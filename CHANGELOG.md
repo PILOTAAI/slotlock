@@ -122,6 +122,10 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Tracing and metrics to OpenTelemetry: a call's span is now a child of the caller's span (given to
+  the tracer alone through the agent server's new `onCallTrace`; the events and logs still never
+  carry it), and the metrics are exported over OTLP each minute (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`,
+  or `<endpoint>/v1/metrics`; `createSlotlockOtlpMetricsExporter`, `SlotlockMetrics.collect`).
 - The five clients take an account for a partner key to act for (`Slotlock-Account`): `account=`
   (Python), `WithAccount` (Go), `Options.account` (Rust), `.account(…)` (Java),
   `SlotlockClientOptions.Account` (.NET), checked before any request.

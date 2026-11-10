@@ -82,7 +82,12 @@ import {
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
-import { type SlotlockOtlpConfig, createSlotlockOtlpExporter, readSlotlockOtlpConfig } from './otel.js';
+import {
+  type SlotlockOtlpConfig,
+  createSlotlockOtlpExporter,
+  createSlotlockOtlpMetricsExporter,
+  readSlotlockOtlpConfig,
+} from './otel.js';
 import { readFile } from 'node:fs/promises';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
@@ -155,6 +160,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_KNOWN_CLIENTS',
   'OTEL_EXPORTER_OTLP_ENDPOINT',
   'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
   'OTEL_EXPORTER_OTLP_HEADERS',
   'OTEL_SERVICE_NAME',
   'SLOTLOCK_GITHUB_CLIENT_ID',
@@ -1093,16 +1099,24 @@ export async function startSlotlockServer(
     let maintenance: SlotlockMaintenanceScheduler | undefined;
     let webhooks: SlotlockWebhookScheduler | undefined;
     const basePath = publicUrl.pathname.replace(/\/$/, '');
+    // Counted for the scrape (SLOTLOCK_METRICS_TOKEN), an OpenTelemetry collector, or both.
     const metrics =
-      config.metricsToken === undefined
+      config.metricsToken === undefined && config.otlp?.metricsUrl === undefined
         ? undefined
         : createSlotlockMetrics({
             version: slotlockPackageVersion(),
             ...(process.versions.tz ? { tzdata: process.versions.tz } : {}),
           });
     const knownClients: ReadonlySet<string> = new Set(config.knownClients ?? []);
+    // The same counters to an OpenTelemetry collector each minute, when one is configured.
+    const metricsExport =
+      metrics && config.otlp?.metricsUrl
+        ? createSlotlockOtlpMetricsExporter({ ...config.otlp, metricsUrl: config.otlp.metricsUrl }, metrics, {
+            onError: (reason) => log.warn('metrics_export_failed', { reason }),
+          })
+        : undefined;
     // A span per call to an OpenTelemetry collector, when one is configured.
-    const tracer = config.otlp
+    const tracer = config.otlp?.tracesUrl
       ? createSlotlockOtlpExporter(config.otlp, {
           onError: (reason) => log.warn('trace_export_failed', { reason }),
         })
@@ -1196,10 +1210,12 @@ export async function startSlotlockServer(
           ? { ready: true, checks: ['database'] }
           : { ready: false, checks: ['database_unreachable'] };
       },
+      ...(tracer ? { onCallTrace: (event, trace) => tracer.record(event, trace.parentSpanId) } : {}),
       // Outcomes and counts only: the server never reports arguments or identities.
       onEvent: (event) => {
         metrics?.event(event);
-        tracer?.record(event);
+        // A traced call's span is made from onCallTrace, as a child of the caller's.
+        if (!('traceId' in event && event.traceId !== undefined)) tracer?.record(event);
         const { type, ...fields } = event;
         log.info(type, snakeCaseKeys(fields));
       },
@@ -1399,6 +1415,7 @@ export async function startSlotlockServer(
         // What the last requests counted is recorded before the pool closes.
         await usage?.close();
         await tracer?.shutdown();
+        await metricsExport?.shutdown();
         await maintenance?.close();
         await webhooks?.close();
         await sql.end({ timeout: 5 });
@@ -2257,6 +2274,7 @@ Environment:
   OTEL_EXPORTER_OTLP_ENDPOINT    An OpenTelemetry collector (OTLP over HTTP, JSON): a span per
                                  call is sent to <endpoint>/v1/traces (off without it)
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT The full traces URL instead of <endpoint>/v1/traces
+  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT The full metrics URL instead of <endpoint>/v1/metrics (sent each minute)
   OTEL_EXPORTER_OTLP_HEADERS     name=value pairs sent with each export, such as an API key
   OTEL_SERVICE_NAME              service.name of the spans (default slotlock)
   SLOTLOCK_GITHUB_CLIENT_ID      Serve the dashboard at $SLOTLOCK_PUBLIC_URL/dashboard: the Client ID

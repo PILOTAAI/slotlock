@@ -901,6 +901,12 @@ export interface SlotlockAgentServerOptions {
    */
   onEvent?: (event: SlotlockAgentServerEvent) => void;
   /**
+   * For tracing only (otel.ts): called with a call's event and the caller's span from its valid
+   * `traceparent`, so the call's own span can be its child. Kept apart from `onEvent`, whose events
+   * go to logs and never carry the caller's span. A throw is ignored.
+   */
+  onCallTrace?: (event: Extract<SlotlockAgentServerEvent, { type: 'call' | 'rest' }>, trace: { parentSpanId: string }) => void;
+  /**
    * Called for each operation a principal ran (MCP, A2A or REST, the application API included), as
    * it reaches the backend, with the principal: for metering a tenant's use (usage.ts). Unlike
    * `onEvent`, it names the tenant and key, so it must not feed a public metric. A throw is ignored.
@@ -3393,6 +3399,18 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       // Observability must never change what a protocol client receives.
     }
   };
+  /** A traced call's event and its caller's span, to the tracer alone. */
+  const emitTrace = (
+    event: Extract<SlotlockAgentServerEvent, { type: 'call' | 'rest' }>,
+    trace: SlotlockTraceContext | undefined,
+  ): void => {
+    if (!trace || !options.onCallTrace) return;
+    try {
+      ignoreRejection(options.onCallTrace(event, { parentSpanId: trace.traceparent.split('-', 3)[2] ?? '' }));
+    } catch {
+      // As emit: never changes what a client receives.
+    }
+  };
   /**
    * Report how an MCP or A2A call that named an operation ended, as a `call` event: run, or refused
    * before it could run (a malformed message, a client that cannot confirm). Never its arguments.
@@ -3404,14 +3422,16 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     started: number,
     trace: SlotlockTraceContext | undefined,
   ): void => {
-    emit({
-      type: 'call',
+    const event = {
+      type: 'call' as const,
       protocol,
       operation,
       outcome,
       durationMs: elapsedMs(started),
       ...(trace ? { traceId: traceIdOf(trace) } : {}),
-    });
+    };
+    emit(event);
+    emitTrace(event, trace);
   };
   /** Run an operation an MCP or A2A caller named, and report how it ended as a `call` event. */
   const invokeReported = async (
@@ -4487,14 +4507,17 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const { route, params } = match;
     const trace = traceContextFrom(undefined, request.headers);
     const started = performance.now();
-    const report = (status: number): void =>
-      emit({
-        type: 'rest',
+    const report = (status: number): void => {
+      const event = {
+        type: 'rest' as const,
         operation: route.operation,
         status,
         durationMs: elapsedMs(started),
         ...(trace ? { traceId: traceIdOf(trace) } : {}),
-      });
+      };
+      emit(event);
+      emitTrace(event, trace);
+    };
     // A call refused before its operation runs is reported as one that ran, as on MCP and A2A.
     const refuseCall = (status: number, code: string): Response => {
       report(status);

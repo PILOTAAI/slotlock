@@ -30,7 +30,8 @@ const MAINTENANCE_COUNTS = [
 /** A label value: an operation, protocol or outcome code. Anything else is counted as `other`. */
 const LABEL = /^[a-z0-9_.]{1,64}$/;
 
-type Labels = Readonly<Record<string, string>>;
+/** A metric's labels, by name. */
+export type Labels = Readonly<Record<string, string>>;
 
 export interface SlotlockMetrics {
   /** Count what the agent server reports (its `onEvent`). */
@@ -50,6 +51,22 @@ export interface SlotlockMetrics {
   client(name: string): void;
   /** Everything counted so far, as a scrape answers it. */
   render(): string;
+  /** Everything counted so far, as data: for an OpenTelemetry metrics export (otel.ts). */
+  collect(): SlotlockMetricsSnapshot;
+}
+
+/** The counters and histograms of one server since it started (cumulative). */
+export interface SlotlockMetricsSnapshot {
+  startedAtMs: number;
+  counters: { name: string; help: string; points: { labels: Labels; value: number }[] }[];
+  histograms: {
+    name: string;
+    help: string;
+    /** Upper bounds, in seconds; each point's buckets count what fell at or under each one. */
+    bounds: readonly number[];
+    points: { labels: Labels; cumulative: number[]; sum: number; count: number }[];
+  }[];
+  gauges: { name: string; help: string; points: { labels: Labels; value: number }[] }[];
 }
 
 const label = (value: string) => (LABEL.test(value) ? value : 'other');
@@ -76,6 +93,9 @@ class Counter {
     const current = this.values.get(id) ?? { labels, value: 0 };
     current.value += amount;
     this.values.set(id, current);
+  }
+  points(): { labels: Labels; value: number }[] {
+    return [...this.values.values()].map(({ labels, value }) => ({ labels, value }));
   }
   render(type = 'counter'): string[] {
     const lines = [`# HELP ${this.name} ${this.help}`, `# TYPE ${this.name} ${type}`];
@@ -109,6 +129,9 @@ class Histogram {
     current.sum += seconds;
     current.count += 1;
     this.series.set(id, current);
+  }
+  points(): { labels: Labels; cumulative: number[]; sum: number; count: number }[] {
+    return [...this.series.values()].map(({ labels, buckets, sum, count }) => ({ labels, cumulative: [...buckets], sum, count }));
   }
   render(): string[] {
     const lines = [`# HELP ${this.name} ${this.help}`, `# TYPE ${this.name} histogram`];
@@ -227,6 +250,15 @@ export function createSlotlockMetrics(info: {
         ...clients.render(),
       ];
       return `${lines.join('\n')}\n`;
+    },
+    collect() {
+      const counter = (metric: Counter) => ({ name: metric.name, help: metric.help, points: metric.points() });
+      return {
+        startedAtMs: started * 1000,
+        counters: [calls, confirmations, subscriptions, refused, passes, upkeep, deliveries, clients].map(counter),
+        histograms: [{ name: duration.name, help: duration.help, bounds: BUCKETS, points: duration.points() }],
+        gauges: [{ name: 'slotlock_subscriptions_open', help: 'MCP subscriptions open now.', points: [{ labels: {}, value: open }] }],
+      };
     },
   };
 }

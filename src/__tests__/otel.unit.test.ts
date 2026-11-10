@@ -3,7 +3,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { createSlotlockMetrics } from '../metrics.js';
-import { createSlotlockOtlpExporter, readSlotlockOtlpConfig, slotlockCallSpan } from '../otel.js';
+import {
+  createSlotlockOtlpExporter,
+  createSlotlockOtlpMetricsExporter,
+  readSlotlockOtlpConfig,
+  slotlockCallSpan,
+} from '../otel.js';
 
 const TRACE = '4bf92f3577b34da6a3ce929d0e0e4736';
 const END = Date.UTC(2026, 10, 10, 12);
@@ -23,6 +28,14 @@ describe('call spans', () => {
     expect(span?.attributes).toContainEqual({ key: 'http.response.status_code', value: { intValue: '200' } });
     expect(slotlockCallSpan({ type: 'rest', operation: 'slotlock_list_resources', status: 503, durationMs: 1 }, END)?.status).toEqual({ code: 2 });
     expect(slotlockCallSpan({ type: 'rest', operation: 'slotlock_list_resources', status: 409, durationMs: 1 }, END)?.status).toEqual({ code: 1 });
+  });
+
+  it("makes the call's span a child of the caller's, only in the caller's trace", () => {
+    const rest = { type: 'rest' as const, operation: 'slotlock_list_resources' as const, status: 200, durationMs: 1 };
+    expect(slotlockCallSpan({ ...rest, traceId: TRACE }, END, '00f067aa0ba902b7')?.parentSpanId).toBe('00f067aa0ba902b7');
+    // No trace of the caller's, or a span id that is not one: a root span.
+    expect(slotlockCallSpan(rest, END, '00f067aa0ba902b7')).not.toHaveProperty('parentSpanId');
+    expect(slotlockCallSpan({ ...rest, traceId: TRACE }, END, '0000000000000000')).not.toHaveProperty('parentSpanId');
   });
 
   it('makes one of an MCP or A2A call, a new trace without one, and nothing of any other event', () => {
@@ -85,6 +98,7 @@ describe('the OTEL_* variables', () => {
     expect(readSlotlockOtlpConfig({})).toBeUndefined();
     expect(readSlotlockOtlpConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector:4318///' })).toEqual({
       tracesUrl: 'http://collector:4318/v1/traces',
+      metricsUrl: 'http://collector:4318/v1/metrics',
       headers: {},
       serviceName: 'slotlock',
     });
@@ -106,6 +120,32 @@ describe('the OTEL_* variables', () => {
     ]) {
       expect(() => readSlotlockOtlpConfig(env), JSON.stringify(env)).toThrow(/OTEL_/);
     }
+  });
+});
+
+describe('the OTLP metrics export', () => {
+  it('sends the counters, the call durations per bucket and the open subscriptions, cumulative', async () => {
+    const metrics = createSlotlockMetrics({ version: '1', now: () => END - 60_000 });
+    metrics.event({ type: 'rest', operation: 'slotlock_list_resources', status: 200, durationMs: 4 });
+    metrics.event({ type: 'rest', operation: 'slotlock_list_resources', status: 200, durationMs: 300 });
+    const sent: string[] = [];
+    const exporter = createSlotlockOtlpMetricsExporter(
+      { tracesUrl: '', metricsUrl: 'http://collector:4318/v1/metrics', headers: { 'x-api-key': 'k' }, serviceName: 'slotlock' },
+      metrics,
+      { fetch: (async (_url: string, init: RequestInit) => { sent.push(String(init.body)); return new Response(null); }) as typeof fetch, now: () => END },
+    );
+    await exporter.shutdown();
+    const body = JSON.parse(sent[0] as string);
+    const named = (name: string) => body.resourceMetrics[0].scopeMetrics[0].metrics.find((metric: { name: string }) => metric.name === name);
+    expect(named('slotlock_calls_total').sum).toMatchObject({ aggregationTemporality: 2, isMonotonic: true });
+    expect(named('slotlock_calls_total').sum.dataPoints[0]).toMatchObject({ asDouble: 2, startTimeUnixNano: String((END - 60_000) * 1e6) });
+    const histogram = named('slotlock_call_duration_seconds').histogram.dataPoints[0];
+    // 4 ms falls in the first bucket (5 ms); 300 ms in (0.25 s, 0.5 s]; one count per bucket, not running totals.
+    expect(histogram.count).toBe('2');
+    expect(histogram.bucketCounts.map(Number)).toEqual([1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+    expect(named('slotlock_subscriptions_open').gauge.dataPoints[0].asDouble).toBe(0);
+    expect(readSlotlockOtlpConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector:4318' })?.metricsUrl).toBe('http://collector:4318/v1/metrics');
+    expect(readSlotlockOtlpConfig({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: 'http://collector:4318/v1/traces' })).not.toHaveProperty('metricsUrl');
   });
 });
 

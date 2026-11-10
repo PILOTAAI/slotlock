@@ -46,9 +46,11 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   and webhook deliveries. No label names a tenant, key or client. `createSlotlockMetrics` builds
   them for a server of your own, from its hooks.
 - Traces: with `OTEL_EXPORTER_OTLP_ENDPOINT` (an OpenTelemetry collector, such as
-  `http://collector:4318`), each call is also a span sent over OTLP/HTTP as JSON, in the caller's
-  trace when it sent a `traceparent`; `OTEL_EXPORTER_OTLP_HEADERS` carries a collector's API key.
-  A span says what the metrics say, and a collector that is down costs spans, never calls.
+  `http://collector:4318`), each call is also a span sent over OTLP/HTTP as JSON, a child of the
+  caller's span when it sent a `traceparent`, and the metrics go there too each minute (cumulative
+  sums, the call-duration histogram, the open subscriptions), with or without
+  `SLOTLOCK_METRICS_TOKEN`; `OTEL_EXPORTER_OTLP_HEADERS` carries a collector's API key. A span says
+  what the metrics say, and a collector that is down costs spans, never calls.
   [docs/hosted/slo-rules.yml](docs/hosted/slo-rules.yml) has Prometheus rules for the objectives on
   the [status page](docs/hosted/status.md#objectives).
 - The server runs as a role that owns nothing and cannot bypass row-level security; a one-off

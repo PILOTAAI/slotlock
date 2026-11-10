@@ -689,8 +689,8 @@ Worker and `serve` check alike), then its issuer, audience, expiry and nonce, an
   Stripe's answer, the owner's price, and the Terms.
 - RFC 0002 P2: OpenTelemetry export and published SLOs first, as a paid service needs them.
   Status: built on `claude/inspiring-dijkstra-bfvqif`: a span per call to an OTLP/HTTP collector
-  (`OTEL_EXPORTER_OTLP_ENDPOINT`), joining the caller's trace by its id but not as a child of its
-  span (the server keeps no caller span id), and objectives on the status page with Prometheus rules
+  (`OTEL_EXPORTER_OTLP_ENDPOINT`), a child of the caller's span (handed to the tracer alone, never
+  to the events or logs), metrics over OTLP each minute, and objectives on the status page with Prometheus rules
   (`docs/hosted/slo-rules.yml`). The targets are proposals for the owner.
 
 ## Vendor facts

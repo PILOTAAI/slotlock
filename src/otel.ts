@@ -1,7 +1,8 @@
 // OpenTelemetry trace export for `slotlock serve` (RFC 0002 P2-5, RFC 0003 Later): one SERVER span
 // per agent and REST call, sent to an OTLP/HTTP collector as JSON (OTEL_EXPORTER_OTLP_ENDPOINT).
-// A call that carried a valid `traceparent` joins the caller's trace by its trace id. It is not
-// made a child of the caller's span: the server never keeps that id (server-events tests hold it).
+// A call that carried a valid `traceparent` joins the caller's trace as a child of the caller's
+// span, which reaches the exporter through the agent server's onCallTrace alone, never its events
+// or logs.
 //
 // What a span says is what /metrics and the logs already say: the protocol, the operation, the
 // outcome or HTTP status, and how long it took. Never a tenant, a key, an argument or an address.
@@ -9,6 +10,7 @@
 // spans, counted, never a request.
 import { randomBytes } from 'node:crypto';
 import type { SlotlockAgentServerEvent } from './agent-server.js';
+import type { SlotlockMetrics } from './metrics.js';
 
 export interface SlotlockOtlpConfig {
   /** Where spans are POSTed: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, or OTEL_EXPORTER_OTLP_ENDPOINT + /v1/traces. */
@@ -17,11 +19,16 @@ export interface SlotlockOtlpConfig {
   headers: Readonly<Record<string, string>>;
   /** service.name (OTEL_SERVICE_NAME), `slotlock` by default. */
   serviceName: string;
+  /**
+   * Where metrics are POSTed: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, or OTEL_EXPORTER_OTLP_ENDPOINT +
+   * /v1/metrics; none with only a traces endpoint.
+   */
+  metricsUrl?: string;
 }
 
 export interface SlotlockTraceExporter {
-  /** Turn an agent server event into a span, if it is a call. */
-  record(event: SlotlockAgentServerEvent): void;
+  /** Turn an agent server event into a span, if it is a call; a child of `parentSpanId` when given. */
+  record(event: SlotlockAgentServerEvent, parentSpanId?: string): void;
   /** Send what is queued now. */
   flush(): Promise<void>;
   /** Stop the timer and send what is left. */
@@ -33,6 +40,7 @@ export interface SlotlockTraceExporter {
 interface Span {
   traceId: string;
   spanId: string;
+  parentSpanId?: string;
   name: string;
   kind: 2;
   startTimeUnixNano: string;
@@ -48,14 +56,23 @@ const SERVER_FAILURES = new Set(['internal_error', 'unavailable']);
 const nanos = (ms: number) => (BigInt(Math.round(ms * 1_000)) * 1_000n).toString();
 
 /** The span a call event makes, or null for any other event. */
-export function slotlockCallSpan(event: SlotlockAgentServerEvent, endedAtMs: number): Span | null {
+export function slotlockCallSpan(
+  event: SlotlockAgentServerEvent,
+  endedAtMs: number,
+  /** The caller's span from its traceparent: the call's span is its child. */
+  parentSpanId?: string,
+): Span | null {
   if (event.type !== 'call' && event.type !== 'rest') return null;
   const protocol = event.type === 'rest' ? 'rest' : event.protocol;
   const failed = event.type === 'rest' ? event.status >= 500 : SERVER_FAILURES.has(event.outcome);
   const traceId = event.traceId !== undefined && HEX_TRACE.test(event.traceId) ? event.traceId : randomBytes(16).toString('hex');
+  const parent = event.traceId !== undefined && parentSpanId !== undefined && /^[0-9a-f]{16}$/.test(parentSpanId) && parentSpanId !== '0'.repeat(16)
+    ? parentSpanId
+    : undefined;
   return {
     traceId,
     spanId: randomBytes(8).toString('hex'),
+    ...(parent ? { parentSpanId: parent } : {}),
     name: `${protocol} ${event.operation}`,
     kind: 2,
     startTimeUnixNano: nanos(endedAtMs - Math.max(0, event.durationMs)),
@@ -75,25 +92,30 @@ export function slotlockCallSpan(event: SlotlockAgentServerEvent, endedAtMs: num
 export function readSlotlockOtlpConfig(env: Readonly<Record<string, string | undefined>>): SlotlockOtlpConfig | undefined {
   // Each read whether or not export is on, so `slotlock --help` lists exactly what is read.
   const traces = env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT?.trim();
+  const metrics = env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT?.trim();
   const base = env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
   const headerList = env.OTEL_EXPORTER_OTLP_HEADERS ?? '';
   const service = env.OTEL_SERVICE_NAME?.trim();
-  if (!traces && !base) return undefined;
+  if (!traces && !base && !metrics) return undefined;
   // Trailing slashes trimmed by hand: a regular expression for it backtracks on a long run of them.
   let trimmed = base ?? '';
   while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
-  const tracesUrl = traces || `${trimmed}/v1/traces`;
-  let parsed: URL;
-  try {
-    parsed = new URL(tracesUrl);
-  } catch {
-    throw Object.assign(new Error('OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL'), { code: 'invalid_otlp_endpoint' });
-  }
-  if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.username || parsed.password) {
-    throw Object.assign(new Error('OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL without credentials'), {
-      code: 'invalid_otlp_endpoint',
-    });
-  }
+  const checked = (url: string) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw Object.assign(new Error('OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL'), { code: 'invalid_otlp_endpoint' });
+    }
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.username || parsed.password) {
+      throw Object.assign(new Error('OTEL_EXPORTER_OTLP_ENDPOINT must be an http or https URL without credentials'), {
+        code: 'invalid_otlp_endpoint',
+      });
+    }
+    return parsed.href;
+  };
+  const tracesUrl = traces ? checked(traces) : base ? checked(`${trimmed}/v1/traces`) : '';
+  const metricsUrl = metrics ? checked(metrics) : base ? checked(`${trimmed}/v1/metrics`) : undefined;
   const headers: Record<string, string> = {};
   for (const part of headerList.split(',')) {
     if (part.trim() === '') continue;
@@ -116,7 +138,7 @@ export function readSlotlockOtlpConfig(env: Readonly<Record<string, string | und
   if (!/^[\x21-\x7e]{1,100}$/.test(serviceName)) {
     throw Object.assign(new Error('OTEL_SERVICE_NAME must be 1-100 printable characters'), { code: 'invalid_otlp_service' });
   }
-  return { tracesUrl: parsed.href, headers, serviceName };
+  return { tracesUrl, headers, serviceName, ...(metricsUrl ? { metricsUrl } : {}) };
 }
 
 /** Batch spans to an OTLP/HTTP collector as JSON. */
@@ -184,8 +206,8 @@ export function createSlotlockOtlpExporter(
   timer.unref?.();
 
   return {
-    record(event) {
-      const span = slotlockCallSpan(event, now());
+    record(event, parentSpanId) {
+      const span = slotlockCallSpan(event, now(), parentSpanId);
       if (!span) return;
       if (queue.length >= maxQueue) {
         dropped += 1;
@@ -201,6 +223,108 @@ export function createSlotlockOtlpExporter(
     },
     get dropped() {
       return dropped;
+    },
+  };
+}
+
+/** The snapshot of a server's metrics as an OTLP/HTTP JSON body: cumulative sums, histograms, gauges. */
+export function slotlockOtlpMetricsBody(metrics: ReturnType<SlotlockMetrics['collect']>, serviceName: string, nowMs: number): string {
+  const start = nanos(metrics.startedAtMs);
+  const time = nanos(nowMs);
+  const attributes = (labels: Readonly<Record<string, string>>) =>
+    Object.entries(labels).map(([key, value]) => ({ key, value: { stringValue: value } }));
+  return JSON.stringify({
+    resourceMetrics: [
+      {
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: serviceName } }] },
+        scopeMetrics: [
+          {
+            scope: { name: 'slotlock' },
+            metrics: [
+              ...metrics.counters.map((counter) => ({
+                name: counter.name,
+                description: counter.help,
+                sum: {
+                  aggregationTemporality: 2,
+                  isMonotonic: true,
+                  dataPoints: counter.points.map((point) => ({
+                    attributes: attributes(point.labels),
+                    startTimeUnixNano: start,
+                    timeUnixNano: time,
+                    asDouble: point.value,
+                  })),
+                },
+              })),
+              ...metrics.histograms.map((histogram) => ({
+                name: histogram.name,
+                description: histogram.help,
+                unit: 's',
+                histogram: {
+                  aggregationTemporality: 2,
+                  dataPoints: histogram.points.map((point) => ({
+                    attributes: attributes(point.labels),
+                    startTimeUnixNano: start,
+                    timeUnixNano: time,
+                    count: String(point.count),
+                    sum: point.sum,
+                    explicitBounds: [...histogram.bounds],
+                    // OTLP counts each bucket on its own; the scrape's are cumulative.
+                    bucketCounts: [...point.cumulative.map((count, index) => count - (index === 0 ? 0 : (point.cumulative[index - 1] ?? 0))), point.count - (point.cumulative.at(-1) ?? 0)].map(String),
+                  })),
+                },
+              })),
+              ...metrics.gauges.map((gauge) => ({
+                name: gauge.name,
+                description: gauge.help,
+                gauge: {
+                  dataPoints: gauge.points.map((point) => ({ attributes: attributes(point.labels), timeUnixNano: time, asDouble: point.value })),
+                },
+              })),
+            ],
+          },
+        ],
+      },
+    ],
+  });
+}
+
+/**
+ * Send a server's metrics to an OTLP/HTTP collector every `intervalMs` (60 seconds), cumulative
+ * since the server started, as the scrape at /metrics counts them; a collector that is down costs
+ * that export, never a request.
+ */
+export function createSlotlockOtlpMetricsExporter(
+  config: SlotlockOtlpConfig & { metricsUrl: string },
+  metrics: SlotlockMetrics,
+  options: { fetch?: typeof fetch; now?: () => number; intervalMs?: number; onError?: (reason: string) => void } = {},
+): { flush(): Promise<void>; shutdown(): Promise<void> } {
+  const send = options.fetch ?? fetch;
+  const now = options.now ?? Date.now;
+  let sending: Promise<void> = Promise.resolve();
+  const flush = () => {
+    sending = sending.then(async () => {
+      try {
+        const response = await send(config.metricsUrl, {
+          method: 'POST',
+          headers: { ...config.headers, 'content-type': 'application/json' },
+          body: slotlockOtlpMetricsBody(metrics.collect(), config.serviceName, now()),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) options.onError?.(`collector answered HTTP ${response.status}`);
+        await response.body?.cancel().catch(() => undefined);
+      } catch {
+        options.onError?.('collector did not answer');
+      }
+    });
+    return sending;
+  };
+  const timer = setInterval(() => void flush(), options.intervalMs ?? 60_000);
+  timer.unref?.();
+  return {
+    flush,
+    async shutdown() {
+      clearInterval(timer);
+      await flush();
     },
   };
 }
