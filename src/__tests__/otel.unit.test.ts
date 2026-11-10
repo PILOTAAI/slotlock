@@ -48,7 +48,6 @@ describe('the OTLP exporter', () => {
     });
     const errors: string[] = [];
     const exporter = createSlotlockOtlpExporter(config, {
-      version: '9.9.9',
       fetch: fetch as typeof globalThis.fetch,
       now: () => END,
       maxBatch: 2,
@@ -64,6 +63,7 @@ describe('the OTLP exporter', () => {
     expect(new Headers(sent[0]?.init.headers).get('x-api-key')).toBe('secret-value');
     const body = JSON.parse(String(sent[0]?.init.body));
     expect(body.resourceSpans[0].resource.attributes).toContainEqual({ key: 'service.name', value: { stringValue: 'slotlock' } });
+    expect(JSON.stringify(body)).not.toContain('service.version');
     expect(body.resourceSpans[0].scopeSpans[0].spans).toHaveLength(2);
     // A collector that refuses costs those spans, never the caller, and says so without its headers.
     status = 500;
@@ -73,7 +73,7 @@ describe('the OTLP exporter', () => {
     expect(errors).toEqual(['collector answered HTTP 500']);
     expect(errors.join(' ')).not.toContain('secret-value');
     // Past the queue's bound, spans are dropped as they come.
-    const quiet = createSlotlockOtlpExporter(config, { version: '1', fetch: (async () => new Response(null)) as typeof globalThis.fetch, maxBatch: 100, maxQueue: 2 });
+    const quiet = createSlotlockOtlpExporter(config, { fetch: (async () => new Response(null)) as typeof globalThis.fetch, maxBatch: 100, maxQueue: 2 });
     for (let i = 0; i < 5; i += 1) quiet.record(call);
     expect(quiet.dropped).toBe(3);
     await quiet.shutdown();
@@ -83,7 +83,7 @@ describe('the OTLP exporter', () => {
 describe('the OTEL_* variables', () => {
   it('reads the standard ones, and refuses what would not work', () => {
     expect(readSlotlockOtlpConfig({})).toBeUndefined();
-    expect(readSlotlockOtlpConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector:4318/' })).toEqual({
+    expect(readSlotlockOtlpConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://collector:4318///' })).toEqual({
       tracesUrl: 'http://collector:4318/v1/traces',
       headers: {},
       serviceName: 'slotlock',

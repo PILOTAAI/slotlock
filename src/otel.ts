@@ -79,7 +79,10 @@ export function readSlotlockOtlpConfig(env: Readonly<Record<string, string | und
   const headerList = env.OTEL_EXPORTER_OTLP_HEADERS ?? '';
   const service = env.OTEL_SERVICE_NAME?.trim();
   if (!traces && !base) return undefined;
-  const tracesUrl = traces || `${(base as string).replace(/\/+$/, '')}/v1/traces`;
+  // Trailing slashes trimmed by hand: a regular expression for it backtracks on a long run of them.
+  let trimmed = base ?? '';
+  while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
+  const tracesUrl = traces || `${trimmed}/v1/traces`;
   let parsed: URL;
   try {
     parsed = new URL(tracesUrl);
@@ -119,8 +122,11 @@ export function readSlotlockOtlpConfig(env: Readonly<Record<string, string | und
 /** Batch spans to an OTLP/HTTP collector as JSON. */
 export function createSlotlockOtlpExporter(
   config: SlotlockOtlpConfig,
+  /**
+   * The service's version is not sent: the deployed one is on /healthz and /metrics, and an export
+   * carries nothing read from a file.
+   */
   options: {
-    version: string;
     fetch?: typeof fetch;
     now?: () => number;
     intervalMs?: number;
@@ -141,7 +147,6 @@ export function createSlotlockOtlpExporter(
   const resource = {
     attributes: [
       { key: 'service.name', value: { stringValue: config.serviceName } },
-      { key: 'service.version', value: { stringValue: options.version } },
       { key: 'telemetry.sdk.name', value: { stringValue: 'slotlock' } },
     ],
   };
@@ -152,7 +157,7 @@ export function createSlotlockOtlpExporter(
         method: 'POST',
         headers: { ...config.headers, 'content-type': 'application/json' },
         body: JSON.stringify({
-          resourceSpans: [{ resource, scopeSpans: [{ scope: { name: 'slotlock', version: options.version }, spans }] }],
+          resourceSpans: [{ resource, scopeSpans: [{ scope: { name: 'slotlock' }, spans }] }],
         }),
         signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
       });

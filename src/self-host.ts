@@ -1104,7 +1104,6 @@ export async function startSlotlockServer(
     // A span per call to an OpenTelemetry collector, when one is configured.
     const tracer = config.otlp
       ? createSlotlockOtlpExporter(config.otlp, {
-          version: slotlockPackageVersion(),
           onError: (reason) => log.warn('trace_export_failed', { reason }),
         })
       : undefined;
