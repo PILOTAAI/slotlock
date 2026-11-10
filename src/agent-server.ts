@@ -1427,6 +1427,8 @@ const EVENT_CREATE_INPUT = z
     recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
     /** Book the time one of your holds keeps (slotlock_hold_slots); its alternatives are released. */
     hold_id: HOLD_ID.optional(),
+    /** False: no one should be notified about it, nor reminded (RFC 0004 P3). Default true. */
+    notify: z.boolean().optional(),
   })
   .strict()
   .refine((value) => boundedEventSpan(value.starts_at, value.ends_at));

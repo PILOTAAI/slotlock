@@ -26,7 +26,7 @@ import { SLOTLOCK_PARTNER_ACCOUNT, SLOTLOCK_PARTNER_PLAN } from './partner-names
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
-import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from './rules.js';
+import { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_SOURCE_BUSY_MAX } from './rules.js';
 import {
   SLOTLOCK_GROUPING_REF,
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
@@ -78,18 +78,23 @@ export type SlotlockApplicationOperation =
   | 'slotlock_get_coverage'
   | 'slotlock_record_coverage_failure'
   | 'slotlock_delete_coverage'
+  | 'slotlock_put_source_busy'
   | 'slotlock_get_reservation_history'
   | 'slotlock_get_tenant_event_history'
   | 'slotlock_acquire_hold'
   | 'slotlock_get_hold'
   | 'slotlock_list_holds'
   | 'slotlock_confirm_hold'
+  | 'slotlock_mark_hold_paid'
   | 'slotlock_release_hold'
   | 'slotlock_get_reservation'
   | 'slotlock_list_reservations'
   | 'slotlock_put_reservation'
   | 'slotlock_cancel_reservation'
   | 'slotlock_check_in_reservation'
+  | 'slotlock_put_contact'
+  | 'slotlock_get_contact'
+  | 'slotlock_delete_contact'
   | 'slotlock_join_waitlist'
   | 'slotlock_list_waitlist'
   | 'slotlock_leave_waitlist'
@@ -228,6 +233,11 @@ export interface SlotlockApplicationBackend {
   getCoverage: Handler;
   recordCoverageFailure: Handler;
   deleteCoverage: Handler;
+  putSourceBusy: Handler;
+  markHoldPaid: Handler;
+  putContact: Handler;
+  getContact: Handler;
+  deleteContact: Handler;
   getReservationHistory: Handler;
   getTenantEventHistory: Handler;
   acquireHold: Handler;
@@ -767,6 +777,9 @@ const WAITLIST_ENTRY = z
   })
   .strict();
 
+/** A payment's reference at the integrator's processor (RFC 0004 C3): a PaymentIntent id, say. */
+const PAYMENT_REF = z.string().regex(/^[\x21-\x7e]{1,255}$/, 'must be 1-255 printable ASCII characters');
+
 const HOLD = z
   .object({
     id: HOLD_ID,
@@ -775,6 +788,32 @@ const HOLD = z
     end: DATE_TIME,
     expires_at: DATE_TIME,
     source: z.string().max(200).nullable(),
+    /** Present when it waits for payment (RFC 0004 C3), with the payment once recorded. */
+    payment_required: z.literal(true).optional(),
+    payment_ref: PAYMENT_REF.nullable().optional(),
+    paid_at: DATE_TIME.nullable().optional(),
+  })
+  .strict();
+
+/** A person a booking may name to be told about it (RFC 0004 P3), by the tenant's reference. */
+const CONTACT_REF = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/, 'must be 1-200 letters, digits, . _ : or -, starting with a letter or digit');
+const E164_NUMBER = z.string().regex(/^\+[1-9][0-9]{6,14}$/, 'must be an E.164 number, like +447700900123');
+const CONSENT = z
+  .object({ email: z.boolean().optional(), sms: z.boolean().optional(), whatsapp: z.boolean().optional() })
+  .strict();
+const CONTACT = z
+  .object({
+    contact_ref: CONTACT_REF,
+    name: z.string().max(200).nullable(),
+    email: z.string().max(320).nullable(),
+    phone: E164_NUMBER.nullable(),
+    whatsapp: E164_NUMBER.nullable(),
+    consent: CONSENT,
+    locale: z.string().max(35).nullable(),
+    created_at: DATE_TIME,
+    updated_at: DATE_TIME,
   })
   .strict();
 
@@ -788,6 +827,10 @@ const RESERVATION = z
     buffer_after_minutes: z.number().int().min(0),
     revision: REVISION,
     source: z.string().max(200).nullable(),
+    /** Whom to tell about it (RFC 0004 P3), when it names someone. */
+    contact_ref: CONTACT_REF.optional(),
+    /** Present, and false, when no one should be notified about it. */
+    notify: z.literal(false).optional(),
   })
   .strict();
 
@@ -1408,7 +1451,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_acquire_hold',
       title: 'Hold time',
       description:
-        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.',
+        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment state and never moves money. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.',
       method: 'POST',
       path: '/v1/holds',
       input: z
@@ -1425,9 +1468,15 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           idempotency_key: IDEMPOTENCY_KEY.optional(),
           // Last, so a generated 0.2.0 client's positional arguments keep their places.
           buffer_after_minutes: BUFFER_AFTER_MINUTES.optional(),
+          /** It waits for payment (RFC 0004 C3): confirmed only once slotlock_mark_hold_paid records it. */
+          payment_required: z.boolean().optional(),
         })
         .strict()
-        .refine(boundedSpan, SPAN_MESSAGE),
+        .refine(boundedSpan, SPAN_MESSAGE)
+        .refine((input) => input.payment_required !== true || input.ttl_seconds <= 1_800, {
+          message: 'A hold that waits for payment lives at most 1800 seconds',
+          path: ['ttl_seconds'],
+        }),
       output: z.object({ hold: HOLD }).strict(),
       risk: { readOnly: false, destructive: false, idempotent: false },
       invoke: 'acquireHold',
@@ -1472,7 +1521,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_confirm_hold',
       title: 'Confirm a hold',
       description:
-        "Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at revision 1: move or cancel it with the reservation routes by that reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or unknown one, 404 hold_not_found.",
+        "Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at revision 1: move or cancel it with the reservation routes by that reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409 payment_required.",
       method: 'POST',
       path: '/v1/holds/{hold_id}/confirm',
       input: z.object({ hold_id: HOLD_ID }).strict(),
@@ -1480,6 +1529,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: false },
       invoke: 'confirmHold',
       example: { hold_id: EXAMPLE_HOLD_ID },
+    },
+    {
+      name: 'slotlock_mark_hold_paid',
+      title: 'Record a hold as paid',
+      description:
+        "Record that a hold made with payment_required is paid, by the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then be confirmed. Slotlock records payment state and never moves money. The same reference again answers the same hold (replayed: true); another answers 409 payment_conflict. The feed says so (hold.paid). A hold that does not wait for payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may be someone else's); a confirmed, released or unknown one, 404 hold_not_found.",
+      method: 'POST',
+      path: '/v1/holds/{hold_id}/paid',
+      input: z.object({ hold_id: HOLD_ID, payment_ref: PAYMENT_REF }).strict(),
+      output: z.object({ hold: HOLD, replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'markHoldPaid',
+      example: { hold_id: EXAMPLE_HOLD_ID, payment_ref: 'pi_3PqX9a2eZvKYlo2C1d7Hk0Lm' },
     },
     {
       name: 'slotlock_release_hold',
@@ -1534,7 +1596,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_put_reservation',
       title: 'Book or move a reservation',
       description:
-        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource\'s reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource\'s zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.',
+        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource\'s reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource\'s zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one; both are on the feed with each change, as sent with each revision.',
       method: 'PUT',
       path: '/v1/reservations/{reservation_ref}',
       input: z
@@ -1550,6 +1612,10 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           override_reason: OVERRIDE_REASON.optional(),
           /** The wall time it starts at in the resource's zone, kept across zone rule changes (RFC 0004 B9). */
           local_start: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/).optional(),
+          /** Whom to tell about it (RFC 0004 P3): a contact's reference, never the person. */
+          contact_ref: CONTACT_REF.optional(),
+          /** False: no one should be notified about it (default true). */
+          notify: z.boolean().optional(),
         })
         .strict()
         .refine(boundedSpan, SPAN_MESSAGE),
@@ -1592,6 +1658,61 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'checkInReservation',
       example: { reservation_ref: 'booking-BK-42' },
+    },
+    {
+      name: 'slotlock_put_contact',
+      title: 'Keep a contact',
+      description:
+        "Keep a person a booking may name to be told about it (contact_ref on slotlock_put_reservation), under your own reference: how to reach them (email, phone for SMS and whatsapp, both E.164) and which channels they agreed to (consent: false is an opt-out a sender must honour). Replaces what was kept under the reference. A sender reads it to send; Slotlock itself sends nothing. created says whether it is new. A tenant keeps at most 100,000 (409 contact_limit_reached).",
+      method: 'PUT',
+      path: '/v1/contacts/{contact_ref}',
+      input: z
+        .object({
+          contact_ref: CONTACT_REF,
+          name: z.string().min(1).max(200).nullable().optional(),
+          email: z.string().min(3).max(320).regex(/^[^\s@]+@[^\s@]+$/, 'must be an email address').nullable().optional(),
+          phone: E164_NUMBER.nullable().optional(),
+          whatsapp: E164_NUMBER.nullable().optional(),
+          consent: CONSENT.optional(),
+          locale: z.string().max(35).regex(/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'must be a BCP 47 tag, like en-GB').nullable().optional(),
+        })
+        .strict(),
+      output: z.object({ contact: CONTACT, created: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'putContact',
+      example: {
+        contact_ref: 'customer-42',
+        name: 'Ada Lovelace',
+        email: 'ada@example.com',
+        phone: '+447700900123',
+        consent: { email: true, sms: false },
+        locale: 'en-GB',
+      },
+    },
+    {
+      name: 'slotlock_get_contact',
+      title: 'Get a contact',
+      description: "The person kept under this reference, for a sender to reach. An unknown one answers 404 contact_not_found.",
+      method: 'GET',
+      path: '/v1/contacts/{contact_ref}',
+      input: z.object({ contact_ref: CONTACT_REF }).strict(),
+      output: z.object({ contact: CONTACT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getContact',
+      example: { contact_ref: 'customer-42' },
+    },
+    {
+      name: 'slotlock_delete_contact',
+      title: 'Forget a contact',
+      description:
+        "Forget a person: their contact, and their reference on every booking that named it, at once (for an erasure request). deleted is false when no contact was kept; bookings counts the bookings that no longer name them. Changes already on the feed keep the reference, never the person.",
+      method: 'DELETE',
+      path: '/v1/contacts/{contact_ref}',
+      input: z.object({ contact_ref: CONTACT_REF }).strict(),
+      output: z.object({ deleted: z.boolean(), bookings: z.number().int().min(0) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteContact',
+      example: { contact_ref: 'customer-42' },
     },
     {
       name: 'slotlock_join_waitlist',
@@ -1698,6 +1819,49 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
         start: '2027-03-01T00:00:00Z',
         end: '2027-06-01T00:00:00Z',
         revision: 7,
+      },
+    },
+    {
+      name: 'slotlock_put_source_busy',
+      title: "Record a calendar's busy time",
+      description: `For a calendar that gives busy time but not its events (Google freeBusy, Microsoft getSchedule): record its coverage of a window at the source's revision, as slotlock_record_coverage does, and the busy time in it, which replaces what the source said of that window before (what it said outside the window stays). Busy time counts in free/busy and every booking Slotlock makes on the resource is refused over it (409 overlap), as over an event. A confirmed booking the source newly reports busy time over is left as it is and put on the feed once as coverage.conflict, naming the booking and the source by its source_id: someone decides. At most ${SLOTLOCK_SOURCE_BUSY_MAX} intervals; they are clipped to the window and merged. Revisions only go forward; repeating one changes nothing (replayed: true).`,
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/coverage/{source}/busy',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID,
+          source: SOURCE,
+          start: DATE_TIME,
+          end: DATE_TIME,
+          revision: REVISION,
+          busy: z
+            .array(
+              z
+                .object({ start: DATE_TIME, end: DATE_TIME })
+                .strict()
+                .refine((value) => Date.parse(value.end) > Date.parse(value.start), SPAN_MESSAGE),
+            )
+            .max(SLOTLOCK_SOURCE_BUSY_MAX),
+        })
+        .strict()
+        .refine((value) => Date.parse(value.end) > Date.parse(value.start), SPAN_MESSAGE),
+      output: z
+        .object({
+          revision: REVISION,
+          replayed: z.boolean(),
+          busy: z.number().int().min(0),
+          conflicts: z.number().int().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'putSourceBusy',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        source: 'google:fleet@example.com',
+        start: '2027-03-01T00:00:00Z',
+        end: '2027-03-15T00:00:00Z',
+        revision: 8,
+        busy: [{ start: '2027-03-02T09:00:00Z', end: '2027-03-02T11:00:00Z' }],
       },
     },
     {
@@ -1959,6 +2123,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           waitlist_offers: z.number().int().min(0),
           approvals_expired: z.number().int().min(0),
           bookings_completed: z.number().int().min(0),
+          reminders_due: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),

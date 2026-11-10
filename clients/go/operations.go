@@ -71,17 +71,22 @@ var operations = func() map[string]operation {
 		{name: "slotlock_release_hold", method: "DELETE", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_list_holds", method: "GET", path: "/v1/resources/{resource_id}/holds", pathParams: []string{"resource_id"}, query: []string{"limit", "cursor"}},
 		{name: "slotlock_confirm_hold", method: "POST", path: "/v1/holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
+		{name: "slotlock_mark_hold_paid", method: "POST", path: "/v1/holds/{hold_id}/paid", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_get_reservation", method: "GET", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_put_reservation", method: "PUT", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision", "override_reason", "dry_run"}},
 		{name: "slotlock_list_reservations", method: "GET", path: "/v1/resources/{resource_id}/reservations", pathParams: []string{"resource_id"}, query: []string{"start", "end", "limit", "cursor"}},
 		{name: "slotlock_check_in_reservation", method: "POST", path: "/v1/reservations/{reservation_ref}/check-in", pathParams: []string{"reservation_ref"}, query: nil},
+		{name: "slotlock_get_contact", method: "GET", path: "/v1/contacts/{contact_ref}", pathParams: []string{"contact_ref"}, query: nil},
+		{name: "slotlock_put_contact", method: "PUT", path: "/v1/contacts/{contact_ref}", pathParams: []string{"contact_ref"}, query: nil},
+		{name: "slotlock_delete_contact", method: "DELETE", path: "/v1/contacts/{contact_ref}", pathParams: []string{"contact_ref"}, query: []string{"dry_run"}},
 		{name: "slotlock_list_waitlist", method: "GET", path: "/v1/waitlist", pathParams: nil, query: []string{"resource_id", "pool", "holder_ref", "limit"}},
 		{name: "slotlock_join_waitlist", method: "POST", path: "/v1/waitlist", pathParams: nil, query: nil},
 		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_decline_waitlist_offer", method: "POST", path: "/v1/waitlist/{entry_id}/decline", pathParams: []string{"entry_id"}, query: nil},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_delete_coverage", method: "DELETE", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: []string{"dry_run"}},
+		{name: "slotlock_put_source_busy", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}/busy", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
@@ -851,6 +856,8 @@ type CreateEventInput struct {
 
 	HoldID *string
 
+	Notify *bool
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -897,6 +904,9 @@ func (in CreateEventInput) values() map[string]any {
 	}
 	if in.HoldID != nil {
 		values["hold_id"] = *in.HoldID
+	}
+	if in.Notify != nil {
+		values["notify"] = *in.Notify
 	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
@@ -2310,6 +2320,8 @@ type AcquireHoldInput struct {
 
 	BufferAfterMinutes *int64
 
+	PaymentRequired *bool
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2332,6 +2344,9 @@ func (in AcquireHoldInput) values() map[string]any {
 	if in.BufferAfterMinutes != nil {
 		values["buffer_after_minutes"] = *in.BufferAfterMinutes
 	}
+	if in.PaymentRequired != nil {
+		values["payment_required"] = *in.PaymentRequired
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -2341,7 +2356,9 @@ func (in AcquireHoldInput) values() map[string]any {
 // AcquireHold: Hold time. Occupy a window without booking it, for example while a customer pays.
 // The hold blocks every other booking until it expires (the database clock, ttl_seconds from
 // now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well,
-// and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
+// and a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
+// confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment state and
+// never moves money. A taken window answers 409 overlap. With an idempotency key (the
 // Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
 // until that hold would have expired, is released or is confirmed; the same key with another
 // request is 422 idempotency_conflict.
@@ -2444,9 +2461,44 @@ func (in ConfirmHoldInput) values() map[string]any {
 // reference is the hold's id at revision 1: move or cancel it with the reservation routes by that
 // reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again
 // answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a
-// released or unknown one, 404 hold_not_found.
+// released or unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409
+// payment_required.
 func (c *Client) ConfirmHold(ctx context.Context, in ConfirmHoldInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_confirm_hold", in.values())
+}
+
+// MarkHoldPaidInput holds the arguments of [Client.MarkHoldPaid].
+type MarkHoldPaidInput struct {
+	HoldID string
+
+	PaymentRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in MarkHoldPaidInput) values() map[string]any {
+	values := map[string]any{}
+	values["hold_id"] = in.HoldID
+	values["payment_ref"] = in.PaymentRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// MarkHoldPaid: Record a hold as paid. Record that a hold made with payment_required is paid, by
+// the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have
+// verified it: the hold may then be confirmed. Slotlock records payment state and never moves
+// money. The same reference again answers the same hold (replayed: true); another answers 409
+// payment_conflict. The feed says so (hold.paid). A hold that does not wait for payment answers
+// 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may
+// be someone else's); a confirmed, released or unknown one, 404 hold_not_found.
+func (c *Client) MarkHoldPaid(ctx context.Context, in MarkHoldPaidInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_mark_hold_paid", in.values())
 }
 
 // GetReservationInput holds the arguments of [Client.GetReservation].
@@ -2487,6 +2539,10 @@ type PutReservationInput struct {
 
 	LocalStart *string
 
+	ContactRef *string
+
+	Notify *bool
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2513,6 +2569,12 @@ func (in PutReservationInput) values() map[string]any {
 	if in.LocalStart != nil {
 		values["local_start"] = *in.LocalStart
 	}
+	if in.ContactRef != nil {
+		values["contact_ref"] = *in.ContactRef
+	}
+	if in.Notify != nil {
+		values["notify"] = *in.Notify
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -2527,7 +2589,9 @@ func (in PutReservationInput) values() map[string]any {
 // unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the
 // resource's zone) records the wall time it is booked for: it must name start, and if time zone
 // rules later move that wall time to another instant, maintenance says so
-// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
+// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref
+// names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one; both
+// are on the feed with each change, as sent with each revision.
 func (c *Client) PutReservation(ctx context.Context, in PutReservationInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_put_reservation", in.values())
 }
@@ -2634,6 +2698,111 @@ func (in CheckInReservationInput) values() map[string]any {
 // again keeps the first time; a booking that has ended answers 409 reservation_ended.
 func (c *Client) CheckInReservation(ctx context.Context, in CheckInReservationInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_check_in_reservation", in.values())
+}
+
+// GetContactInput holds the arguments of [Client.GetContact].
+type GetContactInput struct {
+	ContactRef string
+}
+
+func (in GetContactInput) values() map[string]any {
+	values := map[string]any{}
+	values["contact_ref"] = in.ContactRef
+	return values
+}
+
+// GetContact: Get a contact. The person kept under this reference, for a sender to reach. An
+// unknown one answers 404 contact_not_found.
+func (c *Client) GetContact(ctx context.Context, in GetContactInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_contact", in.values())
+}
+
+// PutContactInput holds the arguments of [Client.PutContact].
+type PutContactInput struct {
+	ContactRef string
+
+	Name Nullable[string]
+
+	Email Nullable[string]
+
+	Phone Nullable[string]
+
+	Whatsapp Nullable[string]
+
+	Consent map[string]any
+
+	Locale Nullable[string]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in PutContactInput) values() map[string]any {
+	values := map[string]any{}
+	values["contact_ref"] = in.ContactRef
+	if value, ok := in.Name.get(); ok {
+		values["name"] = value
+	}
+	if value, ok := in.Email.get(); ok {
+		values["email"] = value
+	}
+	if value, ok := in.Phone.get(); ok {
+		values["phone"] = value
+	}
+	if value, ok := in.Whatsapp.get(); ok {
+		values["whatsapp"] = value
+	}
+	if in.Consent != nil {
+		values["consent"] = in.Consent
+	}
+	if value, ok := in.Locale.get(); ok {
+		values["locale"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// PutContact: Keep a contact. Keep a person a booking may name to be told about it (contact_ref
+// on slotlock_put_reservation), under your own reference: how to reach them (email, phone for SMS
+// and whatsapp, both E.164) and which channels they agreed to (consent: false is an opt-out a
+// sender must honour). Replaces what was kept under the reference. A sender reads it to send;
+// Slotlock itself sends nothing. created says whether it is new. A tenant keeps at most 100,000
+// (409 contact_limit_reached).
+func (c *Client) PutContact(ctx context.Context, in PutContactInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_put_contact", in.values())
+}
+
+// DeleteContactInput holds the arguments of [Client.DeleteContact].
+type DeleteContactInput struct {
+	ContactRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteContactInput) values() map[string]any {
+	values := map[string]any{}
+	values["contact_ref"] = in.ContactRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteContact: Forget a contact. Forget a person: their contact, and their reference on every
+// booking that named it, at once (for an erasure request). deleted is false when no contact was
+// kept; bookings counts the bookings that no longer name them. Changes already on the feed keep
+// the reference, never the person.
+func (c *Client) DeleteContact(ctx context.Context, in DeleteContactInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_contact", in.values())
 }
 
 // ListWaitlistInput holds the arguments of [Client.ListWaitlist].
@@ -2865,6 +3034,54 @@ func (in DeleteCoverageInput) values() map[string]any {
 // resource.
 func (c *Client) DeleteCoverage(ctx context.Context, in DeleteCoverageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_delete_coverage", in.values())
+}
+
+// PutSourceBusyInput holds the arguments of [Client.PutSourceBusy].
+type PutSourceBusyInput struct {
+	ResourceID string
+
+	Source string
+
+	Start string
+
+	End string
+
+	Revision int64
+
+	Busy []map[string]any
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in PutSourceBusyInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["source"] = in.Source
+	values["start"] = in.Start
+	values["end"] = in.End
+	values["revision"] = in.Revision
+	values["busy"] = in.Busy
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// PutSourceBusy: Record a calendar's busy time. For a calendar that gives busy time but not its
+// events (Google freeBusy, Microsoft getSchedule): record its coverage of a window at the
+// source's revision, as slotlock_record_coverage does, and the busy time in it, which replaces
+// what the source said of that window before (what it said outside the window stays). Busy time
+// counts in free/busy and every booking Slotlock makes on the resource is refused over it (409
+// overlap), as over an event. A confirmed booking the source newly reports busy time over is left
+// as it is and put on the feed once as coverage.conflict, naming the booking and the source by
+// its source_id: someone decides. At most 5000 intervals; they are clipped to the window and
+// merged. Revisions only go forward; repeating one changes nothing (replayed: true).
+func (c *Client) PutSourceBusy(ctx context.Context, in PutSourceBusyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_put_source_busy", in.values())
 }
 
 // GetCoverageInput holds the arguments of [Client.GetCoverage].

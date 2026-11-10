@@ -1101,6 +1101,9 @@
           "type": "string",
           "format": "uuid"
         },
+        "notify": {
+          "type": "boolean"
+        },
         "dry_run": {
           "type": "boolean",
           "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."

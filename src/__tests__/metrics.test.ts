@@ -48,6 +48,7 @@ describe('slotlock metrics', () => {
       waitlistOffers: 1,
       approvalsExpired: 0,
       bookingsCompleted: 0,
+      remindersDue: 0,
       capped: false,
       rollPending: false,
     });

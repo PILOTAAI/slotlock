@@ -284,6 +284,7 @@ fn books_holds_and_reservations_without_double_booking() {
             "no_shows",
             "pruned",
             "refused",
+            "reminders_due",
             "stale_sources",
             "waitlist_offers",
             "zone_shifts"

@@ -436,6 +436,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_mark_hold_paid",
+        method: "POST",
+        path: "/v1/holds/{hold_id}/paid",
+        path_params: &["hold_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_reservation",
         method: "GET",
         path: "/v1/reservations/{reservation_ref}",
@@ -469,6 +476,27 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path: "/v1/reservations/{reservation_ref}/check-in",
         path_params: &["reservation_ref"],
         query: &[],
+    },
+    Operation {
+        name: "slotlock_get_contact",
+        method: "GET",
+        path: "/v1/contacts/{contact_ref}",
+        path_params: &["contact_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_put_contact",
+        method: "PUT",
+        path: "/v1/contacts/{contact_ref}",
+        path_params: &["contact_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_contact",
+        method: "DELETE",
+        path: "/v1/contacts/{contact_ref}",
+        path_params: &["contact_ref"],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_list_waitlist",
@@ -511,6 +539,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path: "/v1/resources/{resource_id}/coverage/{source}",
         path_params: &["resource_id", "source"],
         query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_put_source_busy",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/coverage/{source}/busy",
+        path_params: &["resource_id", "source"],
+        query: &[],
     },
     Operation {
         name: "slotlock_get_coverage",
@@ -1080,6 +1115,8 @@ pub struct CreateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1656,6 +1693,8 @@ pub struct AcquireHoldInput {
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_after_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_required: Option<bool>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1704,6 +1743,19 @@ pub struct ConfirmHoldInput {
     pub dry_run: Option<bool>,
 }
 
+/// The arguments of [`Client::mark_hold_paid`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MarkHoldPaidInput {
+    pub hold_id: String,
+    pub payment_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::get_reservation`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetReservationInput {
@@ -1726,6 +1778,10 @@ pub struct PutReservationInput {
     pub override_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1765,6 +1821,53 @@ pub struct ListReservationsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CheckInReservationInput {
     pub reservation_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::get_contact`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetContactInput {
+    pub contact_ref: String,
+}
+
+/// The arguments of [`Client::put_contact`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PutContactInput {
+    pub contact_ref: String,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whatsapp: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent: Option<Value>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_contact`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteContactInput {
+    pub contact_ref: String,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1857,6 +1960,23 @@ pub struct RecordCoverageInput {
 pub struct DeleteCoverageInput {
     pub resource_id: String,
     pub source: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::put_source_busy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PutSourceBusyInput {
+    pub resource_id: String,
+    pub source: String,
+    pub start: String,
+    pub end: String,
+    pub revision: i64,
+    pub busy: Vec<Value>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2831,7 +2951,9 @@ impl Client {
     /// Occupy a window without booking it, for example while a customer pays. The hold blocks
     /// every other booking until it expires (the database clock, ttl_seconds from now), is
     /// confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
-    /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
+    /// a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
+    /// confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment
+    /// state and never moves money. A taken window answers 409 overlap. With an idempotency key
     /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
     /// request made, until that hold would have expired, is released or is confirmed; the same
     /// key with another request is 422 idempotency_conflict.
@@ -2869,9 +2991,23 @@ impl Client {
     /// revision 1: move or cancel it with the reservation routes by that reference (DELETE
     /// /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same
     /// reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-    /// unknown one, 404 hold_not_found.
+    /// unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409
+    /// payment_required.
     pub fn confirm_hold(&self, input: &ConfirmHoldInput) -> Result<Value, Error> {
         self.call("slotlock_confirm_hold", serde_json::to_value(input)?)
+    }
+
+    /// Record a hold as paid.
+    ///
+    /// Record that a hold made with payment_required is paid, by the payment's reference at your
+    /// processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then
+    /// be confirmed. Slotlock records payment state and never moves money. The same reference
+    /// again answers the same hold (replayed: true); another answers 409 payment_conflict. The
+    /// feed says so (hold.paid). A hold that does not wait for payment answers 409
+    /// payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may
+    /// be someone else's); a confirmed, released or unknown one, 404 hold_not_found.
+    pub fn mark_hold_paid(&self, input: &MarkHoldPaidInput) -> Result<Value, Error> {
+        self.call("slotlock_mark_hold_paid", serde_json::to_value(input)?)
     }
 
     /// Get a reservation.
@@ -2894,6 +3030,8 @@ impl Client {
     /// the resource's zone) records the wall time it is booked for: it must name start, and if
     /// time zone rules later move that wall time to another instant, maintenance says so
     /// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
+    /// contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to
+    /// tell no one; both are on the feed with each change, as sent with each revision.
     pub fn put_reservation(&self, input: &PutReservationInput) -> Result<Value, Error> {
         self.call("slotlock_put_reservation", serde_json::to_value(input)?)
     }
@@ -2931,6 +3069,36 @@ impl Client {
     /// booking that has ended answers 409 reservation_ended.
     pub fn check_in_reservation(&self, input: &CheckInReservationInput) -> Result<Value, Error> {
         self.call("slotlock_check_in_reservation", serde_json::to_value(input)?)
+    }
+
+    /// Get a contact.
+    ///
+    /// The person kept under this reference, for a sender to reach. An unknown one answers 404
+    /// contact_not_found.
+    pub fn get_contact(&self, input: &GetContactInput) -> Result<Value, Error> {
+        self.call("slotlock_get_contact", serde_json::to_value(input)?)
+    }
+
+    /// Keep a contact.
+    ///
+    /// Keep a person a booking may name to be told about it (contact_ref on
+    /// slotlock_put_reservation), under your own reference: how to reach them (email, phone for
+    /// SMS and whatsapp, both E.164) and which channels they agreed to (consent: false is an
+    /// opt-out a sender must honour). Replaces what was kept under the reference. A sender reads
+    /// it to send; Slotlock itself sends nothing. created says whether it is new. A tenant keeps
+    /// at most 100,000 (409 contact_limit_reached).
+    pub fn put_contact(&self, input: &PutContactInput) -> Result<Value, Error> {
+        self.call("slotlock_put_contact", serde_json::to_value(input)?)
+    }
+
+    /// Forget a contact.
+    ///
+    /// Forget a person: their contact, and their reference on every booking that named it, at
+    /// once (for an erasure request). deleted is false when no contact was kept; bookings counts
+    /// the bookings that no longer name them. Changes already on the feed keep the reference,
+    /// never the person.
+    pub fn delete_contact(&self, input: &DeleteContactInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_contact", serde_json::to_value(input)?)
     }
 
     /// List the waitlist.
@@ -2996,6 +3164,22 @@ impl Client {
     /// it. 404 coverage_not_found for a source with no coverage of the resource.
     pub fn delete_coverage(&self, input: &DeleteCoverageInput) -> Result<Value, Error> {
         self.call("slotlock_delete_coverage", serde_json::to_value(input)?)
+    }
+
+    /// Record a calendar's busy time.
+    ///
+    /// For a calendar that gives busy time but not its events (Google freeBusy, Microsoft
+    /// getSchedule): record its coverage of a window at the source's revision, as
+    /// slotlock_record_coverage does, and the busy time in it, which replaces what the source
+    /// said of that window before (what it said outside the window stays). Busy time counts in
+    /// free/busy and every booking Slotlock makes on the resource is refused over it (409
+    /// overlap), as over an event. A confirmed booking the source newly reports busy time over is
+    /// left as it is and put on the feed once as coverage.conflict, naming the booking and the
+    /// source by its source_id: someone decides. At most 5000 intervals; they are clipped to the
+    /// window and merged. Revisions only go forward; repeating one changes nothing (replayed:
+    /// true).
+    pub fn put_source_busy(&self, input: &PutSourceBusyInput) -> Result<Value, Error> {
+        self.call("slotlock_put_source_busy", serde_json::to_value(input)?)
     }
 
     /// A resource's coverage and its health.

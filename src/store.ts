@@ -69,6 +69,7 @@ import {
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import {
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
+  SLOTLOCK_SOURCE_BUSY_MAX,
   assertBoundedSearchWindow,
   expandRules,
   invalidWindowError,
@@ -83,9 +84,15 @@ import {
 } from './sync.js';
 import type {
   AcquireHoldResult,
+  MarkHoldPaidResult,
+  PutContactResult,
+  SlotlockContact,
+  SlotlockContactConsent,
   CalendarAttendee,
   CalendarCoverageCommand,
   CalendarCoverageResult,
+  SourceBusyCommand,
+  SourceBusyResult,
   CalendarEventContent,
   CalendarEventOccurrence,
   CalendarEventRetentionResult,
@@ -175,7 +182,7 @@ const MAX_HOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BUFFER_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 /** A day, as bufferBeforeMinutes allows: a read by start can then still use the index. */
 const MAX_BUFFER_BEFORE_MS = 24 * 60 * 60 * 1000;
-export { SLOTLOCK_CALENDAR_HORIZON_DAYS };
+export { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_SOURCE_BUSY_MAX };
 /**
  * Longest one-off event (ten years and some leap days); a recurring series is bounded by its
  * materialization window instead.
@@ -867,6 +874,9 @@ interface ReservationRow {
   buffer_after_ms: string | number;
   revision: string | number;
   source: string | null;
+  /** Read where a booking's own row is answered (RFC 0004 P3); absent from other reads. */
+  contact_ref?: string | null;
+  notify?: boolean;
 }
 
 interface CalendarEventRow {
@@ -1026,7 +1036,95 @@ function validateExternalCommand(
   if (!Number.isSafeInteger(params.revision) || params.revision <= 0) {
     return { ok: false, code: 'invalid_revision' };
   }
+  if (params.contactRef !== undefined && !isValidContactRef(params.contactRef)) {
+    return { ok: false, code: 'invalid_contact_ref' };
+  }
+  if (params.notify !== undefined && typeof params.notify !== 'boolean') {
+    return { ok: false, code: 'invalid_notify' };
+  }
   return null;
+}
+
+/** A recipient's reference (RFC 0004 P3): what the contacts table and a booking name a person by. */
+const CONTACT_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+
+function isValidContactRef(value: unknown): value is string {
+  return typeof value === 'string' && CONTACT_REF.test(value);
+}
+
+/** The most contacts a tenant keeps (RFC 0004 P3). */
+export const SLOTLOCK_MAX_CONTACTS_PER_TENANT = 100_000;
+
+const E164 = /^\+[1-9][0-9]{6,14}$/;
+const LOCALE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+
+interface ContactRow {
+  ref: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  whatsapp: string | null;
+  consent: SlotlockContactConsent;
+  locale: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+function toContact(row: ContactRow): SlotlockContact {
+  const consent: SlotlockContactConsent = {};
+  for (const channel of ['email', 'sms', 'whatsapp'] as const) {
+    const answer = row.consent?.[channel];
+    if (typeof answer === 'boolean') consent[channel] = answer;
+  }
+  return {
+    ref: row.ref,
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    whatsapp: row.whatsapp,
+    consent,
+    locale: row.locale,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** A contact's fields as the table's CHECK takes them, or null when one is not. */
+function contactFields(params: {
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  whatsapp?: string | null;
+  consent?: SlotlockContactConsent;
+  locale?: string | null;
+}): Omit<ContactRow, 'ref' | 'created_at' | 'updated_at'> | null {
+  const text = (value: unknown, valid: (text: string) => boolean): string | null | undefined => {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'string' || !valid(value)) return undefined;
+    return value;
+  };
+  const name = text(params.name, (value) => value.length >= 1 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value));
+  const email = text(
+    params.email,
+    (value) => value.length >= 3 && value.length <= 320 && /^[^\s@]+@[^\s@]+$/.test(value),
+  );
+  const phone = text(params.phone, (value) => E164.test(value));
+  const whatsapp = text(params.whatsapp, (value) => E164.test(value));
+  const locale = text(params.locale, (value) => value.length <= 35 && LOCALE.test(value));
+  if (name === undefined || email === undefined || phone === undefined || whatsapp === undefined || locale === undefined) {
+    return null;
+  }
+  const consent: SlotlockContactConsent = {};
+  if (params.consent !== undefined) {
+    if (typeof params.consent !== 'object' || params.consent === null || Array.isArray(params.consent)) return null;
+    for (const [channel, answer] of Object.entries(params.consent)) {
+      if ((channel !== 'email' && channel !== 'sms' && channel !== 'whatsapp') || typeof answer !== 'boolean') {
+        return null;
+      }
+      consent[channel] = answer;
+    }
+  }
+  return { name, email, phone, whatsapp, consent, locale };
 }
 
 function toReservation(row: ReservationRow): SlotlockReservation {
@@ -1040,6 +1138,8 @@ function toReservation(row: ReservationRow): SlotlockReservation {
     bufferAfterMs: Number(row.buffer_after_ms),
     revision: Number(row.revision),
     source: row.source,
+    ...(row.contact_ref ? { contactRef: row.contact_ref } : {}),
+    ...(row.notify === false ? { notify: false } : {}),
   };
 }
 
@@ -1065,6 +1165,9 @@ interface HoldRow {
   expires_at: Date;
   source: string | null;
   hold_group_id?: string | null;
+  payment_required?: boolean;
+  payment_ref?: string | null;
+  paid_at?: Date | null;
 }
 
 function toHold(row: HoldRow): SlotlockHold {
@@ -1077,7 +1180,25 @@ function toHold(row: HoldRow): SlotlockHold {
     expiresAt: row.expires_at,
     source: row.source,
     ...(row.hold_group_id ? { groupId: row.hold_group_id } : {}),
+    ...(row.payment_required
+      ? {
+          paymentRequired: true as const,
+          paymentRef: row.payment_ref ?? null,
+          paidAt: row.paid_at ?? null,
+        }
+      : {}),
   };
+}
+
+/** The longest a hold that waits for payment may live (RFC 0004 C3): 30 minutes. */
+export const SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS = 30 * 60 * 1000;
+
+/** A payment's reference as the integrator's processor names it: 1-255 printable bytes. */
+function isValidPaymentRef(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[\x21-\x7e]{1,255}$/.test(value)
+  );
 }
 
 function pageCursor(after: { start: Date; id: string } | undefined) {
@@ -1481,6 +1602,7 @@ function putCommandValue(params: Parameters<typeof putCommandHash>[0]) {
     source: params.command.source ?? null,
     // Only when present, so a create without a hold keeps its hash.
     ...(params.command.fromHold ? { fromHold: params.command.fromHold.holdId } : {}),
+    ...(params.command.notify === false ? { notify: false } : {}),
     event: {
       ...params.event,
       start: params.event.start.toISOString(),
@@ -1695,6 +1817,37 @@ async function localStartFor(
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether a source's reported busy time (RFC 0004 C1) meets [start, end) on the resource: read
+ * under the resource's write lock, which a source's replacement takes too.
+ */
+async function sourceBusyLoss(tx: StoreSql, resourceId: string, start: Date, end: Date): Promise<boolean> {
+  const [hit] = await tx`
+    SELECT 1 FROM slotlock.source_busy
+     WHERE resource_id = ${resourceId} AND starts_at < ${end} AND ends_at > ${start}
+     LIMIT 1`;
+  return hit !== undefined;
+}
+
+/**
+ * A source's busy time as kept: each interval valid, clipped to the window, sorted and merged
+ * (touching ones too). Null when any is not an interval, or there are too many.
+ */
+function mergeSourceBusy(busy: readonly Interval[], window: Interval): Interval[] | null {
+  if (!Array.isArray(busy) || busy.length > SLOTLOCK_SOURCE_BUSY_MAX) return null;
+  const clipped: Interval[] = [];
+  for (const interval of busy) {
+    const start = interval?.start;
+    const end = interval?.end;
+    if (!(start instanceof Date) || !(end instanceof Date)) return null;
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) return null;
+    const from = Math.max(start.getTime(), window.start.getTime());
+    const to = Math.min(end.getTime(), window.end.getTime());
+    if (to > from) clipped.push({ start: new Date(from), end: new Date(to) });
+  }
+  return mergeIntervals(clipped);
 }
 
 /** An entry's offer: the hold made for it, said on the entry and the feed. */
@@ -3103,7 +3256,45 @@ export interface SlotlockStore extends SlotlockEventFeed {
      * `fromHold` releases the rest, and releasing one with a holder releases them all.
      */
     groupId?: string;
+    /**
+     * The hold waits for payment (RFC 0004 C3): it cannot be confirmed until `markHoldPaid`
+     * records the payment's reference, and lives at most SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS
+     * (`invalid_ttl` beyond). Slotlock records payment state; it never moves money.
+     */
+    paymentRequired?: boolean;
   }): Promise<AcquireHoldResult>;
+  /**
+   * Record that a hold waiting for payment is paid (RFC 0004 C3), by the payment's reference at the
+   * integrator's processor: the integrator says so, or an adapter that verified it. Once paid it
+   * may be confirmed. The same reference again answers the same hold; another is
+   * `payment_conflict`. The feed says so (`hold.paid`). A hold that does not wait for payment is
+   * `payment_not_required`; an expired one `hold_expired`; one confirmed, released or unknown
+   * `hold_not_found`.
+   */
+  markHoldPaid(params: { tenantRef: string; holdId: string; paymentRef: string }): Promise<MarkHoldPaidResult>;
+  /**
+   * Keep a person a booking may name (`contactRef`) to be told about it (RFC 0004 P3): how to reach
+   * them and which channels they agreed to. Replaces what was kept under the reference. A sender
+   * reads it to send; Slotlock sends nothing. At most SLOTLOCK_MAX_CONTACTS_PER_TENANT.
+   */
+  putContact(params: {
+    tenantRef: string;
+    ref: string;
+    name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    whatsapp?: string | null;
+    consent?: SlotlockContactConsent;
+    locale?: string | null;
+  }): Promise<PutContactResult>;
+  /** The tenant's contact with this reference, or null. */
+  getContact(params: { tenantRef: string; ref: string }): Promise<SlotlockContact | null>;
+  /**
+   * Forget a person (RFC 0004 P3): their contact, and their reference on every booking that named
+   * it, in one transaction. `deleted` is false when there was no contact; `bookings` counts the
+   * bookings that no longer name them.
+   */
+  deleteContact(params: { tenantRef: string; ref: string }): Promise<{ deleted: boolean; bookings: number }>;
   /** One of the tenant's live holds, or null (none, expired, confirmed, or another tenant's). */
   getHold(params: { tenantRef: string; holdId: string }): Promise<SlotlockHold | null>;
   /**
@@ -3410,6 +3601,14 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   reportStaleCoverage(params: { tenantRef: string; maxAgeMs?: number; limit?: number }): Promise<number>;
   /**
+   * Put each event reminder that has come due on the feed once (RFC 0004 P3), as `reminder.due`:
+   * an occurrence's reminder, its minutes before the start, of an event that may be notified about
+   * (`notify`), due within the last day and not started yet. Each is recorded in
+   * `reminder_dispatches` in the same transaction, so no later pass says it again. The change's id
+   * is the key a sender sends it once by. Up to `limit` (default 500); how many.
+   */
+  dueReminders(params: { tenantRef: string; limit?: number }): Promise<number>;
+  /**
    * Claim a booking by its reference (check-in), so a resource whose booking rules ask for check-in
    * (`checkInMinutes`) does not release it. Check-in opens `SLOTLOCK_CHECK_IN_OPENS_MINUTES` before
    * the start (`check_in_not_open` sooner), and a move to another start clears it. Checking in again
@@ -3596,6 +3795,15 @@ export interface SlotlockStore extends SlotlockEventFeed {
   eraseTenant(params: { tenantRef: string }): Promise<SlotlockTenantErasure>;
   /** Record the bounded, complete source window represented by a provider cursor/revision. */
   recordCalendarCoverage(params: CalendarCoverageCommand): Promise<CalendarCoverageResult>;
+  /**
+   * A calendar that gives busy time but not its events (RFC 0004 C1): records its coverage of the
+   * window at the revision, as recordCalendarCoverage does, and in the same transaction replaces
+   * the busy time it reported for that window (what it said outside the window stays). Busy time
+   * counts in free/busy and is refused to every booking Slotlock makes, as an event's would be;
+   * a confirmed booking the source newly reports busy time over is put on the feed as
+   * coverage.conflict, once, and left as it is. A revision already recorded changes nothing.
+   */
+  replaceSourceBusy(params: SourceBusyCommand): Promise<SourceBusyResult>;
   /** Return merged busy intervals plus explicit completeness for caller-required provider sources. */
   getFreeBusy(params: {
     tenantRef: string;
@@ -4294,12 +4502,16 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'rescheduleExternalReservation',
   'cancelExternalReservation',
   'acquireHold',
+  'markHoldPaid',
+  'putContact',
+  'deleteContact',
   'confirmHold',
   'releaseHold',
   'putCalendarEvent',
   'cancelCalendarEvent',
   'cancelCalendarEventById',
   'recordCalendarCoverage',
+  'replaceSourceBusy',
   'createWebhookEndpoint',
   'deleteWebhookEndpoint',
   'enableWebhookEndpoint',
@@ -5608,6 +5820,8 @@ function buildSlotlockStore(
             const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef ?? null);
             if (!locked) return { ok: false, code: 'resource_not_found' };
             if (locked.archived) return { ok: false, code: 'resource_archived' };
+            // Busy time a calendar reported without its events (RFC 0004 C1) is refused as a booking's is.
+            if (await sourceBusyLoss(tx, params.resourceId, occupied.start, occupied.end)) return { ok: false, code: 'overlap', conflictingReservationId: null };
             await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
             const [row] = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
@@ -5620,7 +5834,7 @@ function buildSlotlockStore(
                 ${params.source ?? null}
               )
               RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                        buffer_after_ms, revision, source`;
+                        buffer_after_ms, revision, source, contact_ref, notify`;
             if (!row) throw new Error('slotlock: reservation insert returned no row');
             return { ok: true, reservation: toReservation(row) };
           });
@@ -5673,7 +5887,7 @@ function buildSlotlockStore(
             // holds.
             const existing = await tx<ReservationRow[]>`
               SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                     buffer_after_ms, revision, source
+                     buffer_after_ms, revision, source, contact_ref, notify
                 FROM slotlock.reservations
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
                  AND calendar_event_id IS NULL
@@ -5717,18 +5931,21 @@ function buildSlotlockStore(
             const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
             if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
             if (locked.archived) return { ok: false, code: 'resource_archived' };
+            // Busy time a calendar reported without its events (RFC 0004 C1) is refused as a booking's is.
+            if (await sourceBusyLoss(tx, params.resourceId, occupied.start, occupied.end)) return { ok: false, code: 'overlap', conflictingReservationId: null };
             await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
             const rows = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
                 resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-                buffer_before_ms, revision, source, wall_starts_at
+                buffer_before_ms, revision, source, wall_starts_at, contact_ref, notify
               ) VALUES (
                 ${params.resourceId}, ${params.tenantRef}, ${params.externalRef}, ${params.start},
                 ${params.end}, ${bufferAfterMs}, ${writtenBefore}, ${params.revision},
-                ${params.source ?? null}, ${wall ?? null}::timestamp
+                ${params.source ?? null}, ${wall ?? null}::timestamp, ${params.contactRef ?? null},
+                ${params.notify ?? true}
               )
               RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                        buffer_after_ms, revision, source`;
+                        buffer_after_ms, revision, source, contact_ref, notify`;
             const row = rows[0];
             if (!row) throw new Error('slotlock: external reservation insert returned no row');
             return { ok: true, reservation: toReservation(row), idempotent: false };
@@ -5773,7 +5990,7 @@ function buildSlotlockStore(
             await lockExternalIdentity(tx, params.tenantRef, params.externalRef);
             const existing = await tx<ReservationRow[]>`
               SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                     buffer_after_ms, revision, source
+                     buffer_after_ms, revision, source, contact_ref, notify
                 FROM slotlock.reservations
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
                  AND calendar_event_id IS NULL
@@ -5839,6 +6056,8 @@ function buildSlotlockStore(
             const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
             if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
             if (locked.archived) return { ok: false, code: 'resource_archived' };
+            // Busy time a calendar reported without its events (RFC 0004 C1) is refused as a booking's is.
+            if (await sourceBusyLoss(tx, params.resourceId, occupied.start, occupied.end)) return { ok: false, code: 'overlap', conflictingReservationId: null };
             await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
             const rows = await tx<ReservationRow[]>`
               UPDATE slotlock.reservations
@@ -5849,6 +6068,9 @@ function buildSlotlockStore(
                      buffer_before_ms = ${bufferBeforeMs},
                      revision = ${params.revision},
                      source = ${params.source ?? null},
+                     -- Whom to tell, and whether (RFC 0004 P3): as sent, like the rest.
+                     contact_ref = ${params.contactRef ?? null},
+                     notify = ${params.notify ?? true},
                      -- The wall time it now says it starts at, if any (RFC 0004 B9).
                      wall_starts_at = ${wall ?? null}::timestamp,
                      zone_shift_reported_at = NULL,
@@ -5859,7 +6081,7 @@ function buildSlotlockStore(
                      END
                WHERE id = ${found.id}
                RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                         buffer_after_ms, revision, source`;
+                         buffer_after_ms, revision, source, contact_ref, notify`;
             const row = rows[0];
             if (!row) throw new Error('slotlock: external reservation update returned no row');
             return { ok: true, reservation: toReservation(row), idempotent: false };
@@ -5990,6 +6212,13 @@ function buildSlotlockStore(
       if (!Number.isFinite(params.ttlMs) || params.ttlMs <= 0 || params.ttlMs > MAX_HOLD_TTL_MS) {
         return { ok: false, code: 'invalid_ttl' };
       }
+      const paymentRequired = params.paymentRequired === true;
+      if (params.paymentRequired !== undefined && typeof params.paymentRequired !== 'boolean') {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      if (paymentRequired && params.ttlMs > SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS) {
+        return { ok: false, code: 'invalid_ttl' };
+      }
       const bufferAfterMs = params.bufferAfterMs ?? 0;
       if (
         !Number.isSafeInteger(bufferAfterMs) ||
@@ -6027,6 +6256,7 @@ function buildSlotlockStore(
         source: params.source ?? null,
         ...(params.groupId !== undefined ? { groupId: params.groupId } : {}),
         ...(holderRef !== undefined ? { holderRef } : {}),
+        ...(paymentRequired ? { paymentRequired } : {}),
       });
       const ttlSeconds = params.ttlMs / 1000;
       // The holder's caps: the store's, lowered by its key's own (RFC 0004 A5), never raised.
@@ -6058,7 +6288,10 @@ function buildSlotlockStore(
               const [prior] = await tx<(HoldRow & { payload_hash: string })[]>`
                 SELECT hold_id AS id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at,
                        source, payload_hash,
-                       (SELECT hold_group_id FROM slotlock.reservations WHERE id = hold_id) AS hold_group_id
+                       (SELECT hold_group_id FROM slotlock.reservations WHERE id = hold_id) AS hold_group_id,
+                       (SELECT payment_required FROM slotlock.reservations WHERE id = hold_id) AS payment_required,
+                       (SELECT payment_ref FROM slotlock.reservations WHERE id = hold_id) AS payment_ref,
+                       (SELECT paid_at FROM slotlock.reservations WHERE id = hold_id) AS paid_at
                   FROM slotlock.hold_commands
                  WHERE tenant_ref = ${tenantRef ?? null} AND principal_ref = ${principalRef ?? null}
                    AND idempotency_key = ${idempotencyKey ?? null}`;
@@ -6128,18 +6361,20 @@ function buildSlotlockStore(
             const locked = await lockResourceForWrite(tx, params.resourceId, tenantRef ?? null);
             if (!locked) return { ok: false, code: 'resource_not_found' };
             if (locked.archived) return { ok: false, code: 'resource_archived' };
+            // Busy time a calendar reported without its events (RFC 0004 C1) is refused as a booking's is.
+            if (await sourceBusyLoss(tx, params.resourceId, reach.start, reach.end)) return { ok: false, code: 'overlap', conflictingReservationId: null };
             await reapExpiredHolds(tx, params.resourceId, reach.start, reach.end);
             const [row] = await tx<HoldRow[]>`
               INSERT INTO slotlock.reservations (
                 resource_id, starts_at, ends_at, buffer_after_ms, buffer_before_ms, status,
-                expires_at, source, holder_ref, hold_group_id
+                expires_at, source, holder_ref, hold_group_id, payment_required
               ) VALUES (
                 ${params.resourceId}, ${params.start}, ${params.end}, ${written}, ${writtenBefore}, 'held',
                 statement_timestamp() + make_interval(secs => ${ttlSeconds}), ${params.source ?? null},
-                ${holderRef ?? null}, ${params.groupId ?? null}
+                ${holderRef ?? null}, ${params.groupId ?? null}, ${paymentRequired}
               )
               RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source,
-                        hold_group_id`;
+                        hold_group_id, payment_required, payment_ref, paid_at`;
             if (!row) throw new Error('slotlock: hold insert returned no row');
             if (keyed) {
               await tx`
@@ -6184,6 +6419,117 @@ function buildSlotlockStore(
       }
     },
 
+    async putContact(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!isValidContactRef(params.ref)) return { ok: false, code: 'invalid_contact_ref' };
+      const fields = contactFields(params);
+      if (!fields) return { ok: false, code: 'invalid_contact' };
+      return inTransaction(sql, async (tx): Promise<PutContactResult> => {
+        await lockExternalIdentity(tx, params.tenantRef, `contact:${params.ref}`);
+        const [existing] = await tx<{ ref: string }[]>`
+          SELECT ref FROM slotlock.contacts WHERE tenant_ref = ${params.tenantRef} AND ref = ${params.ref}`;
+        if (!existing) {
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-contacts', params.tenantRef])}, 0))`;
+          const [kept] = await tx<{ count: number }[]>`
+            SELECT count(*)::int AS count FROM (
+              SELECT 1 FROM slotlock.contacts WHERE tenant_ref = ${params.tenantRef}
+               LIMIT ${SLOTLOCK_MAX_CONTACTS_PER_TENANT}) kept`;
+          if ((kept?.count ?? 0) >= SLOTLOCK_MAX_CONTACTS_PER_TENANT) {
+            return { ok: false, code: 'contact_limit_reached', limit: SLOTLOCK_MAX_CONTACTS_PER_TENANT };
+          }
+        }
+        const [row] = await tx<ContactRow[]>`
+          INSERT INTO slotlock.contacts (tenant_ref, ref, name, email, phone, whatsapp, consent, locale)
+          VALUES (${params.tenantRef}, ${params.ref}, ${fields.name}, ${fields.email}, ${fields.phone},
+                  ${fields.whatsapp}, ${tx.json(fields.consent as never)}, ${fields.locale})
+          ON CONFLICT (tenant_ref, ref) DO UPDATE
+             SET name = EXCLUDED.name, email = EXCLUDED.email, phone = EXCLUDED.phone,
+                 whatsapp = EXCLUDED.whatsapp, consent = EXCLUDED.consent, locale = EXCLUDED.locale,
+                 updated_at = statement_timestamp()
+          RETURNING ref, name, email, phone, whatsapp, consent, locale, created_at, updated_at`;
+        if (!row) throw new Error('slotlock: contact upsert returned no row');
+        return { ok: true, contact: toContact(row), created: !existing };
+      }, 'read committed');
+    },
+
+    async getContact(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!isValidContactRef(params.ref)) return null;
+      const [row] = await sql<ContactRow[]>`
+        SELECT ref, name, email, phone, whatsapp, consent, locale, created_at, updated_at
+          FROM slotlock.contacts WHERE tenant_ref = ${params.tenantRef} AND ref = ${params.ref}`;
+      return row ? toContact(row) : null;
+    },
+
+    async deleteContact(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!isValidContactRef(params.ref)) return { deleted: false, bookings: 0 };
+      return inTransaction(sql, async (tx) => {
+        await lockExternalIdentity(tx, params.tenantRef, `contact:${params.ref}`);
+        const deleted = await tx`
+          DELETE FROM slotlock.contacts WHERE tenant_ref = ${params.tenantRef} AND ref = ${params.ref}
+          RETURNING ref`;
+        // Its reference leaves the bookings too; the feed keeps no row of the person (the change
+        // trigger ignores a write that moves no time).
+        const bookings = await tx`
+          UPDATE slotlock.reservations SET contact_ref = NULL
+           WHERE tenant_ref = ${params.tenantRef} AND contact_ref = ${params.ref}
+           RETURNING id`;
+        return { deleted: deleted.length > 0, bookings: bookings.length };
+      }, 'read committed');
+    },
+
+    async markHoldPaid(params) {
+      if (!isValidIdentity(params.tenantRef)) return { ok: false, code: 'invalid_identity' };
+      if (!isValidPaymentRef(params.paymentRef)) return { ok: false, code: 'invalid_payment_ref' };
+      if (!isValidResourceId(params.holdId)) return { ok: false, code: 'hold_not_found' };
+      return inTransaction(sql, async (tx): Promise<MarkHoldPaidResult> => {
+        const [row] = await tx<(HoldRow & { status: string; live: boolean })[]>`
+          SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
+                 hold.expires_at, hold.source, hold.hold_group_id, hold.payment_required,
+                 hold.payment_ref, hold.paid_at, hold.status,
+                 hold.expires_at > statement_timestamp() AS live
+            FROM slotlock.reservations hold
+            JOIN slotlock.resources resource ON resource.id = hold.resource_id
+           WHERE hold.id = ${params.holdId} AND resource.tenant_ref = ${params.tenantRef}
+             AND hold.calendar_event_id IS NULL
+           FOR UPDATE OF hold`;
+        if (!row || row.status !== 'held') return { ok: false, code: 'hold_not_found' };
+        if (!row.payment_required) return { ok: false, code: 'payment_not_required' };
+        if (row.payment_ref !== null && row.payment_ref !== undefined) {
+          return row.payment_ref === params.paymentRef
+            ? { ok: true, hold: toHold(row), idempotent: true }
+            : { ok: false, code: 'payment_conflict' };
+        }
+        // Paid after it lapsed: the time may be someone else's by now. The integrator refunds.
+        if (!row.live) return { ok: false, code: 'hold_expired' };
+        const [paid] = await tx<HoldRow[]>`
+          UPDATE slotlock.reservations
+             SET payment_ref = ${params.paymentRef}, paid_at = statement_timestamp()
+           WHERE id = ${params.holdId}
+           RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source,
+                     hold_group_id, payment_required, payment_ref, paid_at`;
+        if (!paid) throw new Error('slotlock: hold payment update returned no row');
+        await tx`
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          VALUES (${params.tenantRef}, ${paid.resource_id}, 'hold.paid', ${paid.id},
+                  jsonb_build_object(
+                    'id', ${paid.id}::uuid, 'resource_id', ${paid.resource_id}::uuid,
+                    'start', ${paid.starts_at}::timestamptz, 'end', ${paid.ends_at}::timestamptz,
+                    'expires_at', ${paid.expires_at}::timestamptz,
+                    'payment_ref', ${params.paymentRef}::text,
+                    'paid_at', ${paid.paid_at ?? null}::timestamptz),
+                  NULLIF(current_setting('slotlock.actor', true), ''))`;
+        return { ok: true, hold: toHold(paid), idempotent: false };
+      }, 'read committed');
+    },
+
     async getHold(params) {
       if (!isValidIdentity(params.tenantRef)) {
         throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
@@ -6191,7 +6537,7 @@ function buildSlotlockStore(
       if (!isValidResourceId(params.holdId)) return null;
       const [row] = await sql<HoldRow[]>`
         SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
-               hold.expires_at, hold.source
+               hold.expires_at, hold.source, hold.payment_required, hold.payment_ref, hold.paid_at
           FROM slotlock.reservations hold
           JOIN slotlock.resources resource ON resource.id = hold.resource_id
          WHERE hold.id = ${params.holdId} AND resource.tenant_ref = ${params.tenantRef}
@@ -6206,7 +6552,8 @@ function buildSlotlockStore(
       if (!isValidResourceId(params.holdId)) return null;
       const [row] = await sql<(HoldRow & { live: boolean })[]>`
         SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
-               hold.expires_at, hold.source, hold.expires_at > statement_timestamp() AS live
+               hold.expires_at, hold.source, hold.payment_required, hold.payment_ref, hold.paid_at,
+               hold.expires_at > statement_timestamp() AS live
           FROM slotlock.reservations hold
           JOIN slotlock.resources resource ON resource.id = hold.resource_id
          WHERE hold.id = ${params.holdId} AND resource.tenant_ref = ${params.tenantRef}
@@ -6225,7 +6572,7 @@ function buildSlotlockStore(
       const after = pageCursor(params.after);
       const rows = await sql<HoldRow[]>`
         SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
-               hold.expires_at, hold.source
+               hold.expires_at, hold.source, hold.payment_required, hold.payment_ref, hold.paid_at
           FROM slotlock.reservations hold
           JOIN slotlock.resources resource ON resource.id = hold.resource_id
          WHERE hold.resource_id = ${params.resourceId} AND resource.tenant_ref = ${params.tenantRef}
@@ -6566,7 +6913,7 @@ function buildSlotlockStore(
       }
       const [row] = await sql<ReservationRow[]>`
         SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-               revision, source
+               revision, source, contact_ref, notify
           FROM slotlock.reservations
          WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
            AND calendar_event_id IS NULL`;
@@ -6585,7 +6932,7 @@ function buildSlotlockStore(
       const after = pageCursor(params.after);
       const rows = await sql<ReservationRow[]>`
         SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-               revision, source
+               revision, source, contact_ref, notify
           FROM slotlock.reservations
          WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
            AND calendar_event_id IS NULL
@@ -6619,11 +6966,18 @@ function buildSlotlockStore(
         // confirmation.
         const resource = await lockResourceForWrite(tx, owner.resource_id, null);
         const [row] = await tx<
-          (ReservationRow & { status: string; live: boolean; hold_group_id: string | null; holder_ref: string | null })[]
+          (ReservationRow & {
+            status: string;
+            live: boolean;
+            hold_group_id: string | null;
+            holder_ref: string | null;
+            unpaid: boolean;
+          })[]
         >`
           SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at, buffer_after_ms,
-                 revision, source, status, (status = 'held' AND expires_at > statement_timestamp()) AS live,
-                 hold_group_id, holder_ref
+                 revision, source, contact_ref, notify, status,
+                 (status = 'held' AND expires_at > statement_timestamp()) AS live,
+                 hold_group_id, holder_ref, (payment_required AND paid_at IS NULL) AS unpaid
             FROM slotlock.reservations
            WHERE id = ${holdId}
            FOR UPDATE`;
@@ -6641,6 +6995,8 @@ function buildSlotlockStore(
           return { ok: true, reservation: toReservation(row) };
         }
         if (!row.live) return { ok: false, code: 'hold_expired' };
+        // A hold that waits for payment is booked only once it is paid (RFC 0004 C3).
+        if (row.unpaid) return { ok: false, code: 'payment_required' };
         if (resource?.archived !== false) return { ok: false, code: 'resource_archived' };
         if (bookingTenant !== null) {
           const [retired] = await tx<{ revision: string }[]>`
@@ -6664,7 +7020,7 @@ function buildSlotlockStore(
                  tenant_ref = ${bookingTenant}, external_ref = ${bookingTenant === null ? null : holdId}
            WHERE id = ${holdId}
           RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                    buffer_after_ms, revision, source`;
+                    buffer_after_ms, revision, source, contact_ref, notify`;
         if (!confirmed) throw new Error('slotlock: hold confirmation returned no row');
         // Its linked alternatives (one group, one holder) are released with it, as booking one
         // from an agent releases the rest.
@@ -6937,10 +7293,18 @@ function buildSlotlockStore(
                 return { ok: false, code: 'hold_not_found' };
               }
               const [hold] = await tx<
-                { resource_id: string; starts_at: Date; ends_at: Date; hold_group_id: string | null; live: boolean }[]
+                {
+                  resource_id: string;
+                  starts_at: Date;
+                  ends_at: Date;
+                  hold_group_id: string | null;
+                  live: boolean;
+                  unpaid: boolean;
+                }[]
               >`
                 SELECT resource_id, starts_at, ends_at, hold_group_id,
-                       expires_at > statement_timestamp() AS live
+                       expires_at > statement_timestamp() AS live,
+                       (payment_required AND paid_at IS NULL) AS unpaid
                   FROM slotlock.reservations
                  WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}
                  FOR UPDATE`;
@@ -6948,6 +7312,8 @@ function buildSlotlockStore(
               // The holder's own hold that lapsed and is not yet reaped: named as the application
               // API's confirm names it. Another holder's stays not found.
               if (!hold.live) return { ok: false, code: 'hold_expired' };
+              // A hold that waits for payment is booked only once paid (RFC 0004 C3).
+              if (hold.unpaid) return { ok: false, code: 'payment_required' };
               const [only] = occurrences;
               if (
                 hold.resource_id !== params.resourceId ||
@@ -7032,6 +7398,8 @@ function buildSlotlockStore(
                        source = ${params.source ?? null},
                        buffer_after_ms = ${turnaroundMs},
                        buffer_before_ms = ${bufferBeforeMs},
+                       -- Whether anyone should be told (RFC 0004 P3): as sent, like the rest.
+                       notify = ${params.notify !== false},
                        updated_at = now()
                  WHERE id = ${eventId}
                    AND tenant_ref = ${params.tenantRef}
@@ -7043,7 +7411,7 @@ function buildSlotlockStore(
                   summary, description, location, status, transparency, organizer, attendees,
                   reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
                   materialized_ends_at, recurrence_cursor, recurrence_ends_by, revision, source,
-                  buffer_after_ms, buffer_before_ms
+                  buffer_after_ms, buffer_before_ms, notify
                 ) VALUES (
                   ${eventId}, ${params.tenantRef}, ${ownerRef}, ${params.externalRef},
                   ${params.resourceId},
@@ -7057,7 +7425,8 @@ function buildSlotlockStore(
                   ${tx.json(eventExceptionsForJson(event.recurrence?.exceptions))},
                   ${materializationWindow.start}, ${materializationWindow.end},
                   ${seriesCursorJson(tx, series.cursor)}, ${recurrenceEndsBy}::text::timestamptz,
-                  ${revision}, ${params.source ?? null}, ${turnaroundMs}, ${bufferBeforeMs}
+                  ${revision}, ${params.source ?? null}, ${turnaroundMs}, ${bufferBeforeMs},
+                  ${params.notify !== false}
                 )`;
             }
 
@@ -7068,6 +7437,22 @@ function buildSlotlockStore(
             const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
             if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
             if (locked.archived) return { ok: false, code: 'resource_archived' };
+            // A booking (held to the rules, as agents' are) never takes busy time a calendar reported
+            // without its events (RFC 0004 C1); events imported from calendars are that time.
+            if (params.enforceBookingRules === true && (event.transparency ?? 'opaque') === 'opaque') {
+              for (const occurrence of occurrences) {
+                if (
+                  await sourceBusyLoss(
+                    tx,
+                    params.resourceId,
+                    new Date(occurrence.start.getTime() - bufferBeforeMs),
+                    new Date(occurrence.end.getTime() + turnaroundMs),
+                  )
+                ) {
+                  return { ok: false, code: 'overlap', conflictingReservationId: null };
+                }
+              }
+            }
             await replaceCalendarEventOccurrences(tx, {
               tenantRef: params.tenantRef,
               eventId,
@@ -8011,6 +8396,126 @@ function buildSlotlockStore(
       });
     },
 
+    async replaceSourceBusy(params) {
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidIdentity(params.source) ||
+        !isValidResourceId(params.resourceId)
+      ) {
+        return { ok: false, code: 'invalid_identity' };
+      }
+      let window: Interval;
+      try {
+        window = calendarWindow(params.window);
+      } catch {
+        return { ok: false, code: 'invalid_window' };
+      }
+      const busy = mergeSourceBusy(params.busy, window);
+      if (busy === null) return { ok: false, code: 'invalid_busy' };
+      return inTransaction(sql, async (tx): Promise<SourceBusyResult> => {
+        // In turn with every booking on the resource, each of which reads this time (sourceBusyLoss):
+        // a booking either sees the new busy time or is seen by it here.
+        if (!(await lockResourceForWrite(tx, params.resourceId, params.tenantRef))) {
+          return { ok: false, code: 'resource_tenant_mismatch' };
+        }
+        const recorded = await buildSlotlockStore(tx, options, null).recordCalendarCoverage({
+          tenantRef: params.tenantRef,
+          resourceId: params.resourceId,
+          source: params.source,
+          window,
+          revision: params.revision,
+        });
+        if (!recorded.ok) return recorded;
+        if (recorded.idempotent) return { ...recorded, busy: busy.length, conflicts: 0 };
+        const starts = busy.map((interval) => interval.start.toISOString());
+        const ends = busy.map((interval) => interval.end.toISOString());
+        // Confirmed bookings in the way of what the source now says, but not of what it said
+        // before: a conflict already reported is not reported again on every read.
+        const conflicts = await tx<
+          {
+            id: string;
+            external_ref: string | null;
+            calendar_event_id: string | null;
+            starts_at: Date;
+            ends_at: Date;
+            busy_start: Date;
+            busy_end: Date;
+          }[]
+        >`
+          WITH reported AS (
+            SELECT starts_at, ends_at
+              FROM ROWS FROM (pg_catalog.unnest(${starts}::text[]::timestamptz[]),
+                              pg_catalog.unnest(${ends}::text[]::timestamptz[])) AS busy(starts_at, ends_at)
+          )
+          SELECT DISTINCT ON (booking.id)
+                 booking.id, booking.external_ref, booking.calendar_event_id,
+                 booking.starts_at, booking.ends_at,
+                 reported.starts_at AS busy_start, reported.ends_at AS busy_end
+            FROM slotlock.reservations booking
+            JOIN reported ON booking.starts_at < reported.ends_at AND booking.ends_at > reported.starts_at
+           WHERE booking.resource_id = ${params.resourceId}
+             AND booking.status = 'confirmed'
+             AND booking.starts_at < ${window.end} AND booking.ends_at > ${window.start}
+             AND NOT EXISTS (
+               SELECT 1 FROM slotlock.source_busy previous
+                WHERE previous.resource_id = ${params.resourceId} AND previous.source = ${params.source}
+                  AND previous.starts_at < booking.ends_at AND previous.ends_at > booking.starts_at)
+           ORDER BY booking.id, reported.starts_at`;
+        // What the source said of the window goes; what it said outside it stays.
+        await tx`
+          WITH removed AS (
+            DELETE FROM slotlock.source_busy
+             WHERE resource_id = ${params.resourceId} AND source = ${params.source}
+               AND starts_at < ${window.end} AND ends_at > ${window.start}
+            RETURNING starts_at, ends_at
+          )
+          INSERT INTO slotlock.source_busy (tenant_ref, resource_id, source, starts_at, ends_at)
+          SELECT ${params.tenantRef}::text, ${params.resourceId}::uuid, ${params.source}::text, starts_at,
+                 ${window.start}::timestamptz
+            FROM removed WHERE starts_at < ${window.start}
+          UNION ALL
+          SELECT ${params.tenantRef}::text, ${params.resourceId}::uuid, ${params.source}::text,
+                 ${window.end}::timestamptz, ends_at
+            FROM removed WHERE ends_at > ${window.end}`;
+        if (busy.length > 0) {
+          await tx`
+            INSERT INTO slotlock.source_busy (tenant_ref, resource_id, source, starts_at, ends_at)
+            SELECT ${params.tenantRef}::text, ${params.resourceId}::uuid, ${params.source}::text, starts_at, ends_at
+              FROM ROWS FROM (pg_catalog.unnest(${starts}::text[]::timestamptz[]),
+                              pg_catalog.unnest(${ends}::text[]::timestamptz[])) AS busy(starts_at, ends_at)`;
+        }
+        if (conflicts.length > 0) {
+          // Named as every coverage change is, by the source's source_id (never the source); the
+          // booking it is in the way of is in the data (an event's by its id).
+          await tx`
+            INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+            SELECT ${params.tenantRef}, ${params.resourceId}, 'coverage.conflict', coverage.source_id,
+                   jsonb_strip_nulls(jsonb_build_object(
+                     'resource_id', ${params.resourceId}::uuid,
+                     'source_id', coverage.source_id,
+                     'id', CASE WHEN conflict.event_id IS NULL THEN conflict.id END,
+                     'reference', conflict.reference,
+                     'event_id', conflict.event_id,
+                     'start', conflict.starts_at, 'end', conflict.ends_at,
+                     'busy_start', conflict.busy_start, 'busy_end', conflict.busy_end)),
+                   NULLIF(current_setting('slotlock.actor', true), '')
+              FROM ROWS FROM (
+                     pg_catalog.unnest(${conflicts.map((row) => row.id)}::text[]::uuid[]),
+                     pg_catalog.unnest(${conflicts.map((row) => row.external_ref)}::text[]),
+                     pg_catalog.unnest(${conflicts.map((row) => row.calendar_event_id)}::text[]::uuid[]),
+                     pg_catalog.unnest(${conflicts.map((row) => row.starts_at.toISOString())}::text[]::timestamptz[]),
+                     pg_catalog.unnest(${conflicts.map((row) => row.ends_at.toISOString())}::text[]::timestamptz[]),
+                     pg_catalog.unnest(${conflicts.map((row) => row.busy_start.toISOString())}::text[]::timestamptz[]),
+                     pg_catalog.unnest(${conflicts.map((row) => row.busy_end.toISOString())}::text[]::timestamptz[]))
+                   AS conflict(id, reference, event_id, starts_at, ends_at, busy_start, busy_end)
+              CROSS JOIN (SELECT source_id FROM slotlock.calendar_coverage
+                           WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
+                             AND source = ${params.source}) coverage`;
+        }
+        return { ...recorded, busy: busy.length, conflicts: conflicts.length };
+      }, 'read committed');
+    },
+
     async recordCoverageFailure(params) {
       if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.source) || !isValidResourceId(params.resourceId)) {
         return { ok: false, code: 'invalid_identity' };
@@ -8030,6 +8535,11 @@ function buildSlotlockStore(
         return false;
       }
       const rows = await sql`
+        WITH busy AS (
+          DELETE FROM slotlock.source_busy
+           WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
+             AND source = ${params.source}
+        )
         DELETE FROM slotlock.calendar_coverage
          WHERE tenant_ref = ${params.tenantRef} AND resource_id = ${params.resourceId}
            AND source = ${params.source}
@@ -8069,6 +8579,63 @@ function buildSlotlockStore(
         lastErrorAt: row.last_error_at,
         stale: row.stale,
       }));
+    },
+
+    async dueReminders(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 500;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) {
+        throw new RangeError('limit must be a whole number from 1 to 5000');
+      }
+      const rows = await sql<{ count: number }[]>`
+        WITH due AS (
+          SELECT occurrence.event_id, occurrence.recurrence_id, reminder.ordinal, reminder.action,
+                 reminder.minutes_before_start, occurrence.starts_at, occurrence.ends_at,
+                 event.resource_id,
+                 occurrence.starts_at - make_interval(mins => reminder.minutes_before_start) AS due_at
+            FROM slotlock.calendar_event_occurrences occurrence
+            JOIN slotlock.calendar_events event
+              ON event.id = occurrence.event_id AND event.tenant_ref = occurrence.tenant_ref
+            JOIN slotlock.calendar_event_reminders reminder
+              ON reminder.event_id = occurrence.event_id AND reminder.tenant_ref = occurrence.tenant_ref
+           WHERE occurrence.tenant_ref = ${params.tenantRef}
+             AND event.notify AND event.status <> 'cancelled'
+             AND occurrence.starts_at > statement_timestamp()
+             AND occurrence.starts_at - make_interval(mins => reminder.minutes_before_start)
+                 <= statement_timestamp()
+             AND occurrence.starts_at - make_interval(mins => reminder.minutes_before_start)
+                 > statement_timestamp() - interval '1 day'
+             -- Said once per time it is due: an occurrence moved since is reminded again.
+             AND NOT EXISTS (
+               SELECT 1 FROM slotlock.reminder_dispatches sent
+                WHERE sent.event_id = occurrence.event_id AND sent.recurrence_id = occurrence.recurrence_id
+                  AND sent.ordinal = reminder.ordinal
+                  AND sent.due_at = occurrence.starts_at - make_interval(mins => reminder.minutes_before_start))
+           ORDER BY due_at, occurrence.event_id, occurrence.recurrence_id, reminder.ordinal
+           LIMIT ${limit}
+        ), dispatched AS (
+          INSERT INTO slotlock.reminder_dispatches (tenant_ref, event_id, recurrence_id, ordinal, due_at)
+          SELECT ${params.tenantRef}, event_id, recurrence_id, ordinal, due_at FROM due
+          ON CONFLICT (event_id, recurrence_id, ordinal) DO UPDATE
+             SET due_at = EXCLUDED.due_at, dispatched_at = statement_timestamp()
+           WHERE slotlock.reminder_dispatches.due_at <> EXCLUDED.due_at
+          RETURNING event_id, recurrence_id, ordinal
+        ), reported AS (
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          SELECT ${params.tenantRef}, due.resource_id, 'reminder.due', due.event_id::text,
+                 jsonb_build_object(
+                   'event_id', due.event_id, 'recurrence_id', due.recurrence_id,
+                   'resource_id', due.resource_id, 'ordinal', due.ordinal, 'action', due.action,
+                   'minutes_before_start', due.minutes_before_start, 'due_at', due.due_at,
+                   'start', due.starts_at, 'end', due.ends_at),
+                 'slotlock:maintenance'
+            FROM due JOIN dispatched USING (event_id, recurrence_id, ordinal)
+          RETURNING 1
+        )
+        SELECT count(*)::int AS count FROM reported`;
+      return rows[0]?.count ?? 0;
     },
 
     async reportStaleCoverage(params) {
@@ -8794,6 +9361,11 @@ function buildSlotlockStore(
            AND (reservation.status <> 'held' OR reservation.expires_at > statement_timestamp())
         UNION ALL
         ${compositeBusy(sql, params.resourceId, window)}
+        UNION ALL
+        -- Busy time calendars reported without their events (RFC 0004 C1).
+        SELECT busy.starts_at, busy.ends_at FROM slotlock.source_busy busy
+         WHERE busy.resource_id = ${params.resourceId}
+           AND busy.starts_at < ${window.end} AND busy.ends_at > ${window.start}
          ORDER BY 1
          LIMIT ${MAX_FREE_BUSY_INTERVALS + 1}`;
       if (busyRows.length > MAX_FREE_BUSY_INTERVALS) {

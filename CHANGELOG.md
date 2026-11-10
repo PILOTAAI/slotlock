@@ -7,6 +7,31 @@ versioning.
 
 ### Added
 
+- What integrations build on (RFC 0004 P3, D1's recommendation: core keeps primitives, packages
+  outside it send and sync). Feed type `reminder.due`: maintenance puts each event reminder on the
+  feed once, when it comes due (within the last day, before the event starts), and again if the
+  occurrence moves; `reminders_due` in its answer. A change's `id` is the key a sender sends it
+  once by. Events take `notify` (`slotlock_create_event`'s `notify: false`): no reminders, and a
+  sender tells no one.
+- Contacts (P3, T2): new table `contacts`, the people a booking may name to be told about it, by
+  the tenant's own reference, with email, phone and WhatsApp numbers (E.164), locale and consent
+  per channel. `slotlock_put_contact`, `slotlock_get_contact`, `slotlock_delete_contact`
+  (`/v1/contacts/{contact_ref}`); deleting one also takes its reference off every booking. At most
+  100,000 a tenant. Reservations take `contact_ref` and `notify`, both on the feed with each
+  change; neither is ever the person.
+- Holds that wait for payment (RFC 0004 C3, T2): `payment_required` on `slotlock_acquire_hold`
+  (time to live at most 30 minutes). Confirming one answers `409 payment_required` until
+  `slotlock_mark_hold_paid` (`POST /v1/holds/{hold_id}/paid`) records the payment's reference at
+  the integrator's processor: the same reference again answers the same hold, another
+  `payment_conflict`, an expired hold `hold_expired`. New feed type `hold.paid`. Slotlock records
+  payment state and never moves money.
+- Busy time from calendars that give no events (RFC 0004 C1, T2): `slotlock_put_source_busy`
+  (`PUT /v1/resources/{resource_id}/coverage/{source}/busy`) records a source's coverage of a
+  window and the busy time in it (at most 5,000 intervals, merged), replacing what it said of that
+  window. New table `source_busy`. Free/busy counts it, and every booking Slotlock makes is refused
+  over it (`overlap`). A confirmed booking the source newly reports busy time over is left alone
+  and reported once as `coverage.conflict` (named by `source_id`, never the source). Retiring the
+  source forgets its busy time.
 - Hours that inherit (RFC 0004 B2). The tenant and each location store weekly hours
   (`setTenantAvailability`, the new `setLocationAvailability`; `PUT /v1/availability`,
   `PUT /v1/locations/{location}/availability`, `GET /v1/availability`). A resource without its own

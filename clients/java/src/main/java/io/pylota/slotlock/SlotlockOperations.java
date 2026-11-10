@@ -73,17 +73,22 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_release_hold", new Operation("DELETE", "/v1/holds/{hold_id}", List.of("hold_id"), List.of("dry_run"))),
           Map.entry("slotlock_list_holds", new Operation("GET", "/v1/resources/{resource_id}/holds", List.of("resource_id"), List.of("limit", "cursor"))),
           Map.entry("slotlock_confirm_hold", new Operation("POST", "/v1/holds/{hold_id}/confirm", List.of("hold_id"), List.of())),
+          Map.entry("slotlock_mark_hold_paid", new Operation("POST", "/v1/holds/{hold_id}/paid", List.of("hold_id"), List.of())),
           Map.entry("slotlock_get_reservation", new Operation("GET", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_put_reservation", new Operation("PUT", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision", "override_reason", "dry_run"))),
           Map.entry("slotlock_list_reservations", new Operation("GET", "/v1/resources/{resource_id}/reservations", List.of("resource_id"), List.of("start", "end", "limit", "cursor"))),
           Map.entry("slotlock_check_in_reservation", new Operation("POST", "/v1/reservations/{reservation_ref}/check-in", List.of("reservation_ref"), List.of())),
+          Map.entry("slotlock_get_contact", new Operation("GET", "/v1/contacts/{contact_ref}", List.of("contact_ref"), List.of())),
+          Map.entry("slotlock_put_contact", new Operation("PUT", "/v1/contacts/{contact_ref}", List.of("contact_ref"), List.of())),
+          Map.entry("slotlock_delete_contact", new Operation("DELETE", "/v1/contacts/{contact_ref}", List.of("contact_ref"), List.of("dry_run"))),
           Map.entry("slotlock_list_waitlist", new Operation("GET", "/v1/waitlist", List.of(), List.of("resource_id", "pool", "holder_ref", "limit"))),
           Map.entry("slotlock_join_waitlist", new Operation("POST", "/v1/waitlist", List.of(), List.of())),
           Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of("dry_run"))),
           Map.entry("slotlock_decline_waitlist_offer", new Operation("POST", "/v1/waitlist/{entry_id}/decline", List.of("entry_id"), List.of())),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_delete_coverage", new Operation("DELETE", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of("dry_run"))),
+          Map.entry("slotlock_put_source_busy", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}/busy", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
           Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
@@ -806,7 +811,7 @@ public abstract class SlotlockOperations {
    * (string), {@code location} (string), {@code organizer} (object), {@code transparency}
    * (string), {@code status} (string), {@code recurrence_rule} (string), {@code attendees} (list
    * of object), {@code reminders} (list of object), {@code recurrence_exceptions} (list of
-   * object), {@code hold_id} (string), {@code dry_run} (boolean)
+   * object), {@code hold_id} (string), {@code notify} (boolean), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -817,7 +822,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id", "dry_run"), "slotlock_create_event");
+    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id", "notify", "dry_run"), "slotlock_create_event");
     return call("slotlock_create_event", values);
   }
 
@@ -2096,7 +2101,9 @@ public abstract class SlotlockOperations {
    * Hold time. Occupy a window without booking it, for example while a customer pays. The hold
    * blocks every other booking until it expires (the database clock, ttl_seconds from now), is
    * confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a
-   * confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
+   * confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
+   * confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment state
+   * and never moves money. A taken window answers 409 overlap. With an idempotency key (the
    * Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
    * until that hold would have expired, is released or is confirmed; the same key with another
    * request is 422 idempotency_conflict.
@@ -2106,7 +2113,8 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param ttlSeconds {@code ttl_seconds}, integer
    * @param optional the optional arguments, or null: {@code source} (string), {@code
-   * idempotency_key} (string), {@code buffer_after_minutes} (integer), {@code dry_run} (boolean)
+   * idempotency_key} (string), {@code buffer_after_minutes} (integer), {@code payment_required}
+   * (boolean), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2116,7 +2124,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("ttl_seconds", ttlSeconds);
-    putOptional(values, optional, Set.of("source", "idempotency_key", "buffer_after_minutes", "dry_run"), "slotlock_acquire_hold");
+    putOptional(values, optional, Set.of("source", "idempotency_key", "buffer_after_minutes", "payment_required", "dry_run"), "slotlock_acquire_hold");
     return call("slotlock_acquire_hold", values);
   }
 
@@ -2124,7 +2132,9 @@ public abstract class SlotlockOperations {
    * Hold time. Occupy a window without booking it, for example while a customer pays. The hold
    * blocks every other booking until it expires (the database clock, ttl_seconds from now), is
    * confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a
-   * confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the
+   * confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
+   * confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment state
+   * and never moves money. A taken window answers 409 overlap. With an idempotency key (the
    * Idempotency-Key header or idempotency_key), a retry answers the hold the first request made,
    * until that hold would have expired, is released or is confirmed; the same key with another
    * request is 422 idempotency_conflict.
@@ -2217,7 +2227,8 @@ public abstract class SlotlockOperations {
    * hold's id at revision 1: move or cancel it with the reservation routes by that reference
    * (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the
    * same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-   * unknown one, 404 hold_not_found.
+   * unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409
+   * payment_required.
    *
    * @param holdId {@code hold_id}, string
    * @param optional the optional arguments, or null: {@code dry_run} (boolean)
@@ -2236,7 +2247,8 @@ public abstract class SlotlockOperations {
    * hold's id at revision 1: move or cancel it with the reservation routes by that reference
    * (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the
    * same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-   * unknown one, 404 hold_not_found.
+   * unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409
+   * payment_required.
    *
    * @param holdId {@code hold_id}, string
    * @return the response body
@@ -2244,6 +2256,47 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> confirmHold(String holdId) {
     return confirmHold(holdId, null);
+  }
+
+  /**
+   * Record a hold as paid. Record that a hold made with payment_required is paid, by the
+   * payment's reference at your processor (a Stripe PaymentIntent id, say), once you have
+   * verified it: the hold may then be confirmed. Slotlock records payment state and never moves
+   * money. The same reference again answers the same hold (replayed: true); another answers 409
+   * payment_conflict. The feed says so (hold.paid). A hold that does not wait for payment answers
+   * 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time
+   * may be someone else's); a confirmed, released or unknown one, 404 hold_not_found.
+   *
+   * @param holdId {@code hold_id}, string
+   * @param paymentRef {@code payment_ref}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> markHoldPaid(String holdId, String paymentRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("hold_id", holdId);
+    values.put("payment_ref", paymentRef);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_mark_hold_paid");
+    return call("slotlock_mark_hold_paid", values);
+  }
+
+  /**
+   * Record a hold as paid. Record that a hold made with payment_required is paid, by the
+   * payment's reference at your processor (a Stripe PaymentIntent id, say), once you have
+   * verified it: the hold may then be confirmed. Slotlock records payment state and never moves
+   * money. The same reference again answers the same hold (replayed: true); another answers 409
+   * payment_conflict. The feed says so (hold.paid). A hold that does not wait for payment answers
+   * 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time
+   * may be someone else's); a confirmed, released or unknown one, 404 hold_not_found.
+   *
+   * @param holdId {@code hold_id}, string
+   * @param paymentRef {@code payment_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> markHoldPaid(String holdId, String paymentRef) {
+    return markHoldPaid(holdId, paymentRef, null);
   }
 
   /**
@@ -2270,7 +2323,9 @@ public abstract class SlotlockOperations {
    * unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the
    * resource's zone) records the wall time it is booked for: it must name start, and if time zone
    * rules later move that wall time to another instant, maintenance says so
-   * (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
+   * (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref
+   * names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one;
+   * both are on the feed with each change, as sent with each revision.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param resourceId {@code resource_id}, string
@@ -2279,7 +2334,7 @@ public abstract class SlotlockOperations {
    * @param revision {@code revision}, integer
    * @param optional the optional arguments, or null: {@code buffer_after_minutes} (integer),
    * {@code source} (string), {@code override_reason} (string), {@code local_start} (string),
-   * {@code dry_run} (boolean)
+   * {@code contact_ref} (string), {@code notify} (boolean), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2290,7 +2345,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("revision", revision);
-    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "override_reason", "local_start", "dry_run"), "slotlock_put_reservation");
+    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "override_reason", "local_start", "contact_ref", "notify", "dry_run"), "slotlock_put_reservation");
     return call("slotlock_put_reservation", values);
   }
 
@@ -2303,7 +2358,9 @@ public abstract class SlotlockOperations {
    * unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the
    * resource's zone) records the wall time it is booked for: it must name start, and if time zone
    * rules later move that wall time to another instant, maintenance says so
-   * (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
+   * (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref
+   * names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one;
+   * both are on the feed with each change, as sent with each revision.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param resourceId {@code resource_id}, string
@@ -2432,6 +2489,91 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> checkInReservation(String reservationRef) {
     return checkInReservation(reservationRef, null);
+  }
+
+  /**
+   * Get a contact. The person kept under this reference, for a sender to reach. An unknown one
+   * answers 404 contact_not_found.
+   *
+   * @param contactRef {@code contact_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getContact(String contactRef) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("contact_ref", contactRef);
+    return call("slotlock_get_contact", values);
+  }
+
+  /**
+   * Keep a contact. Keep a person a booking may name to be told about it (contact_ref on
+   * slotlock_put_reservation), under your own reference: how to reach them (email, phone for SMS
+   * and whatsapp, both E.164) and which channels they agreed to (consent: false is an opt-out a
+   * sender must honour). Replaces what was kept under the reference. A sender reads it to send;
+   * Slotlock itself sends nothing. created says whether it is new. A tenant keeps at most 100,000
+   * (409 contact_limit_reached).
+   *
+   * @param contactRef {@code contact_ref}, string
+   * @param optional the optional arguments, or null: {@code name} (string, null clears it),
+   * {@code email} (string, null clears it), {@code phone} (string, null clears it), {@code
+   * whatsapp} (string, null clears it), {@code consent} (object), {@code locale} (string, null
+   * clears it), {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> putContact(String contactRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("contact_ref", contactRef);
+    putOptional(values, optional, Set.of("name", "email", "phone", "whatsapp", "consent", "locale", "dry_run"), "slotlock_put_contact");
+    return call("slotlock_put_contact", values);
+  }
+
+  /**
+   * Keep a contact. Keep a person a booking may name to be told about it (contact_ref on
+   * slotlock_put_reservation), under your own reference: how to reach them (email, phone for SMS
+   * and whatsapp, both E.164) and which channels they agreed to (consent: false is an opt-out a
+   * sender must honour). Replaces what was kept under the reference. A sender reads it to send;
+   * Slotlock itself sends nothing. created says whether it is new. A tenant keeps at most 100,000
+   * (409 contact_limit_reached).
+   *
+   * @param contactRef {@code contact_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> putContact(String contactRef) {
+    return putContact(contactRef, null);
+  }
+
+  /**
+   * Forget a contact. Forget a person: their contact, and their reference on every booking that
+   * named it, at once (for an erasure request). deleted is false when no contact was kept;
+   * bookings counts the bookings that no longer name them. Changes already on the feed keep the
+   * reference, never the person.
+   *
+   * @param contactRef {@code contact_ref}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteContact(String contactRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("contact_ref", contactRef);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_contact");
+    return call("slotlock_delete_contact", values);
+  }
+
+  /**
+   * Forget a contact. Forget a person: their contact, and their reference on every booking that
+   * named it, at once (for an erasure request). deleted is false when no contact was kept;
+   * bookings counts the bookings that no longer name them. Changes already on the feed keep the
+   * reference, never the person.
+   *
+   * @param contactRef {@code contact_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteContact(String contactRef) {
+    return deleteContact(contactRef, null);
   }
 
   /**
@@ -2655,6 +2797,63 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> deleteCoverage(String resourceId, String source) {
     return deleteCoverage(resourceId, source, null);
+  }
+
+  /**
+   * Record a calendar's busy time. For a calendar that gives busy time but not its events (Google
+   * freeBusy, Microsoft getSchedule): record its coverage of a window at the source's revision,
+   * as slotlock_record_coverage does, and the busy time in it, which replaces what the source
+   * said of that window before (what it said outside the window stays). Busy time counts in
+   * free/busy and every booking Slotlock makes on the resource is refused over it (409 overlap),
+   * as over an event. A confirmed booking the source newly reports busy time over is left as it
+   * is and put on the feed once as coverage.conflict, naming the booking and the source by its
+   * source_id: someone decides. At most 5000 intervals; they are clipped to the window and
+   * merged. Revisions only go forward; repeating one changes nothing (replayed: true).
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param revision {@code revision}, integer
+   * @param busy {@code busy}, list of object
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> putSourceBusy(String resourceId, String source, String start, String end, long revision, List<?> busy, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("source", source);
+    values.put("start", start);
+    values.put("end", end);
+    values.put("revision", revision);
+    values.put("busy", busy);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_put_source_busy");
+    return call("slotlock_put_source_busy", values);
+  }
+
+  /**
+   * Record a calendar's busy time. For a calendar that gives busy time but not its events (Google
+   * freeBusy, Microsoft getSchedule): record its coverage of a window at the source's revision,
+   * as slotlock_record_coverage does, and the busy time in it, which replaces what the source
+   * said of that window before (what it said outside the window stays). Busy time counts in
+   * free/busy and every booking Slotlock makes on the resource is refused over it (409 overlap),
+   * as over an event. A confirmed booking the source newly reports busy time over is left as it
+   * is and put on the feed once as coverage.conflict, naming the booking and the source by its
+   * source_id: someone decides. At most 5000 intervals; they are clipped to the window and
+   * merged. Revisions only go forward; repeating one changes nothing (replayed: true).
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param revision {@code revision}, integer
+   * @param busy {@code busy}, list of object
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> putSourceBusy(String resourceId, String source, String start, String end, long revision, List<?> busy) {
+    return putSourceBusy(resourceId, source, start, end, revision, busy, null);
   }
 
   /**

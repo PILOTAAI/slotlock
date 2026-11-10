@@ -65,6 +65,7 @@ export const GROUPS = [
       'slotlock_get_coverage',
       'slotlock_record_coverage_failure',
       'slotlock_delete_coverage',
+      'slotlock_put_source_busy',
     ],
   },
   {
@@ -99,6 +100,7 @@ export const GROUPS = [
       'slotlock_get_hold',
       'slotlock_list_holds',
       'slotlock_confirm_hold',
+      'slotlock_mark_hold_paid',
       'slotlock_release_hold',
     ],
   },
@@ -116,6 +118,10 @@ export const GROUPS = [
   {
     name: 'Waitlist',
     operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist', 'slotlock_decline_waitlist_offer'],
+  },
+  {
+    name: 'Contacts',
+    operations: ['slotlock_put_contact', 'slotlock_get_contact', 'slotlock_delete_contact'],
   },
   {
     name: 'Changes and webhooks',

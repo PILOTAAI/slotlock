@@ -4528,6 +4528,9 @@
                     "type": "string",
                     "format": "uuid"
                   },
+                  "notify": {
+                    "type": "boolean"
+                  },
                   "dry_run": {
                     "type": "boolean",
                     "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
@@ -17390,7 +17393,7 @@
       "post": {
         "operationId": "slotlock_acquire_hold",
         "summary": "Hold time",
-        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.",
+        "description": "Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be confirmed until slotlock_mark_hold_paid records the payment: Slotlock records payment state and never moves money. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.",
         "tags": [
           "Application"
         ],
@@ -17435,6 +17438,9 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 43200
+                  },
+                  "payment_required": {
+                    "type": "boolean"
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -17503,6 +17509,32 @@
                             {
                               "type": "string",
                               "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "payment_required": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "payment_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[\\x21-\\x7e]{1,255}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "paid_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
                             },
                             {
                               "type": "null"
@@ -17620,6 +17652,32 @@
                             {
                               "type": "string",
                               "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "payment_required": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "payment_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[\\x21-\\x7e]{1,255}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "paid_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
                             },
                             {
                               "type": "null"
@@ -17832,6 +17890,32 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "payment_required": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "payment_ref": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[\\x21-\\x7e]{1,255}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "paid_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -17891,7 +17975,7 @@
       "post": {
         "operationId": "slotlock_confirm_hold",
         "summary": "Confirm a hold",
-        "description": "Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at revision 1: move or cancel it with the reservation routes by that reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or unknown one, 404 hold_not_found.",
+        "description": "Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at revision 1: move or cancel it with the reservation routes by that reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409 payment_required.",
         "tags": [
           "Application"
         ],
@@ -17985,6 +18069,14 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "contact_ref": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                        },
+                        "notify": {
+                          "type": "boolean",
+                          "const": false
                         }
                       },
                       "required": [
@@ -18007,6 +18099,174 @@
                   },
                   "required": [
                     "reservation"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/holds/{hold_id}/paid": {
+      "post": {
+        "operationId": "slotlock_mark_hold_paid",
+        "summary": "Record a hold as paid",
+        "description": "Record that a hold made with payment_required is paid, by the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then be confirmed. Slotlock records payment state and never moves money. The same reference again answers the same hold (replayed: true); another answers 409 payment_conflict. The feed says so (hold.paid). A hold that does not wait for payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund the payment: its time may be someone else's); a confirmed, released or unknown one, 404 hold_not_found.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "payment_ref": {
+                    "type": "string",
+                    "pattern": "^[\\x21-\\x7e]{1,255}$"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "payment_ref"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "hold_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hold": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "resource_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "start": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "end": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "source": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "payment_required": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "payment_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[\\x21-\\x7e]{1,255}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "paid_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "resource_id",
+                        "start",
+                        "end",
+                        "expires_at",
+                        "source"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "hold",
+                    "replayed"
                   ],
                   "additionalProperties": false
                 }
@@ -18117,6 +18377,14 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "contact_ref": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                        },
+                        "notify": {
+                          "type": "boolean",
+                          "const": false
                         }
                       },
                       "required": [
@@ -18163,7 +18431,7 @@
       "put": {
         "operationId": "slotlock_put_reservation",
         "summary": "Book or move a reservation",
-        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource's zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.",
+        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource's zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one; both are on the feed with each change, as sent with each revision.",
         "tags": [
           "Application"
         ],
@@ -18212,6 +18480,13 @@
                   "local_start": {
                     "type": "string",
                     "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?$"
+                  },
+                  "contact_ref": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                  },
+                  "notify": {
+                    "type": "boolean"
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -18300,6 +18575,14 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "contact_ref": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                        },
+                        "notify": {
+                          "type": "boolean",
+                          "const": false
                         }
                       },
                       "required": [
@@ -18608,6 +18891,14 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "contact_ref": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                          },
+                          "notify": {
+                            "type": "boolean",
+                            "const": false
                           }
                         },
                         "required": [
@@ -18730,6 +19021,504 @@
                   "required": [
                     "reference",
                     "checked_in_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/contacts/{contact_ref}": {
+      "put": {
+        "operationId": "slotlock_put_contact",
+        "summary": "Keep a contact",
+        "description": "Keep a person a booking may name to be told about it (contact_ref on slotlock_put_reservation), under your own reference: how to reach them (email, phone for SMS and whatsapp, both E.164) and which channels they agreed to (consent: false is an opt-out a sender must honour). Replaces what was kept under the reference. A sender reads it to send; Slotlock itself sends nothing. created says whether it is new. A tenant keeps at most 100,000 (409 contact_limit_reached).",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "email": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 320,
+                        "pattern": "^[^\\s@]+@[^\\s@]+$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "phone": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^\\+[1-9][0-9]{6,14}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "whatsapp": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^\\+[1-9][0-9]{6,14}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "consent": {
+                    "type": "object",
+                    "properties": {
+                      "email": {
+                        "type": "boolean"
+                      },
+                      "sms": {
+                        "type": "boolean"
+                      },
+                      "whatsapp": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "locale": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 35,
+                        "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "contact_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contact": {
+                      "type": "object",
+                      "properties": {
+                        "contact_ref": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "email": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 320
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "phone": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^\\+[1-9][0-9]{6,14}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "whatsapp": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^\\+[1-9][0-9]{6,14}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "consent": {
+                          "type": "object",
+                          "properties": {
+                            "email": {
+                              "type": "boolean"
+                            },
+                            "sms": {
+                              "type": "boolean"
+                            },
+                            "whatsapp": {
+                              "type": "boolean"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "locale": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 35
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updated_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "contact_ref",
+                        "name",
+                        "email",
+                        "phone",
+                        "whatsapp",
+                        "consent",
+                        "locale",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "created": {
+                      "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "contact",
+                    "created"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "slotlock_get_contact",
+        "summary": "Get a contact",
+        "description": "The person kept under this reference, for a sender to reach. An unknown one answers 404 contact_not_found.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "contact_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contact": {
+                      "type": "object",
+                      "properties": {
+                        "contact_ref": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "email": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 320
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "phone": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^\\+[1-9][0-9]{6,14}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "whatsapp": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^\\+[1-9][0-9]{6,14}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "consent": {
+                          "type": "object",
+                          "properties": {
+                            "email": {
+                              "type": "boolean"
+                            },
+                            "sms": {
+                              "type": "boolean"
+                            },
+                            "whatsapp": {
+                              "type": "boolean"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "locale": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 35
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updated_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "contact_ref",
+                        "name",
+                        "email",
+                        "phone",
+                        "whatsapp",
+                        "consent",
+                        "locale",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "contact"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "slotlock_delete_contact",
+        "summary": "Forget a contact",
+        "description": "Forget a person: their contact, and their reference on every booking that named it, at once (for an erasure request). deleted is false when no contact was kept; bookings counts the bookings that no longer name them. Changes already on the feed keep the reference, never the person.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "contact_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    },
+                    "bookings": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "deleted",
+                    "bookings"
                   ],
                   "additionalProperties": false
                 }
@@ -19744,6 +20533,162 @@
                   },
                   "required": [
                     "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resource_id}/coverage/{source}/busy": {
+      "put": {
+        "operationId": "slotlock_put_source_busy",
+        "summary": "Record a calendar's busy time",
+        "description": "For a calendar that gives busy time but not its events (Google freeBusy, Microsoft getSchedule): record its coverage of a window at the source's revision, as slotlock_record_coverage does, and the busy time in it, which replaces what the source said of that window before (what it said outside the window stays). Busy time counts in free/busy and every booking Slotlock makes on the resource is refused over it (409 overlap), as over an event. A confirmed booking the source newly reports busy time over is left as it is and put on the feed once as coverage.conflict, naming the booking and the source by its source_id: someone decides. At most 5000 intervals; they are clipped to the window and merged. Revisions only go forward; repeating one changes nothing (replayed: true).",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "start": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "end": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "busy": {
+                    "maxItems": 5000,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "end": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "start",
+                  "end",
+                  "revision",
+                  "busy"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "source",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "busy": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "conflicts": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "replayed",
+                    "busy",
+                    "conflicts"
                   ],
                   "additionalProperties": false
                 }
@@ -22153,6 +23098,11 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "reminders_due": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "capped": {
                       "type": "boolean"
                     }
@@ -22168,6 +23118,7 @@
                     "waitlist_offers",
                     "approvals_expired",
                     "bookings_completed",
+                    "reminders_due",
                     "capped"
                   ],
                   "additionalProperties": false
@@ -22372,7 +23323,7 @@
                   },
                   "event_types": {
                     "minItems": 1,
-                    "maxItems": 46,
+                    "maxItems": 49,
                     "type": "array",
                     "items": {
                       "type": "string",
@@ -22382,6 +23333,7 @@
                         "hold.confirmed",
                         "hold.released",
                         "hold.expired",
+                        "hold.paid",
                         "reservation.created",
                         "reservation.updated",
                         "reservation.cancelled",
@@ -22396,7 +23348,9 @@
                         "event.timezone_conflict",
                         "reservation.timezone_shifted",
                         "reservation.timezone_conflict",
+                        "reminder.due",
                         "coverage.stale",
+                        "coverage.conflict",
                         "waitlist.offered",
                         "waitlist.expired",
                         "waitlist.joined",
@@ -22525,6 +23479,7 @@
                                   "hold.confirmed",
                                   "hold.released",
                                   "hold.expired",
+                                  "hold.paid",
                                   "reservation.created",
                                   "reservation.updated",
                                   "reservation.cancelled",
@@ -22539,7 +23494,9 @@
                                   "event.timezone_conflict",
                                   "reservation.timezone_shifted",
                                   "reservation.timezone_conflict",
+                                  "reminder.due",
                                   "coverage.stale",
+                                  "coverage.conflict",
                                   "waitlist.offered",
                                   "waitlist.expired",
                                   "waitlist.joined",
@@ -22794,6 +23751,7 @@
                                     "hold.confirmed",
                                     "hold.released",
                                     "hold.expired",
+                                    "hold.paid",
                                     "reservation.created",
                                     "reservation.updated",
                                     "reservation.cancelled",
@@ -22808,7 +23766,9 @@
                                     "event.timezone_conflict",
                                     "reservation.timezone_shifted",
                                     "reservation.timezone_conflict",
+                                    "reminder.due",
                                     "coverage.stale",
+                                    "coverage.conflict",
                                     "waitlist.offered",
                                     "waitlist.expired",
                                     "waitlist.joined",
@@ -23150,6 +24110,7 @@
                                   "hold.confirmed",
                                   "hold.released",
                                   "hold.expired",
+                                  "hold.paid",
                                   "reservation.created",
                                   "reservation.updated",
                                   "reservation.cancelled",
@@ -23164,7 +24125,9 @@
                                   "event.timezone_conflict",
                                   "reservation.timezone_shifted",
                                   "reservation.timezone_conflict",
+                                  "reminder.due",
                                   "coverage.stale",
+                                  "coverage.conflict",
                                   "waitlist.offered",
                                   "waitlist.expired",
                                   "waitlist.joined",

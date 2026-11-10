@@ -41,6 +41,11 @@ export interface SlotlockMaintenanceResult {
   approvalsExpired: number;
   /** Bookings whose end has passed in the last week, now said on the feed (`reservation.completed`). */
   bookingsCompleted: number;
+  /**
+   * Event reminders that came due, each now on the feed once (`reminder.due`) for a sender to send
+   * (RFC 0004 P3).
+   */
+  remindersDue: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -154,6 +159,7 @@ export async function maintainSlotlockTenant(
   const noShows = await withTenant((tenant) => tenant.releaseNoShows({ tenantRef }));
   // Bookings that ended since the last pass (RFC 0004 B4): no row changes, the feed says so.
   const completed = await withTenant((tenant) => tenant.completeEndedBookings({ tenantRef, limit: 500 }));
+  const reminders = await withTenant((tenant) => tenant.dueReminders({ tenantRef, limit: 500 }));
   // The whole waitlist in join order, a page per transaction, so a later free entry is offered
   // however many wait before it.
   let waitlistOffers = 0;
@@ -180,7 +186,15 @@ export async function maintainSlotlockTenant(
     waitlistOffers,
     approvalsExpired: approvals.expired,
     bookingsCompleted: completed,
-    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft || approvals.expired === 100 || completed === 500,
+    remindersDue: reminders,
+    capped:
+      rollCapped ||
+      eventsLeft ||
+      bookingsLeft ||
+      changesLeft ||
+      approvals.expired === 100 ||
+      completed === 500 ||
+      reminders === 500,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
 }

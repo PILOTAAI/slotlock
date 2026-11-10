@@ -161,6 +161,10 @@ export interface SlotlockReservation {
   /** Monotonic command revision; legacy, hold, and shadow rows start at 1. */
   revision: number;
   source: string | null;
+  /** Whom to tell about it (RFC 0004 P3), when it names someone. */
+  contactRef?: string;
+  /** Present, and false, when no one should be notified about it. */
+  notify?: false;
 }
 
 export interface ExternalReservationCommand {
@@ -183,6 +187,13 @@ export interface ExternalReservationCommand {
    * it (`followZoneRules`). Left out, the booking keeps its instant only.
    */
   localStart?: string;
+  /**
+   * Whom to tell about it (RFC 0004 P3): a contact's reference (`putContact`), never the person.
+   * Put on the feed with each of its changes; a sender looks the person up by it.
+   */
+  contactRef?: string;
+  /** False: no sender should notify anyone about it (default true). On the feed only when false. */
+  notify?: boolean;
 }
 
 /** What a cancellation records for the integrator to charge (RFC 0004 B5). Slotlock moves no money. */
@@ -196,6 +207,7 @@ export type ExternalReservationResult =
   | { ok: false; code: 'invalid_window' }
   /** `localStart` is not a wall time, or does not name `start` in the resource's zone. */
   | { ok: false; code: 'invalid_local_start' }
+  | { ok: false; code: 'invalid_contact_ref' | 'invalid_notify' }
   | { ok: false; code: 'invalid_buffer' }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
@@ -276,6 +288,11 @@ export interface SlotlockHold {
   source: string | null;
   /** The alternatives it was held with (`groupId` when acquired); absent when held alone. */
   groupId?: string;
+  /** Present when it waits for payment (RFC 0004 C3): it is confirmed only once paid. */
+  paymentRequired?: true;
+  /** The payment's reference at the integrator's processor, once paid. */
+  paymentRef?: string | null;
+  paidAt?: Date | null;
 }
 
 /** One entry of a tenant's agenda (`listAgenda`): what occupies a resource, and from when. */
@@ -328,6 +345,8 @@ export type ConfirmHoldResult =
   | { ok: true; reservation: SlotlockReservation }
   | { ok: false; code: 'hold_not_found' }
   | { ok: false; code: 'hold_expired' }
+  /** The hold waits for payment (RFC 0004 C3) and none is recorded yet (markHoldPaid). */
+  | { ok: false; code: 'payment_required' }
   /** A cancellation of the hold's reference (its id) arrived first and retired it. */
   | { ok: false; code: 'reservation_cancelled' }
   /** Another booking of the tenant already uses the hold's id as its reference. */
@@ -338,6 +357,47 @@ export type ConfirmHoldResult =
   | { ok: false; code: 'reservation_limit_reached'; limit: number };
 
 export type ReleaseHoldResult = { ok: true; released: boolean };
+
+/**
+ * A person a booking may name to be told about it (RFC 0004 P3), by the tenant's own reference: how
+ * to reach them, and which channels they agreed to. A sender reads it; Slotlock sends nothing.
+ */
+export interface SlotlockContact {
+  ref: string;
+  name: string | null;
+  email: string | null;
+  /** E.164, for SMS. */
+  phone: string | null;
+  /** E.164, for WhatsApp. */
+  whatsapp: string | null;
+  /** Each channel the person said yes or no to; a channel left out has no answer recorded. */
+  consent: SlotlockContactConsent;
+  /** BCP 47, for the language of what is sent. */
+  locale: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface SlotlockContactConsent {
+  email?: boolean;
+  sms?: boolean;
+  whatsapp?: boolean;
+}
+
+export type PutContactResult =
+  | { ok: true; contact: SlotlockContact; created: boolean }
+  | { ok: false; code: 'invalid_contact_ref' | 'invalid_contact' }
+  | { ok: false; code: 'contact_limit_reached'; limit: number };
+
+/** Recording a hold's payment (RFC 0004 C3); `idempotent` when it was recorded already. */
+export type MarkHoldPaidResult =
+  | { ok: true; hold: SlotlockHold; idempotent: boolean }
+  | { ok: false; code: 'invalid_identity' | 'invalid_payment_ref' }
+  | { ok: false; code: 'hold_not_found' | 'hold_expired' }
+  /** The hold does not wait for payment. */
+  | { ok: false; code: 'payment_not_required' }
+  /** It was already paid by another payment. */
+  | { ok: false; code: 'payment_conflict' };
 
 /** RFC 5545 TRANSP projection. Transparent events remain visible but never occupy a resource. */
 export type CalendarTransparency = 'opaque' | 'transparent';
@@ -457,6 +517,11 @@ export interface PutCalendarEventCommand extends CalendarEventContent {
    * step and hours are judged again.
    */
   fromHold?: { holdId: string; holderRef: string };
+  /**
+   * False: no sender should notify anyone about it (RFC 0004 P3), and its reminders are not put on
+   * the feed. Default true; as sent with each revision.
+   */
+  notify?: boolean;
 }
 
 export type PutCalendarEventResult =
@@ -485,6 +550,8 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'hold_not_found' }
   /** `fromHold`'s hold is the holder's, but it lapsed before it was booked. */
   | { ok: false; code: 'hold_expired' }
+  /** `fromHold`'s hold waits for payment (RFC 0004 C3) and none is recorded yet. */
+  | { ok: false; code: 'payment_required' }
   /** `fromHold`'s hold is on another resource, or does not cover the event. */
   | { ok: false; code: 'hold_mismatch' }
   /**
@@ -613,6 +680,30 @@ export type CalendarCoverageResult =
   | { ok: false; code: 'stale_revision' | 'revision_conflict' | 'idempotency_conflict' }
   /** A new source would pass the tenant's `coverage` limit (advancing one it has never does). */
   | { ok: false; code: 'coverage_limit_reached'; limit: number };
+
+/**
+ * What a calendar that gives busy time but not its events says (Google freeBusy, Microsoft
+ * getSchedule; RFC 0004 C1): its coverage of the window, and the busy time in it, which replaces
+ * what the source said of that window before.
+ */
+export interface SourceBusyCommand extends CalendarCoverageCommand {
+  /** At most SLOTLOCK_SOURCE_BUSY_MAX intervals; clipped to the window and merged. */
+  busy: Interval[];
+}
+
+export type SourceBusyResult =
+  | {
+      ok: true;
+      revision: number;
+      /** A revision already recorded: nothing changed. */
+      idempotent: boolean;
+      /** How many intervals are kept, merged and clipped. */
+      busy: number;
+      /** Bookings the source newly reports in the way of, each put on the feed as coverage.conflict. */
+      conflicts: number;
+    }
+  | Exclude<CalendarCoverageResult, { ok: true }>
+  | { ok: false; code: 'invalid_busy' };
 
 export interface CalendarCoverageAssessment {
   state: 'complete' | 'partial' | 'unknown';

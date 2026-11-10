@@ -2341,6 +2341,7 @@ async function maintainTenant(
         waitlistOffers: 0,
         approvalsExpired: 0,
         bookingsCompleted: 0,
+        remindersDue: 0,
         capped: true,
         passes: 0,
       };
@@ -2357,6 +2358,7 @@ async function maintainTenant(
         sum.waitlistOffers += pass.waitlistOffers;
         sum.approvalsExpired += pass.approvalsExpired;
         sum.bookingsCompleted += pass.bookingsCompleted;
+        sum.remindersDue += pass.remindersDue;
         // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
         // before the series it had put back, the next pass meets new ones (and perhaps a healthy
         // one); once it reached them, another pass would meet them again.

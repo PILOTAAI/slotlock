@@ -73,6 +73,8 @@ import type {
   SlotlockApprovalKind,
   SlotlockApprovalPolicy,
   SlotlockCalendarEvent,
+  SlotlockContact,
+  SlotlockContactConsent,
   SlotlockHold,
   SlotlockReservation,
   SlotlockResource,
@@ -166,6 +168,7 @@ interface AgentEventInput {
   status?: CalendarEventContent['status'];
   recurrence_rule?: string | null;
   hold_id?: string;
+  notify?: boolean;
   recurrence_exceptions?: AgentRecurrenceExceptionInput[];
   idempotency_key: string;
 }
@@ -1567,6 +1570,8 @@ export function createSlotlockStoreAgentBackend(
           ...(typeof input.hold_id === 'string'
             ? { fromHold: { holdId: input.hold_id, holderRef: agentOwnerRef(context) } }
             : {}),
+          // Tell no one about it (RFC 0004 P3).
+          ...(input.notify === false ? { notify: false } : {}),
         });
         if (!result.ok) throw operationError(result, await overlapDetails(tenantStore, context, result));
         const created = await tenantStore.getCalendarEvent({
@@ -2663,6 +2668,27 @@ function holdOutput(hold: SlotlockHold) {
     end: hold.end.toISOString(),
     expires_at: hold.expiresAt.toISOString(),
     source: hold.source,
+    ...(hold.paymentRequired
+      ? {
+          payment_required: true as const,
+          payment_ref: hold.paymentRef ?? null,
+          paid_at: hold.paidAt?.toISOString() ?? null,
+        }
+      : {}),
+  };
+}
+
+function contactOutput(contact: SlotlockContact) {
+  return {
+    contact_ref: contact.ref,
+    name: contact.name,
+    email: contact.email,
+    phone: contact.phone,
+    whatsapp: contact.whatsapp,
+    consent: contact.consent,
+    locale: contact.locale,
+    created_at: contact.createdAt.toISOString(),
+    updated_at: contact.updatedAt.toISOString(),
   };
 }
 
@@ -2677,6 +2703,8 @@ function reservationOutput(reservation: SlotlockReservation) {
     buffer_after_minutes: Math.ceil(reservation.bufferAfterMs / 60_000),
     revision: reservation.revision,
     source: reservation.source,
+    ...(reservation.contactRef ? { contact_ref: reservation.contactRef } : {}),
+    ...(reservation.notify === false ? { notify: false as const } : {}),
   };
 }
 
@@ -3382,6 +3410,7 @@ export function createSlotlockStoreApplicationBackend(
           ...(input.buffer_after_minutes !== undefined
             ? { bufferAfterMs: (input.buffer_after_minutes as number) * 60_000 }
             : {}),
+          ...(input.payment_required === true ? { paymentRequired: true } : {}),
           // A retried request with the caller's key answers the hold the first one made.
           ...(input.idempotency_key !== undefined
             ? {
@@ -3431,6 +3460,51 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation) };
       }, WRITE);
+    },
+
+    async markHoldPaid(context, input) {
+      const id = input.hold_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('hold_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.markHoldPaid({
+          tenantRef: tenantOf(context),
+          holdId: id,
+          paymentRef: input.payment_ref as string,
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { hold: holdOutput(result.hold), replayed: result.idempotent };
+      }, WRITE);
+    },
+
+    async putContact(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.putContact({
+          tenantRef: tenantOf(context),
+          ref: input.contact_ref as string,
+          name: (input.name as string | null | undefined) ?? null,
+          email: (input.email as string | null | undefined) ?? null,
+          phone: (input.phone as string | null | undefined) ?? null,
+          whatsapp: (input.whatsapp as string | null | undefined) ?? null,
+          consent: (input.consent as SlotlockContactConsent | undefined) ?? {},
+          locale: (input.locale as string | null | undefined) ?? null,
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { contact: contactOutput(result.contact), created: result.created };
+      }, WRITE);
+    },
+
+    async getContact(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const contact = await tenant.getContact({ tenantRef: tenantOf(context), ref: input.contact_ref as string });
+        if (!contact) throw new SlotlockAgentOperationError('contact_not_found', 404);
+        return { contact: contactOutput(contact) };
+      });
+    },
+
+    async deleteContact(context, input) {
+      return withTenant(store, context, async (tenant) =>
+        tenant.deleteContact({ tenantRef: tenantOf(context), ref: input.contact_ref as string }),
+      WRITE);
     },
 
     async releaseHold(context, input) {
@@ -3487,6 +3561,8 @@ export function createSlotlockStoreApplicationBackend(
           ...(input.source !== undefined ? { source: input.source as string } : {}),
           ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
           ...(input.local_start !== undefined ? { localStart: input.local_start as string } : {}),
+          ...(input.contact_ref !== undefined ? { contactRef: input.contact_ref as string } : {}),
+          ...(input.notify !== undefined ? { notify: input.notify as boolean } : {}),
         };
         const result =
           command.revision === 1
@@ -3654,6 +3730,25 @@ export function createSlotlockStoreApplicationBackend(
         });
         if (!result.ok) throw applicationRefusal(result.code);
         return { revision: result.revision, replayed: result.idempotent };
+      }, WRITE);
+    },
+
+    async putSourceBusy(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const result = await tenant.replaceSourceBusy({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+          window: interval(input as { start: string; end: string }),
+          revision: input.revision as number,
+          busy: (input.busy as { start: string; end: string }[]).map((busy) => ({
+            start: new Date(busy.start),
+            end: new Date(busy.end),
+          })),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { revision: result.revision, replayed: result.idempotent, busy: result.busy, conflicts: result.conflicts };
       }, WRITE);
     },
 
@@ -4169,7 +4264,7 @@ export function createSlotlockStoreApplicationBackend(
     async runMaintenance(context) {
       assertActive(context);
       try {
-        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, bookingsCompleted, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, bookingsCompleted, remindersDue, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
@@ -4181,6 +4276,7 @@ export function createSlotlockStoreApplicationBackend(
           waitlist_offers: waitlistOffers,
           approvals_expired: approvalsExpired,
           bookings_completed: bookingsCompleted,
+          reminders_due: remindersDue,
         };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);

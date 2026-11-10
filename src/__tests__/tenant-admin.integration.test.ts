@@ -500,6 +500,36 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
             })
           ).ok,
         ).toBe(true);
+        // What integrations build on (RFC 0004 P3): a contact, a calendar's busy time, and a
+        // reminder said on the feed.
+        expect((await tenant.putContact({ tenantRef, ref: 'driver-1', email: 'driver@example.com' })).ok).toBe(true);
+        expect(
+          (
+            await tenant.replaceSourceBusy({
+              tenantRef,
+              resourceId,
+              source: 'google:fleet',
+              window: { start: slot(30).start, end: slot(40).end },
+              revision: 1,
+              busy: [slot(31)],
+            })
+          ).ok,
+        ).toBe(true);
+        const soon = Math.floor(Date.now() / 1_000) * 1_000 + 10 * 60_000;
+        const reminded = await tenant.putCalendarEvent({
+          tenantRef,
+          externalRef: 'soon-1',
+          idempotencyKey: 'soon-create',
+          expectedRevision: 0,
+          resourceId,
+          start: new Date(soon),
+          end: new Date(soon + HOUR),
+          timezone: 'UTC',
+          summary: 'Soon',
+          reminders: [{ action: 'display', minutesBeforeStart: 30 }],
+        });
+        if (!reminded.ok) throw new Error(reminded.code);
+        expect(await tenant.dueReminders({ tenantRef })).toBe(1);
         return resourceId;
       });
       const resourceId = (

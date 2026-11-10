@@ -2012,6 +2012,18 @@ BEGIN
   DELETE FROM slotlock.availability_defaults WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'contacts';
+  DELETE FROM slotlock.contacts WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'reminder_dispatches';
+  DELETE FROM slotlock.reminder_dispatches WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'source_busy';
+  DELETE FROM slotlock.source_busy WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'reservations';
   DELETE FROM slotlock.reservations
    WHERE tenant_ref = requested_tenant_ref
@@ -2263,7 +2275,7 @@ BEGIN
   FOREACH emptied IN ARRAY ARRAY[
     'calendar_event_attendees', 'calendar_event_reminders', 'calendar_event_exceptions',
     'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
-    'availability_exceptions', 'availability_defaults',
+    'availability_exceptions', 'availability_defaults', 'contacts', 'reminder_dispatches', 'source_busy',
     'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
     'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
     'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
@@ -3131,6 +3143,10 @@ BEGIN
       'start', changed.starts_at,
       'end', changed.ends_at,
       'buffer_after_ms', changed.buffer_after_ms,
+      -- Whom to tell and whether (RFC 0004 P3): a reference, never the person; notify only when off.
+      'contact_ref', changed.contact_ref,
+      'notify', CASE WHEN NOT changed.notify THEN false END,
+      'payment_required', CASE WHEN changed.payment_required THEN true END,
       -- A cancellation's fee and an admin's reason for going past a cutoff (RFC 0004 B5).
       'cancellation_fee', CASE WHEN kind = 'reservation.cancelled'
                                THEN NULLIF(current_setting('slotlock.cancellation_fee', true), '')::jsonb END,
@@ -3198,6 +3214,7 @@ BEGIN
       'transparency', changed.transparency,
       'recurring', changed.recurrence_rule IS NOT NULL,
       'revision', changed.revision,
+      'notify', CASE WHEN NOT changed.notify THEN false END,
       -- A cancellation's fee and an admin's reason for going past a cutoff (RFC 0004 B5).
       'cancellation_fee', CASE WHEN kind = 'event.cancelled'
                                THEN NULLIF(current_setting('slotlock.cancellation_fee', true), '')::jsonb END,
@@ -5731,6 +5748,94 @@ $slotlock_occurrence_wall_backfill$;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS wall_starts_at timestamp;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS zone_shift_reported_at timestamptz;
 
+-- Integrations (RFC 0004 P3). Core never sends a message and never holds a provider token; it keeps
+-- what the packages that do need. A booking may name the person to tell (contact_ref) and say not
+-- to tell anyone (notify); a hold may wait for the integrator's payment before it is confirmed.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS contact_ref text;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS notify boolean NOT NULL DEFAULT true;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS payment_required boolean NOT NULL DEFAULT false;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS payment_ref text;
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS paid_at timestamptz;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS notify boolean NOT NULL DEFAULT true;
+DO $slotlock_integration_columns$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_reservations_integration_valid'
+                    AND conrelid = 'slotlock.reservations'::regclass) THEN
+    ALTER TABLE slotlock.reservations ADD CONSTRAINT slotlock_reservations_integration_valid CHECK (
+      (contact_ref IS NULL OR contact_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$')
+      AND (payment_ref IS NULL OR octet_length(payment_ref) BETWEEN 1 AND 255)
+      AND (paid_at IS NULL OR payment_ref IS NOT NULL)
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_integration_columns$;
+-- Forgetting a person finds the bookings that name them.
+CREATE INDEX IF NOT EXISTS slotlock_reservations_contact_idx
+  ON slotlock.reservations (tenant_ref, contact_ref) WHERE contact_ref IS NOT NULL;
+
+-- The people a tenant's bookings may tell (RFC 0004 P3): how to reach each, and what each agreed
+-- to. A person is erased by deleting their row; bookings keep no copy of what it held.
+CREATE TABLE IF NOT EXISTS slotlock.contacts (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text,
+  email text,
+  phone text,
+  whatsapp text,
+  consent jsonb NOT NULL DEFAULT '{}'::jsonb,
+  locale text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_contacts_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'
+    AND (name IS NULL OR char_length(name) BETWEEN 1 AND 200)
+    AND (email IS NULL OR (char_length(email) BETWEEN 3 AND 320 AND email LIKE '%_@_%'))
+    AND (phone IS NULL OR phone ~ '^[+][1-9][0-9]{6,14}$')
+    AND (whatsapp IS NULL OR whatsapp ~ '^[+][1-9][0-9]{6,14}$')
+    AND jsonb_typeof(consent) = 'object' AND octet_length(consent::text) <= 512
+    AND (locale IS NULL OR locale ~ '^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$')
+  )
+);
+
+-- Each reminder once (RFC 0004 P3): when maintenance put reminder.due on the feed for an
+-- occurrence, so a later pass never says it again.
+CREATE TABLE IF NOT EXISTS slotlock.reminder_dispatches (
+  tenant_ref text NOT NULL,
+  event_id uuid NOT NULL,
+  recurrence_id text NOT NULL,
+  ordinal integer NOT NULL,
+  due_at timestamptz NOT NULL,
+  dispatched_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (event_id, recurrence_id, ordinal),
+  CONSTRAINT slotlock_reminder_dispatches_event_fkey FOREIGN KEY (event_id, tenant_ref)
+    REFERENCES slotlock.calendar_events (id, tenant_ref) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS slotlock_reminder_dispatches_tenant_idx
+  ON slotlock.reminder_dispatches (tenant_ref, due_at);
+
+-- Busy time a calendar reports without its events (Google freeBusy, Microsoft getSchedule), for one
+-- resource and source (RFC 0004 C1): replaced window by window with the source's coverage, counted
+-- in free/busy and refused to every booking Slotlock makes, as an event's time would be.
+CREATE TABLE IF NOT EXISTS slotlock.source_busy (
+  tenant_ref text NOT NULL,
+  resource_id uuid NOT NULL,
+  source text NOT NULL,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  CONSTRAINT slotlock_source_busy_resource_fkey FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_source_busy_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND octet_length(source) BETWEEN 1 AND 500
+    AND ends_at > starts_at
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_source_busy_resource_idx
+  ON slotlock.source_busy (resource_id, starts_at, ends_at);
+CREATE INDEX IF NOT EXISTS slotlock_source_busy_source_idx
+  ON slotlock.source_busy (resource_id, source, starts_at);
+
 -- A cancelled UID remains terminal. This blocks delayed create delivery after the event row and
 -- its derived reservations have been removed.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_tombstones (
@@ -6093,6 +6198,9 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'approvals',
   'availability_defaults',
   'availability_exceptions',
+  'contacts',
+  'reminder_dispatches',
+  'source_busy',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -6152,6 +6260,7 @@ export const SLOTLOCK_RESOURCE_SCOPED_TABLES: Readonly<Record<string, string>> =
   waitlist_entries: resourceScopeAllows('resource_id'),
   // The tenant's and locations' exceptions shape every resource's hours, so every key reads them.
   availability_exceptions: `(resource_id IS NULL OR ${resourceScopeAllows('resource_id')})`,
+  source_busy: resourceScopeAllows('resource_id'),
   ...Object.fromEntries(
     [
       'calendar_event_attendees',
@@ -6251,6 +6360,12 @@ ALTER TABLE slotlock.availability_defaults ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.availability_defaults FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.availability_exceptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.availability_exceptions FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.contacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.contacts FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.reminder_dispatches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.reminder_dispatches FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.source_busy ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.source_busy FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -6291,7 +6406,10 @@ BEGIN
          'approval_policies',
          'approvals',
          'availability_defaults',
-         'availability_exceptions'
+         'availability_exceptions',
+         'contacts',
+         'reminder_dispatches',
+         'source_busy'
        )
   LOOP
     EXECUTE format(
@@ -6622,6 +6740,36 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'contacts'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.contacts
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'reminder_dispatches'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.reminder_dispatches
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'source_busy'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.source_busy
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -6683,6 +6831,12 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.availability_defaults
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.availability_exceptions
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.contacts
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.reminder_dispatches
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.source_busy
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -6735,7 +6889,10 @@ WHERE schemaname = 'slotlock'
     'approval_policies',
     'approvals',
     'availability_defaults',
-    'availability_exceptions'
+    'availability_exceptions',
+    'contacts',
+    'reminder_dispatches',
+    'source_busy'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE
