@@ -240,7 +240,7 @@ describe('the hosted service page', () => {
     expect(assistant).toContain('in Settings, Assistant');
     expect(assistant).toContain('the Anthropic Messages API, or any OpenAI-compatible API');
     expect(assistant).toContain(`up to ${String(steps)} model calls a message`);
-    expect(assistant).toContain(`${String(perMinute)} messages a minute per member`);
+    expect(assistant).toContain(`${String(perMinute)} messages a minute per person`);
     expect(assistant).toContain(`kept for ${String(hours)} hours after its last message`);
     expect(assistant).toContain('**Approve** or **Dismiss**');
     expect(assistant).toContain('needs a public HTTPS address, or a hosted provider');
