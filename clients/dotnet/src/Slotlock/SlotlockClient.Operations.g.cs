@@ -24,27 +24,27 @@ public sealed partial class SlotlockClient
         ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
         ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
         ["slotlock_get_pool_availability"] = new("GET", "/v1/pool-availability", [], ["pool", "start", "end"]),
-        ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], []),
+        ["slotlock_release_slots"] = new("DELETE", "/v1/slot-holds/{hold_id}", ["hold_id"], ["dry_run"]),
         ["slotlock_confirm_slot"] = new("POST", "/v1/slot-holds/{hold_id}/confirm", ["hold_id"], []),
         ["slotlock_list_events"] = new("GET", "/v1/events", [], ["resource_ids", "start", "end", "cursor", "limit"]),
         ["slotlock_create_event"] = new("POST", "/v1/events", [], []),
         ["slotlock_get_event"] = new("GET", "/v1/events/{event_id}", ["event_id"], []),
         ["slotlock_update_event"] = new("PATCH", "/v1/events/{event_id}", ["event_id"], []),
-        ["slotlock_delete_event"] = new("DELETE", "/v1/events/{event_id}", ["event_id"], ["expected_revision", "idempotency_key"]),
+        ["slotlock_delete_event"] = new("DELETE", "/v1/events/{event_id}", ["event_id"], ["expected_revision", "idempotency_key", "dry_run"]),
         ["slotlock_reschedule"] = new("POST", "/v1/events/{event_id}/reschedule", ["event_id"], []),
         ["slotlock_cancel"] = new("POST", "/v1/events/{event_id}/cancel", ["event_id"], []),
         ["slotlock_get_resource"] = new("GET", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_update_resource"] = new("PATCH", "/v1/resources/{resource_id}", ["resource_id"], []),
-        ["slotlock_delete_resource"] = new("DELETE", "/v1/resources/{resource_id}", ["resource_id"], []),
+        ["slotlock_delete_resource"] = new("DELETE", "/v1/resources/{resource_id}", ["resource_id"], ["dry_run"]),
         ["slotlock_list_locations"] = new("GET", "/v1/locations", [], []),
         ["slotlock_create_location"] = new("POST", "/v1/locations", [], []),
         ["slotlock_update_location"] = new("PATCH", "/v1/locations/{location_ref}", ["location_ref"], []),
-        ["slotlock_delete_location"] = new("DELETE", "/v1/locations/{location_ref}", ["location_ref"], []),
+        ["slotlock_delete_location"] = new("DELETE", "/v1/locations/{location_ref}", ["location_ref"], ["dry_run"]),
         ["slotlock_list_groups"] = new("GET", "/v1/groups", [], []),
         ["slotlock_create_group"] = new("POST", "/v1/groups", [], []),
-        ["slotlock_delete_group"] = new("DELETE", "/v1/groups/{group_ref}", ["group_ref"], []),
+        ["slotlock_delete_group"] = new("DELETE", "/v1/groups/{group_ref}", ["group_ref"], ["dry_run"]),
         ["slotlock_add_group_member"] = new("PUT", "/v1/groups/{group_ref}/members/{resource_id}", ["group_ref", "resource_id"], []),
-        ["slotlock_remove_group_member"] = new("DELETE", "/v1/groups/{group_ref}/members/{resource_id}", ["group_ref", "resource_id"], []),
+        ["slotlock_remove_group_member"] = new("DELETE", "/v1/groups/{group_ref}/members/{resource_id}", ["group_ref", "resource_id"], ["dry_run"]),
         ["slotlock_archive_resource"] = new("POST", "/v1/resources/{resource_id}/archive", ["resource_id"], []),
         ["slotlock_restore_resource"] = new("POST", "/v1/resources/{resource_id}/restore", ["resource_id"], []),
         ["slotlock_list_busy"] = new("GET", "/v1/resources/{resource_id}/busy", ["resource_id"], ["start", "end"]),
@@ -65,24 +65,24 @@ public sealed partial class SlotlockClient
         ["slotlock_set_tenant_availability"] = new("PUT", "/v1/availability", [], []),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
-        ["slotlock_release_hold"] = new("DELETE", "/v1/holds/{hold_id}", ["hold_id"], []),
+        ["slotlock_release_hold"] = new("DELETE", "/v1/holds/{hold_id}", ["hold_id"], ["dry_run"]),
         ["slotlock_list_holds"] = new("GET", "/v1/resources/{resource_id}/holds", ["resource_id"], ["limit", "cursor"]),
         ["slotlock_confirm_hold"] = new("POST", "/v1/holds/{hold_id}/confirm", ["hold_id"], []),
         ["slotlock_get_reservation"] = new("GET", "/v1/reservations/{reservation_ref}", ["reservation_ref"], []),
         ["slotlock_put_reservation"] = new("PUT", "/v1/reservations/{reservation_ref}", ["reservation_ref"], []),
-        ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision"]),
+        ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision", "dry_run"]),
         ["slotlock_list_reservations"] = new("GET", "/v1/resources/{resource_id}/reservations", ["resource_id"], ["start", "end", "limit", "cursor"]),
         ["slotlock_check_in_reservation"] = new("POST", "/v1/reservations/{reservation_ref}/check-in", ["reservation_ref"], []),
         ["slotlock_list_waitlist"] = new("GET", "/v1/waitlist", [], ["resource_id", "pool", "holder_ref", "limit"]),
         ["slotlock_join_waitlist"] = new("POST", "/v1/waitlist", [], []),
-        ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], []),
+        ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], ["dry_run"]),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
-        ["slotlock_delete_coverage"] = new("DELETE", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
+        ["slotlock_delete_coverage"] = new("DELETE", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], ["dry_run"]),
         ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
         ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
         ["slotlock_get_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}", ["event_id"], []),
-        ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key"]),
+        ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key", "dry_run"]),
         ["slotlock_export_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}/jscalendar", ["event_id"], []),
         ["slotlock_get_tenant"] = new("GET", "/v1/tenant", [], []),
         ["slotlock_erase_tenant"] = new("POST", "/v1/tenant/erase", [], []),
@@ -90,7 +90,7 @@ public sealed partial class SlotlockClient
         ["slotlock_list_changes"] = new("GET", "/v1/changes", [], ["cursor", "limit"]),
         ["slotlock_list_webhooks"] = new("GET", "/v1/webhooks", [], []),
         ["slotlock_create_webhook"] = new("POST", "/v1/webhooks", [], []),
-        ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], []),
+        ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], ["dry_run"]),
         ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
         ["slotlock_get_usage"] = new("GET", "/v1/usage", [], ["from", "to"]),
         ["slotlock_partner_get_account"] = new("GET", "/v1/partner/accounts/{account}", ["account"], []),
@@ -188,6 +188,10 @@ public sealed partial class SlotlockClient
     /// <param name="labels">labels</param>
     /// <param name="attributes">attributes</param>
     /// <param name="location">location</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -202,6 +206,7 @@ public sealed partial class SlotlockClient
         Optional<IEnumerable<string>> labels = default,
         Optional<JsonObject> attributes = default,
         Optional<string> location = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -215,6 +220,7 @@ public sealed partial class SlotlockClient
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         if (attributes.HasValue) values["attributes"] = Json.ToNode(attributes.Value);
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_create_resource", values, cancellationToken);
     }
 
@@ -236,7 +242,8 @@ public sealed partial class SlotlockClient
             capacity: default,
             labels: default,
             attributes: default,
-            location: default);
+            location: default,
+            dryRun: default);
 
     /// <summary>Get free-busy.</summary>
     /// <remarks>
@@ -428,6 +435,10 @@ public sealed partial class SlotlockClient
     /// <param name="slots">slots</param>
     /// <param name="idempotencyKey">idempotency_key</param>
     /// <param name="ttlSeconds">ttl_seconds</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -435,12 +446,14 @@ public sealed partial class SlotlockClient
         JsonArray slots,
         string idempotencyKey,
         Optional<long> ttlSeconds = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["slots"] = Json.ToNode(slots);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (ttlSeconds.HasValue) values["ttl_seconds"] = Json.ToNode(ttlSeconds.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_hold_slots", values, cancellationToken);
     }
 
@@ -457,6 +470,10 @@ public sealed partial class SlotlockClient
     /// <param name="timezone">timezone</param>
     /// <param name="idempotencyKey">idempotency_key</param>
     /// <param name="title">title</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -467,6 +484,7 @@ public sealed partial class SlotlockClient
         string timezone,
         string idempotencyKey,
         Optional<string> title = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -476,6 +494,7 @@ public sealed partial class SlotlockClient
         values["timezone"] = Json.ToNode(timezone);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_book_together", values, cancellationToken);
     }
 
@@ -494,6 +513,10 @@ public sealed partial class SlotlockClient
     /// <param name="timezone">timezone</param>
     /// <param name="idempotencyKey">idempotency_key</param>
     /// <param name="title">title</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -504,6 +527,7 @@ public sealed partial class SlotlockClient
         string timezone,
         string idempotencyKey,
         Optional<string> title = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -513,6 +537,7 @@ public sealed partial class SlotlockClient
         values["timezone"] = Json.ToNode(timezone);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (title.HasValue) values["title"] = Json.ToNode(title.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_book_pool", values, cancellationToken);
     }
 
@@ -548,15 +573,21 @@ public sealed partial class SlotlockClient
     /// expire. `released` is false when it was already gone.
     /// </remarks>
     /// <param name="holdId">hold_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ReleaseSlotsAsync(
         string holdId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["hold_id"] = Json.ToNode(holdId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_release_slots", values, cancellationToken);
     }
 
@@ -573,6 +604,10 @@ public sealed partial class SlotlockClient
     /// <param name="location">location</param>
     /// <param name="timezone">timezone</param>
     /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -583,6 +618,7 @@ public sealed partial class SlotlockClient
         Optional<string> location = default,
         Optional<string> timezone = default,
         Optional<string> idempotencyKey = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -592,6 +628,7 @@ public sealed partial class SlotlockClient
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_confirm_slot", values, cancellationToken);
     }
 
@@ -649,6 +686,10 @@ public sealed partial class SlotlockClient
     /// <param name="reminders">reminders</param>
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
     /// <param name="holdId">hold_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -669,6 +710,7 @@ public sealed partial class SlotlockClient
         Optional<JsonArray> reminders = default,
         Optional<JsonArray> recurrenceExceptions = default,
         Optional<string> holdId = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -688,6 +730,7 @@ public sealed partial class SlotlockClient
         if (reminders.HasValue) values["reminders"] = Json.ToNode(reminders.Value);
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
         if (holdId.HasValue) values["hold_id"] = Json.ToNode(holdId.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_create_event", values, cancellationToken);
     }
 
@@ -728,7 +771,8 @@ public sealed partial class SlotlockClient
             reminders: reminders,
             recurrenceExceptions: recurrenceExceptions,
             cancellationToken: cancellationToken,
-            holdId: default);
+            holdId: default,
+            dryRun: default);
 
     /// <summary>Get resource event.</summary>
     /// <remarks>
@@ -775,6 +819,10 @@ public sealed partial class SlotlockClient
     /// it.</param>
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
     /// <param name="expectedResourceId">expected_resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -797,6 +845,7 @@ public sealed partial class SlotlockClient
         Optional<string?> recurrenceRule = default,
         Optional<JsonArray> recurrenceExceptions = default,
         Optional<string> expectedResourceId = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -818,6 +867,7 @@ public sealed partial class SlotlockClient
         if (recurrenceRule.HasValue) values["recurrence_rule"] = Json.ToNode(recurrenceRule.Value);
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
         if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_update_event", values, cancellationToken);
     }
 
@@ -862,7 +912,8 @@ public sealed partial class SlotlockClient
             recurrenceRule: recurrenceRule,
             recurrenceExceptions: recurrenceExceptions,
             cancellationToken: cancellationToken,
-            expectedResourceId: default);
+            expectedResourceId: default,
+            dryRun: default);
 
     /// <summary>Delete resource event.</summary>
     /// <remarks>
@@ -873,6 +924,10 @@ public sealed partial class SlotlockClient
     /// <param name="eventId">event_id</param>
     /// <param name="expectedRevision">expected_revision</param>
     /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -880,14 +935,31 @@ public sealed partial class SlotlockClient
         string eventId,
         long expectedRevision,
         string idempotencyKey,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["event_id"] = Json.ToNode(eventId);
         values["expected_revision"] = Json.ToNode(expectedRevision);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_delete_event", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>DeleteEventAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> DeleteEventAsync(
+        string eventId,
+        long expectedRevision,
+        string idempotencyKey,
+        CancellationToken cancellationToken) =>
+        DeleteEventAsync(
+            eventId: eventId,
+            expectedRevision: expectedRevision,
+            idempotencyKey: idempotencyKey,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>Reschedule an event.</summary>
     /// <remarks>
@@ -902,6 +974,10 @@ public sealed partial class SlotlockClient
     /// <param name="endsAt">ends_at</param>
     /// <param name="resourceId">resource_id</param>
     /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -912,6 +988,7 @@ public sealed partial class SlotlockClient
         string endsAt,
         Optional<string> resourceId = default,
         Optional<string> idempotencyKey = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -921,6 +998,7 @@ public sealed partial class SlotlockClient
         values["ends_at"] = Json.ToNode(endsAt);
         if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_reschedule", values, cancellationToken);
     }
 
@@ -933,6 +1011,10 @@ public sealed partial class SlotlockClient
     /// <param name="eventId">event_id</param>
     /// <param name="expectedRevision">expected_revision</param>
     /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -940,12 +1022,14 @@ public sealed partial class SlotlockClient
         string eventId,
         long expectedRevision,
         Optional<string> idempotencyKey = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["event_id"] = Json.ToNode(eventId);
         values["expected_revision"] = Json.ToNode(expectedRevision);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_cancel", values, cancellationToken);
     }
 
@@ -984,6 +1068,10 @@ public sealed partial class SlotlockClient
     /// <param name="labels">labels</param>
     /// <param name="attributes">attributes</param>
     /// <param name="location">location Null clears it; leave it out to keep it.</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -996,6 +1084,7 @@ public sealed partial class SlotlockClient
         Optional<IEnumerable<string>> labels = default,
         Optional<JsonObject> attributes = default,
         Optional<string?> location = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1007,6 +1096,7 @@ public sealed partial class SlotlockClient
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         if (attributes.HasValue) values["attributes"] = Json.ToNode(attributes.Value);
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_update_resource", values, cancellationToken);
     }
 
@@ -1019,15 +1109,21 @@ public sealed partial class SlotlockClient
     /// say.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> DeleteResourceAsync(
         string resourceId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_delete_resource", values, cancellationToken);
     }
 
@@ -1057,6 +1153,10 @@ public sealed partial class SlotlockClient
     /// <param name="name">name</param>
     /// <param name="parentRef">parent_ref Null clears it; leave it out to keep it.</param>
     /// <param name="timezone">timezone Null clears it; leave it out to keep it.</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1065,6 +1165,7 @@ public sealed partial class SlotlockClient
         string name,
         Optional<string?> parentRef = default,
         Optional<string?> timezone = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1072,6 +1173,7 @@ public sealed partial class SlotlockClient
         values["name"] = Json.ToNode(name);
         if (parentRef.HasValue) values["parent_ref"] = Json.ToNode(parentRef.Value);
         if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_create_location", values, cancellationToken);
     }
 
@@ -1084,6 +1186,10 @@ public sealed partial class SlotlockClient
     /// <param name="name">name</param>
     /// <param name="parentRef">parent_ref Null clears it; leave it out to keep it.</param>
     /// <param name="timezone">timezone Null clears it; leave it out to keep it.</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1092,6 +1198,7 @@ public sealed partial class SlotlockClient
         Optional<string> name = default,
         Optional<string?> parentRef = default,
         Optional<string?> timezone = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1099,6 +1206,7 @@ public sealed partial class SlotlockClient
         if (name.HasValue) values["name"] = Json.ToNode(name.Value);
         if (parentRef.HasValue) values["parent_ref"] = Json.ToNode(parentRef.Value);
         if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_update_location", values, cancellationToken);
     }
 
@@ -1108,15 +1216,21 @@ public sealed partial class SlotlockClient
     /// location is in it: move them first. deleted is false when the tenant has no such location.
     /// </remarks>
     /// <param name="locationRef">location_ref</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> DeleteLocationAsync(
         string locationRef,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["location_ref"] = Json.ToNode(locationRef);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_delete_location", values, cancellationToken);
     }
 
@@ -1144,6 +1258,10 @@ public sealed partial class SlotlockClient
     /// <param name="ref">ref</param>
     /// <param name="name">name</param>
     /// <param name="description">description Null clears it; leave it out to keep it.</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1151,12 +1269,14 @@ public sealed partial class SlotlockClient
         string @ref,
         string name,
         Optional<string?> description = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["ref"] = Json.ToNode(@ref);
         values["name"] = Json.ToNode(name);
         if (description.HasValue) values["description"] = Json.ToNode(description.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_create_group", values, cancellationToken);
     }
 
@@ -1166,15 +1286,21 @@ public sealed partial class SlotlockClient
     /// such group.
     /// </remarks>
     /// <param name="groupRef">group_ref</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> DeleteGroupAsync(
         string groupRef,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["group_ref"] = Json.ToNode(groupRef);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_delete_group", values, cancellationToken);
     }
 
@@ -1186,17 +1312,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="groupRef">group_ref</param>
     /// <param name="resourceId">resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> AddGroupMemberAsync(
         string groupRef,
         string resourceId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["group_ref"] = Json.ToNode(groupRef);
         values["resource_id"] = Json.ToNode(resourceId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_add_group_member", values, cancellationToken);
     }
 
@@ -1206,17 +1338,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="groupRef">group_ref</param>
     /// <param name="resourceId">resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> RemoveGroupMemberAsync(
         string groupRef,
         string resourceId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["group_ref"] = Json.ToNode(groupRef);
         values["resource_id"] = Json.ToNode(resourceId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_remove_group_member", values, cancellationToken);
     }
 
@@ -1227,15 +1365,21 @@ public sealed partial class SlotlockClient
     /// Archiving it again keeps the first time.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ArchiveResourceAsync(
         string resourceId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_archive_resource", values, cancellationToken);
     }
 
@@ -1244,15 +1388,21 @@ public sealed partial class SlotlockClient
     /// Put an archived resource back in use. Restoring one in use changes nothing.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> RestoreResourceAsync(
         string resourceId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_restore_resource", values, cancellationToken);
     }
 
@@ -1291,19 +1441,38 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="rules">rules</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetResourceAvailabilityAsync(
         string resourceId,
         JsonArray? rules,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["rules"] = Json.ToNode(rules);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_resource_availability", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>SetResourceAvailabilityAsync</c>, kept
+    /// so code written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> SetResourceAvailabilityAsync(
+        string resourceId,
+        JsonArray? rules,
+        CancellationToken cancellationToken) =>
+        SetResourceAvailabilityAsync(
+            resourceId: resourceId,
+            rules: rules,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>Export a resource's bookable hours as iCalendar.</summary>
     /// <remarks>
@@ -1334,17 +1503,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="icalendar">icalendar</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ImportResourceAvailabilityAsync(
         string resourceId,
         string icalendar,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["icalendar"] = Json.ToNode(icalendar);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_import_resource_availability", values, cancellationToken);
     }
 
@@ -1360,17 +1535,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="rules">rules</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetResourceBookingRulesAsync(
         string resourceId,
         JsonObject? rules,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["rules"] = Json.ToNode(rules);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_resource_booking_rules", values, cancellationToken);
     }
 
@@ -1384,17 +1565,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="pool">pool</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetResourcePoolAsync(
         string resourceId,
         string? pool,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["pool"] = Json.ToNode(pool);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_resource_pool", values, cancellationToken);
     }
 
@@ -1408,17 +1595,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="parentId">parent_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetResourceParentAsync(
         string resourceId,
         string? parentId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["parent_id"] = Json.ToNode(parentId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_resource_parent", values, cancellationToken);
     }
 
@@ -1446,17 +1639,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="pool">pool</param>
     /// <param name="order">order</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetPoolOrderAsync(
         string pool,
         string order,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["pool"] = Json.ToNode(pool);
         values["order"] = Json.ToNode(order);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_pool_order", values, cancellationToken);
     }
 
@@ -1483,15 +1682,21 @@ public sealed partial class SlotlockClient
     /// check_in_minutes, which only a resource sets.
     /// </remarks>
     /// <param name="rules">rules</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetTenantBookingRulesAsync(
         JsonObject? rules,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["rules"] = Json.ToNode(rules);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_tenant_booking_rules", values, cancellationToken);
     }
 
@@ -1504,17 +1709,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="pool">pool</param>
     /// <param name="rules">rules</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetPoolBookingRulesAsync(
         string pool,
         JsonObject? rules,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["pool"] = Json.ToNode(pool);
         values["rules"] = Json.ToNode(rules);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_pool_booking_rules", values, cancellationToken);
     }
 
@@ -1600,17 +1811,34 @@ public sealed partial class SlotlockClient
     /// default. Returns how many resources changed.
     /// </remarks>
     /// <param name="rules">rules</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetTenantAvailabilityAsync(
         JsonArray? rules,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["rules"] = Json.ToNode(rules);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_tenant_availability", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>SetTenantAvailabilityAsync</c>, kept so
+    /// code written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> SetTenantAvailabilityAsync(
+        JsonArray? rules,
+        CancellationToken cancellationToken) =>
+        SetTenantAvailabilityAsync(
+            rules: rules,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>Hold time.</summary>
     /// <remarks>
@@ -1631,6 +1859,10 @@ public sealed partial class SlotlockClient
     /// header: the same key with the same request answers what the first did; with another
     /// request, 422 idempotency_conflict.</param>
     /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1642,6 +1874,7 @@ public sealed partial class SlotlockClient
         Optional<string> source = default,
         Optional<string> idempotencyKey = default,
         Optional<long> bufferAfterMinutes = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1652,6 +1885,7 @@ public sealed partial class SlotlockClient
         if (source.HasValue) values["source"] = Json.ToNode(source.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
         if (bufferAfterMinutes.HasValue) values["buffer_after_minutes"] = Json.ToNode(bufferAfterMinutes.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_acquire_hold", values, cancellationToken);
     }
 
@@ -1673,7 +1907,8 @@ public sealed partial class SlotlockClient
             source: source,
             cancellationToken: cancellationToken,
             idempotencyKey: default,
-            bufferAfterMinutes: default);
+            bufferAfterMinutes: default,
+            dryRun: default);
 
     /// <summary>Get a hold.</summary>
     /// <remarks>
@@ -1699,17 +1934,34 @@ public sealed partial class SlotlockClient
     /// or released.
     /// </remarks>
     /// <param name="holdId">hold_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ReleaseHoldAsync(
         string holdId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["hold_id"] = Json.ToNode(holdId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_release_hold", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>ReleaseHoldAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> ReleaseHoldAsync(
+        string holdId,
+        CancellationToken cancellationToken) =>
+        ReleaseHoldAsync(
+            holdId: holdId,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>List a resource's holds.</summary>
     /// <remarks>
@@ -1744,17 +1996,34 @@ public sealed partial class SlotlockClient
     /// unknown one, 404 hold_not_found.
     /// </remarks>
     /// <param name="holdId">hold_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ConfirmHoldAsync(
         string holdId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["hold_id"] = Json.ToNode(holdId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_confirm_hold", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>ConfirmHoldAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> ConfirmHoldAsync(
+        string holdId,
+        CancellationToken cancellationToken) =>
+        ConfirmHoldAsync(
+            holdId: holdId,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>Get a reservation.</summary>
     /// <remarks>
@@ -1789,6 +2058,10 @@ public sealed partial class SlotlockClient
     /// <param name="revision">revision</param>
     /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
     /// <param name="source">source</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1800,6 +2073,7 @@ public sealed partial class SlotlockClient
         long revision,
         Optional<long> bufferAfterMinutes = default,
         Optional<string> source = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1810,8 +2084,32 @@ public sealed partial class SlotlockClient
         values["revision"] = Json.ToNode(revision);
         if (bufferAfterMinutes.HasValue) values["buffer_after_minutes"] = Json.ToNode(bufferAfterMinutes.Value);
         if (source.HasValue) values["source"] = Json.ToNode(source.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_put_reservation", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>PutReservationAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> PutReservationAsync(
+        string reservationRef,
+        string resourceId,
+        string start,
+        string end,
+        long revision,
+        Optional<long> bufferAfterMinutes,
+        Optional<string> source,
+        CancellationToken cancellationToken) =>
+        PutReservationAsync(
+            reservationRef: reservationRef,
+            resourceId: resourceId,
+            start: start,
+            end: end,
+            revision: revision,
+            bufferAfterMinutes: bufferAfterMinutes,
+            source: source,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>Cancel a reservation.</summary>
     /// <remarks>
@@ -1821,19 +2119,38 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="reservationRef">reservation_ref</param>
     /// <param name="revision">revision</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> CancelReservationAsync(
         string reservationRef,
         long revision,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["reservation_ref"] = Json.ToNode(reservationRef);
         values["revision"] = Json.ToNode(revision);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_cancel_reservation", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>CancelReservationAsync</c>, kept so
+    /// code written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> CancelReservationAsync(
+        string reservationRef,
+        long revision,
+        CancellationToken cancellationToken) =>
+        CancelReservationAsync(
+            reservationRef: reservationRef,
+            revision: revision,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>List a resource's reservations.</summary>
     /// <remarks>
@@ -1877,15 +2194,21 @@ public sealed partial class SlotlockClient
     /// booking that has ended answers 409 reservation_ended.
     /// </remarks>
     /// <param name="reservationRef">reservation_ref</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> CheckInReservationAsync(
         string reservationRef,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["reservation_ref"] = Json.ToNode(reservationRef);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_check_in_reservation", values, cancellationToken);
     }
 
@@ -1938,6 +2261,10 @@ public sealed partial class SlotlockClient
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
     /// request, 422 idempotency_conflict.</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -1949,6 +2276,7 @@ public sealed partial class SlotlockClient
         Optional<string> pool = default,
         Optional<long> offerTtlSeconds = default,
         Optional<string> idempotencyKey = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -1959,6 +2287,7 @@ public sealed partial class SlotlockClient
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         if (offerTtlSeconds.HasValue) values["offer_ttl_seconds"] = Json.ToNode(offerTtlSeconds.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_join_waitlist", values, cancellationToken);
     }
 
@@ -1969,15 +2298,21 @@ public sealed partial class SlotlockClient
     /// when there was no such entry.
     /// </remarks>
     /// <param name="entryId">entry_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> LeaveWaitlistAsync(
         string entryId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["entry_id"] = Json.ToNode(entryId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_leave_waitlist", values, cancellationToken);
     }
 
@@ -1993,6 +2328,10 @@ public sealed partial class SlotlockClient
     /// <param name="start">start</param>
     /// <param name="end">end</param>
     /// <param name="revision">revision</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -2002,6 +2341,7 @@ public sealed partial class SlotlockClient
         string start,
         string end,
         long revision,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -2010,8 +2350,28 @@ public sealed partial class SlotlockClient
         values["start"] = Json.ToNode(start);
         values["end"] = Json.ToNode(end);
         values["revision"] = Json.ToNode(revision);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_record_coverage", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>RecordCoverageAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> RecordCoverageAsync(
+        string resourceId,
+        string source,
+        string start,
+        string end,
+        long revision,
+        CancellationToken cancellationToken) =>
+        RecordCoverageAsync(
+            resourceId: resourceId,
+            source: source,
+            start: start,
+            end: end,
+            revision: revision,
+            cancellationToken: cancellationToken,
+            dryRun: default);
 
     /// <summary>Retire a source.</summary>
     /// <remarks>
@@ -2021,17 +2381,23 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="source">source</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> DeleteCoverageAsync(
         string resourceId,
         string source,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["source"] = Json.ToNode(source);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_delete_coverage", values, cancellationToken);
     }
 
@@ -2066,6 +2432,10 @@ public sealed partial class SlotlockClient
     /// <param name="resourceId">resource_id</param>
     /// <param name="source">source</param>
     /// <param name="error">error</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -2073,12 +2443,14 @@ public sealed partial class SlotlockClient
         string resourceId,
         string source,
         string error,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         values["source"] = Json.ToNode(source);
         values["error"] = Json.ToNode(error);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_record_coverage_failure", values, cancellationToken);
     }
 
@@ -2146,6 +2518,10 @@ public sealed partial class SlotlockClient
     /// header: the same key with the same request answers what the first did; with another
     /// request, 422 idempotency_conflict.</param>
     /// <param name="expectedResourceId">expected_resource_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -2154,6 +2530,7 @@ public sealed partial class SlotlockClient
         long expectedRevision,
         string idempotencyKey,
         Optional<string> expectedResourceId = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -2161,6 +2538,7 @@ public sealed partial class SlotlockClient
         values["expected_revision"] = Json.ToNode(expectedRevision);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_cancel_tenant_event", values, cancellationToken);
     }
 
@@ -2308,6 +2686,10 @@ public sealed partial class SlotlockClient
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
     /// request, 422 idempotency_conflict.</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -2319,6 +2701,7 @@ public sealed partial class SlotlockClient
         Optional<IEnumerable<string>> locations = default,
         Optional<IEnumerable<string>> groups = default,
         Optional<string> idempotencyKey = default,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -2329,6 +2712,7 @@ public sealed partial class SlotlockClient
         if (locations.HasValue) values["locations"] = Json.ToNode(locations.Value);
         if (groups.HasValue) values["groups"] = Json.ToNode(groups.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_create_webhook", values, cancellationToken);
     }
 
@@ -2337,15 +2721,21 @@ public sealed partial class SlotlockClient
     /// Stop sending to a webhook. deleted is false when the tenant has no such webhook.
     /// </remarks>
     /// <param name="webhookId">webhook_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> DeleteWebhookAsync(
         string webhookId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["webhook_id"] = Json.ToNode(webhookId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_delete_webhook", values, cancellationToken);
     }
 
@@ -2357,15 +2747,21 @@ public sealed partial class SlotlockClient
     /// it, add it again, and read what it missed from slotlock_list_changes.
     /// </remarks>
     /// <param name="webhookId">webhook_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> EnableWebhookAsync(
         string webhookId,
+        Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["webhook_id"] = Json.ToNode(webhookId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_enable_webhook", values, cancellationToken);
     }
 

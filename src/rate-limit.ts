@@ -130,6 +130,8 @@ export interface SlotlockRequestLimits {
   consumeRateLimit(args: {
     principal: SlotlockAgentPrincipal;
     operation: SlotlockAgentOperation | 'protocol';
+    /** A dry run of a write, charged as a read. */
+    dryRun?: boolean;
   }): Promise<boolean>;
   /**
    * For `authorize`: when the operation may expand a recurring series, or runs maintenance, take its
@@ -800,14 +802,15 @@ export function createSlotlockRequestLimits(
       return options.authenticate(request);
     },
 
-    async consumeRateLimit({ principal, operation }) {
+    async consumeRateLimit({ principal, operation, dryRun }) {
       const state = states.getStore();
       if (!state) return true;
       const classes: Array<'read' | 'write'> = [];
       if (operation === 'protocol') {
         classes.push('read');
-        if (state.write) classes.push('write');
-      } else if (slotlockAgentOperationScope(operation) === 'write') {
+        if (state.write && dryRun !== true) classes.push('write');
+      } else if (slotlockAgentOperationScope(operation) === 'write' && dryRun !== true) {
+        // A dry run writes nothing: the request's read token is its charge (RFC 0004 A3).
         classes.push('write');
       }
       return chargeRequest(state, principal, classes);

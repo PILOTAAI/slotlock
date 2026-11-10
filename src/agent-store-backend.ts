@@ -153,6 +153,13 @@ interface TenantCallContext {
   signal: AbortSignal;
   /** The surface the call came through, recorded with its changes. */
   origin?: SlotlockChangeOrigin;
+  /** A dry run (RFC 0004 A3): every transaction this call opens is rolled back. */
+  dryRun?: boolean;
+}
+
+/** Thrown out of a dry run's transaction, with its answer, so the transaction rolls back. */
+class DryRunRollback {
+  constructor(readonly value: unknown) {}
 }
 
 // The UUIDs withTenant takes as a keyId (versions 1-5); any other from a custom authenticator is
@@ -182,7 +189,14 @@ async function withTenant<T>(
   try {
     const actor = actorOf(context);
     const keyId = context.principal.keyId;
-    value = await store.withTenant(context.principal.tenantRef, callback, {
+    // A dry run's transaction does everything, constraints included, then is undone: its answer
+    // is carried out of it by the rollback.
+    const run: typeof callback = context.dryRun
+      ? async (tenantStore) => {
+          throw new DryRunRollback(await callback(tenantStore));
+        }
+      : callback;
+    value = await store.withTenant(context.principal.tenantRef, run, {
       ...options,
       signal: context.signal,
       ...(actor !== undefined ? { actor } : {}),
@@ -192,6 +206,10 @@ async function withTenant<T>(
       ...(context.principal.resourceScope ? { resourceScope: context.principal.resourceScope } : {}),
     });
   } catch (error) {
+    if (error instanceof DryRunRollback) {
+      assertActive(context);
+      return error.value as T;
+    }
     const code = (error as { code?: unknown } | null)?.code;
     // A suspended tenant may read; a write it asks for is forbidden, not a server failure.
     if (code === 'tenant_suspended') throw new SlotlockAgentOperationError('tenant_suspended', 403);
@@ -923,7 +941,7 @@ export function createSlotlockStoreAgentBackend(
           holderRef: agentOwnerRef(context),
         }).then(({ released }) => ({ released })),
       );
-      if (result.released) await offerFreedTime(store, context.principal.tenantRef);
+      if (result.released) await offerFreedTime(store, context);
       return result;
     },
 
@@ -1357,7 +1375,7 @@ export function createSlotlockStoreAgentBackend(
         if (!updated) throw new SlotlockAgentOperationError('store_inconsistent', 503);
         return { event: projectSlotlockCalendarEvent(updated), replayed: result.idempotent };
       }, WRITE);
-      if (!moved.replayed) await offerFreedTime(store, context.principal.tenantRef);
+      if (!moved.replayed) await offerFreedTime(store, context);
       return moved;
     },
 
@@ -1387,7 +1405,7 @@ export function createSlotlockStoreAgentBackend(
           replayed: result.idempotent,
         };
       }, WRITE);
-      if (!deleted.replayed) await offerFreedTime(store, context.principal.tenantRef);
+      if (!deleted.replayed) await offerFreedTime(store, context);
       return deleted;
     },
   };
@@ -1482,7 +1500,10 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
  * Offer what a cancel or release just freed to the waitlist now. Best effort, after commit:
  * maintenance offers whatever this misses.
  */
-async function offerFreedTime(store: SlotlockStore, tenantRef: string): Promise<void> {
+async function offerFreedTime(store: SlotlockStore, context: TenantCallContext): Promise<void> {
+  // A dry run freed nothing.
+  if (context.dryRun) return;
+  const tenantRef = context.principal.tenantRef;
   try {
     await store.withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
       origin: 'maintenance',
@@ -2262,7 +2283,7 @@ export function createSlotlockStoreApplicationBackend(
       const released = await withTenant(store, context, async (tenant) => ({
         released: (await tenant.releaseHold(id, { tenantRef: tenantOf(context) })).released,
       }));
-      if (released.released) await offerFreedTime(store, tenantOf(context));
+      if (released.released) await offerFreedTime(store, context);
       return released;
     },
 
@@ -2317,7 +2338,7 @@ export function createSlotlockStoreApplicationBackend(
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
       }, WRITE);
       if ((input.revision as number) > 1 && !put.replayed) {
-        await offerFreedTime(store, tenantOf(context));
+        await offerFreedTime(store, context);
       }
       return put;
     },
@@ -2332,7 +2353,7 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { cancelled: result.cancelled, revision: result.revision };
       }, WRITE);
-      if (cancelled.cancelled) await offerFreedTime(store, tenantOf(context));
+      if (cancelled.cancelled) await offerFreedTime(store, context);
       return cancelled;
     },
 
@@ -2383,7 +2404,7 @@ export function createSlotlockStoreApplicationBackend(
       const left = await withTenant(store, context, async (tenant) => ({
         left: await tenant.leaveWaitlist({ tenantRef: tenantOf(context), id: input.entry_id as string }),
       }));
-      if (left.left) await offerFreedTime(store, tenantOf(context));
+      if (left.left) await offerFreedTime(store, context);
       return left;
     },
 
@@ -2514,7 +2535,7 @@ export function createSlotlockStoreApplicationBackend(
           replayed: result.idempotent,
         };
       }, WRITE);
-      if (!cancelled.replayed) await offerFreedTime(store, tenantOf(context));
+      if (!cancelled.replayed) await offerFreedTime(store, context);
       return cancelled;
     },
 

@@ -1203,6 +1203,14 @@ not holds. An `overlap` also says when the booking in the way makes the time bus
 `busy_end`), and names it when it is the agent's own (`conflicting_hold_id`,
 `conflicting_event_id`).
 
+Every write takes `dry_run: true` to check it without making it: it runs in its transaction with
+every check, the database's constraints included, and is then rolled back, so nothing is stored,
+recorded on the feed or sent. The answer is what it would have been, with `dry_run: true` (ids in
+it are never stored), or the refusal it would have met, with its alternatives. A dry run is never
+put to a person to confirm, and is charged as a read (on REST, when `dry_run=true` is in the query
+string). Tenant erasure, maintenance and the partner API refuse one (`dry_run_not_supported`); a
+read takes no `dry_run`.
+
 An agent offering a person several times holds them first, so none is taken while the person
 decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
 `refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in

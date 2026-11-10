@@ -76,7 +76,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/slot-holds/{hold_id}",
         path_params: &["hold_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_confirm_slot",
@@ -118,7 +118,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/events/{event_id}",
         path_params: &["event_id"],
-        query: &["expected_revision", "idempotency_key"],
+        query: &["expected_revision", "idempotency_key", "dry_run"],
     },
     Operation {
         name: "slotlock_reschedule",
@@ -153,7 +153,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/resources/{resource_id}",
         path_params: &["resource_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_list_locations",
@@ -181,7 +181,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/locations/{location_ref}",
         path_params: &["location_ref"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_list_groups",
@@ -202,7 +202,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/groups/{group_ref}",
         path_params: &["group_ref"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_add_group_member",
@@ -216,7 +216,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/groups/{group_ref}/members/{resource_id}",
         path_params: &["group_ref", "resource_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_archive_resource",
@@ -363,7 +363,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/holds/{hold_id}",
         path_params: &["hold_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_list_holds",
@@ -398,7 +398,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/reservations/{reservation_ref}",
         path_params: &["reservation_ref"],
-        query: &["revision"],
+        query: &["revision", "dry_run"],
     },
     Operation {
         name: "slotlock_list_reservations",
@@ -433,7 +433,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/waitlist/{entry_id}",
         path_params: &["entry_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_record_coverage",
@@ -447,7 +447,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/resources/{resource_id}/coverage/{source}",
         path_params: &["resource_id", "source"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_get_coverage",
@@ -482,7 +482,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/tenant/events/{event_id}",
         path_params: &["event_id"],
-        query: &["expected_revision", "expected_resource_id", "idempotency_key"],
+        query: &["expected_revision", "expected_resource_id", "idempotency_key", "dry_run"],
     },
     Operation {
         name: "slotlock_export_tenant_event",
@@ -538,7 +538,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/webhooks/{webhook_id}",
         path_params: &["webhook_id"],
-        query: &[],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_enable_webhook",
@@ -684,6 +684,12 @@ pub struct CreateResourceInput {
     pub attributes: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_free_busy`].
@@ -759,6 +765,12 @@ pub struct HoldSlotsInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::book_together`].
@@ -771,6 +783,12 @@ pub struct BookTogetherInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::book_pool`].
@@ -783,6 +801,12 @@ pub struct BookPoolInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_pool_availability`].
@@ -797,6 +821,12 @@ pub struct GetPoolAvailabilityInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReleaseSlotsInput {
     pub hold_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::confirm_slot`].
@@ -813,6 +843,12 @@ pub struct ConfirmSlotInput {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_events`].
@@ -857,6 +893,12 @@ pub struct CreateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_event`].
@@ -906,6 +948,12 @@ pub struct UpdateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_event`].
@@ -914,6 +962,12 @@ pub struct DeleteEventInput {
     pub event_id: String,
     pub expected_revision: i64,
     pub idempotency_key: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::reschedule`].
@@ -927,6 +981,12 @@ pub struct RescheduleInput {
     pub resource_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::cancel`].
@@ -936,6 +996,12 @@ pub struct CancelInput {
     pub expected_revision: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_resource`].
@@ -966,12 +1032,24 @@ pub struct UpdateResourceInput {
     /// `None` leaves it out; `Some(None)` sends null, which clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_resource`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeleteResourceInput {
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_locations`].
@@ -990,6 +1068,12 @@ pub struct CreateLocationInput {
     /// `None` leaves it out; `Some(None)` sends null, which clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::update_location`].
@@ -1004,12 +1088,24 @@ pub struct UpdateLocationInput {
     /// `None` leaves it out; `Some(None)` sends null, which clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_location`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeleteLocationInput {
     pub location_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_groups`].
@@ -1025,12 +1121,24 @@ pub struct CreateGroupInput {
     /// `None` leaves it out; `Some(None)` sends null, which clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_group`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeleteGroupInput {
     pub group_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::add_group_member`].
@@ -1038,6 +1146,12 @@ pub struct DeleteGroupInput {
 pub struct AddGroupMemberInput {
     pub group_ref: String,
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::remove_group_member`].
@@ -1045,18 +1159,36 @@ pub struct AddGroupMemberInput {
 pub struct RemoveGroupMemberInput {
     pub group_ref: String,
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::archive_resource`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ArchiveResourceInput {
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::restore_resource`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RestoreResourceInput {
     pub resource_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_busy`].
@@ -1072,6 +1204,12 @@ pub struct ListBusyInput {
 pub struct SetResourceAvailabilityInput {
     pub resource_id: String,
     pub rules: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::export_resource_availability`].
@@ -1085,6 +1223,12 @@ pub struct ExportResourceAvailabilityInput {
 pub struct ImportResourceAvailabilityInput {
     pub resource_id: String,
     pub icalendar: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_resource_booking_rules`].
@@ -1092,6 +1236,12 @@ pub struct ImportResourceAvailabilityInput {
 pub struct SetResourceBookingRulesInput {
     pub resource_id: String,
     pub rules: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_resource_pool`].
@@ -1099,6 +1249,12 @@ pub struct SetResourceBookingRulesInput {
 pub struct SetResourcePoolInput {
     pub resource_id: String,
     pub pool: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_resource_parent`].
@@ -1106,6 +1262,12 @@ pub struct SetResourcePoolInput {
 pub struct SetResourceParentInput {
     pub resource_id: String,
     pub parent_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_pools`].
@@ -1118,6 +1280,12 @@ pub struct ListPoolsInput {
 pub struct SetPoolOrderInput {
     pub pool: String,
     pub order: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_booking_rule_defaults`].
@@ -1129,6 +1297,12 @@ pub struct GetBookingRuleDefaultsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantBookingRulesInput {
     pub rules: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::set_pool_booking_rules`].
@@ -1136,6 +1310,12 @@ pub struct SetTenantBookingRulesInput {
 pub struct SetPoolBookingRulesInput {
     pub pool: String,
     pub rules: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_resource_history`].
@@ -1172,6 +1352,12 @@ pub struct GetTenantEventHistoryInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantAvailabilityInput {
     pub rules: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::acquire_hold`].
@@ -1189,6 +1375,12 @@ pub struct AcquireHoldInput {
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_after_minutes: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_hold`].
@@ -1201,6 +1393,12 @@ pub struct GetHoldInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReleaseHoldInput {
     pub hold_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_holds`].
@@ -1217,6 +1415,12 @@ pub struct ListHoldsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ConfirmHoldInput {
     pub hold_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_reservation`].
@@ -1237,6 +1441,12 @@ pub struct PutReservationInput {
     pub buffer_after_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::cancel_reservation`].
@@ -1244,6 +1454,12 @@ pub struct PutReservationInput {
 pub struct CancelReservationInput {
     pub reservation_ref: String,
     pub revision: i64,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_reservations`].
@@ -1262,6 +1478,12 @@ pub struct ListReservationsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CheckInReservationInput {
     pub reservation_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_waitlist`].
@@ -1293,12 +1515,24 @@ pub struct JoinWaitlistInput {
     /// request answers what the first did; with another request, 422 idempotency_conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::leave_waitlist`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LeaveWaitlistInput {
     pub entry_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::record_coverage`].
@@ -1309,6 +1543,12 @@ pub struct RecordCoverageInput {
     pub start: String,
     pub end: String,
     pub revision: i64,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_coverage`].
@@ -1316,6 +1556,12 @@ pub struct RecordCoverageInput {
 pub struct DeleteCoverageInput {
     pub resource_id: String,
     pub source: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_coverage`].
@@ -1330,6 +1576,12 @@ pub struct RecordCoverageFailureInput {
     pub resource_id: String,
     pub source: String,
     pub error: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::list_tenant_events`].
@@ -1360,6 +1612,12 @@ pub struct CancelTenantEventInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::export_tenant_event`].
@@ -1416,18 +1674,36 @@ pub struct CreateWebhookInput {
     /// request answers what the first did; with another request, 422 idempotency_conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::delete_webhook`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DeleteWebhookInput {
     pub webhook_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::enable_webhook`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct EnableWebhookInput {
     pub webhook_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_usage`].

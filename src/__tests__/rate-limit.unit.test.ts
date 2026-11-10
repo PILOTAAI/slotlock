@@ -455,6 +455,42 @@ describe('token buckets', () => {
     ]);
   });
 
+  it('charges a dry run as a read, on REST (in the query string) and on a tool call (RFC 0004 A3)', async () => {
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({
+        rates: {
+          address: null,
+          key_read: { perSecond: 1, burst: 5 },
+          key_write: { perSecond: 1, burst: 1 },
+          tenant_read: { perSecond: 1, burst: 5 },
+          tenant_write: { perSecond: 1, burst: 1 },
+        },
+      }),
+      basePath: '',
+      now: clock().now,
+      authenticate: async () => PRINCIPAL,
+    });
+    // The agent server's part: the request's charge, a dry run named in its query string as a read.
+    const target = limiter.serve({
+      async fetch(request) {
+        const principal = (await limiter.authenticate(request)) as typeof PRINCIPAL;
+        const dryRun = new URL(request.url).searchParams.get('dry_run') === 'true';
+        const ok = await limiter.consumeRateLimit({ principal, operation: 'protocol', ...(dryRun ? { dryRun } : {}) });
+        return ok ? Response.json({ ok: true }) : Response.json({ error: { code: 'rate_limited' } }, { status: 429 });
+      },
+    });
+    const post = (path: string) =>
+      target.fetch(new Request(`http://localhost${path}`, { method: 'POST', headers: { authorization: 'Bearer good' } }), {
+        remoteAddress: '127.0.0.1',
+      });
+    // Three dry runs within one write token, then the one real write it allows.
+    for (let index = 0; index < 3; index++) {
+      expect((await post('/v1/events?dry_run=true')).headers.get('ratelimit')).toMatch(/^"(key|tenant)_read"/);
+    }
+    expect((await post('/v1/events')).status).toBe(200);
+    expect((await post('/v1/events')).status).toBe(429);
+  });
+
   it("charges a key that may not use the application API its own buckets, not the application's", async () => {
     // A read-only key's refused application calls must not empty the tenant's app budgets.
     const { target } = setup(limitsWith({ rates: { address: null } }), { now: clock().now });

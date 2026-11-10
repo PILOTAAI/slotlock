@@ -76,7 +76,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/slot-holds/{hold_id}",
         ("hold_id",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_confirm_slot": Operation(
         "slotlock_confirm_slot",
@@ -118,7 +118,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/events/{event_id}",
         ("event_id",),
-        ("expected_revision", "idempotency_key"),
+        ("expected_revision", "idempotency_key", "dry_run"),
     ),
     "slotlock_reschedule": Operation(
         "slotlock_reschedule",
@@ -153,7 +153,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/resources/{resource_id}",
         ("resource_id",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_list_locations": Operation(
         "slotlock_list_locations",
@@ -181,7 +181,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/locations/{location_ref}",
         ("location_ref",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_list_groups": Operation(
         "slotlock_list_groups",
@@ -202,7 +202,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/groups/{group_ref}",
         ("group_ref",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_add_group_member": Operation(
         "slotlock_add_group_member",
@@ -216,7 +216,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/groups/{group_ref}/members/{resource_id}",
         ("group_ref", "resource_id"),
-        (),
+        ("dry_run",),
     ),
     "slotlock_archive_resource": Operation(
         "slotlock_archive_resource",
@@ -363,7 +363,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/holds/{hold_id}",
         ("hold_id",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_list_holds": Operation(
         "slotlock_list_holds",
@@ -398,7 +398,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/reservations/{reservation_ref}",
         ("reservation_ref",),
-        ("revision",),
+        ("revision", "dry_run"),
     ),
     "slotlock_list_reservations": Operation(
         "slotlock_list_reservations",
@@ -433,7 +433,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/waitlist/{entry_id}",
         ("entry_id",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_record_coverage": Operation(
         "slotlock_record_coverage",
@@ -447,7 +447,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/resources/{resource_id}/coverage/{source}",
         ("resource_id", "source"),
-        (),
+        ("dry_run",),
     ),
     "slotlock_get_coverage": Operation(
         "slotlock_get_coverage",
@@ -482,7 +482,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/tenant/events/{event_id}",
         ("event_id",),
-        ("expected_revision", "expected_resource_id", "idempotency_key"),
+        ("expected_revision", "expected_resource_id", "idempotency_key", "dry_run"),
     ),
     "slotlock_export_tenant_event": Operation(
         "slotlock_export_tenant_event",
@@ -538,7 +538,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/webhooks/{webhook_id}",
         ("webhook_id",),
-        (),
+        ("dry_run",),
     ),
     "slotlock_enable_webhook": Operation(
         "slotlock_enable_webhook",
@@ -695,6 +695,7 @@ class Operations(Transport):
         labels: list[str] | None = None,
         attributes: dict[str, Any] | None = None,
         location: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create or update a resource.
 
@@ -708,6 +709,12 @@ class Operations(Transport):
         people see instead of the reference, a description, its kind (person, room, desk, space,
         vehicle, machine, equipment, service or other: a hint, never a rule), its capacity
         (informational), up to 20 labels to find it by, and attributes you want back.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"external_ref": external_ref}
         if timezone is not None:
@@ -728,6 +735,8 @@ class Operations(Transport):
             values["attributes"] = attributes
         if location is not None:
             values["location"] = location
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_create_resource", values)
 
     def get_free_busy(
@@ -849,6 +858,7 @@ class Operations(Transport):
         slots: list[dict[str, Any]],
         idempotency_key: str,
         ttl_seconds: int | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Hold candidate slots.
 
@@ -858,10 +868,18 @@ class Operations(Transport):
         unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
         once. A candidate refused for its time comes with alternatives (the earliest free times of
         its length). slotlock_confirm_slot books a held time.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"slots": slots, "idempotency_key": idempotency_key}
         if ttl_seconds is not None:
             values["ttl_seconds"] = ttl_seconds
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_hold_slots", values)
 
     def book_together(
@@ -873,6 +891,7 @@ class Operations(Transport):
         timezone: str,
         idempotency_key: str,
         title: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book resources together.
 
@@ -880,6 +899,12 @@ class Operations(Transport):
         with its projector. If any of them is taken, nothing is booked, and the refusal names that
         resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
         with the same idempotency_key answers the same events.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "resource_ids": resource_ids,
@@ -890,6 +915,8 @@ class Operations(Transport):
         }
         if title is not None:
             values["title"] = title
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_book_together", values)
 
     def book_pool(
@@ -901,6 +928,7 @@ class Operations(Transport):
         timezone: str,
         idempotency_key: str,
         title: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book from a pool.
 
@@ -910,6 +938,12 @@ class Operations(Transport):
         transaction, so a class sells out exactly at its number of members. The event names the
         member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
         member you may book. A retry with the same idempotency_key answers the same event.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "pool": pool,
@@ -920,6 +954,8 @@ class Operations(Transport):
         }
         if title is not None:
             values["title"] = title
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_book_pool", values)
 
     def get_pool_availability(self, *, pool: str, start: str, end: str) -> dict[str, Any]:
@@ -933,13 +969,21 @@ class Operations(Transport):
         values: dict[str, Any] = {"pool": pool, "start": start, "end": end}
         return self.call("slotlock_get_pool_availability", values)
 
-    def release_slots(self, hold_id: str) -> dict[str, Any]:
+    def release_slots(self, hold_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Release held slots.
 
         Release one of your holds, and the rest of its group, at once instead of letting them
         expire. `released` is false when it was already gone.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"hold_id": hold_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_release_slots", values)
 
     def confirm_slot(
@@ -951,6 +995,7 @@ class Operations(Transport):
         location: str | None = None,
         timezone: str | None = None,
         idempotency_key: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Confirm a held slot.
 
@@ -958,6 +1003,12 @@ class Operations(Transport):
         exactly, with the title and details you give, and the rest of its group released. 409
         hold_expired when the hold lapsed first; 404 hold_not_found when it was released, booked
         or is not yours. A retry answers the same event (replayed).
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"hold_id": hold_id}
         if title is not None:
@@ -970,6 +1021,8 @@ class Operations(Transport):
             values["timezone"] = timezone
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_confirm_slot", values)
 
     def list_events(
@@ -1011,6 +1064,7 @@ class Operations(Transport):
         reminders: list[dict[str, Any]] | None = None,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
         hold_id: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create resource event.
 
@@ -1020,6 +1074,12 @@ class Operations(Transport):
         A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
         a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
         idempotency_key answers the same event.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "resource_id": resource_id,
@@ -1050,6 +1110,8 @@ class Operations(Transport):
             values["recurrence_exceptions"] = recurrence_exceptions
         if hold_id is not None:
             values["hold_id"] = hold_id
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_create_event", values)
 
     def get_event(self, event_id: str) -> dict[str, Any]:
@@ -1082,6 +1144,7 @@ class Operations(Transport):
         recurrence_rule: str | None | Unset = UNSET,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
         expected_resource_id: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Update resource event.
 
@@ -1090,6 +1153,12 @@ class Operations(Transport):
         alternatives; a stale revision is 409 revision_conflict (read the event again). With
         expected_resource_id, the resource you read it on, an event since moved elsewhere is not
         found. To change only the time, slotlock_reschedule is simpler.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
@@ -1126,6 +1195,8 @@ class Operations(Transport):
             values["recurrence_exceptions"] = recurrence_exceptions
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_update_event", values)
 
     def delete_event(
@@ -1134,18 +1205,27 @@ class Operations(Transport):
         *,
         expected_revision: int,
         idempotency_key: str,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Delete resource event.
 
         Cancel one of your events at the revision you last read (expected_revision); a stale one
         is 409 revision_conflict. It cannot come back at that revision, so an old copy synced
         later does not restore it. slotlock_cancel does the same with fewer fields.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
             "expected_revision": expected_revision,
             "idempotency_key": idempotency_key,
         }
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_delete_event", values)
 
     def reschedule(
@@ -1157,6 +1237,7 @@ class Operations(Transport):
         ends_at: str,
         resource_id: str | None = None,
         idempotency_key: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Reschedule an event.
 
@@ -1164,6 +1245,12 @@ class Operations(Transport):
         revision you last read (expected_revision). A time already taken is 409 overlap with
         alternatives; a stale revision 409 revision_conflict. A retry answers the same move
         (replayed).
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
@@ -1175,6 +1262,8 @@ class Operations(Transport):
             values["resource_id"] = resource_id
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_reschedule", values)
 
     def cancel(
@@ -1183,16 +1272,25 @@ class Operations(Transport):
         *,
         expected_revision: int,
         idempotency_key: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Cancel an event.
 
         Cancel one of your events at the revision you last read (expected_revision); a stale one
         is 409 revision_conflict. Its time is free at once. A retry answers the same cancellation
         (replayed).
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"event_id": event_id, "expected_revision": expected_revision}
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_cancel", values)
 
     def get_resource(self, resource_id: str) -> dict[str, Any]:
@@ -1215,6 +1313,7 @@ class Operations(Transport):
         labels: list[str] | None = None,
         attributes: dict[str, Any] | None = None,
         location: str | None | Unset = UNSET,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Change a resource's profile.
 
@@ -1224,6 +1323,12 @@ class Operations(Transport):
         location_not_found. The feed's resource.updated names the fields that changed
         (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
         naming the field.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
         if not isinstance(name, Unset):
@@ -1240,9 +1345,11 @@ class Operations(Transport):
             values["attributes"] = attributes
         if not isinstance(location, Unset):
             values["location"] = location
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_update_resource", values)
 
-    def delete_resource(self, resource_id: str) -> dict[str, Any]:
+    def delete_resource(self, resource_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Delete a resource.
 
         Delete a resource with its history (past bookings, coverage, cancelled events), freeing
@@ -1250,8 +1357,16 @@ class Operations(Transport):
         booking on it has not ended, a hold on it is live, or a calendar event is on it: cancel or
         move those first. deleted is false when the tenant has no such resource, deleted already,
         say.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_delete_resource", values)
 
     def list_locations(self) -> dict[str, Any]:
@@ -1271,18 +1386,27 @@ class Operations(Transport):
         name: str,
         parent_ref: str | None | Unset = UNSET,
         timezone: str | None | Unset = UNSET,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create or update a location.
 
         Create the location with this reference, or change its name, and the parent and time zone
         given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep
         past 5 levels, location_cycle under itself, location_limit_reached past 1000.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"ref": ref, "name": name}
         if not isinstance(parent_ref, Unset):
             values["parent_ref"] = parent_ref
         if not isinstance(timezone, Unset):
             values["timezone"] = timezone
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_create_location", values)
 
     def update_location(
@@ -1292,11 +1416,18 @@ class Operations(Transport):
         name: str | None = None,
         parent_ref: str | None | Unset = UNSET,
         timezone: str | None | Unset = UNSET,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Change a location.
 
         Change a location's name, parent or time zone: the fields given. Refused as creating one
         is.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"location_ref": location_ref}
         if name is not None:
@@ -1305,15 +1436,25 @@ class Operations(Transport):
             values["parent_ref"] = parent_ref
         if not isinstance(timezone, Unset):
             values["timezone"] = timezone
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_update_location", values)
 
-    def delete_location(self, location_ref: str) -> dict[str, Any]:
+    def delete_location(self, location_ref: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Delete a location.
 
         Delete a location. Refused with 409 location_in_use while a resource is at it or a
         location is in it: move them first. deleted is false when the tenant has no such location.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"location_ref": location_ref}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_delete_location", values)
 
     def list_groups(self) -> dict[str, Any]:
@@ -1332,60 +1473,121 @@ class Operations(Transport):
         ref: str,
         name: str,
         description: str | None | Unset = UNSET,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create or update a group.
 
         Create the group with this reference, or change its name, and its description when given.
         409 group_limit_reached past 500.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"ref": ref, "name": name}
         if not isinstance(description, Unset):
             values["description"] = description
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_create_group", values)
 
-    def delete_group(self, group_ref: str) -> dict[str, Any]:
+    def delete_group(self, group_ref: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Delete a group.
 
         Delete a group; its resources stay as they are. deleted is false when the tenant has no
         such group.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"group_ref": group_ref}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_delete_group", values)
 
-    def add_group_member(self, group_ref: str, resource_id: str) -> dict[str, Any]:
+    def add_group_member(
+        self,
+        group_ref: str,
+        resource_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Put a resource in a group.
 
         Put one of the tenant's resources in a group. added is false when it was in it already.
         404 group_not_found or resource_not_found; 409 resource_group_limit_reached past 20 groups
         a resource.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"group_ref": group_ref, "resource_id": resource_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_add_group_member", values)
 
-    def remove_group_member(self, group_ref: str, resource_id: str) -> dict[str, Any]:
+    def remove_group_member(
+        self,
+        group_ref: str,
+        resource_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Take a resource out of a group.
 
         Take a resource out of a group. removed is false when it was not in it.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"group_ref": group_ref, "resource_id": resource_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_remove_group_member", values)
 
-    def archive_resource(self, resource_id: str) -> dict[str, Any]:
+    def archive_resource(self, resource_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Archive a resource.
 
         Take a resource out of use: no list shows it and it takes no new booking, hold or event
         (409 resource_archived), while what is on it stays and can still be cancelled or released.
         Archiving it again keeps the first time.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_archive_resource", values)
 
-    def restore_resource(self, resource_id: str) -> dict[str, Any]:
+    def restore_resource(self, resource_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Restore a resource.
 
         Put an archived resource back in use. Restoring one in use changes nothing.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_restore_resource", values)
 
     def list_busy(self, resource_id: str, *, start: str, end: str) -> dict[str, Any]:
@@ -1405,14 +1607,23 @@ class Operations(Transport):
         resource_id: str,
         *,
         rules: list[dict[str, Any]] | None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Set a resource's bookable hours.
 
         Give one resource its own weekly bookable hours. `null` makes it use the server's default;
         `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone:
         start_minutes after midnight, lasting duration_minutes.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_resource_availability", values)
 
     def export_resource_availability(self, resource_id: str) -> dict[str, Any]:
@@ -1425,7 +1636,13 @@ class Operations(Transport):
         values: dict[str, Any] = {"resource_id": resource_id}
         return self.call("slotlock_export_resource_availability", values)
 
-    def import_resource_availability(self, resource_id: str, *, icalendar: str) -> dict[str, Any]:
+    def import_resource_availability(
+        self,
+        resource_id: str,
+        *,
+        icalendar: str,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Import a resource's bookable hours from iCalendar.
 
         Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
@@ -1433,8 +1650,16 @@ class Operations(Transport):
         a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
         or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
         VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "icalendar": icalendar}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_import_resource_availability", values)
 
     def set_resource_booking_rules(
@@ -1442,6 +1667,7 @@ class Operations(Transport):
         resource_id: str,
         *,
         rules: dict[str, Any] | None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Set a resource's booking rules.
 
@@ -1452,11 +1678,25 @@ class Operations(Transport):
         its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
         slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
         refused with the rule they break; searches offer only what they allow.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_resource_booking_rules", values)
 
-    def set_resource_pool(self, resource_id: str, *, pool: str | None) -> dict[str, Any]:
+    def set_resource_pool(
+        self,
+        resource_id: str,
+        *,
+        pool: str | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Set a resource's pool.
 
         Make a resource a member of a pool, a class of interchangeable resources such as a vehicle
@@ -1464,11 +1704,25 @@ class Operations(Transport):
         slotlock_book_pool, which takes the first member free; the class's capacity is its number
         of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.', '_'
         and '-'.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "pool": pool}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_resource_pool", values)
 
-    def set_resource_parent(self, resource_id: str, *, parent_id: str | None) -> dict[str, Any]:
+    def set_resource_parent(
+        self,
+        resource_id: str,
+        *,
+        parent_id: str | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Make a resource part of another.
 
         Make a resource a part of a composite (a room of a hall, a half of a court), or no part
@@ -1476,8 +1730,16 @@ class Operations(Transport):
         its parts, and two parts never conflict with each other; each part's free/busy shows the
         whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts;
         refused while either side has a booking or live hold still to come (`composite_busy`).
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "parent_id": parent_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_resource_parent", values)
 
     def list_pools(self) -> dict[str, Any]:
@@ -1489,15 +1751,29 @@ class Operations(Transport):
         values: dict[str, Any] = {}
         return self.call("slotlock_list_pools", values)
 
-    def set_pool_order(self, pool: str, *, order: str) -> dict[str, Any]:
+    def set_pool_order(
+        self,
+        pool: str,
+        *,
+        order: str,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Set a pool's order.
 
         The order slotlock_book_pool tries a pool's members in: stable (by id, the default),
         least_booked (fewest bookings made on each in the last 30 days first, to share them out)
         or round_robin (from the member after the one booked last). At most 1,000 pools have one:
         one more is 409 pool_order_limit_reached.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"pool": pool, "order": order}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_pool_order", values)
 
     def get_booking_rule_defaults(self) -> dict[str, Any]:
@@ -1510,25 +1786,52 @@ class Operations(Transport):
         values: dict[str, Any] = {}
         return self.call("slotlock_get_booking_rule_defaults", values)
 
-    def set_tenant_booking_rules(self, *, rules: dict[str, Any] | None) -> dict[str, Any]:
+    def set_tenant_booking_rules(
+        self,
+        *,
+        rules: dict[str, Any] | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Set default booking rules.
 
         Set the booking rules every resource of the tenant has unless its pool or its own rules
         set the same rule, from now on; `null` clears them. They take any resource rule but
         check_in_minutes, which only a resource sets.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_tenant_booking_rules", values)
 
-    def set_pool_booking_rules(self, pool: str, *, rules: dict[str, Any] | None) -> dict[str, Any]:
+    def set_pool_booking_rules(
+        self,
+        pool: str,
+        *,
+        rules: dict[str, Any] | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Set a pool's booking rules.
 
         Set the booking rules every member of one pool has unless its own rules set the same rule,
         over the tenant's defaults, from now on; `null` clears them. They take any resource rule
         but check_in_minutes. At most 1,000 pools have them: one more is 409
         pool_rules_limit_reached.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"pool": pool, "rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_pool_booking_rules", values)
 
     def get_resource_history(
@@ -1591,14 +1894,27 @@ class Operations(Transport):
             values["before"] = before
         return self.call("slotlock_get_tenant_event_history", values)
 
-    def set_tenant_availability(self, *, rules: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def set_tenant_availability(
+        self,
+        *,
+        rules: list[dict[str, Any]] | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Set every resource's bookable hours.
 
         Set the weekly bookable hours of every resource the tenant has, as
         slotlock_set_resource_availability does for one. `null` makes them all use the server's
         default. Returns how many resources changed.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_set_tenant_availability", values)
 
     def acquire_hold(
@@ -1611,6 +1927,7 @@ class Operations(Transport):
         source: str | None = None,
         idempotency_key: str | None = None,
         buffer_after_minutes: int | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Hold time.
 
@@ -1626,6 +1943,10 @@ class Operations(Transport):
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
             same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "resource_id": resource_id,
@@ -1639,6 +1960,8 @@ class Operations(Transport):
             values["idempotency_key"] = idempotency_key
         if buffer_after_minutes is not None:
             values["buffer_after_minutes"] = buffer_after_minutes
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_acquire_hold", values)
 
     def get_hold(self, hold_id: str) -> dict[str, Any]:
@@ -1650,13 +1973,21 @@ class Operations(Transport):
         values: dict[str, Any] = {"hold_id": hold_id}
         return self.call("slotlock_get_hold", values)
 
-    def release_hold(self, hold_id: str) -> dict[str, Any]:
+    def release_hold(self, hold_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Release a hold.
 
         Free a held window. released is false when the hold was already gone: expired, confirmed
         or released.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"hold_id": hold_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_release_hold", values)
 
     def list_holds(
@@ -1678,7 +2009,7 @@ class Operations(Transport):
             values["cursor"] = cursor
         return self.call("slotlock_list_holds", values)
 
-    def confirm_hold(self, hold_id: str) -> dict[str, Any]:
+    def confirm_hold(self, hold_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Confirm a hold.
 
         Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at
@@ -1686,8 +2017,16 @@ class Operations(Transport):
         /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same
         reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
         unknown one, 404 hold_not_found.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"hold_id": hold_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_confirm_hold", values)
 
     def get_reservation(self, reservation_ref: str) -> dict[str, Any]:
@@ -1710,6 +2049,7 @@ class Operations(Transport):
         revision: int,
         buffer_after_minutes: int | None = None,
         source: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book or move a reservation.
 
@@ -1717,6 +2057,12 @@ class Operations(Transport):
         current one plus 1). Sending the same reservation at its current revision again changes
         nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
         reservation where it was. buffer_after_minutes keeps the time after it busy as well.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "reservation_ref": reservation_ref,
@@ -1729,16 +2075,32 @@ class Operations(Transport):
             values["buffer_after_minutes"] = buffer_after_minutes
         if source is not None:
             values["source"] = source
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_put_reservation", values)
 
-    def cancel_reservation(self, reservation_ref: str, *, revision: int) -> dict[str, Any]:
+    def cancel_reservation(
+        self,
+        reservation_ref: str,
+        *,
+        revision: int,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Cancel a reservation.
 
         Cancel the reservation with this reference at the next revision (the current one plus 1).
         Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the
         cancel answers cancelled: false. Use a new reference for a new reservation.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"reservation_ref": reservation_ref, "revision": revision}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_cancel_reservation", values)
 
     def list_reservations(
@@ -1764,7 +2126,12 @@ class Operations(Transport):
             values["cursor"] = cursor
         return self.call("slotlock_list_reservations", values)
 
-    def check_in_reservation(self, reservation_ref: str) -> dict[str, Any]:
+    def check_in_reservation(
+        self,
+        reservation_ref: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Check in a booking.
 
         Claim a booking by its reference: the customer has arrived or picked up. On a resource
@@ -1773,8 +2140,16 @@ class Operations(Transport):
         waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
         moving the booking to another start clears it. Checking in again keeps the first time; a
         booking that has ended answers 409 reservation_ended.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"reservation_ref": reservation_ref}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_check_in_reservation", values)
 
     def list_waitlist(
@@ -1811,6 +2186,7 @@ class Operations(Transport):
         pool: str | None = None,
         offer_ttl_seconds: int | None = None,
         idempotency_key: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Join the waitlist.
 
@@ -1829,6 +2205,10 @@ class Operations(Transport):
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
             same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"start": start, "end": end, "holder_ref": holder_ref}
         if resource_id is not None:
@@ -1839,16 +2219,26 @@ class Operations(Transport):
             values["offer_ttl_seconds"] = offer_ttl_seconds
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_join_waitlist", values)
 
-    def leave_waitlist(self, entry_id: str) -> dict[str, Any]:
+    def leave_waitlist(self, entry_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Leave the waitlist.
 
         Stop waiting. A hold offered and not yet confirmed is released with the entry, and the
         time offered to the next who waits; one confirmed is a booking and stays. left is false
         when there was no such entry.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"entry_id": entry_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_leave_waitlist", values)
 
     def record_coverage(
@@ -1859,6 +2249,7 @@ class Operations(Transport):
         start: str,
         end: str,
         revision: int,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Record calendar coverage.
 
@@ -1866,6 +2257,12 @@ class Operations(Transport):
         resource, at that source's revision. Free/busy calls time unproven, not free, until every
         source a resource requires covers it. Revisions only go forward; repeating one changes
         nothing.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "resource_id": resource_id,
@@ -1874,16 +2271,32 @@ class Operations(Transport):
             "end": end,
             "revision": revision,
         }
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_record_coverage", values)
 
-    def delete_coverage(self, resource_id: str, source: str) -> dict[str, Any]:
+    def delete_coverage(
+        self,
+        resource_id: str,
+        source: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
         """Retire a source.
 
         Forget a source's coverage of the resource, for a calendar sync that is disconnected or
         replaced: free/busy and a resource whose booking rules require certainty stop waiting on
         it. 404 coverage_not_found for a source with no coverage of the resource.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "source": source}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_delete_coverage", values)
 
     def get_coverage(self, resource_id: str) -> dict[str, Any]:
@@ -1905,14 +2318,23 @@ class Operations(Transport):
         source: str,
         *,
         error: str,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Record a failed read of a source.
 
         Record that reading an external calendar failed (it answered 500, a token expired): kept
         as the source's last error, shown by slotlock_get_coverage, while its coverage stays as it
         was. 404 coverage_not_found for a source that has never recorded coverage of the resource.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"resource_id": resource_id, "source": source, "error": error}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_record_coverage_failure", values)
 
     def list_tenant_events(
@@ -1953,6 +2375,7 @@ class Operations(Transport):
         expected_revision: int,
         idempotency_key: str,
         expected_resource_id: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Cancel any event of the tenant.
 
@@ -1967,6 +2390,10 @@ class Operations(Transport):
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
             same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {
             "event_id": event_id,
@@ -1975,6 +2402,8 @@ class Operations(Transport):
         }
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_cancel_tenant_event", values)
 
     def export_tenant_event(self, event_id: str) -> dict[str, Any]:
@@ -2068,6 +2497,7 @@ class Operations(Transport):
         locations: list[str] | None = None,
         groups: list[str] | None = None,
         idempotency_key: str | None = None,
+        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Add a webhook.
 
@@ -2088,6 +2518,10 @@ class Operations(Transport):
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
             same key with the same request answers what the first did; with another request, 422
             idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"url": url}
         if event_types is not None:
@@ -2102,25 +2536,43 @@ class Operations(Transport):
             values["groups"] = groups
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_create_webhook", values)
 
-    def delete_webhook(self, webhook_id: str) -> dict[str, Any]:
+    def delete_webhook(self, webhook_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Delete a webhook.
 
         Stop sending to a webhook. deleted is false when the tenant has no such webhook.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"webhook_id": webhook_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_delete_webhook", values)
 
-    def enable_webhook(self, webhook_id: str) -> dict[str, Any]:
+    def enable_webhook(self, webhook_id: str, *, dry_run: bool | None = None) -> dict[str, Any]:
         """Enable a webhook.
 
         Send to a disabled webhook again, from the first change it did not accept. 404
         webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
         missed is older than the 30 days the feed keeps, since it would skip those unseen: delete
         it, add it again, and read what it missed from slotlock_list_changes.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"webhook_id": webhook_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
         return self.call("slotlock_enable_webhook", values)
 
     def get_usage(self, *, from_: str | None = None, to: str | None = None) -> dict[str, Any]:

@@ -36,6 +36,7 @@ import {
   type SlotlockApplicationOperationDefinition,
   isSlotlockApplicationOperation,
   slotlockApplicationOperation,
+  slotlockApplicationDryRunnable,
 } from './application-api.js';
 import {
   type SlotlockAgentChangeSource,
@@ -779,6 +780,12 @@ export interface SlotlockAgentInvocationContext {
    * to record with its changes (withTenant's `origin`).
    */
   origin?: SlotlockChangeOrigin;
+  /**
+   * A dry run (RFC 0004 A3): make the write with every check, the database's constraints
+   * included, then roll it back, and answer what it would have done. A backend that cannot undo
+   * all it would write refuses with `dry_run_not_supported`.
+   */
+  dryRun?: boolean;
 }
 
 /** A bounded domain failure a backend may deliberately expose through a protocol tool result. */
@@ -1073,6 +1080,8 @@ export interface SlotlockAgentServerOptions {
   consumeRateLimit?: (args: {
     principal: SlotlockAgentPrincipal;
     operation: SlotlockAgentOperation | 'protocol';
+    /** A dry run of a write: charged as a read (RFC 0004 A3). */
+    dryRun?: boolean;
   }) => Promise<boolean>;
   allowInsecureLocalhost?: boolean;
   maxRequestBytes?: number;
@@ -1185,6 +1194,8 @@ export interface SlotlockAgentOperationDispatchOptions {
   consumeRateLimit?: (args: {
     principal: SlotlockAgentPrincipal;
     operation: SlotlockAgentOperation;
+    /** A dry run of a write: charged as a read (RFC 0004 A3). */
+    dryRun?: boolean;
   }) => Promise<boolean>;
   /**
    * A gate after authorization and the rate limit (so every round of a guarded write is charged):
@@ -1959,8 +1970,11 @@ export function slotlockApplicationOperations() {
     description: operation.description,
     method: operation.method,
     path: operation.path,
-    inputSchema: toJsonSchema(operation.input, 'input'),
-    outputSchema: toJsonSchema(operation.output, 'output'),
+    ...slotlockDryRunSchemas(
+      slotlockApplicationDryRunnable(operation),
+      toJsonSchema(operation.input, 'input'),
+      toJsonSchema(operation.output, 'output'),
+    ),
     ...(operation.scope ? { scope: operation.scope } : {}),
   }));
 }
@@ -1984,8 +1998,11 @@ export function slotlockAgentTools() {
     name: operation.name,
     title: operation.title,
     description: operation.description,
-    inputSchema: toJsonSchema(operation.input, 'input'),
-    outputSchema: toJsonSchema(operation.output, 'output'),
+    ...slotlockDryRunSchemas(
+      OPERATION_SCOPES[operation.name] === 'write',
+      toJsonSchema(operation.input, 'input'),
+      toJsonSchema(operation.output, 'output'),
+    ),
     annotations: {
       title: operation.title,
       readOnlyHint: operation.risk.readOnly,
@@ -2005,6 +2022,45 @@ export function slotlockAgentTools() {
           : { visibility: ['model'] as const },
     },
   }));
+}
+
+/** What `dry_run` asks for, in every write's arguments. */
+const DRY_RUN_DESCRIPTION =
+  'Check the write without making it: it runs with every check, the database\'s included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read.';
+
+/**
+ * A write's input and output schemas with `dry_run` (RFC 0004 A3): an optional flag in, and
+ * `dry_run: true` on a dry run's answer. Other operations' are as they are.
+ */
+export function slotlockDryRunSchemas(
+  dryRunnable: boolean,
+  inputSchema: Readonly<Record<string, unknown>>,
+  outputSchema: Readonly<Record<string, unknown>>,
+): { inputSchema: Readonly<Record<string, unknown>>; outputSchema: Readonly<Record<string, unknown>> } {
+  if (!dryRunnable) return { inputSchema, outputSchema };
+  const add = (schema: Readonly<Record<string, unknown>>, field: Record<string, unknown>) => ({
+    ...schema,
+    properties: { ...((schema.properties as Record<string, unknown> | undefined) ?? {}), dry_run: field },
+  });
+  return {
+    inputSchema: add(inputSchema, { type: 'boolean', description: DRY_RUN_DESCRIPTION }),
+    outputSchema: add(outputSchema, {
+      type: 'boolean',
+      const: true,
+      description: 'Present on a dry run only: nothing was stored.',
+    }),
+  };
+}
+
+/**
+ * The `dry_run` flag of a call's arguments, taken out before they are validated: true, false
+ * (absent or false), or null when it is not a boolean or the operation cannot dry-run.
+ */
+function takeDryRun(input: unknown, dryRunnable: boolean): { dryRun: boolean; input: unknown } | null {
+  if (!isRecord(input) || !Object.hasOwn(input, 'dry_run')) return { dryRun: false, input };
+  const { dry_run: flag, ...rest } = input;
+  if (typeof flag !== 'boolean' || (flag && !dryRunnable)) return null;
+  return { dryRun: flag, input: rest };
 }
 
 /** The resource and interval a refused write asked for, as an overlap's problem details name them. */
@@ -2307,7 +2363,11 @@ export async function invokeSlotlockAgentOperation(args: {
     if (args.input != null && !isRecord(args.input)) {
       return { ok: false, status: 400, code: 'invalid_arguments' };
     }
-    const parsed = operation.input.safeParse(args.input ?? {});
+    // A write may be a dry run; a read has nothing to undo.
+    const taken = takeDryRun(args.input, OPERATION_SCOPES[operation.name] === 'write');
+    if (taken === null) return { ok: false, status: 400, code: 'invalid_arguments' };
+    const dryRun = taken.dryRun;
+    const parsed = operation.input.safeParse(taken.input ?? {});
     if (!parsed.success) return invalidArguments(parsed.error);
     if (
       !(await args.options.authorize({
@@ -2322,11 +2382,16 @@ export async function invokeSlotlockAgentOperation(args: {
     // call that could not run is never put to a person.
     if (
       args.options.consumeRateLimit &&
-      !(await args.options.consumeRateLimit({ principal, operation: operation.name }))
+      !(await args.options.consumeRateLimit({
+        principal,
+        operation: operation.name,
+        ...(dryRun ? { dryRun: true } : {}),
+      }))
     ) {
       return { ok: false, status: 429, code: 'rate_limited' };
     }
-    if (args.options.confirm) {
+    // Nothing a dry run does stays, so no person is asked to confirm it.
+    if (args.options.confirm && !dryRun) {
       const halt = await args.options.confirm({
         principal,
         operation: operation.name,
@@ -2351,6 +2416,7 @@ export async function invokeSlotlockAgentOperation(args: {
     };
     if (args.trace) context.trace = args.trace;
     if (args.origin) context.origin = args.origin;
+    if (dryRun) context.dryRun = true;
     reportUsage(args.options.onUsage, {
       principal,
       operation: operation.name,
@@ -2412,7 +2478,7 @@ export async function invokeSlotlockAgentOperation(args: {
       );
       return { ok: false, status: 500, code: 'invalid_backend_result' };
     }
-    return { ok: true, data };
+    return { ok: true, data: dryRun ? { ...data, dry_run: true } : data };
   } catch (error) {
     if (error instanceof SlotlockAgentOperationError) {
       const alternatives = recover ? await recover(error.code) : undefined;
@@ -4741,7 +4807,14 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
       ) {
         return { ok: false, status: 403, code: 'forbidden' };
       }
-      const parsed = definition.input.safeParse(given);
+      // A write that can be undone may be a dry run; any other operation refuses one.
+      if (Object.hasOwn(given, 'dry_run') && given.dry_run === true && !slotlockApplicationDryRunnable(definition)) {
+        return { ok: false, status: 400, code: 'dry_run_not_supported' };
+      }
+      const taken = takeDryRun(given, slotlockApplicationDryRunnable(definition));
+      if (taken === null) return { ok: false, status: 400, code: 'invalid_arguments' };
+      const dryRun = taken.dryRun;
+      const parsed = definition.input.safeParse(taken.input);
       if (!parsed.success) return invalidArguments(parsed.error);
       if (!(await served.authorize({ principal, operation: definition.name, input: parsed.data }))) {
         return { ok: false, status: 403, code: 'forbidden' };
@@ -4753,6 +4826,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         origin: 'application',
       };
       if (trace) context.trace = trace;
+      if (dryRun) context.dryRun = true;
       reportUsage(options.onUsage, { principal, operation: definition.name, origin: 'application' });
       const data = await served.backend[definition.invoke].call(served.backend, context, parsed.data);
       if (!definition.output.safeParse(data).success) {
@@ -4768,7 +4842,7 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         );
         return { ok: false, status: 500, code: 'invalid_backend_result' };
       }
-      return { ok: true, data };
+      return { ok: true, data: dryRun ? { ...data, dry_run: true } : data };
     } catch (error) {
       if (error instanceof SlotlockAgentOperationError) {
         return {
@@ -4831,9 +4905,15 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
         'WWW-Authenticate': 'Bearer realm="slotlock"',
       });
     }
+    // A dry run named in the query string is charged as a read: the body is read only after.
+    const dryRunQuery = new URL(request.url).searchParams.get('dry_run') === 'true';
     if (
       options.consumeRateLimit &&
-      !(await options.consumeRateLimit({ principal, operation: 'protocol' }))
+      !(await options.consumeRateLimit({
+        principal,
+        operation: 'protocol',
+        ...(dryRunQuery ? { dryRun: true } : {}),
+      }))
     ) {
       return refuse(429, 'rate_limited');
     }

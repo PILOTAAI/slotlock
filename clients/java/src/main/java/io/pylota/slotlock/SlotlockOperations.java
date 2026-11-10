@@ -21,27 +21,27 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
           Map.entry("slotlock_get_pool_availability", new Operation("GET", "/v1/pool-availability", List.of(), List.of("pool", "start", "end"))),
-          Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of())),
+          Map.entry("slotlock_release_slots", new Operation("DELETE", "/v1/slot-holds/{hold_id}", List.of("hold_id"), List.of("dry_run"))),
           Map.entry("slotlock_confirm_slot", new Operation("POST", "/v1/slot-holds/{hold_id}/confirm", List.of("hold_id"), List.of())),
           Map.entry("slotlock_list_events", new Operation("GET", "/v1/events", List.of(), List.of("resource_ids", "start", "end", "cursor", "limit"))),
           Map.entry("slotlock_create_event", new Operation("POST", "/v1/events", List.of(), List.of())),
           Map.entry("slotlock_get_event", new Operation("GET", "/v1/events/{event_id}", List.of("event_id"), List.of())),
           Map.entry("slotlock_update_event", new Operation("PATCH", "/v1/events/{event_id}", List.of("event_id"), List.of())),
-          Map.entry("slotlock_delete_event", new Operation("DELETE", "/v1/events/{event_id}", List.of("event_id"), List.of("expected_revision", "idempotency_key"))),
+          Map.entry("slotlock_delete_event", new Operation("DELETE", "/v1/events/{event_id}", List.of("event_id"), List.of("expected_revision", "idempotency_key", "dry_run"))),
           Map.entry("slotlock_reschedule", new Operation("POST", "/v1/events/{event_id}/reschedule", List.of("event_id"), List.of())),
           Map.entry("slotlock_cancel", new Operation("POST", "/v1/events/{event_id}/cancel", List.of("event_id"), List.of())),
           Map.entry("slotlock_get_resource", new Operation("GET", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_update_resource", new Operation("PATCH", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
-          Map.entry("slotlock_delete_resource", new Operation("DELETE", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_delete_resource", new Operation("DELETE", "/v1/resources/{resource_id}", List.of("resource_id"), List.of("dry_run"))),
           Map.entry("slotlock_list_locations", new Operation("GET", "/v1/locations", List.of(), List.of())),
           Map.entry("slotlock_create_location", new Operation("POST", "/v1/locations", List.of(), List.of())),
           Map.entry("slotlock_update_location", new Operation("PATCH", "/v1/locations/{location_ref}", List.of("location_ref"), List.of())),
-          Map.entry("slotlock_delete_location", new Operation("DELETE", "/v1/locations/{location_ref}", List.of("location_ref"), List.of())),
+          Map.entry("slotlock_delete_location", new Operation("DELETE", "/v1/locations/{location_ref}", List.of("location_ref"), List.of("dry_run"))),
           Map.entry("slotlock_list_groups", new Operation("GET", "/v1/groups", List.of(), List.of())),
           Map.entry("slotlock_create_group", new Operation("POST", "/v1/groups", List.of(), List.of())),
-          Map.entry("slotlock_delete_group", new Operation("DELETE", "/v1/groups/{group_ref}", List.of("group_ref"), List.of())),
+          Map.entry("slotlock_delete_group", new Operation("DELETE", "/v1/groups/{group_ref}", List.of("group_ref"), List.of("dry_run"))),
           Map.entry("slotlock_add_group_member", new Operation("PUT", "/v1/groups/{group_ref}/members/{resource_id}", List.of("group_ref", "resource_id"), List.of())),
-          Map.entry("slotlock_remove_group_member", new Operation("DELETE", "/v1/groups/{group_ref}/members/{resource_id}", List.of("group_ref", "resource_id"), List.of())),
+          Map.entry("slotlock_remove_group_member", new Operation("DELETE", "/v1/groups/{group_ref}/members/{resource_id}", List.of("group_ref", "resource_id"), List.of("dry_run"))),
           Map.entry("slotlock_archive_resource", new Operation("POST", "/v1/resources/{resource_id}/archive", List.of("resource_id"), List.of())),
           Map.entry("slotlock_restore_resource", new Operation("POST", "/v1/resources/{resource_id}/restore", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_busy", new Operation("GET", "/v1/resources/{resource_id}/busy", List.of("resource_id"), List.of("start", "end"))),
@@ -62,24 +62,24 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_set_tenant_availability", new Operation("PUT", "/v1/availability", List.of(), List.of())),
           Map.entry("slotlock_acquire_hold", new Operation("POST", "/v1/holds", List.of(), List.of())),
           Map.entry("slotlock_get_hold", new Operation("GET", "/v1/holds/{hold_id}", List.of("hold_id"), List.of())),
-          Map.entry("slotlock_release_hold", new Operation("DELETE", "/v1/holds/{hold_id}", List.of("hold_id"), List.of())),
+          Map.entry("slotlock_release_hold", new Operation("DELETE", "/v1/holds/{hold_id}", List.of("hold_id"), List.of("dry_run"))),
           Map.entry("slotlock_list_holds", new Operation("GET", "/v1/resources/{resource_id}/holds", List.of("resource_id"), List.of("limit", "cursor"))),
           Map.entry("slotlock_confirm_hold", new Operation("POST", "/v1/holds/{hold_id}/confirm", List.of("hold_id"), List.of())),
           Map.entry("slotlock_get_reservation", new Operation("GET", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_put_reservation", new Operation("PUT", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
-          Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision"))),
+          Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision", "dry_run"))),
           Map.entry("slotlock_list_reservations", new Operation("GET", "/v1/resources/{resource_id}/reservations", List.of("resource_id"), List.of("start", "end", "limit", "cursor"))),
           Map.entry("slotlock_check_in_reservation", new Operation("POST", "/v1/reservations/{reservation_ref}/check-in", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_list_waitlist", new Operation("GET", "/v1/waitlist", List.of(), List.of("resource_id", "pool", "holder_ref", "limit"))),
           Map.entry("slotlock_join_waitlist", new Operation("POST", "/v1/waitlist", List.of(), List.of())),
-          Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of())),
+          Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of("dry_run"))),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
-          Map.entry("slotlock_delete_coverage", new Operation("DELETE", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
+          Map.entry("slotlock_delete_coverage", new Operation("DELETE", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of("dry_run"))),
           Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
           Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
           Map.entry("slotlock_get_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of())),
-          Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key"))),
+          Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key", "dry_run"))),
           Map.entry("slotlock_export_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}/jscalendar", List.of("event_id"), List.of())),
           Map.entry("slotlock_get_tenant", new Operation("GET", "/v1/tenant", List.of(), List.of())),
           Map.entry("slotlock_erase_tenant", new Operation("POST", "/v1/tenant/erase", List.of(), List.of())),
@@ -87,7 +87,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_list_changes", new Operation("GET", "/v1/changes", List.of(), List.of("cursor", "limit"))),
           Map.entry("slotlock_list_webhooks", new Operation("GET", "/v1/webhooks", List.of(), List.of())),
           Map.entry("slotlock_create_webhook", new Operation("POST", "/v1/webhooks", List.of(), List.of())),
-          Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of())),
+          Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of("dry_run"))),
           Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())),
           Map.entry("slotlock_get_usage", new Operation("GET", "/v1/usage", List.of(), List.of("from", "to"))),
           Map.entry("slotlock_partner_get_account", new Operation("GET", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
@@ -180,14 +180,15 @@ public abstract class SlotlockOperations {
    * @param optional the optional arguments, or null: {@code timezone} (string), {@code
    * visibility} (string), {@code name} (string, null clears it), {@code description} (string,
    * null clears it), {@code kind} (string), {@code capacity} (integer, null clears it), {@code
-   * labels} (list of string), {@code attributes} (object), {@code location} (string)
+   * labels} (list of string), {@code attributes} (object), {@code location} (string), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> createResource(String externalRef, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("external_ref", externalRef);
-    putOptional(values, optional, Set.of("timezone", "visibility", "name", "description", "kind", "capacity", "labels", "attributes", "location"), "slotlock_create_resource");
+    putOptional(values, optional, Set.of("timezone", "visibility", "name", "description", "kind", "capacity", "labels", "attributes", "location", "dry_run"), "slotlock_create_resource");
     return call("slotlock_create_resource", values);
   }
 
@@ -445,7 +446,8 @@ public abstract class SlotlockOperations {
    *
    * @param slots {@code slots}, list of object
    * @param idempotencyKey {@code idempotency_key}, string
-   * @param optional the optional arguments, or null: {@code ttl_seconds} (integer)
+   * @param optional the optional arguments, or null: {@code ttl_seconds} (integer), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -453,7 +455,7 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("slots", slots);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("ttl_seconds"), "slotlock_hold_slots");
+    putOptional(values, optional, Set.of("ttl_seconds", "dry_run"), "slotlock_hold_slots");
     return call("slotlock_hold_slots", values);
   }
 
@@ -485,7 +487,8 @@ public abstract class SlotlockOperations {
    * @param endsAt {@code ends_at}, string
    * @param timezone {@code timezone}, string
    * @param idempotencyKey {@code idempotency_key}, string
-   * @param optional the optional arguments, or null: {@code title} (string)
+   * @param optional the optional arguments, or null: {@code title} (string), {@code dry_run}
+   * (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -496,7 +499,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title"), "slotlock_book_together");
+    putOptional(values, optional, Set.of("title", "dry_run"), "slotlock_book_together");
     return call("slotlock_book_together", values);
   }
 
@@ -531,7 +534,8 @@ public abstract class SlotlockOperations {
    * @param endsAt {@code ends_at}, string
    * @param timezone {@code timezone}, string
    * @param idempotencyKey {@code idempotency_key}, string
-   * @param optional the optional arguments, or null: {@code title} (string)
+   * @param optional the optional arguments, or null: {@code title} (string), {@code dry_run}
+   * (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -542,7 +546,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title"), "slotlock_book_pool");
+    putOptional(values, optional, Set.of("title", "dry_run"), "slotlock_book_pool");
     return call("slotlock_book_pool", values);
   }
 
@@ -591,13 +595,27 @@ public abstract class SlotlockOperations {
    * letting them expire. `released` is false when it was already gone.
    *
    * @param holdId {@code hold_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> releaseSlots(String holdId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("hold_id", holdId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_release_slots");
+    return call("slotlock_release_slots", values);
+  }
+
+  /**
+   * Release held slots. Release one of your holds, and the rest of its group, at once instead of
+   * letting them expire. `released` is false when it was already gone.
+   *
+   * @param holdId {@code hold_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> releaseSlots(String holdId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("hold_id", holdId);
-    return call("slotlock_release_slots", values);
+    return releaseSlots(holdId, null);
   }
 
   /**
@@ -609,14 +627,14 @@ public abstract class SlotlockOperations {
    * @param holdId {@code hold_id}, string
    * @param optional the optional arguments, or null: {@code title} (string), {@code description}
    * (string), {@code location} (string), {@code timezone} (string), {@code idempotency_key}
-   * (string)
+   * (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> confirmSlot(String holdId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("hold_id", holdId);
-    putOptional(values, optional, Set.of("title", "description", "location", "timezone", "idempotency_key"), "slotlock_confirm_slot");
+    putOptional(values, optional, Set.of("title", "description", "location", "timezone", "idempotency_key", "dry_run"), "slotlock_confirm_slot");
     return call("slotlock_confirm_slot", values);
   }
 
@@ -684,7 +702,7 @@ public abstract class SlotlockOperations {
    * (string), {@code location} (string), {@code organizer} (object), {@code transparency}
    * (string), {@code status} (string), {@code recurrence_rule} (string), {@code attendees} (list
    * of object), {@code reminders} (list of object), {@code recurrence_exceptions} (list of
-   * object), {@code hold_id} (string)
+   * object), {@code hold_id} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -695,7 +713,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id"), "slotlock_create_event");
+    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id", "dry_run"), "slotlock_create_event");
     return call("slotlock_create_event", values);
   }
 
@@ -749,7 +767,7 @@ public abstract class SlotlockOperations {
    * (string, null clears it), {@code organizer} (object, null clears it), {@code attendees} (list
    * of object), {@code reminders} (list of object), {@code transparency} (string), {@code status}
    * (string), {@code recurrence_rule} (string, null clears it), {@code recurrence_exceptions}
-   * (list of object), {@code expected_resource_id} (string)
+   * (list of object), {@code expected_resource_id} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -758,7 +776,7 @@ public abstract class SlotlockOperations {
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("resource_id", "starts_at", "ends_at", "timezone", "title", "description", "location", "organizer", "attendees", "reminders", "transparency", "status", "recurrence_rule", "recurrence_exceptions", "expected_resource_id"), "slotlock_update_event");
+    putOptional(values, optional, Set.of("resource_id", "starts_at", "ends_at", "timezone", "title", "description", "location", "organizer", "attendees", "reminders", "transparency", "status", "recurrence_rule", "recurrence_exceptions", "expected_resource_id", "dry_run"), "slotlock_update_event");
     return call("slotlock_update_event", values);
   }
 
@@ -788,15 +806,33 @@ public abstract class SlotlockOperations {
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
    * @param idempotencyKey {@code idempotency_key}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> deleteEvent(String eventId, long expectedRevision, String idempotencyKey) {
+  public Map<String, Object> deleteEvent(String eventId, long expectedRevision, String idempotencyKey, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_event");
     return call("slotlock_delete_event", values);
+  }
+
+  /**
+   * Delete resource event. Cancel one of your events at the revision you last read
+   * (expected_revision); a stale one is 409 revision_conflict. It cannot come back at that
+   * revision, so an old copy synced later does not restore it. slotlock_cancel does the same with
+   * fewer fields.
+   *
+   * @param eventId {@code event_id}, string
+   * @param expectedRevision {@code expected_revision}, integer
+   * @param idempotencyKey {@code idempotency_key}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteEvent(String eventId, long expectedRevision, String idempotencyKey) {
+    return deleteEvent(eventId, expectedRevision, idempotencyKey, null);
   }
 
   /**
@@ -810,7 +846,7 @@ public abstract class SlotlockOperations {
    * @param startsAt {@code starts_at}, string
    * @param endsAt {@code ends_at}, string
    * @param optional the optional arguments, or null: {@code resource_id} (string), {@code
-   * idempotency_key} (string)
+   * idempotency_key} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -820,7 +856,7 @@ public abstract class SlotlockOperations {
     values.put("expected_revision", expectedRevision);
     values.put("starts_at", startsAt);
     values.put("ends_at", endsAt);
-    putOptional(values, optional, Set.of("resource_id", "idempotency_key"), "slotlock_reschedule");
+    putOptional(values, optional, Set.of("resource_id", "idempotency_key", "dry_run"), "slotlock_reschedule");
     return call("slotlock_reschedule", values);
   }
 
@@ -848,7 +884,8 @@ public abstract class SlotlockOperations {
    *
    * @param eventId {@code event_id}, string
    * @param expectedRevision {@code expected_revision}, integer
-   * @param optional the optional arguments, or null: {@code idempotency_key} (string)
+   * @param optional the optional arguments, or null: {@code idempotency_key} (string), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -856,7 +893,7 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
-    putOptional(values, optional, Set.of("idempotency_key"), "slotlock_cancel");
+    putOptional(values, optional, Set.of("idempotency_key", "dry_run"), "slotlock_cancel");
     return call("slotlock_cancel", values);
   }
 
@@ -900,14 +937,14 @@ public abstract class SlotlockOperations {
    * @param optional the optional arguments, or null: {@code name} (string, null clears it),
    * {@code description} (string, null clears it), {@code kind} (string), {@code capacity}
    * (integer, null clears it), {@code labels} (list of string), {@code attributes} (object),
-   * {@code location} (string, null clears it)
+   * {@code location} (string, null clears it), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> updateResource(String resourceId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
-    putOptional(values, optional, Set.of("name", "description", "kind", "capacity", "labels", "attributes", "location"), "slotlock_update_resource");
+    putOptional(values, optional, Set.of("name", "description", "kind", "capacity", "labels", "attributes", "location", "dry_run"), "slotlock_update_resource");
     return call("slotlock_update_resource", values);
   }
 
@@ -935,13 +972,30 @@ public abstract class SlotlockOperations {
    * resource, deleted already, say.
    *
    * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteResource(String resourceId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_resource");
+    return call("slotlock_delete_resource", values);
+  }
+
+  /**
+   * Delete a resource. Delete a resource with its history (past bookings, coverage, cancelled
+   * events), freeing its place under the tenant's resource limit. Refused with 409
+   * resource_in_use while a booking on it has not ended, a hold on it is live, or a calendar
+   * event is on it: cancel or move those first. deleted is false when the tenant has no such
+   * resource, deleted already, say.
+   *
+   * @param resourceId {@code resource_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> deleteResource(String resourceId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_id", resourceId);
-    return call("slotlock_delete_resource", values);
+    return deleteResource(resourceId, null);
   }
 
   /**
@@ -965,7 +1019,7 @@ public abstract class SlotlockOperations {
    * @param ref {@code ref}, string
    * @param name {@code name}, string
    * @param optional the optional arguments, or null: {@code parent_ref} (string, null clears it),
-   * {@code timezone} (string, null clears it)
+   * {@code timezone} (string, null clears it), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -973,7 +1027,7 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("ref", ref);
     values.put("name", name);
-    putOptional(values, optional, Set.of("parent_ref", "timezone"), "slotlock_create_location");
+    putOptional(values, optional, Set.of("parent_ref", "timezone", "dry_run"), "slotlock_create_location");
     return call("slotlock_create_location", values);
   }
 
@@ -998,14 +1052,15 @@ public abstract class SlotlockOperations {
    *
    * @param locationRef {@code location_ref}, string
    * @param optional the optional arguments, or null: {@code name} (string), {@code parent_ref}
-   * (string, null clears it), {@code timezone} (string, null clears it)
+   * (string, null clears it), {@code timezone} (string, null clears it), {@code dry_run}
+   * (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> updateLocation(String locationRef, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("location_ref", locationRef);
-    putOptional(values, optional, Set.of("name", "parent_ref", "timezone"), "slotlock_update_location");
+    putOptional(values, optional, Set.of("name", "parent_ref", "timezone", "dry_run"), "slotlock_update_location");
     return call("slotlock_update_location", values);
   }
 
@@ -1027,13 +1082,28 @@ public abstract class SlotlockOperations {
    * location.
    *
    * @param locationRef {@code location_ref}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteLocation(String locationRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("location_ref", locationRef);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_location");
+    return call("slotlock_delete_location", values);
+  }
+
+  /**
+   * Delete a location. Delete a location. Refused with 409 location_in_use while a resource is at
+   * it or a location is in it: move them first. deleted is false when the tenant has no such
+   * location.
+   *
+   * @param locationRef {@code location_ref}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> deleteLocation(String locationRef) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("location_ref", locationRef);
-    return call("slotlock_delete_location", values);
+    return deleteLocation(locationRef, null);
   }
 
   /**
@@ -1054,7 +1124,8 @@ public abstract class SlotlockOperations {
    *
    * @param ref {@code ref}, string
    * @param name {@code name}, string
-   * @param optional the optional arguments, or null: {@code description} (string, null clears it)
+   * @param optional the optional arguments, or null: {@code description} (string, null clears
+   * it), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1062,7 +1133,7 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("ref", ref);
     values.put("name", name);
-    putOptional(values, optional, Set.of("description"), "slotlock_create_group");
+    putOptional(values, optional, Set.of("description", "dry_run"), "slotlock_create_group");
     return call("slotlock_create_group", values);
   }
 
@@ -1084,13 +1155,46 @@ public abstract class SlotlockOperations {
    * tenant has no such group.
    *
    * @param groupRef {@code group_ref}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteGroup(String groupRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("group_ref", groupRef);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_group");
+    return call("slotlock_delete_group", values);
+  }
+
+  /**
+   * Delete a group. Delete a group; its resources stay as they are. deleted is false when the
+   * tenant has no such group.
+   *
+   * @param groupRef {@code group_ref}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> deleteGroup(String groupRef) {
+    return deleteGroup(groupRef, null);
+  }
+
+  /**
+   * Put a resource in a group. Put one of the tenant's resources in a group. added is false when
+   * it was in it already. 404 group_not_found or resource_not_found; 409
+   * resource_group_limit_reached past 20 groups a resource.
+   *
+   * @param groupRef {@code group_ref}, string
+   * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> addGroupMember(String groupRef, String resourceId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("group_ref", groupRef);
-    return call("slotlock_delete_group", values);
+    values.put("resource_id", resourceId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_add_group_member");
+    return call("slotlock_add_group_member", values);
   }
 
   /**
@@ -1104,10 +1208,25 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> addGroupMember(String groupRef, String resourceId) {
+    return addGroupMember(groupRef, resourceId, null);
+  }
+
+  /**
+   * Take a resource out of a group. Take a resource out of a group. removed is false when it was
+   * not in it.
+   *
+   * @param groupRef {@code group_ref}, string
+   * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> removeGroupMember(String groupRef, String resourceId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("group_ref", groupRef);
     values.put("resource_id", resourceId);
-    return call("slotlock_add_group_member", values);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_remove_group_member");
+    return call("slotlock_remove_group_member", values);
   }
 
   /**
@@ -1120,10 +1239,24 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> removeGroupMember(String groupRef, String resourceId) {
+    return removeGroupMember(groupRef, resourceId, null);
+  }
+
+  /**
+   * Archive a resource. Take a resource out of use: no list shows it and it takes no new booking,
+   * hold or event (409 resource_archived), while what is on it stays and can still be cancelled
+   * or released. Archiving it again keeps the first time.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> archiveResource(String resourceId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    values.put("group_ref", groupRef);
     values.put("resource_id", resourceId);
-    return call("slotlock_remove_group_member", values);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_archive_resource");
+    return call("slotlock_archive_resource", values);
   }
 
   /**
@@ -1136,9 +1269,23 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> archiveResource(String resourceId) {
+    return archiveResource(resourceId, null);
+  }
+
+  /**
+   * Restore a resource. Put an archived resource back in use. Restoring one in use changes
+   * nothing.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> restoreResource(String resourceId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
-    return call("slotlock_archive_resource", values);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_restore_resource");
+    return call("slotlock_restore_resource", values);
   }
 
   /**
@@ -1150,9 +1297,7 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> restoreResource(String resourceId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_id", resourceId);
-    return call("slotlock_restore_resource", values);
+    return restoreResource(resourceId, null);
   }
 
   /**
@@ -1183,14 +1328,30 @@ public abstract class SlotlockOperations {
    *
    * @param resourceId {@code resource_id}, string
    * @param rules {@code rules}, list of object (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setResourceAvailability(String resourceId, List<?> rules, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("rules", rules);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_resource_availability");
+    return call("slotlock_set_resource_availability", values);
+  }
+
+  /**
+   * Set a resource's bookable hours. Give one resource its own weekly bookable hours. `null`
+   * makes it use the server's default; `[]` makes it never bookable. Each rule is weekly with
+   * BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param rules {@code rules}, list of object (may be null)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setResourceAvailability(String resourceId, List<?> rules) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_id", resourceId);
-    values.put("rules", rules);
-    return call("slotlock_set_resource_availability", values);
+    return setResourceAvailability(resourceId, rules, null);
   }
 
   /**
@@ -1219,14 +1380,56 @@ public abstract class SlotlockOperations {
    *
    * @param resourceId {@code resource_id}, string
    * @param icalendar {@code icalendar}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> importResourceAvailability(String resourceId, String icalendar, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("icalendar", icalendar);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_import_resource_availability");
+    return call("slotlock_import_resource_availability", values);
+  }
+
+  /**
+   * Import a resource's bookable hours from iCalendar. Set one resource's own weekly bookable
+   * hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does
+   * from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must
+   * be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what
+   * weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another
+   * zone.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param icalendar {@code icalendar}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> importResourceAvailability(String resourceId, String icalendar) {
+    return importResourceAvailability(resourceId, icalendar, null);
+  }
+
+  /**
+   * Set a resource's booking rules. Set what a booking on one resource must satisfy from now on:
+   * minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's
+   * time zone, offset by step_offset_minutes), the time kept free before and after each booking,
+   * and whether bookings must lie inside its hours. `null` clears them. A rule it does not set
+   * comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
+   * slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused
+   * with the rule they break; searches offer only what they allow.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param rules {@code rules}, object (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setResourceBookingRules(String resourceId, Map<String, ?> rules, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
-    values.put("icalendar", icalendar);
-    return call("slotlock_import_resource_availability", values);
+    values.put("rules", rules);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_resource_booking_rules");
+    return call("slotlock_set_resource_booking_rules", values);
   }
 
   /**
@@ -1244,10 +1447,28 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setResourceBookingRules(String resourceId, Map<String, ?> rules) {
+    return setResourceBookingRules(resourceId, rules, null);
+  }
+
+  /**
+   * Set a resource's pool. Make a resource a member of a pool, a class of interchangeable
+   * resources such as a vehicle class or a room type, or take it out (`null`). Agents book the
+   * class with slotlock_book_pool, which takes the first member free; the class's capacity is its
+   * number of members. A resource is in one pool at most; pool names are 1-100 of a-z, 0-9, '.',
+   * '_' and '-'.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param pool {@code pool}, string (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setResourcePool(String resourceId, String pool, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
-    values.put("rules", rules);
-    return call("slotlock_set_resource_booking_rules", values);
+    values.put("pool", pool);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_resource_pool");
+    return call("slotlock_set_resource_pool", values);
   }
 
   /**
@@ -1263,10 +1484,29 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setResourcePool(String resourceId, String pool) {
+    return setResourcePool(resourceId, pool, null);
+  }
+
+  /**
+   * Make a resource part of another. Make a resource a part of a composite (a room of a hall, a
+   * half of a court), or no part (`null`). A booking of the composite as a whole then conflicts
+   * with a booking of any of its parts, and two parts never conflict with each other; each part's
+   * free/busy shows the whole's bookings, and the whole's shows its parts'. One level deep, at
+   * most 50 parts; refused while either side has a booking or live hold still to come
+   * (`composite_busy`).
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param parentId {@code parent_id}, string (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setResourceParent(String resourceId, String parentId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
-    values.put("pool", pool);
-    return call("slotlock_set_resource_pool", values);
+    values.put("parent_id", parentId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_resource_parent");
+    return call("slotlock_set_resource_parent", values);
   }
 
   /**
@@ -1283,10 +1523,7 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setResourceParent(String resourceId, String parentId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_id", resourceId);
-    values.put("parent_id", parentId);
-    return call("slotlock_set_resource_parent", values);
+    return setResourceParent(resourceId, parentId, null);
   }
 
   /**
@@ -1308,14 +1545,31 @@ public abstract class SlotlockOperations {
    *
    * @param pool {@code pool}, string
    * @param order {@code order}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setPoolOrder(String pool, String order, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("order", order);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_pool_order");
+    return call("slotlock_set_pool_order", values);
+  }
+
+  /**
+   * Set a pool's order. The order slotlock_book_pool tries a pool's members in: stable (by id,
+   * the default), least_booked (fewest bookings made on each in the last 30 days first, to share
+   * them out) or round_robin (from the member after the one booked last). At most 1,000 pools
+   * have one: one more is 409 pool_order_limit_reached.
+   *
+   * @param pool {@code pool}, string
+   * @param order {@code order}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setPoolOrder(String pool, String order) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("pool", pool);
-    values.put("order", order);
-    return call("slotlock_set_pool_order", values);
+    return setPoolOrder(pool, order, null);
   }
 
   /**
@@ -1336,13 +1590,48 @@ public abstract class SlotlockOperations {
    * resource rule but check_in_minutes, which only a resource sets.
    *
    * @param rules {@code rules}, object (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setTenantBookingRules(Map<String, ?> rules, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("rules", rules);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_tenant_booking_rules");
+    return call("slotlock_set_tenant_booking_rules", values);
+  }
+
+  /**
+   * Set default booking rules. Set the booking rules every resource of the tenant has unless its
+   * pool or its own rules set the same rule, from now on; `null` clears them. They take any
+   * resource rule but check_in_minutes, which only a resource sets.
+   *
+   * @param rules {@code rules}, object (may be null)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setTenantBookingRules(Map<String, ?> rules) {
+    return setTenantBookingRules(rules, null);
+  }
+
+  /**
+   * Set a pool's booking rules. Set the booking rules every member of one pool has unless its own
+   * rules set the same rule, over the tenant's defaults, from now on; `null` clears them. They
+   * take any resource rule but check_in_minutes. At most 1,000 pools have them: one more is 409
+   * pool_rules_limit_reached.
+   *
+   * @param pool {@code pool}, string
+   * @param rules {@code rules}, object (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setPoolBookingRules(String pool, Map<String, ?> rules, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
     values.put("rules", rules);
-    return call("slotlock_set_tenant_booking_rules", values);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_pool_booking_rules");
+    return call("slotlock_set_pool_booking_rules", values);
   }
 
   /**
@@ -1357,10 +1646,7 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setPoolBookingRules(String pool, Map<String, ?> rules) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("pool", pool);
-    values.put("rules", rules);
-    return call("slotlock_set_pool_booking_rules", values);
+    return setPoolBookingRules(pool, rules, null);
   }
 
   /**
@@ -1462,13 +1748,28 @@ public abstract class SlotlockOperations {
    * server's default. Returns how many resources changed.
    *
    * @param rules {@code rules}, list of object (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setTenantAvailability(List<?> rules, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("rules", rules);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_tenant_availability");
+    return call("slotlock_set_tenant_availability", values);
+  }
+
+  /**
+   * Set every resource's bookable hours. Set the weekly bookable hours of every resource the
+   * tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the
+   * server's default. Returns how many resources changed.
+   *
+   * @param rules {@code rules}, list of object (may be null)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setTenantAvailability(List<?> rules) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("rules", rules);
-    return call("slotlock_set_tenant_availability", values);
+    return setTenantAvailability(rules, null);
   }
 
   /**
@@ -1485,7 +1786,7 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param ttlSeconds {@code ttl_seconds}, integer
    * @param optional the optional arguments, or null: {@code source} (string), {@code
-   * idempotency_key} (string), {@code buffer_after_minutes} (integer)
+   * idempotency_key} (string), {@code buffer_after_minutes} (integer), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1495,7 +1796,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("ttl_seconds", ttlSeconds);
-    putOptional(values, optional, Set.of("source", "idempotency_key", "buffer_after_minutes"), "slotlock_acquire_hold");
+    putOptional(values, optional, Set.of("source", "idempotency_key", "buffer_after_minutes", "dry_run"), "slotlock_acquire_hold");
     return call("slotlock_acquire_hold", values);
   }
 
@@ -1539,13 +1840,27 @@ public abstract class SlotlockOperations {
    * expired, confirmed or released.
    *
    * @param holdId {@code hold_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> releaseHold(String holdId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("hold_id", holdId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_release_hold");
+    return call("slotlock_release_hold", values);
+  }
+
+  /**
+   * Release a hold. Free a held window. released is false when the hold was already gone:
+   * expired, confirmed or released.
+   *
+   * @param holdId {@code hold_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> releaseHold(String holdId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("hold_id", holdId);
-    return call("slotlock_release_hold", values);
+    return releaseHold(holdId, null);
   }
 
   /**
@@ -1585,13 +1900,30 @@ public abstract class SlotlockOperations {
    * unknown one, 404 hold_not_found.
    *
    * @param holdId {@code hold_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> confirmHold(String holdId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("hold_id", holdId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_confirm_hold");
+    return call("slotlock_confirm_hold", values);
+  }
+
+  /**
+   * Confirm a hold. Turn an unexpired hold into a confirmed reservation, whose reference is the
+   * hold's id at revision 1: move or cancel it with the reservation routes by that reference
+   * (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the
+   * same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
+   * unknown one, 404 hold_not_found.
+   *
+   * @param holdId {@code hold_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> confirmHold(String holdId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("hold_id", holdId);
-    return call("slotlock_confirm_hold", values);
+    return confirmHold(holdId, null);
   }
 
   /**
@@ -1622,7 +1954,7 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param revision {@code revision}, integer
    * @param optional the optional arguments, or null: {@code buffer_after_minutes} (integer),
-   * {@code source} (string)
+   * {@code source} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1633,7 +1965,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("revision", revision);
-    putOptional(values, optional, Set.of("buffer_after_minutes", "source"), "slotlock_put_reservation");
+    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "dry_run"), "slotlock_put_reservation");
     return call("slotlock_put_reservation", values);
   }
 
@@ -1664,14 +1996,31 @@ public abstract class SlotlockOperations {
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param revision {@code revision}, integer
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> cancelReservation(String reservationRef, long revision, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("reservation_ref", reservationRef);
+    values.put("revision", revision);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_cancel_reservation");
+    return call("slotlock_cancel_reservation", values);
+  }
+
+  /**
+   * Cancel a reservation. Cancel the reservation with this reference at the next revision (the
+   * current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it
+   * back; repeating the cancel answers cancelled: false. Use a new reference for a new
+   * reservation.
+   *
+   * @param reservationRef {@code reservation_ref}, string
+   * @param revision {@code revision}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> cancelReservation(String reservationRef, long revision) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("reservation_ref", reservationRef);
-    values.put("revision", revision);
-    return call("slotlock_cancel_reservation", values);
+    return cancelReservation(reservationRef, revision, null);
   }
 
   /**
@@ -1722,13 +2071,31 @@ public abstract class SlotlockOperations {
    * booking that has ended answers 409 reservation_ended.
    *
    * @param reservationRef {@code reservation_ref}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> checkInReservation(String reservationRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("reservation_ref", reservationRef);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_check_in_reservation");
+    return call("slotlock_check_in_reservation", values);
+  }
+
+  /**
+   * Check in a booking. Claim a booking by its reference: the customer has arrived or picked up.
+   * On a resource whose booking rules set check_in_minutes, a booking not checked in that long
+   * after its start is released by maintenance (reservation.no_show on the feed) and offered to
+   * the waitlist. Check-in opens an hour before the start (409 check_in_not_open before then) and
+   * moving the booking to another start clears it. Checking in again keeps the first time; a
+   * booking that has ended answers 409 reservation_ended.
+   *
+   * @param reservationRef {@code reservation_ref}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> checkInReservation(String reservationRef) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("reservation_ref", reservationRef);
-    return call("slotlock_check_in_reservation", values);
+    return checkInReservation(reservationRef, null);
   }
 
   /**
@@ -1773,7 +2140,8 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param holderRef {@code holder_ref}, string
    * @param optional the optional arguments, or null: {@code resource_id} (string), {@code pool}
-   * (string), {@code offer_ttl_seconds} (integer), {@code idempotency_key} (string)
+   * (string), {@code offer_ttl_seconds} (integer), {@code idempotency_key} (string), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1782,7 +2150,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("holder_ref", holderRef);
-    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds", "idempotency_key"), "slotlock_join_waitlist");
+    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds", "idempotency_key", "dry_run"), "slotlock_join_waitlist");
     return call("slotlock_join_waitlist", values);
   }
 
@@ -1814,13 +2182,54 @@ public abstract class SlotlockOperations {
    * is false when there was no such entry.
    *
    * @param entryId {@code entry_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> leaveWaitlist(String entryId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("entry_id", entryId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_leave_waitlist");
+    return call("slotlock_leave_waitlist", values);
+  }
+
+  /**
+   * Leave the waitlist. Stop waiting. A hold offered and not yet confirmed is released with the
+   * entry, and the time offered to the next who waits; one confirmed is a booking and stays. left
+   * is false when there was no such entry.
+   *
+   * @param entryId {@code entry_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> leaveWaitlist(String entryId) {
+    return leaveWaitlist(entryId, null);
+  }
+
+  /**
+   * Record calendar coverage. Record that the events of an external calendar (source) are
+   * complete for a window of a resource, at that source's revision. Free/busy calls time
+   * unproven, not free, until every source a resource requires covers it. Revisions only go
+   * forward; repeating one changes nothing.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param revision {@code revision}, integer
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> recordCoverage(String resourceId, String source, String start, String end, long revision, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    values.put("entry_id", entryId);
-    return call("slotlock_leave_waitlist", values);
+    values.put("resource_id", resourceId);
+    values.put("source", source);
+    values.put("start", start);
+    values.put("end", end);
+    values.put("revision", revision);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_record_coverage");
+    return call("slotlock_record_coverage", values);
   }
 
   /**
@@ -1838,13 +2247,26 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> recordCoverage(String resourceId, String source, String start, String end, long revision) {
+    return recordCoverage(resourceId, source, start, end, revision, null);
+  }
+
+  /**
+   * Retire a source. Forget a source's coverage of the resource, for a calendar sync that is
+   * disconnected or replaced: free/busy and a resource whose booking rules require certainty stop
+   * waiting on it. 404 coverage_not_found for a source with no coverage of the resource.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteCoverage(String resourceId, String source, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
     values.put("source", source);
-    values.put("start", start);
-    values.put("end", end);
-    values.put("revision", revision);
-    return call("slotlock_record_coverage", values);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_coverage");
+    return call("slotlock_delete_coverage", values);
   }
 
   /**
@@ -1858,10 +2280,7 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> deleteCoverage(String resourceId, String source) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_id", resourceId);
-    values.put("source", source);
-    return call("slotlock_delete_coverage", values);
+    return deleteCoverage(resourceId, source, null);
   }
 
   /**
@@ -1891,15 +2310,33 @@ public abstract class SlotlockOperations {
    * @param resourceId {@code resource_id}, string
    * @param source {@code source}, string
    * @param error {@code error}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> recordCoverageFailure(String resourceId, String source, String error) {
+  public Map<String, Object> recordCoverageFailure(String resourceId, String source, String error, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
     values.put("source", source);
     values.put("error", error);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_record_coverage_failure");
     return call("slotlock_record_coverage_failure", values);
+  }
+
+  /**
+   * Record a failed read of a source. Record that reading an external calendar failed (it
+   * answered 500, a token expired): kept as the source's last error, shown by
+   * slotlock_get_coverage, while its coverage stays as it was. 404 coverage_not_found for a
+   * source that has never recorded coverage of the resource.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param source {@code source}, string
+   * @param error {@code error}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> recordCoverageFailure(String resourceId, String source, String error) {
+    return recordCoverageFailure(resourceId, source, error, null);
   }
 
   /**
@@ -1969,7 +2406,8 @@ public abstract class SlotlockOperations {
    * @param idempotencyKey A retry identity, also accepted as the Idempotency-Key header: the same
    * key with the same request answers what the first did; with another request, 422
    * idempotency_conflict.
-   * @param optional the optional arguments, or null: {@code expected_resource_id} (string)
+   * @param optional the optional arguments, or null: {@code expected_resource_id} (string),
+   * {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1978,7 +2416,7 @@ public abstract class SlotlockOperations {
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("expected_resource_id"), "slotlock_cancel_tenant_event");
+    putOptional(values, optional, Set.of("expected_resource_id", "dry_run"), "slotlock_cancel_tenant_event");
     return call("slotlock_cancel_tenant_event", values);
   }
 
@@ -2132,14 +2570,15 @@ public abstract class SlotlockOperations {
    * @param url {@code url}, string
    * @param optional the optional arguments, or null: {@code event_types} (list of string), {@code
    * resource_ids} (list of string), {@code pools} (list of string), {@code locations} (list of
-   * string), {@code groups} (list of string), {@code idempotency_key} (string)
+   * string), {@code groups} (list of string), {@code idempotency_key} (string), {@code dry_run}
+   * (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> createWebhook(String url, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("url", url);
-    putOptional(values, optional, Set.of("event_types", "resource_ids", "pools", "locations", "groups", "idempotency_key"), "slotlock_create_webhook");
+    putOptional(values, optional, Set.of("event_types", "resource_ids", "pools", "locations", "groups", "idempotency_key", "dry_run"), "slotlock_create_webhook");
     return call("slotlock_create_webhook", values);
   }
 
@@ -2170,13 +2609,45 @@ public abstract class SlotlockOperations {
    * webhook.
    *
    * @param webhookId {@code webhook_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteWebhook(String webhookId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("webhook_id", webhookId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_webhook");
+    return call("slotlock_delete_webhook", values);
+  }
+
+  /**
+   * Delete a webhook. Stop sending to a webhook. deleted is false when the tenant has no such
+   * webhook.
+   *
+   * @param webhookId {@code webhook_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> deleteWebhook(String webhookId) {
+    return deleteWebhook(webhookId, null);
+  }
+
+  /**
+   * Enable a webhook. Send to a disabled webhook again, from the first change it did not accept.
+   * 404 webhook_not_found when the tenant has no such webhook; 409 changes_pruned when what it
+   * missed is older than the 30 days the feed keeps, since it would skip those unseen: delete it,
+   * add it again, and read what it missed from slotlock_list_changes.
+   *
+   * @param webhookId {@code webhook_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> enableWebhook(String webhookId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("webhook_id", webhookId);
-    return call("slotlock_delete_webhook", values);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_enable_webhook");
+    return call("slotlock_enable_webhook", values);
   }
 
   /**
@@ -2190,9 +2661,7 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> enableWebhook(String webhookId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("webhook_id", webhookId);
-    return call("slotlock_enable_webhook", values);
+    return enableWebhook(webhookId, null);
   }
 
   /**

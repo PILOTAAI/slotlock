@@ -125,6 +125,30 @@ export interface SlotlockApplicationInvocationContext {
   trace?: SlotlockTraceContext;
   /** The surface the call came through: `application` when the agent server dispatches it. */
   origin?: SlotlockChangeOrigin;
+  /** A dry run (RFC 0004 A3): every check, then rolled back (SlotlockAgentInvocationContext). */
+  dryRun?: boolean;
+}
+
+/**
+ * Writes that cannot be a dry run: they do not run in one tenant transaction that can be undone
+ * (erasure, maintenance's passes, the partner store's).
+ */
+const NOT_DRY_RUNNABLE: ReadonlySet<string> = new Set([
+  'slotlock_erase_tenant',
+  'slotlock_run_maintenance',
+  'slotlock_partner_put_account',
+  'slotlock_partner_create_key',
+  'slotlock_partner_rotate_key',
+  'slotlock_partner_revoke_key',
+  'slotlock_partner_suspend_account',
+  'slotlock_partner_unsuspend_account',
+  'slotlock_partner_erase_account',
+  'slotlock_partner_reconcile_usage',
+]);
+
+/** Whether an application operation takes `dry_run` (RFC 0004 A3): a write that can be undone. */
+export function slotlockApplicationDryRunnable(definition: { name: string; risk: { readOnly: boolean } }): boolean {
+  return !definition.risk.readOnly && !NOT_DRY_RUNNABLE.has(definition.name);
 }
 
 type Handler = (

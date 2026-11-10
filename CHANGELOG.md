@@ -13,6 +13,12 @@ versioning.
   `slotlock_find_available_slots`' own search: on the same resource, on a bundle's resources
   together, or on any member of the pool. `slotlock_hold_slots` gives each candidate refused for its
   time its own. On MCP, A2A and REST alike; never a hold.
+- Dry runs (RFC 0004 A3): every agent and application write takes `dry_run: true`. The write
+  runs with every check, the database's constraints included, then rolls back: nothing is stored,
+  recorded or sent, and the answer is what it would have been (`dry_run: true`) or the refusal,
+  alternatives included. It is never put to a person to confirm and is charged as a read (on REST,
+  with `dry_run=true` in the query string). Erasure, maintenance and the partner API answer
+  `dry_run_not_supported`.
 - Three named booking tools (RFC 0004 A2): `slotlock_confirm_slot` books a held time exactly
   (`POST /v1/slot-holds/{hold_id}/confirm`), `slotlock_reschedule` moves an event
   (`POST /v1/events/{event_id}/reschedule`) and `slotlock_cancel` cancels one

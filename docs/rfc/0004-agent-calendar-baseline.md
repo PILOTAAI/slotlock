@@ -219,7 +219,13 @@ idempotency key when none is given. Add three tools that wrap existing operation
 The 14 existing tools stay, so integrations do not break. A description pass removes internal
 words ("arbiter"), and each tool states its failure codes. `tool-contract.json` pins the result.
 
-**A3. Dry run on every write (T2).** `dry_run: true` on agent and application writes. The
+**A3. Dry run on every write (T2).** Status: built.
+- The backend's tenant transaction is rolled back by a marker that carries the answer out.
+- The waitlist offer that follows a write is skipped.
+- On REST the charge reads `dry_run` from the query string, because the body is read after the
+  charge.
+- Erasure, maintenance and the partner API refuse a dry run.
+ `dry_run: true` on agent and application writes. The
 write runs in its transaction with every check, including the constraint, and is then rolled
 back. The answer is what would have happened (`would_create`, or the refusal with A1's
 alternatives). A dry run counts as a read for rate limits and quotas, writes no history and

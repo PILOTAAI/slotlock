@@ -393,6 +393,10 @@
                   "location": {
                     "type": "string",
                     "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -752,6 +756,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -1567,6 +1576,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -1701,6 +1714,11 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -1788,6 +1806,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -2118,6 +2140,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -2201,6 +2228,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -2526,6 +2557,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -2742,6 +2778,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -2754,6 +2799,11 @@
                   "properties": {
                     "released": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -2826,6 +2876,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [],
@@ -3154,6 +3208,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -3795,6 +3854,10 @@
                   "hold_id": {
                     "type": "string",
                     "format": "uuid"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -4120,6 +4183,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -4741,6 +4809,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -5073,6 +5145,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -5153,6 +5230,15 @@
             }
           },
           {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
+          },
+          {
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
@@ -5188,6 +5274,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -5269,6 +5360,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -5602,6 +5697,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -5668,6 +5768,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -5725,6 +5829,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -5874,6 +5983,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [],
@@ -6243,6 +6356,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -6693,6 +6811,15 @@
               "minLength": 1,
               "maxLength": 200
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -6705,6 +6832,11 @@
                   "properties": {
                     "deleted": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -6884,6 +7016,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -6951,6 +7087,11 @@
                         "resources"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7028,6 +7169,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [],
@@ -7103,6 +7248,11 @@
                         "resources"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7153,6 +7303,15 @@
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -7165,6 +7324,11 @@
                   "properties": {
                     "deleted": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7320,6 +7484,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -7374,6 +7542,11 @@
                         "members"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7426,6 +7599,15 @@
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -7438,6 +7620,11 @@
                   "properties": {
                     "deleted": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7487,7 +7674,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -7525,6 +7717,11 @@
                   "properties": {
                     "added": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7585,6 +7782,15 @@
               "minLength": 1,
               "maxLength": 200
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -7597,6 +7803,11 @@
                   "properties": {
                     "removed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -7646,7 +7857,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -8014,6 +8230,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -8063,7 +8284,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -8431,6 +8657,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -8616,6 +8847,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -8987,6 +9222,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -9109,6 +9349,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 65536
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -9480,6 +9724,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -9583,6 +9832,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -9954,6 +10207,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -10014,6 +10272,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -10385,6 +10647,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -10446,6 +10713,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -10817,6 +11088,11 @@
                         "part_index"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -10953,6 +11229,10 @@
                       "least_booked",
                       "round_robin"
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -10993,6 +11273,11 @@
                         "least_booked",
                         "round_robin"
                       ]
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -11247,6 +11532,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -11313,6 +11602,11 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -11411,6 +11705,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -11492,6 +11790,11 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -12091,6 +12394,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -12113,6 +12420,11 @@
                       "type": "integer",
                       "minimum": 0,
                       "maximum": 9007199254740991
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -12196,6 +12508,10 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 43200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -12276,6 +12592,11 @@
                         "source"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -12436,6 +12757,15 @@
               "minLength": 1,
               "maxLength": 200
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -12448,6 +12778,11 @@
                   "properties": {
                     "released": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -12640,7 +12975,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -12731,6 +13071,11 @@
                         "source"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -12931,6 +13276,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -13031,6 +13380,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -13093,6 +13447,15 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -13110,6 +13473,11 @@
                       "type": "integer",
                       "exclusiveMinimum": 0,
                       "maximum": 9007199254740991
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -13339,7 +13707,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -13374,6 +13747,11 @@
                     "checked_in_at": {
                       "type": "string",
                       "format": "date-time"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -13457,6 +13835,10 @@
                     "minLength": 1,
                     "maxLength": 500,
                     "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -13603,6 +13985,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -13861,6 +14248,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -13873,6 +14269,11 @@
                   "properties": {
                     "left": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -13935,6 +14336,10 @@
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -13984,6 +14389,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -14046,6 +14456,15 @@
               "minLength": 1,
               "maxLength": 200
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -14059,6 +14478,11 @@
                     "deleted": {
                       "type": "boolean",
                       "const": true
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -14244,6 +14668,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -14287,6 +14715,11 @@
                     "recorded": {
                       "type": "boolean",
                       "const": true
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -15140,6 +15573,15 @@
             }
           },
           {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
+          },
+          {
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
@@ -15175,6 +15617,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -15860,6 +16307,10 @@
                     "minLength": 1,
                     "maxLength": 500,
                     "description": "A retry identity, also accepted as the Idempotency-Key header: the same key with the same request answers what the first did; with another request, 422 idempotency_conflict."
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
                   }
                 },
                 "required": [
@@ -16085,6 +16536,11 @@
                     },
                     "replayed": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -16379,6 +16835,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
           }
         ],
         "responses": {
@@ -16391,6 +16856,11 @@
                   "properties": {
                     "deleted": {
                       "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
@@ -16440,7 +16910,12 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -16653,6 +17128,11 @@
                         "filter"
                       ],
                       "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
                     }
                   },
                   "required": [
