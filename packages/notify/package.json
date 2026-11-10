@@ -1,0 +1,26 @@
+{
+  "name": "@slotlock/notify",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Notifications for Slotlock: confirmations, changes and reminders from the change feed, by email (Postmark, Resend or SES), SMS and WhatsApp (Twilio), each sent once.",
+  "license": "Apache-2.0",
+  "author": "TREFT LTD",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "peerDependencies": {
+    "postgres": "^3.4.5"
+  },
+  "peerDependenciesMeta": {
+    "postgres": {
+      "optional": true
+    }
+  }
+}

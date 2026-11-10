@@ -2,6 +2,7 @@
 // each tenant's Slotlock key, each connected account, which calendar feeds which resource, the
 // bookings written back, and how far it read the change feed. Secrets are kept sealed (seal.ts).
 import type { Interval } from './slotlock-api.js';
+import type { Sql } from 'postgres';
 
 export type SyncProviderKind = 'google' | 'microsoft' | 'ics';
 
@@ -185,11 +186,6 @@ CREATE TABLE IF NOT EXISTS slotlock_sync.write_backs (
 CREATE INDEX IF NOT EXISTS write_backs_time_idx ON slotlock_sync.write_backs (mapping_id, starts_at, ends_at);
 `;
 
-/** The few methods of a postgres.js `sql` this store calls. */
-interface Sql {
-  unsafe(query: string): Promise<unknown>;
-  <T = Record<string, unknown>[]>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
-}
 
 /** A store in PostgreSQL (postgres.js), in schema slotlock_sync: apply SLOTLOCK_SYNC_DDL first. */
 export function createPostgresSyncStore(sql: Sql): SyncStore & { applySchema(): Promise<void> } {

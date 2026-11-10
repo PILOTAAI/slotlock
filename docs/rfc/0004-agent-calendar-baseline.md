@@ -465,7 +465,20 @@ baseline, and buyers do too. The proposal keeps core as it is (it never sends a 
 holds a provider token). It adds three packages on the event feed and the coverage API, and runs
 them on Cloud:
 
-**C1. Free/busy adapters (T2).**
+Status: built, following D1's recommendation (each package its own process, schema and secrets;
+D1 itself is still the owner's to confirm). Core gained the primitives D1 lists: `reminder.due` on
+the feed (maintenance, once per reminder, again when the occurrence moves), the change's `id` as
+the send key, contacts with per-channel consent that a booking names by `contact_ref` (deleting one
+takes the reference off every booking), and `notify: false` on bookings and events. It also gained
+busy time without events (`source_busy`, `PUT .../coverage/{source}/busy`), and holds that wait for
+payment. The packages are in `packages/`: `@slotlock/sync` (C1, C4), `@slotlock/notify` (C2) and
+`@slotlock/payments-stripe` (C3). Not yet: Cloud running them, and its per-message price (D5). Each
+T2 part needs its independent security review first.
+
+**C1. Free/busy adapters (T2).** Status: built as one package, `@slotlock/sync`, with Google,
+Microsoft and iCalendar readers. A source that gives busy time without events records it with
+`slotlock_put_source_busy`; a confirmed booking it newly reports busy time over is reported as
+`coverage.conflict`, never moved.
 - `@slotlock/sync-google` (the Calendar freeBusy API), `@slotlock/sync-microsoft` (Graph
   `getSchedule`) and an ICS URL poller.
 - Each tenant connects with OAuth, and tokens are kept encrypted in the adapter's store.
@@ -473,14 +486,17 @@ them on Cloud:
   apply as now.
 - Read-only.
 
-**C2. Notifications (T1 for the package, T2 for Cloud's sending).**
+**C2. Notifications (T1 for the package, T2 for Cloud's sending).** Status: package built (Postmark,
+Resend or SES; Twilio SMS and WhatsApp); Cloud sending waits on D5.
 - `@slotlock/notify` subscribes to the feed and sends confirmations and reminders by email
   (SES or Postmark), SMS and WhatsApp (Twilio).
 - Reminders come from `calendar_event_reminders`.
 - Per-tenant templates and sender, with an opt-out per recipient.
 - On Cloud it is a paid add-on with per-message pricing.
 
-**C3. Payments for bookings (T2).**
+**C3. Payments for bookings (T2).** Status: built: `payment_required` holds,
+`slotlock_mark_hold_paid`, and `@slotlock/payments-stripe`, which reads the PaymentIntent back from
+Stripe before marking a hold paid and refunds one whose hold expired first, when asked.
 - A hold may require a payment (`payment_required: true`, TTL up to 30 minutes, a
   `payment_ref`). Confirming it needs the integrator's payment confirmation, through
   `POST /v1/holds/{id}/paid` or a Stripe adapter verifying a PaymentIntent on the tenant's own
@@ -488,7 +504,9 @@ them on Cloud:
 - Slotlock records payment state and never processes money. Managed Payments cannot carry
   marketplace flows, so this is the tenant's own account, not Slotlock's.
 
-**C4. Two-way sync (T2, last).** Confirmed bookings are written to the connected Google or
+**C4. Two-way sync (T2, last).** Status: built in `@slotlock/sync`: times only, under a neutral
+title; its own bookings are subtracted from what it reads back, and one changed in the calendar is
+reported as the source's failure. Confirmed bookings are written to the connected Google or
 Microsoft calendar by the C1 adapters. Slotlock stays the source of truth. A change made in the
 provider comes back as coverage and is reported as a conflict, never applied silently.
 

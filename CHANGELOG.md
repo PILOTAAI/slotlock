@@ -7,6 +7,17 @@ versioning.
 
 ### Added
 
+- Three integration packages in `packages/` (RFC 0004 P3), each its own process with its own
+  schema and secrets, talking to Slotlock over its API:
+  - `@slotlock/sync` (C1, C4, T2): busy time from Google freeBusy, Microsoft getSchedule and
+    iCalendar URLs, recorded as each source's busy time; confirmed bookings written back to Google
+    and Microsoft calendars, times only. OAuth with PKCE; tokens, URLs and keys sealed with
+    AES-256-GCM. A booking changed in the calendar is reported, never applied.
+  - `@slotlock/notify` (C2): confirmations, moves, cancellations and reminders by Postmark,
+    Resend or SES, and Twilio SMS and WhatsApp, each send recorded under its key (change id,
+    channel, recipient) before it is made. Consent per channel; test tenants go to a capture inbox.
+  - `@slotlock/payments-stripe` (C3, T2): a PaymentIntent read back from the tenant's own Stripe
+    account marks its hold paid; a payment for an expired hold is refused and, if asked, refunded.
 - What integrations build on (RFC 0004 P3, D1's recommendation: core keeps primitives, packages
   outside it send and sync). Feed type `reminder.due`: maintenance puts each event reminder on the
   feed once, when it comes due (within the last day, before the event starts), and again if the
