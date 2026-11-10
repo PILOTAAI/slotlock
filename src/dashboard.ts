@@ -48,6 +48,7 @@ import {
   type SlotlockAssistantEntry,
   type SlotlockAssistantModel,
   type SlotlockAssistantStore,
+  type SlotlockAssistantTurnEvent,
   boundSlotlockAssistantEntries,
   createSlotlockAssistantStore,
   openSlotlockAssistantKeyWithAny,
@@ -72,6 +73,14 @@ import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
+import { SLOTLOCK_SETTINGS_CSS } from './dashboard-settings-ui.js';
+import { renderSlotlockMarkdown } from './dashboard-markdown.js';
+import {
+  SLOTLOCK_ASSISTANT_CSS,
+  slotlockAssistantActionVerb,
+  slotlockAssistantScript,
+  slotlockAssistantStepLabel,
+} from './dashboard-assistant-ui.js';
 import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan, type SlotlockTenantPlan } from './plans.js';
 import {
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
@@ -175,6 +184,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/teams/enable',
   '/teams/disable',
   '/assistant',
+  '/assistant/stream',
   '/assistant/approve',
   '/assistant/dismiss',
   '/assistant/reset',
@@ -219,7 +229,7 @@ const KEY_EXPIRY_DAYS: Readonly<Record<string, number | null>> = Object.freeze({
  */
 const REFERRER_POLICY = 'same-origin';
 const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /** The policy, with billing's origins allowed as form targets so Upgrade and Manage can redirect. */
 function policyFor(billing: SlotlockDashboardBilling | undefined): string {
@@ -1861,15 +1871,21 @@ ${live}
 </html>`;
   }
 
-  const noticeOf = (notice?: string) =>
-    notice ? html`<p class="notice" role="alert">${notice}</p>` : html``;
+  // A notice is an alert only when the page answers with an error: a done or saved message is a
+  // status, so success is never painted in the error colour.
+  const noticeOf = (notice?: string, status = 200) =>
+    notice
+      ? status >= 400
+        ? html`<p class="notice" role="alert">${notice}</p>`
+        : html`<p class="notice done" role="status">${notice}</p>`
+      : html``;
 
   function signedOutPage(status: number, notice?: string, cookies: string[] = []): Response {
     const content = html`<section class="sign-in">
 <span class="sign-in-mark">${ICONS.mark}</span>
 <h1>Sign in to ${brandName}</h1>
 <p>Create keys for your agents, add what they book, and watch what they do.</p>
-${noticeOf(notice)}
+${noticeOf(notice, status)}
 <a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
       google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
     }
@@ -2055,7 +2071,7 @@ ${
       { done: active.length > 0, text: 'Create a key for an agent', href: `${root}/keys` },
       { done: (changes?.length ?? 0) > 0, text: 'Connect the agent and book', href: `${root}/keys` },
     ];
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('Overview')}
 ${
   steps.every((step) => step.done)
@@ -2152,7 +2168,7 @@ ${
               html`<label class="choice"><input type="checkbox" name="limit_group" value="${group.ref}"> Group: ${group.name}</label>`,
           )}</div><p class="fine">The key then reaches only the resources there (a location with every location in it), read and write only. Developer plan and up.</p></details>`
         : html``;
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('API keys')}
 <section class="panel">
 <h2>Connect an agent</h2>
@@ -2206,7 +2222,7 @@ ${
     const resources = await options.resources.list(tenantOf(session));
     const allowance = await resourceAllowance(tenantOf(session), resources);
     const token = csrfToken(session);
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead(
   'Resources',
   html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}${resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : html``}</div>`,
@@ -2280,7 +2296,7 @@ ${
 <form method="post" action="${root}/groups/delete">${sent()}<input type="hidden" name="ref" value="${group.ref}"><button class="danger" type="submit">Delete group</button></form></div></details></td>
 </tr>`,
     );
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead('Locations and groups')}
 <section class="panel" id="locations">
@@ -2317,44 +2333,66 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
+  type SettingsSection = 'assistant' | 'endpoints' | 'hours' | 'account';
+
+  /** Settings' sections, each its own page: the assistant's form apart from what is only read. */
+  const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string; path: string }[] = Object.freeze([
+    { id: 'assistant', label: 'Assistant', path: '/settings' },
+    { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
+    { id: 'hours', label: 'Hours', path: '/settings/hours' },
+    { id: 'account', label: 'Account', path: '/settings/account' },
+  ]);
+
   async function settingsPage(
     session: Session,
     status = 200,
     notice?: string,
     draft?: AssistantDraft,
+    section: SettingsSection = 'assistant',
   ): Promise<Response> {
-    const rules = options.availability ?? [];
-    const current = session.orgs?.find((org) => org.id === session.org);
-    const content = html`${noticeOf(notice)}
-${pageHead('Settings')}
-${await assistantSettingsPanel(session, draft)}
-<section class="panel">
-<h2>Endpoints</h2>
-${endpoints()}
-</section>
-<section class="panel">
-<h2>Server hours</h2>
-${
-  rules.length === 0
-    ? html`<p class="empty">None: agents find a free slot only on resources with hours of their own.</p>`
-    : html`<ul class="hours">${rules.map(
-        (rule) =>
-          html`<li>${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
-      )}</ul>`
-}
-<p class="fine">For resources without hours of their own, in each resource's time zone. Set by the server's operator.</p>
-</section>
-<section class="panel">
-<h2>Account</h2>
-<dl class="facts"><dt>Signed in as</dt><dd>${shownAs(session)}</dd>${
-      current
-        ? html`<dt>Organization</dt><dd>${current.login}</dd>${(session.orgs?.length ?? 0) > 1 ? html`<dt>Also a member of</dt><dd>${(session.orgs ?? []).filter((org) => org.id !== current.id).map((org) => org.login).join(', ')}</dd>` : html``}`
-        : html`<dt>Workspace</dt><dd>Personal</dd>`
-    }<dt>Session ends</dt><dd>${formatDate(new Date(session.exp))}</dd></dl>
-${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}
-</section>`;
+    const store = assistantStore();
+    const sections = SETTINGS_SECTIONS.filter((entry) => entry.id !== 'assistant' || store);
+    const shown: SettingsSection = section === 'assistant' && !store ? 'endpoints' : section;
+    const connected = store ? Boolean(await store.getSettings(tenantOf(session))) : false;
+    const nav = html`<nav class="subnav" aria-label="Settings">${sections.map(
+      (entry) =>
+        html`<a href="${root}${entry.path}"${entry.id === shown ? html` aria-current="page"` : html``}>${entry.label}${
+          entry.id === 'assistant' && connected ? html`<span class="nav-dot" aria-hidden="true"></span>` : html``
+        }</a>`,
+    )}</nav>`;
+    let body: Html;
+    if (shown === 'assistant') {
+      body = await assistantSettingsSection(session, status, notice, draft);
+    } else if (shown === 'endpoints') {
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">MCP</span><div class="row-value">${copyField('mcp-url', mcpUrl)}</div></div><div class="row"><span class="row-label">A2A</span><div class="row-value">${copyField('a2a-url', a2aUrl)}</div></div></div>`;
+    } else if (shown === 'hours') {
+      const rules = options.availability ?? [];
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Default hours</span><div class="row-value${rules.length === 0 ? ' muted' : ''}">${
+        rules.length === 0
+          ? 'None. Agents find free time only on resources with hours of their own.'
+          : html`${rules.map(
+              (rule, index) =>
+                html`${index > 0 ? html`<br>` : html``}${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}`,
+            )}`
+      }</div></div></div><p class="fine">In each resource's own time zone, for resources without hours of their own. Set by the server's operator.</p>`;
+    } else {
+      const current = session.orgs?.find((org) => org.id === session.org);
+      const others = (session.orgs ?? []).filter((org) => org.id !== current?.id);
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Signed in as</span><div class="row-value">${shownAs(session)}</div></div><div class="row"><span class="row-label">${current ? 'Organization' : 'Workspace'}</span><div class="row-value">${current ? current.login : 'Personal'}</div></div>${
+        current && others.length > 0
+          ? html`<div class="row"><span class="row-label">Also a member of</span><div class="row-value">${others.map((org) => org.login).join(', ')}</div></div>`
+          : html``
+      }<div class="row"><span class="row-label">Session ends</span><div class="row-value">${formatDate(new Date(session.exp))}</div></div></div>${
+        current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``
+      }`;
+    }
+    const content = html`${pageHead('Settings')}<div class="settings">${nav}<div class="settings-body">${body}</div></div>`;
     return respond(status, layout('Settings', content, session, 'settings'));
   }
+
+  /** A value to copy: monospace, cut with an ellipsis, with a Copy button (app.js). */
+  const copyField = (id: string, value: string) =>
+    html`<dl class="endpoints"><dd><code id="${id}">${value}</code><button class="quiet" type="button" data-copy="${id}">Copy</button></dd></dl>`;
 
   /** The tenant's resource with that id and every resource (for names), or null for anything else. */
   async function resourceDetailPage(
@@ -2407,7 +2445,7 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
       const fallback = from ? `As its default (${from.value ? 'on' : 'off'}, ${from.from})` : 'Off';
       return html`<label>${label}<select name="${key}"><option value=""${chosen(undefined)}>${fallback}</option><option value="1"${chosen(true)}>On</option><option value="0"${chosen(false)}>Off</option></select></label>`;
     };
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
 ${resource.description ? html`<p>${resource.description}</p>` : html``}
@@ -2811,7 +2849,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
 <form method="post" action="${root}/webhooks/delete"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${endpoint.id}"><button class="danger" type="submit">Delete webhook</button></form></div></details></td>
 </tr>`;
     });
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('Webhooks')}
 <div class="stats">
 <div class="stat"><span class="stat-label">Endpoints</span><span class="stat-value">${String(endpoints.length)}</span></div>
@@ -2929,7 +2967,7 @@ ${
     });
     const waiting = entries.filter((entry) => entry.status === 'waiting').length;
     const offered = entries.filter((entry) => entry.status === 'offered').length;
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('Waitlist')}
 <div class="stats">
 <div class="stat"><span class="stat-label">Waiting</span><span class="stat-value">${String(waiting)}</span></div>
@@ -3004,7 +3042,7 @@ ${
 <td data-label="Asked">${ago(entry.createdAt, now())}</td>
 </tr>`,
     );
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('Approvals')}
 <p class="fine">Bookings an approval policy holds for a person. Their time stays held until you decide or the wait ends. Policies are set through the API (slotlock_put_approval_policy).</p>
 <div class="stats">
@@ -3279,46 +3317,137 @@ ${
     };
   }
 
+  /** When a change happens, in its resource's time zone when the card knows it, else UTC. */
+  function whenOf(start: unknown, end: unknown, zone: string | undefined): string | null {
+    if (typeof start !== 'string') return null;
+    const from = new Date(start);
+    if (Number.isNaN(from.getTime())) return null;
+    const timeZone = zone ?? 'UTC';
+    let day: Intl.DateTimeFormat;
+    let time: Intl.DateTimeFormat;
+    try {
+      day = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone });
+      time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone });
+    } catch {
+      return null;
+    }
+    const to = typeof end === 'string' ? new Date(end) : null;
+    const span =
+      to && !Number.isNaN(to.getTime())
+        ? day.format(from) === day.format(to)
+          ? `${time.format(from)}–${time.format(to)}`
+          : `${time.format(from)} – ${day.format(to)}, ${time.format(to)}`
+        : time.format(from);
+    return `${day.format(from)}, ${span} ${timeZone}`;
+  }
+
+  /** What a proposed change's fields are called on its card. */
+  const FACT_NAMES: Readonly<Record<string, string>> = Object.freeze({
+    resource_id: 'Resource',
+    resource_ids: 'Resources',
+    pool_id: 'Pool',
+    title: 'Title',
+    external_ref: 'Reference',
+    event_id: 'Booking',
+    hold_id: 'Hold',
+    ttl_seconds: 'Held for',
+    notes: 'Note',
+    description: 'Note',
+    metadata: 'Details',
+    slots: 'Times',
+  });
+
   /**
-   * A field of a proposed change, as the card shows it: all of it, wrapped, never cut (the
-   * proposal is bounded instead). A resource is named, with its id beside the name.
+   * A field of a proposed change, as the card shows it: all of it, wrapped, never cut (the proposal
+   * is bounded instead). A resource is named; its id is the name's title.
    */
   function fieldValue(name: string, value: unknown, names: ReadonlyMap<string, string>): Html {
-    const named = (id: string) => (names.has(id) ? `${names.get(id) as string} (${id})` : id);
-    if (typeof value === 'string') {
-      return html`<span class="wrap">${name === 'resource_id' ? named(value) : value}</span>`;
+    const named = (id: string) =>
+      names.has(id) ? html`<span title="${id}">${names.get(id) as string}</span>` : html`<code>${id}</code>`;
+    if (name === 'resource_id' && typeof value === 'string') return named(value);
+    if (name === 'resource_ids' && Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+      return html`${(value as string[]).map((id, index) => html`${index > 0 ? ', ' : ''}${named(id)}`)}`;
     }
+    if (name === 'ttl_seconds' && typeof value === 'number') {
+      return html`${value >= 60 ? `${Math.round(value / 60)} min` : `${value} s`}`;
+    }
+    if ((name === 'event_id' || name === 'hold_id') && typeof value === 'string') return html`<code>${value}</code>`;
+    if (typeof value === 'string') return html`<span class="wrap">${value}</span>`;
     if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
-      return html`<span class="wrap">${(value as string[]).map((item) => (name === 'resource_ids' ? named(item) : item)).join(', ')}</span>`;
+      return html`<span class="wrap">${(value as string[]).join(', ')}</span>`;
     }
-    if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
-      return html`${String(value)}`;
-    }
-    return html`<pre class="wrap">${JSON.stringify(value, null, 2)}</pre>`;
+    if (typeof value === 'number' || typeof value === 'boolean' || value === null) return html`${String(value)}`;
+    return html`<pre>${JSON.stringify(value, null, 2)}</pre>`;
   }
+
+  /** Why a change or a step was refused, in words, for the codes a member meets. */
+  const REFUSALS: Readonly<Record<string, string>> = Object.freeze({
+    overlap: 'that time was just taken',
+    pool_full: 'the pool is full then',
+    not_found: 'it no longer exists',
+    resource_not_found: 'the resource no longer exists',
+    event_not_found: 'the booking no longer exists',
+    invalid_input: 'the request was incomplete',
+    invalid_arguments: 'the request was incomplete',
+    validation_error: 'the request was incomplete',
+    turn_read_budget_exceeded: 'one message may read only so much',
+    too_many_pending_changes: 'too many changes are waiting for you',
+    change_too_large_to_show: 'the change was too large to show',
+    tool_not_available: 'the assistant may not do that',
+    too_many_calls: 'too many at once',
+    quota_exceeded: "this month's allowance is used up",
+    approval_pending: 'it is waiting for an approval',
+  });
+  const refusal = (code: string) => REFUSALS[code] ?? code.replaceAll('_', ' ');
 
   function actionCard(
     session: Session,
     action: SlotlockAssistantAction,
     names: ReadonlyMap<string, string>,
+    zones: ReadonlyMap<string, string>,
   ): Html {
+    const verb = slotlockAssistantActionVerb(action.operation);
+    const title = action.summary || `${verb.verb}: ${toolTitles.get(action.operation) ?? action.operation}`;
+    if (action.status !== 'pending') {
+      const [tone, word] =
+        action.status === 'done'
+          ? ['ok', verb.done]
+          : action.status === 'dismissed'
+            ? ['', 'Declined']
+            : action.status === 'approved'
+              ? ['', 'Running…']
+              : ['bad', `Refused: ${refusal(action.outcome ?? 'failed')}`];
+      return html`<li class="turn action" id="action-${action.id}"><p class="receipt ${tone}"><span>${title}</span><span class="why">${word}</span></p></li>`;
+    }
     const token = csrfToken(session);
-    const fields = Object.entries(action.input).filter(([name]) => name !== 'idempotency_key');
-    const summary = action.summary ? html`<p class="action-summary">${action.summary}</p>` : html``;
-    const state = {
-      pending: { text: 'Waiting for you', tone: 'held' },
-      approved: { text: 'Running', tone: 'held' },
-      dismissed: { text: 'Dismissed', tone: 'revoked' },
-      done: { text: 'Done', tone: 'active' },
-      failed: { text: 'Failed', tone: 'revoked' },
-    }[action.status] ?? { text: action.status, tone: 'revoked' };
-    const buttons =
-      action.status === 'pending'
-        ? html`<div class="action-buttons"><form class="inline" method="post" action="${root}/assistant/approve"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button class="primary" type="submit">Approve</button></form><form class="inline" method="post" action="${root}/assistant/dismiss"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button type="submit">Dismiss</button></form></div>`
-        : html``;
-    return html`<li class="action-card" id="action-${action.id}"><div class="action-head"><span class="title">${toolTitles.get(action.operation) ?? action.operation}</span><span class="pill ${state.tone}">${state.text}</span></div>${summary}<dl class="facts">${fields.map(
-      ([name, value]) => html`<dt>${name.replaceAll('_', ' ')}</dt><dd>${fieldValue(name, value, names)}</dd>`,
-    )}</dl>${action.status === 'failed' && action.outcome ? html`<p class="fine">Refused: <code>${action.outcome}</code></p>` : html``}${buttons}</li>`;
+    const input = Object.entries(action.input).filter(([name]) => name !== 'idempotency_key');
+    // The change's own time zone when it gives one, else its resource's.
+    const zone =
+      typeof action.input.timezone === 'string'
+        ? action.input.timezone
+        : typeof action.input.resource_id === 'string'
+          ? zones.get(action.input.resource_id)
+          : undefined;
+    const when = whenOf(action.input.starts_at, action.input.ends_at, zone);
+    const facts: Html[] = [];
+    const more: Html[] = [];
+    if (when) facts.push(html`<dt>When</dt><dd>${when}</dd>`);
+    for (const [name, value] of input) {
+      if (when && (name === 'starts_at' || name === 'ends_at' || name === 'timezone')) continue;
+      const label = FACT_NAMES[name] ?? name.charAt(0).toUpperCase() + name.slice(1).replaceAll('_', ' ');
+      (name in FACT_NAMES || name === 'attendees' ? facts : more).push(
+        html`<dt>${label}</dt><dd>${fieldValue(name, value, names)}</dd>`,
+      );
+    }
+    const hidden = (id: string) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${id}">`;
+    return html`<li class="turn action" id="action-${action.id}"><div class="change"><p class="change-title">${title}</p>${
+      facts.length > 0 ? html`<dl class="facts">${facts}</dl>` : html``
+    }${
+      more.length > 0
+        ? html`<details class="more"><summary>All details</summary><dl class="facts">${more}</dl></details>`
+        : html``
+    }<div class="change-buttons"><form method="post" action="${root}/assistant/approve">${hidden(action.id)}<button class="${verb.danger ? 'danger' : 'primary'}" type="submit" data-busy="${verb.busy}">${verb.verb}</button></form><form method="post" action="${root}/assistant/dismiss">${hidden(action.id)}<button class="ghost" type="submit">Decline</button></form></div></div></li>`;
   }
 
   function readAction(id: string, value: unknown): SlotlockAssistantAction | null {
@@ -3333,6 +3462,110 @@ ${
     };
   }
 
+  /** The code a tool result was refused with, from the JSON the model was given. */
+  function refusedCode(content: string): string | null {
+    try {
+      const parsed = JSON.parse(content) as unknown;
+      const error = isRecord(parsed) && isRecord(parsed.error) ? parsed.error : null;
+      return error && typeof error.code === 'string' ? error.code : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Notes the turn ends with that are not a failure: a member's Stop, and the step bound. */
+  const quietNote = (text: string) => text === 'Stopped.' || text.startsWith('The assistant stopped after');
+
+  /**
+   * The conversation as the thread shows it: the member's messages as bubbles, the replies as
+   * rendered Markdown, each run of tool steps folded into one line, proposed changes as cards, and
+   * a failure that ends it with a way to send the last message again.
+   */
+  function assistantItems(
+    session: Session,
+    entries: readonly SlotlockAssistantEntry[],
+    actions: Record<string, unknown>,
+    names: ReadonlyMap<string, string>,
+    zones: ReadonlyMap<string, string>,
+  ): Html[] {
+    const items: Html[] = [];
+    let steps: { label: string; ok: boolean; why: string | null }[] = [];
+    let cards: Html[] = [];
+    const flush = () => {
+      if (steps.length > 0) {
+        const bad = steps.some((step) => !step.ok);
+        const seen: string[] = [];
+        for (const step of steps) if (!seen.includes(step.label)) seen.push(step.label);
+        const summary = seen.map((label, index) => (index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1))).join(', ');
+        items.push(
+          html`<li class="turn steps"><details class="steps${bad ? ' has-bad' : ''}"><summary>${summary}</summary><ul class="step-list">${steps.map(
+            (step) =>
+              html`<li class="step ${step.ok ? 'ok' : 'bad'}">${step.label}${step.why ? html` <span class="why">${step.why}</span>` : html``}</li>`,
+          )}</ul></details></li>`,
+        );
+        steps = [];
+      }
+      items.push(...cards);
+      cards = [];
+    };
+    const lastUser = [...entries].reverse().find((entry) => entry.role === 'user');
+    for (const [index, entry] of entries.entries()) {
+      if (entry.role === 'user') {
+        flush();
+        items.push(html`<li class="turn mine"><div class="bubble">${entry.text}</div></li>`);
+      } else if (entry.role === 'assistant') {
+        if (entry.text.trim() === '') continue;
+        flush();
+        items.push(html`<li class="turn bot"><div class="prose">${new Html(renderSlotlockMarkdown(entry.text))}</div></li>`);
+      } else if (entry.role === 'tool') {
+        for (const result of entry.results) {
+          const write = SLOTLOCK_ASSISTANT_TOOL_USE[result.name as SlotlockAgentOperation] === 'propose';
+          const action = result.action ? readAction(result.action, actions[result.action]) : null;
+          if (action) {
+            cards.push(actionCard(session, action, names, zones));
+            continue;
+          }
+          const title = toolTitles.get(result.name) ?? result.name;
+          const code = result.error ? refusedCode(result.content) : null;
+          steps.push({
+            label: slotlockAssistantStepLabel(result.name, title, result.error ? 'bad' : 'ok', write),
+            ok: !result.error,
+            why: code ? refusal(code) : null,
+          });
+        }
+      } else if (entry.role === 'note') {
+        flush();
+        const last = index === entries.length - 1;
+        if (last && !quietNote(entry.text) && lastUser?.role === 'user') {
+          items.push(
+            html`<li class="turn error" role="alert"><span>${entry.text}</span><form method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="message" value="${lastUser.text}"><button class="text-button" type="submit">Retry</button></form></li>`,
+          );
+        } else {
+          items.push(html`<li class="turn note">${entry.text}</li>`);
+        }
+      }
+    }
+    flush();
+    return items;
+  }
+
+  /** The tenant's resources as a proposed change's card names them, and each one's time zone. */
+  async function resourceLookups(tenantRef: string) {
+    const resources = await options.resources.list(tenantRef);
+    return {
+      resources,
+      names: new Map(resources.map((resource) => [resource.id, resourceName(resource, resource.id)])),
+      zones: new Map(resources.flatMap((resource) => (resource.timezone ? [[resource.id, resource.timezone] as const] : []))),
+    };
+  }
+
+  const ASSISTANT_ICONS = {
+    send: new Html('<svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'),
+    stop: new Html('<svg class="stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'),
+    down: new Html('<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>'),
+    plus: new Html('<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>'),
+  };
+
   async function assistantPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const store = assistantStore();
     if (!store) return notFound(session);
@@ -3341,53 +3574,50 @@ ${
       store.getSettings(tenantRef),
       store.getConversation(tenantRef, personOf(session)),
     ]);
+    if (!settings) {
+      const content = html`${noticeOf(notice, status)}${pageHead('Assistant')}${emptyState(
+        ICONS.assistant,
+        isAdmin(session) ? 'Connect a model to use the assistant.' : 'An admin of this organization connects a model in Settings.',
+        isAdmin(session) ? { href: `${root}/settings#assistant`, label: 'Connect a model' } : undefined,
+      )}`;
+      return respond(status, layout('Assistant', content, session, 'assistant'));
+    }
     const entries = readSlotlockAssistantEntries(conversation?.messages);
     const actions = conversation?.actions ?? {};
-    const names = new Map<string, string>();
-    if (Object.keys(actions).length > 0) {
-      for (const resource of await options.resources.list(tenantRef)) {
-        names.set(resource.id, resourceName(resource, resource.id));
-      }
-    }
+    const empty = entries.length === 0;
+    const { resources, names, zones } =
+      empty || Object.keys(actions).length > 0
+        ? await resourceLookups(tenantRef)
+        : { resources: [], names: new Map<string, string>(), zones: new Map<string, string>() };
     const token = csrfToken(session);
-    const items: Html[] = [];
-    for (const entry of entries) {
-      if (entry.role === 'user') items.push(html`<li class="msg mine"><p>${entry.text}</p></li>`);
-      else if (entry.role === 'assistant' && entry.text.trim() !== '') {
-        items.push(html`<li class="msg bot"><p>${entry.text}</p></li>`);
-      } else if (entry.role === 'note') items.push(html`<li class="notice">${entry.text}</li>`);
-      else if (entry.role === 'tool') {
-        for (const result of entry.results) {
-          const action = result.action ? readAction(result.action, actions[result.action]) : null;
-          if (action) items.push(actionCard(session, action, names));
-          else {
-            items.push(
-              html`<li class="tool-line">${result.error ? 'Could not run' : 'Read'}: ${toolTitles.get(result.name) ?? result.name}</li>`,
-            );
-          }
-        }
-      }
-    }
-    const composer = html`<form class="composer" method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="message">Message</label><textarea id="message" name="message" rows="3" maxlength="${String(SLOTLOCK_ASSISTANT_MAX_MESSAGE)}" required placeholder="Find a free van tomorrow morning and book it for Ana"></textarea><button class="primary" type="submit">Send</button></form>`;
-    const reset =
-      entries.length > 0
-        ? html`<form class="inline" method="post" action="${root}/assistant/reset"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">New conversation</button></form>`
-        : undefined;
-    const content = html`${noticeOf(notice)}
-${pageHead('Assistant', reset)}
-${
-  settings
-    ? html`<section class="panel chat">${
-        items.length === 0
-          ? html`<p class="empty">Ask about bookings and free time. Changes wait for your approval.</p>`
-          : html`<ol class="thread">${items}</ol>`
-      }<span id="latest"></span>${composer}</section>`
-    : html`<p class="empty">${
-        isAdmin(session)
-          ? html`No model is connected. <a href="${root}/settings#assistant">Connect one in Settings</a>.`
-          : 'No model is connected. An admin of this organization can connect one in Settings.'
-      }</p>`
-}`;
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const first = resources.find((resource) => !resource.archivedAt);
+    const named = first ? resourceName(first, first.id) : null;
+    // A read chip asks at once; a write chip fills the box to finish (app.js), or asks (no script).
+    const prompts: { label: string; message: string; fill?: true }[] = [
+      { label: "What's on today", message: "What's booked today?" },
+      { label: 'Find free time', message: named ? `When is ${named} free tomorrow morning?` : 'What is free tomorrow morning?' },
+      { label: 'Book', message: named ? `Book ${named} tomorrow 9:00–10:00` : 'Book ', fill: true },
+      { label: 'Move a booking', message: 'Move the next booking one hour later', fill: true },
+      { label: 'Cancel a booking', message: 'Cancel the next booking', fill: true },
+    ];
+    const chips = html`<div class="assistant-start"><div class="chips">${prompts.map(
+      (prompt) =>
+        html`<form method="post" action="${root}/assistant">${hidden()}<button class="chip" type="submit" name="message" value="${prompt.message}"${
+          prompt.fill ? html` data-fill="${prompt.message}"` : html``
+        }>${prompt.label}</button></form>`,
+    )}</div></div>`;
+    const composer = html`<div class="dock"><button class="jump" type="button" hidden aria-label="Jump to the latest message">${ASSISTANT_ICONS.down}</button><form class="composer" method="post" action="${root}/assistant">${hidden()}<label class="visually-hidden" for="message">Message</label><textarea id="message" name="message" rows="2" maxlength="${String(SLOTLOCK_ASSISTANT_MAX_MESSAGE)}" required placeholder="${empty ? 'Ask about bookings' : 'Reply…'}"></textarea><div class="composer-bar"><span class="count" hidden></span><button class="send" type="submit" aria-label="Send">${ASSISTANT_ICONS.send}${ASSISTANT_ICONS.stop}</button></div></form></div>`;
+    const reset = html`<form class="inline new-chat" method="post" action="${root}/assistant/reset">${hidden()}<button class="ghost" type="submit">${ASSISTANT_ICONS.plus}New conversation</button></form>`;
+    const flag = empty ? new Html(' data-empty') : html``;
+    const content = html`${noticeOf(notice, status)}<div class="assistant-page"${flag}>${pageHead('Assistant', reset)}<div class="assistant" data-assistant data-stream="${root}/assistant/stream" data-page="${root}/assistant"${flag}><ol class="thread">${assistantItems(
+      session,
+      entries,
+      actions,
+      names,
+      zones,
+    )}</ol><span id="latest"></span>${chips}${composer}</div></div>`;
     return respond(status, layout('Assistant', content, session, 'assistant'));
   }
 
@@ -3400,54 +3630,102 @@ ${
     models?: readonly string[];
   };
 
-  async function assistantSettingsPanel(session: Session, draft?: AssistantDraft): Promise<Html> {
-    const store = assistantStore();
-    if (!store) return html``;
+  /** The named provider a provider and base URL are, or none (Custom). */
+  const presetOf = (provider: string, baseUrl: string) =>
+    SLOTLOCK_ASSISTANT_PRESETS.find(
+      (preset) => preset.id !== 'custom' && preset.provider === provider && preset.baseUrl === baseUrl,
+    );
+
+  /**
+   * The assistant's settings: what is connected and whether it answers (Test, its result in place),
+   * then the form, one provider chosen from tiles, and Disconnect apart. A member sees only what is
+   * connected, and where their messages go.
+   */
+  async function assistantSettingsSection(
+    session: Session,
+    status: number,
+    notice: string | undefined,
+    draft?: AssistantDraft,
+  ): Promise<Html> {
+    const store = assistantStore() as SlotlockAssistantStore;
     const settings = await store.getSettings(tenantOf(session));
-    const sentTo = html`<p class="fine">Members' messages, and the bookings and resources the assistant reads for them, are sent to this provider.</p>`;
-    if (!isAdmin(session)) {
-      return html`<section class="panel" id="assistant"><h2>Assistant</h2>${
-        settings
-          ? html`<dl class="facts"><dt>Provider</dt><dd>${settings.provider === 'anthropic' ? 'Anthropic' : 'OpenAI-compatible'}</dd><dt>Model</dt><dd>${settings.model}</dd></dl>${sentTo}`
-          : html`<p class="empty">No model is connected. An admin can connect one.</p>`
-      }</section>`;
-    }
     const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const savedName = settings ? (presetOf(settings.provider, settings.baseUrl)?.name ?? 'Custom') : null;
+    // Where messages go, in words: the provider's name, or a custom one's host.
+    const hostOf = (url: string) => {
+      try {
+        return new URL(url).host;
+      } catch {
+        return url;
+      }
+    };
+    const savedTo = settings ? (savedName === 'Custom' ? hostOf(settings.baseUrl) : savedName) : null;
+    const admin = isAdmin(session);
+    const badge = !settings
+      ? html`<span class="badge">Not set up</span>`
+      : notice && status === 200 && notice.startsWith('Connected')
+        ? html`<span class="badge ok">Connected</span>`
+        : notice && status === 502
+          ? html`<span class="badge bad">Failing</span>`
+          : html`<span class="badge ok">Set up</span>`;
+    const test =
+      settings && admin
+        ? html`<form method="post" action="${root}/settings/assistant/test">${hidden()}<button type="submit">Test</button></form>`
+        : html``;
+    const statusCard = html`<div class="set-card status-card" id="assistant"><div class="status-head"><span class="mono-tile" aria-hidden="true">${
+      savedName ? savedName.charAt(0) : '–'
+    }</span><div class="status-name"><strong>${savedName ?? 'No model connected'}</strong>${
+      settings ? html`<code>${settings.model}</code>` : html``
+    }</div>${badge}${test}</div>${noticeOf(notice, status)}</div>`;
+    const sentTo = (name: string | null) =>
+      html`<p class="fine">Members' messages, and the bookings they ask about, are sent to ${name ?? 'the provider you choose'}.</p>`;
+    if (!admin) {
+      return html`${statusCard}${settings ? sentTo(savedTo) : html`<p class="fine">An admin of this organization connects a model here.</p>`}`;
+    }
     // What the form shows: a draft (a preset, or a model list) over what is saved.
-    const provider = draft?.provider ?? settings?.provider;
+    const provider = draft?.provider ?? settings?.provider ?? 'anthropic';
     const baseUrl = draft ? draft.baseUrl : (settings?.baseUrl ?? '');
     const model = draft?.model ?? settings?.model ?? '';
-    const selected = (value: string) => (provider === value ? html` selected` : html``);
+    const chosen = settings || draft ? (presetOf(provider, baseUrl)?.id ?? 'custom') : 'anthropic';
+    const chosenName =
+      chosen === 'custom' ? (baseUrl ? hostOf(baseUrl) : null) : (SLOTLOCK_ASSISTANT_PRESETS.find((preset) => preset.id === chosen)?.name ?? null);
     const models = draft?.models ?? [];
-    return html`<section class="panel" id="assistant">
-<h2>Assistant</h2>
-<form class="presets" method="get" action="${root}/settings"><span class="fine">Fill in for</span>${SLOTLOCK_ASSISTANT_PRESETS.map(
-      (preset) => html`<button type="submit" name="preset" value="${preset.id}">${preset.name}</button>`,
-    )}</form>
-<form method="post" action="${root}/settings/assistant">
-<input type="hidden" name="csrf" value="${token}">
-<input type="hidden" name="once" value="${formNonce(session)}">
-<div class="grid-form">
-<label>Provider<select name="provider"><option value="anthropic"${selected('anthropic')}>Anthropic Messages API</option><option value="openai"${selected('openai')}>OpenAI-compatible</option></select></label>
-<label>Base URL<input name="base_url" required maxlength="2048" value="${baseUrl}" placeholder="https://api.anthropic.com"></label>
-<label>Model<input name="model" required maxlength="200" value="${model}" placeholder="your-model"${models.length > 0 ? html` list="assistant-models"` : html``}></label>${
+    const tiles = html`<div class="tiles" role="radiogroup" aria-label="Provider">${SLOTLOCK_ASSISTANT_PRESETS.map(
+      (preset) =>
+        html`<label class="tile"><input type="radio" name="preset" value="${preset.id}"${
+          preset.id === chosen ? html` checked` : html``
+        }><span class="tile-mark" aria-hidden="true">${preset.name.charAt(0)}</span>${preset.name}</label>`,
+    )}</div>`;
+    const format = (value: 'anthropic' | 'openai', label: string) =>
+      html`<label><input type="radio" name="provider" value="${value}"${provider === value ? html` checked` : html``}>${label}</label>`;
+    const keyField = settings?.keyHint
+      ? html`<div class="key-set"><code>•••• ${settings.keyHint}</code><details><summary>Replace</summary><input id="api-key" name="api_key" type="password" autocomplete="off" maxlength="4096" aria-label="New API key"></details></div>`
+      : html`<input id="api-key" name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="Optional for a local model">`;
+    const form = html`<form class="set-card provider-form" method="post" action="${root}/settings/assistant">${hidden()}<div class="row stack"><span class="row-label">Provider</span>${tiles}</div><div class="row custom-only"><span class="row-label">API format</span><div class="segmented">${format(
+      'anthropic',
+      'Anthropic Messages',
+    )}${format('openai', 'OpenAI-compatible')}</div></div><div class="row custom-only"><label class="row-label" for="base-url">Base URL</label><input id="base-url" class="mono" name="base_url" maxlength="2048" value="${baseUrl}" placeholder="https://host/v1"></div><div class="row"><label class="row-label" for="model">Model</label><div class="field-with-button"><input id="model" class="mono" name="model" required maxlength="200" value="${model}" placeholder="Model name"${
+      models.length > 0 ? html` list="assistant-models"` : html``
+    }><button type="submit" formaction="${root}/settings/assistant/models" formnovalidate>Load models</button></div>${
       models.length > 0
         ? html`<datalist id="assistant-models">${models.map((id) => html`<option value="${id}"></option>`)}</datalist>`
         : html``
-    }
-<label>API key<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="${settings?.keyHint ? 'Leave empty to keep it' : 'Optional for a local model'}"></label>
-</div>
-<p class="fine">Key: ${settings?.keyHint ? html`set, ending in <code>${settings.keyHint}</code>` : 'none'}. OpenAI-compatible covers OpenAI, OpenRouter, vLLM, Ollama and LM Studio; give the URL that ends in <code>/v1</code>.</p>
-${settings?.keyHint ? html`<label class="choice"><input type="checkbox" name="clear_key" value="1"> Remove the key</label>` : html``}
-<div class="row-actions"><button class="primary" type="submit">Save</button><button type="submit" formaction="${root}/settings/assistant/models">Load models</button></div>
-</form>
-${sentTo}
-${
-  settings
-    ? html`<div class="row-actions"><form class="inline" method="post" action="${root}/settings/assistant/test"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Test connection</button></form><details class="act danger"><summary>Disconnect</summary><div class="pop"><p>Members can no longer chat. The key is deleted.</p><form method="post" action="${root}/settings/assistant/remove"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button class="danger" type="submit">Disconnect</button></form></div></details></div>`
-    : html``
-}
-</section>`;
+    }</div><div class="row"><label class="row-label" for="api-key">API key</label>${keyField}</div><div class="card-foot">${sentTo(
+      chosenName,
+    )}<button class="primary" type="submit">Save</button></div></form>`;
+    const disconnect = settings
+      ? html`<div class="set-card"><div class="danger-row"><strong>Disconnect ${savedName}</strong><details class="act danger"><summary>Disconnect…</summary><div class="pop"><p>The key is deleted. Members can't use the assistant until a model is connected again.</p><form method="post" action="${root}/settings/assistant/remove">${hidden()}<button class="danger" type="submit">Disconnect</button></form></div></details></div></div>`
+      : html``;
+    return html`${statusCard}${form}${disconnect}`;
+  }
+
+  /** The provider and base URL a form names: a named provider's own, or Custom's two fields. */
+  function formEndpoint(form: URLSearchParams): { provider: string | null; baseUrl: string } {
+    const preset = SLOTLOCK_ASSISTANT_PRESETS.find((candidate) => candidate.id === form.get('preset'));
+    if (preset && preset.id !== 'custom') return { provider: preset.provider, baseUrl: preset.baseUrl };
+    return { provider: form.get('provider'), baseUrl: (form.get('base_url') ?? '').trim() };
   }
 
   const adminOnly = (session: Session) =>
@@ -3457,8 +3735,8 @@ ${
     const store = assistantStore();
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
-    const provider = form.get('provider');
-    const checkedUrl = readSlotlockAssistantBaseUrl(form.get('base_url') ?? '', { privateUrls });
+    const { provider, baseUrl: givenUrl } = formEndpoint(form);
+    const checkedUrl = readSlotlockAssistantBaseUrl(givenUrl, { privateUrls });
     const model = (form.get('model') ?? '').trim();
     const apiKey = (form.get('api_key') ?? '').trim();
     if (provider !== 'anthropic' && provider !== 'openai') {
@@ -3516,14 +3794,14 @@ ${
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
       return tooManyMessages(session, settingsPage);
     }
-    const provider = form.get('provider');
+    const { provider, baseUrl: givenUrl } = formEndpoint(form);
     if (provider !== 'anthropic' && provider !== 'openai') {
       return settingsPage(session, 400, 'Choose a provider from the list.');
     }
     const typedModel = (form.get('model') ?? '').trim();
     const draft: AssistantDraft = {
       provider,
-      baseUrl: (form.get('base_url') ?? '').trim(),
+      baseUrl: givenUrl,
       ...(typedModel !== '' ? { model: typedModel } : {}),
     };
     const checkedUrl = readSlotlockAssistantBaseUrl(draft.baseUrl, { privateUrls });
@@ -3615,23 +3893,39 @@ ${
     }
   }
 
-  async function sendToAssistant(session: Session, form: URLSearchParams): Promise<Response> {
+  type AssistantRun =
+    | { ok: false; status: number; message: string }
+    | { ok: true; messages: SlotlockAssistantEntry[]; actions: Record<string, unknown> };
+
+  /**
+   * One member message: check it, run the turn (streaming its text and steps to `onEvent` when
+   * given, stopping when `signal` aborts), and keep the conversation. Both ways to send share it.
+   */
+  async function runAssistantMessage(
+    session: Session,
+    form: URLSearchParams,
+    hooks: { onEvent?: (event: SlotlockAssistantTurnEvent) => void; signal?: AbortSignal } = {},
+  ): Promise<AssistantRun> {
     const store = assistantStore();
-    if (!store || !assistantOptions) return notFound(session);
+    if (!store || !assistantOptions) return { ok: false, status: 404, message: 'Nothing is here.' };
     const text = (form.get('message') ?? '').trim();
     if (text === '' || text.length > SLOTLOCK_ASSISTANT_MAX_MESSAGE) {
-      return assistantPage(
-        session,
-        400,
-        `Write a message of 1 to ${SLOTLOCK_ASSISTANT_MAX_MESSAGE.toLocaleString('en')} characters.`,
-      );
+      return {
+        ok: false,
+        status: 400,
+        message: `Write a message of 1 to ${SLOTLOCK_ASSISTANT_MAX_MESSAGE.toLocaleString('en')} characters.`,
+      };
     }
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
-      return tooManyMessages(session, assistantPage);
+      return {
+        ok: false,
+        status: 429,
+        message: 'You have sent the assistant a lot in the last minute. Wait a moment and try again.',
+      };
     }
     const found = await assistantModel(session);
-    if (found === null) return assistantPage(session, 409, 'No model is connected.');
-    if ('problem' in found) return assistantPage(session, 409, found.problem);
+    if (found === null) return { ok: false, status: 409, message: 'No model is connected.' };
+    if ('problem' in found) return { ok: false, status: 409, message: found.problem };
     const tenantRef = tenantOf(session);
     const member = personOf(session);
     try {
@@ -3662,6 +3956,8 @@ ${
       timeoutMs: assistantTimeout,
       turnTimeoutMs: assistantTurnTimeout,
       ...(assistantOptions.maxSteps !== undefined ? { maxSteps: assistantOptions.maxSteps } : {}),
+      ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+      ...(hooks.signal ? { signal: hooks.signal } : {}),
       read: async (operation, input) => {
         // A turn's reads share one budget of resource-days, so 8 steps of wide reads cannot each
         // scan a hundred resources over years.
@@ -3724,7 +4020,87 @@ ${
       },
       conversationTtl,
     );
+    return { ok: true, messages, actions: kept };
+  }
+
+  /** The form's way (no script): run the turn, then show the conversation at its latest message. */
+  async function sendToAssistant(session: Session, form: URLSearchParams): Promise<Response> {
+    const run = await runAssistantMessage(session, form);
+    if (!run.ok) return run.status === 404 ? notFound(session) : assistantPage(session, run.status, run.message);
     return redirect(303, `${root}/assistant#latest`);
+  }
+
+  /**
+   * app.js's way: the same turn, answered as it happens, one JSON object a line. `text` carries a
+   * piece of the reply, `step` a tool step as it starts and ends, and the last line is `done` (the
+   * turn as the page renders it, which replaces what was streamed) or `error`, each with a fresh
+   * single-use value for the next send. The member's Stop aborts the request, and the turn with it.
+   */
+  async function streamToAssistant(session: Session, form: URLSearchParams, request: Request): Promise<Response> {
+    const encoder = new TextEncoder();
+    const pipe = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = pipe.writable.getWriter();
+    let open = true;
+    const write = (event: Record<string, unknown>) => {
+      if (!open) return;
+      writer.write(encoder.encode(`${JSON.stringify(event)}\n`)).catch(() => {
+        open = false;
+      });
+    };
+    const label = (name: string, state: 'run' | 'ok' | 'bad') =>
+      slotlockAssistantStepLabel(
+        name,
+        toolTitles.get(name) ?? name,
+        state,
+        SLOTLOCK_ASSISTANT_TOOL_USE[name as SlotlockAgentOperation] === 'propose',
+      );
+    const failed = (message: string) =>
+      write({
+        t: 'error',
+        html: html`<li class="turn error" role="alert"><span>${message}</span></li>`.value,
+        once: formNonce(session),
+      });
+    const work = (async () => {
+      try {
+        const run = await runAssistantMessage(session, form, {
+          signal: request.signal,
+          onEvent: (event) => {
+            if (event.type === 'text') write({ t: 'text', d: event.delta });
+            else if (event.type === 'call') write({ t: 'step', id: event.id, s: 'run', label: label(event.name, 'run') });
+            else write({ t: 'step', id: event.id, s: event.ok ? 'ok' : 'bad', label: label(event.name, event.ok ? 'ok' : 'bad') });
+          },
+        });
+        if (!run.ok) {
+          failed(run.message);
+          return;
+        }
+        // The turn from the member's message on, as a reload would show it.
+        const start = run.messages.map((entry) => entry.role).lastIndexOf('user');
+        const turn = run.messages.slice(Math.max(0, start));
+        const lookups =
+          Object.keys(run.actions).length > 0
+            ? await resourceLookups(tenantOf(session))
+            : { names: new Map<string, string>(), zones: new Map<string, string>() };
+        write({
+          t: 'done',
+          html: assistantItems(session, turn, run.actions, lookups.names, lookups.zones).join(''),
+          once: formNonce(session),
+        });
+      } catch (error) {
+        report(error instanceof Error ? error.message : 'assistant stream failed');
+        failed('Something went wrong. Reload the page and try again.');
+      } finally {
+        await writer.close().catch(() => undefined);
+        open = false;
+      }
+    })();
+    ignoreRejection(work);
+    const page = respond(200, '');
+    const headers = new Headers(page.headers);
+    headers.set('Content-Type', 'application/x-ndjson; charset=utf-8');
+    // Proxies that buffer (nginx) send each line as it is written.
+    headers.set('X-Accel-Buffering', 'no');
+    return new Response(pipe.readable, { status: 200, headers });
   }
 
   async function settleAction(
@@ -3813,7 +4189,7 @@ ${
         status,
         layout(
           'Plan',
-          html`${pageHead('Plan')}${noticeOf(notice)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
+          html`${pageHead('Plan')}${noticeOf(notice, status)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
             tested
               ? html`<section class="panel" id="usage"><h2>Test usage this month</h2><div class="stats">${stat('Operations', tested.totals.operations)}${stat('Bookings', tested.totals.bookings)}${stat('Holds', tested.totals.holds)}</div><p class="fine">Since ${range.from}, in UTC, counted apart from Live, against the same monthly quotas.</p></section>`
               : html``
@@ -3929,7 +4305,7 @@ ${
 }
 </section>`
       : html``;
-    const content = html`${thanks ? html`<p class="notice">${notice ?? ''}</p>` : noticeOf(notice)}
+    const content = html`${thanks ? html`<p class="notice">${notice ?? ''}</p>` : noticeOf(notice, status)}
 ${warning}
 ${pageHead(`Plan: ${name}`, manage)}
 <div class="stats">
@@ -4230,7 +4606,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
           : html`<span class="muted">An owner can turn it on</span>`;
       return html`<tr><td data-label="Organization" class="strong">${org.login}</td><td data-label="You are">${owner ? 'Owner' : 'Member'}</td><td data-label="Slotlock"><span class="pill ${on ? 'active' : 'revoked'}">${on ? 'On' : 'Off'}</span></td><td class="actions">${actions}</td></tr>`;
     });
-    const content = html`${noticeOf(notice)}${pageHead('Teams')}
+    const content = html`${noticeOf(notice, status)}${pageHead('Teams')}
 <p>Work with the people in a GitHub organization: once an owner turns Slotlock on for it, every owner and member shares its resources, keys and history, and picks it from the workspace menu. Your own workspace stays yours.</p>
 ${
   rows.length === 0
@@ -4865,7 +5241,10 @@ ${
     }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
-    const form = await readForm(request, route === '/assistant' ? MAX_ASSISTANT_FORM_BYTES : MAX_FORM_BYTES);
+    const form = await readForm(
+      request,
+      route === '/assistant' || route === '/assistant/stream' ? MAX_ASSISTANT_FORM_BYTES : MAX_FORM_BYTES,
+    );
     if (form === 'too_large') {
       return respond(
         413,
@@ -4928,6 +5307,8 @@ ${
         );
       }
       if (!first) {
+        // The first one was taken: a second click, a reload or a resend shows what it did.
+        if (route.startsWith('/assistant')) return redirect(303, `${root}/assistant#latest`);
         return pageFor(route)(
           session,
           409,
@@ -4995,6 +5376,8 @@ ${
         return sandboxAction(session, form, 'fast-forward');
       case '/assistant':
         return sendToAssistant(session, form);
+      case '/assistant/stream':
+        return streamToAssistant(session, form, request);
       case '/assistant/approve':
         return settleAction(session, form, 'approve');
       case '/assistant/dismiss':
@@ -5049,6 +5432,9 @@ ${
             case '/assistant':
             case '/plan':
             case '/teams':
+            case '/settings/endpoints':
+            case '/settings/hours':
+            case '/settings/account':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
@@ -5069,6 +5455,9 @@ ${
               if (route === '/waitlist') return await waitlistPage(session);
               if (route === '/approvals') return await approvalsPage(session);
               if (route === '/assistant') return await assistantPage(session);
+              if (route === '/settings/endpoints') return await settingsPage(session, 200, undefined, undefined, 'endpoints');
+              if (route === '/settings/hours') return await settingsPage(session, 200, undefined, undefined, 'hours');
+              if (route === '/settings/account') return await settingsPage(session, 200, undefined, undefined, 'account');
               // A provider preset fills the assistant's form; nothing is saved until Save.
               const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
                 (candidate) => candidate.id === url.searchParams.get('preset'),
@@ -5081,9 +5470,9 @@ ${
               );
             }
             case '/style.css':
-              return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
+              return asset(DASHBOARD_ASSETS.css, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
             case '/app.js':
-              return asset(DASHBOARD_JS, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
+              return asset(DASHBOARD_ASSETS.js, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
             case '/favicon.svg':
               return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
             case '/sign-in':
@@ -5375,8 +5764,6 @@ textarea { padding: 10px var(--space-3); resize: vertical; min-height: 72px; lin
 .create .grow { flex: 1 1 220px; }
 label > input, label > select, label > .unit-input { width: 100%; }
 label > textarea { width: 100%; padding: var(--space-2) var(--space-3); resize: vertical; }
-.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); }
-.presets button { height: 28px; padding: 0 var(--space-3); font-size: var(--text-sm); }
 label.choice > input { width: 16px; }
 .create label:not(.grow) { flex: 0 1 auto; }
 form > label { margin-bottom: var(--space-3); }
@@ -5466,6 +5853,7 @@ form > .table { margin-bottom: var(--space-3); }
 /* Notices and empty states */
 .notice { display: block; border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-3) var(--space-4); background: var(--surface); color: var(--ink); margin: 0; font-size: var(--text-md); }
 .notice[role="alert"] { border-color: var(--bad-line); background: var(--bad-wash); color: var(--ink); box-shadow: inset 3px 0 0 var(--bad); }
+.notice.done { border-color: color-mix(in srgb, var(--good) 35%, var(--line)); background: var(--good-wash); color: var(--ink); box-shadow: inset 3px 0 0 var(--good); }
 .notice.warn, .notice.warn[role="alert"] { border-color: var(--warn-line); background: var(--warn-wash); color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); }
 .notice p { color: inherit; margin: 0 0 var(--space-2); }
 .empty { color: var(--ink-3); margin: 0; }
@@ -5502,23 +5890,6 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 .bare-main > .notice { max-width: 480px; }
 
 /* Assistant */
-.chat { display: grid; gap: var(--space-5); }
-.thread { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
-.msg { max-width: 78%; padding: 10px 14px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--line); }
-.msg p { margin: 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg.mine { justify-self: end; background: var(--button); border-color: var(--button); border-bottom-right-radius: 4px; }
-.msg.mine p { color: var(--button-ink); }
-.msg.bot { justify-self: start; border-bottom-left-radius: 4px; }
-.tool-line { font: 400 var(--text-sm)/1.5 var(--mono); color: var(--ink-3); padding-left: var(--space-1); }
-.thread > .notice { justify-self: start; }
-.action-card { justify-self: start; width: min(100%, 540px); padding: var(--space-4) var(--space-5); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--pop-shadow); display: grid; gap: var(--space-3); }
-.action-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.action-card .facts { font-size: var(--text-md); gap: 6px var(--space-4); }
-.action-card .facts dt::first-letter { text-transform: uppercase; }
-.action-card pre.wrap { white-space: pre-wrap; margin: 0; padding: var(--space-2); font-size: 12px; }
-.action-summary { margin: 0; color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
-.action-card .action-buttons { margin-top: var(--space-1); }
-.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--line-soft); }
 
 @media (max-width: 1080px) {
   .split { grid-template-columns: minmax(0, 1fr); }
@@ -5576,8 +5947,6 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .act.danger summary { border-color: var(--bad-line); }
   .pop { left: 0; right: auto; width: min(300px, calc(100vw - 48px)); transform-origin: top left; }
   .table .pop { margin-left: 0; }
-  .msg { max-width: 92%; }
-  .composer { grid-template-columns: minmax(0, 1fr); }
   .empty-state { padding: var(--space-8) var(--space-4); }
   .bare-main { padding-top: 6vh; }
   .sign-in { padding: var(--space-6); }
@@ -5601,8 +5970,14 @@ const COMPOSITE_PROBLEMS: Readonly<Record<string, string>> = Object.freeze({
 /** What the Plan page calls each plan. */
 const PLAN_NAMES: Readonly<Record<SlotlockPlan, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
 
+const DASHBOARD_ASSETS = Object.freeze({
+  css: DASHBOARD_CSS + SLOTLOCK_ASSISTANT_CSS + SLOTLOCK_SETTINGS_CSS,
+  // The chat's script renders a reply with the server's own Markdown renderer, embedded.
+  js: DASHBOARD_JS + slotlockAssistantScript(renderSlotlockMarkdown.toString()),
+});
+
 const ASSET_VERSIONS = Object.freeze({
-  css: createHash('sha256').update(DASHBOARD_CSS).digest('base64url').slice(0, 12),
-  js: createHash('sha256').update(DASHBOARD_JS).digest('base64url').slice(0, 12),
+  css: createHash('sha256').update(DASHBOARD_ASSETS.css).digest('base64url').slice(0, 12),
+  js: createHash('sha256').update(DASHBOARD_ASSETS.js).digest('base64url').slice(0, 12),
   icon: createHash('sha256').update(SLOTLOCK_DASHBOARD_ICON_SVG).digest('base64url').slice(0, 12),
 });

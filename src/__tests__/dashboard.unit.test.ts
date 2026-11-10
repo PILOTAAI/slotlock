@@ -276,7 +276,7 @@ describe('dashboard routes and headers', () => {
     const response = await get(dashboard(), '/base/dashboard');
     expect(response.status).toBe(200);
     expect(response.headers.get('content-security-policy')).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     );
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('x-frame-options')).toBe('DENY');
@@ -407,11 +407,16 @@ describe('GitHub sign-in', () => {
       'user-agent': 'slotlock-dashboard',
     });
 
-    const page = await (await get(dashboard(), '/base/dashboard/settings', session)).text();
-    expect(page).toContain('@octocat');
-    expect(page).toContain('Mon–Fri: 09:00–17:00');
-    expect(page).toContain('https://slotlock.example.com/base/mcp');
-    expect(page).not.toContain('gho_fake');
+    // Settings is one page a section: the account, the server's hours, the endpoints.
+    const sections = await Promise.all(
+      ['/settings/account', '/settings/hours', '/settings'].map(async (path) =>
+        (await get(dashboard(), `/base/dashboard${path}`, session)).text(),
+      ),
+    );
+    expect(sections[0]).toContain('@octocat');
+    expect(sections[1]).toContain('Mon–Fri: 09:00–17:00');
+    expect(sections[2]).toContain('https://slotlock.example.com/base/mcp');
+    for (const page of sections) expect(page).not.toContain('gho_fake');
   });
 
   it.each([
@@ -930,7 +935,7 @@ describe('bookable hours in the dashboard', () => {
       'Mon–Fri 08:00–12:00, 13:00–18:00; Sat 22:00–08:00 next day; Sun all day',
     );
     expect(html).toContain('Mon, Wed 23:00–00:20 next day; Fri from 09:00 for 2 d 2 h 30 min');
-    const settings = await (await get(target, '/base/dashboard/settings', session)).text();
+    const settings = await (await get(target, '/base/dashboard/settings/hours', session)).text();
     expect(settings).toContain('Mon–Fri: 09:00–17:00');
     expect(html).not.toMatch(/\d\.\d+ h/);
   });
@@ -2345,7 +2350,7 @@ describe('the dashboard design', () => {
       const response = await get(target, `/base/dashboard${path}`, session);
       expect(response.status, path).toBe(200);
       expect(response.headers.get('content-security-policy'), path).toBe(
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       );
       const html = await response.text();
       expect(html, path).toContain('<a class="skip" href="#main">Skip to content</a>');
@@ -2388,7 +2393,18 @@ describe('the dashboard design', () => {
     expect(css).toContain(':focus-visible');
     // No web fonts, images or imports: the policy would refuse them, and the dashboard asks for none.
     expect(css).not.toMatch(/url\(|@import|@font-face|https?:/i);
-    expect(js).not.toMatch(/https?:|fetch\(|XMLHttpRequest|innerHTML|eval\(/);
+    expect(js).not.toMatch(/XMLHttpRequest|eval\(|new Function|sendBeacon|WebSocket|EventSource|import\(/);
+    // One request: the assistant's reply, from the page's own stream (connect-src 'self' holds it
+    // to this origin). The only absolute URLs are the http(s) links a reply may hold.
+    expect(js.match(/fetch\(/g)).toHaveLength(1);
+    expect(js).toContain("fetch(page.getAttribute('data-stream'), {");
+    expect(js.replaceAll('https?:\\/\\/', '')).not.toMatch(/https?:/);
+    // Markup it writes is the server's: its own Markdown renderer's, or the turn the server rendered.
+    const writes = js.split('\n').filter((line) => /innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(line));
+    expect(writes.map((line) => line.trim())).toEqual([
+      'if (prose) prose.innerHTML = renderMarkdown(proseText);',
+      "thread.insertAdjacentHTML('beforeend', e.html || '');",
+    ]);
   });
 
   it('opens a row’s confirmation in place, never floating where the table would clip it', async () => {

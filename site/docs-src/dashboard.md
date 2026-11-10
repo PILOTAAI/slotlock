@@ -119,8 +119,8 @@ its own model.
   are not resolved: a Worker's fetch reaches no private network.
 - **The key goes only where it was entered for.** Changing the provider or the base URL takes the
   key again (decided in the database write, so racing saves cannot get past it), even on an origin
-  that serves several accounts. **Test connection** makes one real request and checks the model
-  answers with one correct tool call.
+  that serves several accounts. **Test** makes one real request and checks the model answers with
+  one correct tool call; the result shows beside it.
 - **The organization's data is sent to the provider it configures**: its messages, and the bookings
   and resources the assistant reads.
 - **The key** is stored sealed with AES-256-GCM under a key derived from
@@ -138,7 +138,7 @@ its own model.
   availability, events; the writes: holds, bookings, pool and bundle bookings, changes and
   cancellations). A read runs at once through the same operation boundary as an agent's. A write
   never runs when the model asks: it appears as a proposed change the member approves (or
-  dismisses) with a form, and only then runs, once (its idempotency key is the dashboard's), with
+  declines) with a form, and only then runs, once (its idempotency key is the dashboard's), with
   the same booking rules, tenant limits and rate limits as an agent, recorded as
   `dashboard-assistant:github:<user id>` (shown as "Assistant for @login").
 - **The card** leads with the sentence a confirmation would ask (the resource by name, the times in
@@ -151,6 +151,10 @@ its own model.
   outside the list is refused. Tool results and booking data are data to the model, never
   instructions, and the system prompt says so; the tool list does not change with what the model
   says. A member may send 10 messages a minute; each model call has 30 seconds and a message 90.
+- **Replies stream.** The dashboard's script reads the turn from `POST <root>/assistant/stream`, one
+  JSON object a line (the reply's text as it comes, each tool step as it starts and ends, then the
+  turn as the page renders it), and Stop ends it. Without script, the form posts and the page
+  shows the reply. Replies are Markdown, rendered escaped (links http(s) only).
 - **Conversations** are kept per member in `slotlock.assistant_conversations` for 2 hours after the
   last message, then deleted: by `serve`'s maintenance, which sweeps every tenant's expired
   conversations every quarter hour (a tenant only the dashboard serves included), by

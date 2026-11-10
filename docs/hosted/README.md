@@ -86,9 +86,9 @@ room-3?", "book it for Ana") with a model you bring:
 
 - **Connect your own model** in Settings, Assistant: the Anthropic Messages API, or any
   OpenAI-compatible API (OpenAI, OpenRouter, and others that answer tool calls), with its base
-  URL, the model name and your API key. A preset (Anthropic, OpenAI, OpenRouter, Google, Mistral,
-  Groq, Together) fills in the URL; **Load models** asks your provider which models it offers.
-  **Test connection** makes one real request. You pay your provider for what the model uses;
+  URL, the model name and your API key. Choosing a provider (Anthropic, OpenAI, OpenRouter, Google,
+  Mistral, Groq, Together) brings its URL and API format; Custom takes both. **Load models** asks
+  your provider which models it offers. **Test** makes one real request. You pay your provider for what the model uses;
   Slotlock does not charge for it.
 - **Your key** is stored encrypted (AES-256-GCM) and never shown again: only that it is set, and its
   last four characters.

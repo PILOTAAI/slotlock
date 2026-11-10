@@ -538,6 +538,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         onnotice: () => {},
       });
       let requestScope: RequestScope | undefined;
+      // A streamed answer (the assistant's reply) is still working when the response is returned:
+      // its connection and usage are closed once the stream ends, not when fetch returns.
+      let streaming: Promise<unknown> | null = null;
       try {
         const store = createSlotlockStore(sql);
         // Recorded once, when the response is sent: a Worker keeps nothing between requests.
@@ -585,15 +588,33 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           resources: createSlotlockDashboardResources(store, { agentBackend }),
           state: createSlotlockDashboardState(sql),
         };
-        return await scope.run(requestScope, () => dashboard.fetch(request));
+        const relayed = slotlockRelayStream(await scope.run(requestScope, () => dashboard.fetch(request)));
+        streaming = relayed.done;
+        return relayed.response;
       } finally {
         const counted = requestScope?.usage;
         ctx.waitUntil(
-          (counted ? counted.close() : Promise.resolve()).finally(() => sql.end({ timeout: 5 })),
+          (streaming ?? Promise.resolve())
+            .then(() => (counted ? counted.close() : undefined))
+            .finally(() => sql.end({ timeout: 5 })),
         );
       }
     },
   };
+}
+
+/**
+ * A streamed answer (`application/x-ndjson`, the assistant's reply) is still being written when the
+ * dashboard returns it. Relayed, `done` settles once its last byte has gone (or the client left), so
+ * the request's connection and usage are closed then and not before. Anything else passes as is.
+ */
+export function slotlockRelayStream(response: Response): { response: Response; done: Promise<void> | null } {
+  if (!response.body || !response.headers.get('content-type')?.startsWith('application/x-ndjson')) {
+    return { response, done: null };
+  }
+  const relay = new TransformStream<Uint8Array, Uint8Array>();
+  const done = response.body.pipeTo(relay.writable).catch(() => undefined);
+  return { response: new Response(relay.readable, { status: response.status, headers: response.headers }), done };
 }
 
 export default createSlotlockDashboardWorker();
