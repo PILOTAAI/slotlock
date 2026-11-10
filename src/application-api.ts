@@ -58,6 +58,12 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_busy'
   | 'slotlock_set_resource_availability'
   | 'slotlock_set_tenant_availability'
+  | 'slotlock_get_availability_defaults'
+  | 'slotlock_set_location_availability'
+  | 'slotlock_list_availability_exceptions'
+  | 'slotlock_create_availability_exception'
+  | 'slotlock_delete_availability_exception'
+  | 'slotlock_import_holidays'
   | 'slotlock_export_resource_availability'
   | 'slotlock_import_resource_availability'
   | 'slotlock_set_resource_booking_rules'
@@ -199,6 +205,12 @@ export interface SlotlockApplicationBackend {
   listBusy: Handler;
   setResourceAvailability: Handler;
   setTenantAvailability: Handler;
+  getAvailabilityDefaults: Handler;
+  setLocationAvailability: Handler;
+  listAvailabilityExceptions: Handler;
+  createAvailabilityException: Handler;
+  deleteAvailabilityException: Handler;
+  importHolidays: Handler;
   exportResourceAvailability: Handler;
   importResourceAvailability: Handler;
   setResourceBookingRules: Handler;
@@ -578,8 +590,49 @@ const RESOURCE = z
     parent_id: z.string().uuid().nullable(),
     /** Its place among its parent's parts, from 0; `null` when it is no part. */
     part_index: z.number().int().min(0).nullable(),
+    /**
+     * The hours it inherits when it has none of its own (RFC 0004 B2): its location's (the nearest
+     * up the chain), else the tenant's; `null` when it has its own or uses the server's default.
+     */
+    inherited_availability: z
+      .object({ source: z.enum(['location', 'tenant']), location: GROUPING_REF.nullable(), rules: AVAILABILITY_RULES })
+      .strict()
+      .nullable(),
   })
   .strict();
+
+/** A day in the scope's calendar, YYYY-MM-DD. */
+const LOCAL_DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** One window of an exception's day: minutes after local midnight and how long. */
+const EXCEPTION_WINDOW = z
+  .object({ start_minutes: z.number().int().min(0).max(1_439), duration_minutes: z.number().int().min(1).max(1_440) })
+  .strict();
+/** A closure or a day of special hours (RFC 0004 B1). */
+const AVAILABILITY_EXCEPTION = z
+  .object({
+    id: z.string().uuid(),
+    /** The location it applies to (and every location inside it); `null` when not one location's. */
+    location: GROUPING_REF.nullable(),
+    /** The resource it applies to; `null` when not one resource's. Both null: the whole tenant. */
+    resource_id: z.string().uuid().nullable(),
+    starts_on: LOCAL_DATE,
+    /** The last day, inclusive. */
+    ends_on: LOCAL_DATE,
+    outcome: z.enum(['closed', 'open']),
+    /** For open: the windows each of its days has instead of its weekly hours; `null` when closed. */
+    hours: z.array(EXCEPTION_WINDOW).min(1).max(4).nullable(),
+    label: z.string().max(200),
+    /** manual, ics (a holiday calendar) or vavailability (a resource's imported hours). */
+    source: z.enum(['manual', 'ics', 'vavailability']),
+    created_at: DATE_TIME,
+  })
+  .strict();
+const AVAILABILITY_DEFAULTS_RESULT = {
+  /** Resources in use the hours now apply to. */
+  resources_updated: z.number().int().min(0),
+  /** Resources in use the hours reach that keep hours of their own. */
+  resources_with_own_hours: z.number().int().min(0),
+};
 
 const HISTORY_ENTRY = z
   .object({
@@ -976,7 +1029,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_resource_availability',
       title: "Set a resource's bookable hours",
       description:
-        "Give one resource its own weekly bookable hours. `null` makes it use the server's default; `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.",
+        "Give one resource its own weekly bookable hours. `null` makes it inherit: its location's hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/availability',
       input: z.object({ resource_id: RESOURCE_ID, rules: AVAILABILITY_RULES.nullable() }).strict(),
@@ -989,7 +1042,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_export_resource_availability',
       title: "Export a resource's bookable hours as iCalendar",
       description:
-        "One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. `null` when the resource uses the server's default.",
+        "The weekly bookable hours that apply to one resource (its own, or those it inherits) as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE with RDATEs gives a day its own hours. `null` when the resource uses the server's default.",
       method: 'GET',
       path: '/v1/resources/{resource_id}/availability/ical',
       input: z.object({ resource_id: RESOURCE_ID }).strict(),
@@ -1002,7 +1055,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_import_resource_availability',
       title: "Import a resource's bookable hours from iCalendar",
       description:
-        "Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another zone.",
+        "Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the resource's exceptions, replacing those an earlier import made: each day they name keeps the windows left on it, or is closed with none. Times must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/availability/ical',
       input: z
@@ -1176,16 +1229,133 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
     },
     {
       name: 'slotlock_set_tenant_availability',
-      title: "Set every resource's bookable hours",
+      title: "Set the tenant's bookable hours",
       description:
-        "Set the weekly bookable hours of every resource the tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the server's default. Returns how many resources changed.",
+        "Store the tenant's weekly bookable hours: every resource without hours of its own, and with no location hours above it, uses them, resources added later too. `null` hands them back to the server's default. Nothing is copied: a resource with its own hours keeps them, unless override_resources is true, which clears them so every resource inherits. resources_updated counts the resources in use these hours now apply to; resources_with_own_hours, those that keep their own.",
       method: 'PUT',
       path: '/v1/availability',
-      input: z.object({ rules: AVAILABILITY_RULES.nullable() }).strict(),
-      output: z.object({ resources_updated: z.number().int().min(0) }).strict(),
+      input: z.object({ rules: AVAILABILITY_RULES.nullable(), override_resources: z.boolean().optional() }).strict(),
+      output: z.object(AVAILABILITY_DEFAULTS_RESULT).strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'setTenantAvailability',
       example: { rules: EXAMPLE_RULES },
+    },
+    {
+      name: 'slotlock_get_availability_defaults',
+      title: 'Read stored bookable hours',
+      description:
+        "The tenant's stored weekly hours (`null` when it uses the server's default) and each location's that has its own. A resource without its own uses its location's, the nearest up the chain, then the tenant's, then the server's.",
+      method: 'GET',
+      path: '/v1/availability',
+      input: z.object({}).strict(),
+      output: z
+        .object({
+          tenant: AVAILABILITY_RULES.nullable(),
+          locations: z.array(z.object({ location: GROUPING_REF, rules: AVAILABILITY_RULES }).strict()),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getAvailabilityDefaults',
+      example: {},
+    },
+    {
+      name: 'slotlock_set_location_availability',
+      title: "Set a location's bookable hours",
+      description:
+        "Store a location's weekly bookable hours, each read in a resource's own time zone: resources at it, or at a location inside it, without hours of their own use them, unless a location nearer them has its own. `null` clears them, so they inherit from further up. 404 location_not_found for a location the tenant does not have.",
+      method: 'PUT',
+      path: '/v1/locations/{location}/availability',
+      input: z.object({ location: GROUPING_REF, rules: AVAILABILITY_RULES.nullable() }).strict(),
+      output: z.object({ location: GROUPING_REF, ...AVAILABILITY_DEFAULTS_RESULT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setLocationAvailability',
+      example: { location: 'london-depot', rules: EXAMPLE_RULES },
+    },
+    {
+      name: 'slotlock_list_availability_exceptions',
+      title: 'List closures and special hours',
+      description:
+        "The tenant's exceptions to its weekly hours, by first day: with resource_id, those that apply to that resource (the tenant's, its locations' and its own); with location, that location's own; else all of them. from and to keep those that reach the days between. At most limit (1-1,000, default 100); next is the cursor for after.",
+      method: 'GET',
+      path: '/v1/availability/exceptions',
+      input: z
+        .object({
+          resource_id: z.string().uuid().optional(),
+          location: GROUPING_REF.optional(),
+          from: LOCAL_DATE.optional(),
+          to: LOCAL_DATE.optional(),
+          limit: z.coerce.number().int().min(1).max(1_000).optional(),
+          after: z.string().uuid().optional(),
+        })
+        .strict(),
+      output: z.object({ exceptions: z.array(AVAILABILITY_EXCEPTION), next: z.string().uuid().nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listAvailabilityExceptions',
+      example: { from: '2026-12-01', to: '2027-01-31' },
+    },
+    {
+      name: 'slotlock_create_availability_exception',
+      title: 'Add a closure or special hours',
+      description:
+        "Close whole days, or give them hours of their own, for the whole tenant, one location (and every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367 days) are local days, read in each resource's time zone. outcome closed empties those days; open replaces their weekly hours with hours (1-4 windows of start_minutes and duration_minutes). Where several apply to a day, the nearest wins: the resource's own, then its location's from the innermost out, then the tenant's. Search leaves the days as they say; a write is refused outside_hours only under the enforce_hours booking rule. 409 availability_exceptions_limit_reached past 5,000 a tenant.",
+      method: 'POST',
+      path: '/v1/availability/exceptions',
+      input: z
+        .object({
+          location: GROUPING_REF.optional(),
+          resource_id: z.string().uuid().optional(),
+          starts_on: LOCAL_DATE,
+          ends_on: LOCAL_DATE.optional(),
+          outcome: z.enum(['closed', 'open']),
+          hours: z.array(EXCEPTION_WINDOW).min(1).max(4).optional(),
+          label: z.string().trim().min(1).max(200),
+        })
+        .strict(),
+      output: z.object({ exception: AVAILABILITY_EXCEPTION }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'createAvailabilityException',
+      example: { starts_on: '2026-12-25', ends_on: '2026-12-26', outcome: 'closed', label: 'Christmas' },
+    },
+    {
+      name: 'slotlock_delete_availability_exception',
+      title: 'Delete a closure or special hours',
+      description: 'Remove an exception: its days read as the weekly hours again. 404 availability_exception_not_found.',
+      method: 'DELETE',
+      path: '/v1/availability/exceptions/{exception_id}',
+      input: z.object({ exception_id: z.string().uuid() }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteAvailabilityException',
+      example: { exception_id: '7b3c1d9e-4f2a-4e8b-9c6d-1a2b3c4d5e6f' },
+    },
+    {
+      name: 'slotlock_import_holidays',
+      title: 'Import a holiday calendar',
+      description:
+        "Close the days an iCalendar holiday calendar names, for the whole tenant, one location or one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the days it covers, and each occurrence of a recurring one within from to to (default today to two years on, at most three years); timed and cancelled events are skipped. Importing the same calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.",
+      method: 'POST',
+      path: '/v1/availability/holidays',
+      input: z
+        .object({
+          icalendar: z.string().min(1).max(1_048_576).optional(),
+          url: z.string().url().max(2_000).optional(),
+          location: GROUPING_REF.optional(),
+          resource_id: z.string().uuid().optional(),
+          from: LOCAL_DATE.optional(),
+          to: LOCAL_DATE.optional(),
+        })
+        .strict(),
+      output: z
+        .object({
+          /** Closures added or updated. */
+          imported: z.number().int().min(0),
+          /** Events that were not all-day, were cancelled, or fell outside the span. */
+          skipped: z.number().int().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'importHolidays',
+      example: { url: 'https://example.com/holidays/gb.ics', location: 'london-depot' },
     },
     {
       name: 'slotlock_acquire_hold',

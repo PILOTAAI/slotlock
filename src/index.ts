@@ -83,8 +83,42 @@ export {
   parseVAvailability,
   recurrenceRuleFromRRule,
   SLOTLOCK_MAX_VAVAILABILITY_CHARACTERS,
+  SLOTLOCK_MAX_VAVAILABILITY_DAYS,
   toJSCalendarEvent,
 } from './interop.js';
+// Stored hours that inherit, and closures and special days (RFC 0004 B1, B2).
+export {
+  applicableHours,
+  coveredByOpenWindows,
+  exceptionDays,
+  exceptionRanges,
+  openWindows,
+  parseExceptionDays,
+  SLOTLOCK_MAX_AVAILABILITY_EXCEPTIONS,
+  SLOTLOCK_MAX_EXCEPTION_DAYS,
+  SLOTLOCK_MAX_EXCEPTION_WINDOWS,
+} from './hours.js';
+export type {
+  SlotlockAvailabilityException,
+  SlotlockExceptionDay,
+  SlotlockExceptionOutcome,
+  SlotlockExceptionSource,
+  SlotlockExceptionWindow,
+  SlotlockHoursSource,
+  SlotlockRankedException,
+} from './hours.js';
+export type {
+  SlotlockAvailabilityDefaults,
+  SlotlockAvailabilityDefaultsResult,
+  SlotlockAvailabilityExceptionInput,
+} from './availability-store.js';
+export {
+  fetchHolidayCalendar,
+  parseHolidayCalendar,
+  SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES,
+  SLOTLOCK_MAX_HOLIDAY_DAYS,
+} from './holidays.js';
+export type { ParsedHolidayCalendar, SlotlockHoliday } from './holidays.js';
 export type {
   EmitVAvailabilityOptions,
   JSCalendarAlert,
@@ -396,5 +430,6 @@ export type {
   PutCalendarEventResult,
   ReleaseHoldResult,
   TrustedICalendarEvent,
+  SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
 } from './types.js';

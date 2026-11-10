@@ -146,11 +146,20 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
       { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
     ]);
+    // Your hours are stored once; the override clears the van's own so it inherits them (RFC 0004 B2).
     expect(
-      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed' }, session)).status,
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed', override: 'yes' }, session)).status,
+    ).toBe(303);
+    expect(await read()).not.toHaveProperty('availabilityRules');
+    expect((await read())?.inheritedAvailability).toEqual({ source: 'tenant', rules: [] });
+    expect(await (await get('/dashboard/resources', session)).text()).toContain('<span>Your hours: Closed</span><a class="meta-link" href');
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'server' }, session)).status,
+    ).toBe(303);
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: van, mode: 'closed' }, session)).status,
     ).toBe(303);
     expect((await read())?.availabilityRules).toEqual([]);
-    expect(await (await get('/dashboard/resources', session)).text()).toContain('<span>Closed</span><a class="meta-link" href');
     expect(
       (await post('/dashboard/hours', { csrf, resource: van, mode: 'server' }, session)).status,
     ).toBe(303);

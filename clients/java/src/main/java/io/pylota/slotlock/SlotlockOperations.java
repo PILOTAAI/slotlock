@@ -59,7 +59,13 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_get_resource_history", new Operation("GET", "/v1/resources/{resource_id}/history", List.of("resource_id"), List.of("limit", "before"))),
           Map.entry("slotlock_get_reservation_history", new Operation("GET", "/v1/reservations/{reservation_ref}/history", List.of("reservation_ref"), List.of("limit", "before"))),
           Map.entry("slotlock_get_tenant_event_history", new Operation("GET", "/v1/tenant/events/{event_id}/history", List.of("event_id"), List.of("limit", "before"))),
+          Map.entry("slotlock_get_availability_defaults", new Operation("GET", "/v1/availability", List.of(), List.of())),
           Map.entry("slotlock_set_tenant_availability", new Operation("PUT", "/v1/availability", List.of(), List.of())),
+          Map.entry("slotlock_set_location_availability", new Operation("PUT", "/v1/locations/{location}/availability", List.of("location"), List.of())),
+          Map.entry("slotlock_list_availability_exceptions", new Operation("GET", "/v1/availability/exceptions", List.of(), List.of("resource_id", "location", "from", "to", "limit", "after"))),
+          Map.entry("slotlock_create_availability_exception", new Operation("POST", "/v1/availability/exceptions", List.of(), List.of())),
+          Map.entry("slotlock_delete_availability_exception", new Operation("DELETE", "/v1/availability/exceptions/{exception_id}", List.of("exception_id"), List.of("dry_run"))),
+          Map.entry("slotlock_import_holidays", new Operation("POST", "/v1/availability/holidays", List.of(), List.of())),
           Map.entry("slotlock_acquire_hold", new Operation("POST", "/v1/holds", List.of(), List.of())),
           Map.entry("slotlock_get_hold", new Operation("GET", "/v1/holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_release_hold", new Operation("DELETE", "/v1/holds/{hold_id}", List.of("hold_id"), List.of("dry_run"))),
@@ -1333,8 +1339,9 @@ public abstract class SlotlockOperations {
 
   /**
    * Set a resource's bookable hours. Give one resource its own weekly bookable hours. `null`
-   * makes it use the server's default; `[]` makes it never bookable. Each rule is weekly with
-   * BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.
+   * makes it inherit: its location's hours (the nearest up the chain), else the tenant's, else
+   * the server's; `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's
+   * time zone: start_minutes after midnight, lasting duration_minutes.
    *
    * @param resourceId {@code resource_id}, string
    * @param rules {@code rules}, list of object (may be null)
@@ -1352,8 +1359,9 @@ public abstract class SlotlockOperations {
 
   /**
    * Set a resource's bookable hours. Give one resource its own weekly bookable hours. `null`
-   * makes it use the server's default; `[]` makes it never bookable. Each rule is weekly with
-   * BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.
+   * makes it inherit: its location's hours (the nearest up the chain), else the tenant's, else
+   * the server's; `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's
+   * time zone: start_minutes after midnight, lasting duration_minutes.
    *
    * @param resourceId {@code resource_id}, string
    * @param rules {@code rules}, list of object (may be null)
@@ -1365,10 +1373,12 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Export a resource's bookable hours as iCalendar. One resource's own weekly bookable hours as
-   * an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
-   * rule, its DTSTART's TZID the resource's IANA time zone. `null` when the resource uses the
-   * server's default.
+   * Export a resource's bookable hours as iCalendar. The weekly bookable hours that apply to one
+   * resource (its own, or those it inherits) as an iCalendar VAVAILABILITY (RFC 7953) for a
+   * calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
+   * time zone. The closures and special hours of the next year are there too: an EXDATE takes a
+   * weekly window off a day, and an AVAILABLE with RDATEs gives a day its own hours. `null` when
+   * the resource uses the server's default.
    *
    * @param resourceId {@code resource_id}, string
    * @return the response body
@@ -1383,10 +1393,12 @@ public abstract class SlotlockOperations {
   /**
    * Import a resource's bookable hours from iCalendar. Set one resource's own weekly bookable
    * hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does
-   * from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must
-   * be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what
-   * weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another
-   * zone.
+   * from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. EXDATE,
+   * RDATE and single AVAILABLEs become the resource's exceptions, replacing those an earlier
+   * import made: each day they name keeps the windows left on it, or is closed with none. Times
+   * must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names
+   * what cannot be said: a bounded VAVAILABILITY, RECURRENCE-ID, another zone, more than four
+   * windows on a day.
    *
    * @param resourceId {@code resource_id}, string
    * @param icalendar {@code icalendar}, string
@@ -1405,10 +1417,12 @@ public abstract class SlotlockOperations {
   /**
    * Import a resource's bookable hours from iCalendar. Set one resource's own weekly bookable
    * hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does
-   * from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must
-   * be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what
-   * weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another
-   * zone.
+   * from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. EXDATE,
+   * RDATE and single AVAILABLEs become the resource's exceptions, replacing those an earlier
+   * import made: each day they name keeps the windows left on it, or is closed with none. Times
+   * must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names
+   * what cannot be said: a bounded VAVAILABILITY, RECURRENCE-ID, another zone, more than four
+   * windows on a day.
    *
    * @param resourceId {@code resource_id}, string
    * @param icalendar {@code icalendar}, string
@@ -1753,26 +1767,45 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Set every resource's bookable hours. Set the weekly bookable hours of every resource the
-   * tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the
-   * server's default. Returns how many resources changed.
+   * Read stored bookable hours. The tenant's stored weekly hours (`null` when it uses the
+   * server's default) and each location's that has its own. A resource without its own uses its
+   * location's, the nearest up the chain, then the tenant's, then the server's.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getAvailabilityDefaults() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_get_availability_defaults", values);
+  }
+
+  /**
+   * Set the tenant's bookable hours. Store the tenant's weekly bookable hours: every resource
+   * without hours of its own, and with no location hours above it, uses them, resources added
+   * later too. `null` hands them back to the server's default. Nothing is copied: a resource with
+   * its own hours keeps them, unless override_resources is true, which clears them so every
+   * resource inherits. resources_updated counts the resources in use these hours now apply to;
+   * resources_with_own_hours, those that keep their own.
    *
    * @param rules {@code rules}, list of object (may be null)
-   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @param optional the optional arguments, or null: {@code override_resources} (boolean), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> setTenantAvailability(List<?> rules, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("rules", rules);
-    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_tenant_availability");
+    putOptional(values, optional, Set.of("override_resources", "dry_run"), "slotlock_set_tenant_availability");
     return call("slotlock_set_tenant_availability", values);
   }
 
   /**
-   * Set every resource's bookable hours. Set the weekly bookable hours of every resource the
-   * tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the
-   * server's default. Returns how many resources changed.
+   * Set the tenant's bookable hours. Store the tenant's weekly bookable hours: every resource
+   * without hours of its own, and with no location hours above it, uses them, resources added
+   * later too. `null` hands them back to the server's default. Nothing is copied: a resource with
+   * its own hours keeps them, unless override_resources is true, which clears them so every
+   * resource inherits. resources_updated counts the resources in use these hours now apply to;
+   * resources_with_own_hours, those that keep their own.
    *
    * @param rules {@code rules}, list of object (may be null)
    * @return the response body
@@ -1780,6 +1813,187 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> setTenantAvailability(List<?> rules) {
     return setTenantAvailability(rules, null);
+  }
+
+  /**
+   * Set a location's bookable hours. Store a location's weekly bookable hours, each read in a
+   * resource's own time zone: resources at it, or at a location inside it, without hours of their
+   * own use them, unless a location nearer them has its own. `null` clears them, so they inherit
+   * from further up. 404 location_not_found for a location the tenant does not have.
+   *
+   * @param location {@code location}, string
+   * @param rules {@code rules}, list of object (may be null)
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setLocationAvailability(String location, List<?> rules, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("location", location);
+    values.put("rules", rules);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_set_location_availability");
+    return call("slotlock_set_location_availability", values);
+  }
+
+  /**
+   * Set a location's bookable hours. Store a location's weekly bookable hours, each read in a
+   * resource's own time zone: resources at it, or at a location inside it, without hours of their
+   * own use them, unless a location nearer them has its own. `null` clears them, so they inherit
+   * from further up. 404 location_not_found for a location the tenant does not have.
+   *
+   * @param location {@code location}, string
+   * @param rules {@code rules}, list of object (may be null)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setLocationAvailability(String location, List<?> rules) {
+    return setLocationAvailability(location, rules, null);
+  }
+
+  /**
+   * List closures and special hours. The tenant's exceptions to its weekly hours, by first day:
+   * with resource_id, those that apply to that resource (the tenant's, its locations' and its
+   * own); with location, that location's own; else all of them. from and to keep those that reach
+   * the days between. At most limit (1-1,000, default 100); next is the cursor for after.
+   *
+   * @param optional the optional arguments, or null: {@code resource_id} (string), {@code
+   * location} (string), {@code from} (string), {@code to} (string), {@code limit} (integer),
+   * {@code after} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listAvailabilityExceptions(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("resource_id", "location", "from", "to", "limit", "after"), "slotlock_list_availability_exceptions");
+    return call("slotlock_list_availability_exceptions", values);
+  }
+
+  /**
+   * List closures and special hours. The tenant's exceptions to its weekly hours, by first day:
+   * with resource_id, those that apply to that resource (the tenant's, its locations' and its
+   * own); with location, that location's own; else all of them. from and to keep those that reach
+   * the days between. At most limit (1-1,000, default 100); next is the cursor for after.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listAvailabilityExceptions() {
+    return listAvailabilityExceptions(null);
+  }
+
+  /**
+   * Add a closure or special hours. Close whole days, or give them hours of their own, for the
+   * whole tenant, one location (and every location inside it) or one resource. starts_on to
+   * ends_on (inclusive, at most 367 days) are local days, read in each resource's time zone.
+   * outcome closed empties those days; open replaces their weekly hours with hours (1-4 windows
+   * of start_minutes and duration_minutes). Where several apply to a day, the nearest wins: the
+   * resource's own, then its location's from the innermost out, then the tenant's. Search leaves
+   * the days as they say; a write is refused outside_hours only under the enforce_hours booking
+   * rule. 409 availability_exceptions_limit_reached past 5,000 a tenant.
+   *
+   * @param startsOn {@code starts_on}, string
+   * @param outcome {@code outcome}, string
+   * @param label {@code label}, string
+   * @param optional the optional arguments, or null: {@code location} (string), {@code
+   * resource_id} (string), {@code ends_on} (string), {@code hours} (list of object), {@code
+   * dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createAvailabilityException(String startsOn, String outcome, String label, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("starts_on", startsOn);
+    values.put("outcome", outcome);
+    values.put("label", label);
+    putOptional(values, optional, Set.of("location", "resource_id", "ends_on", "hours", "dry_run"), "slotlock_create_availability_exception");
+    return call("slotlock_create_availability_exception", values);
+  }
+
+  /**
+   * Add a closure or special hours. Close whole days, or give them hours of their own, for the
+   * whole tenant, one location (and every location inside it) or one resource. starts_on to
+   * ends_on (inclusive, at most 367 days) are local days, read in each resource's time zone.
+   * outcome closed empties those days; open replaces their weekly hours with hours (1-4 windows
+   * of start_minutes and duration_minutes). Where several apply to a day, the nearest wins: the
+   * resource's own, then its location's from the innermost out, then the tenant's. Search leaves
+   * the days as they say; a write is refused outside_hours only under the enforce_hours booking
+   * rule. 409 availability_exceptions_limit_reached past 5,000 a tenant.
+   *
+   * @param startsOn {@code starts_on}, string
+   * @param outcome {@code outcome}, string
+   * @param label {@code label}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createAvailabilityException(String startsOn, String outcome, String label) {
+    return createAvailabilityException(startsOn, outcome, label, null);
+  }
+
+  /**
+   * Delete a closure or special hours. Remove an exception: its days read as the weekly hours
+   * again. 404 availability_exception_not_found.
+   *
+   * @param exceptionId {@code exception_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteAvailabilityException(String exceptionId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("exception_id", exceptionId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_availability_exception");
+    return call("slotlock_delete_availability_exception", values);
+  }
+
+  /**
+   * Delete a closure or special hours. Remove an exception: its days read as the weekly hours
+   * again. 404 availability_exception_not_found.
+   *
+   * @param exceptionId {@code exception_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteAvailabilityException(String exceptionId) {
+    return deleteAvailabilityException(exceptionId, null);
+  }
+
+  /**
+   * Import a holiday calendar. Close the days an iCalendar holiday calendar names, for the whole
+   * tenant, one location or one resource: the text in icalendar, or an https url the server
+   * fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the
+   * days it covers, and each occurrence of a recurring one within from to to (default today to
+   * two years on, at most three years); timed and cancelled events are skipped. Importing the
+   * same calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar
+   * for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
+   * holiday_url_not_served where the server fetches no urls.
+   *
+   * @param optional the optional arguments, or null: {@code icalendar} (string), {@code url}
+   * (string), {@code location} (string), {@code resource_id} (string), {@code from} (string),
+   * {@code to} (string), {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> importHolidays(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("icalendar", "url", "location", "resource_id", "from", "to", "dry_run"), "slotlock_import_holidays");
+    return call("slotlock_import_holidays", values);
+  }
+
+  /**
+   * Import a holiday calendar. Close the days an iCalendar holiday calendar names, for the whole
+   * tenant, one location or one resource: the text in icalendar, or an https url the server
+   * fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the
+   * days it covers, and each occurrence of a recurring one within from to to (default today to
+   * two years on, at most three years); timed and cancelled events are skipped. Importing the
+   * same calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar
+   * for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
+   * holiday_url_not_served where the server fetches no urls.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> importHolidays() {
+    return importHolidays(null);
   }
 
   /**

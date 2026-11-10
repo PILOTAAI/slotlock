@@ -467,6 +467,13 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           expiresAt: new Date(Date.now() + HOUR),
         });
         if (!approval.ok) throw new Error(approval.code);
+        // Stored hours and a closure (RFC 0004 B1, B2).
+        await tenant.setLocationAvailability({
+          tenantRef,
+          location: 'depot',
+          rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 540, durationMinutes: 60 }],
+        });
+        await tenant.createAvailabilityException({ tenantRef, location: 'depot', startsOn: '2027-12-25', outcome: 'closed', label: 'Christmas' });
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',

@@ -43,7 +43,17 @@ import {
   bookingSearchReach,
 } from './booking-rules.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
-import { expandRules } from './rules.js';
+import {
+  type SlotlockAvailabilityException,
+  applicableHours,
+  coveredByOpenWindows,
+  dayToDate,
+  epochDay,
+  exceptionDays,
+  exceptionRanges,
+  openWindows,
+} from './hours.js';
+import { fetchHolidayCalendar, parseHolidayCalendar } from './holidays.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
   type SlotlockStore,
@@ -651,6 +661,42 @@ export function createSlotlockStoreChangeSource(
 }
 
 /** Bind the protocol server to the production store without giving a request control of tenancy. */
+/**
+ * Each resource's open hours within `window` (RFC 0004 B1, B2): its own weekly hours, else what it
+ * inherits from its location or tenant, else the server's, with the exceptions that reach it applied.
+ * One query reads every resource's exceptions.
+ */
+async function hoursWithin(
+  tenantStore: SlotlockTenantStore,
+  context: SlotlockAgentInvocationContext,
+  resources: readonly SlotlockResource[],
+  window: Interval,
+  options: Pick<SlotlockStoreAgentBackendOptions, 'availabilityRules'>,
+): Promise<Map<string, Interval[]>> {
+  const exceptions = await tenantStore.availabilityExceptionsFor({
+    tenantRef: context.principal.tenantRef,
+    resourceIds: resources.map((resource) => resource.id),
+    window,
+  });
+  const open = new Map<string, Interval[]>();
+  for (const resource of resources) {
+    const fallback =
+      resource.availabilityRules === undefined && resource.inheritedAvailability === undefined
+        ? await options.availabilityRules(context, resource)
+        : [];
+    open.set(
+      resource.id,
+      openWindows({
+        hours: applicableHours(resource, fallback).rules,
+        exceptions: exceptions.get(resource.id) ?? [],
+        timezone: resource.timezone,
+        window,
+      }),
+    );
+  }
+  return open;
+}
+
 export function createSlotlockStoreAgentBackend(
   store: SlotlockStore,
   options: SlotlockStoreAgentBackendOptions,
@@ -804,6 +850,9 @@ export function createSlotlockStoreAgentBackend(
           [window.end.getTime(), 0],
         ]);
         let complete = true;
+        const enforced = members.filter((member) => member.effectiveBookingRules?.enforceHours === true);
+        const memberHours =
+          enforced.length > 0 ? await hoursWithin(tenantStore, context, enforced, window, options) : new Map();
         for (const member of members) {
           const sources = await requiredSources(options, context, member);
           const freeBusy = await readFreeBusy(tenantStore, {
@@ -830,8 +879,7 @@ export function createSlotlockStoreAgentBackend(
             ? [{ start: search.window.start, end: new Date(Math.min(search.window.end.getTime(), latestStart)) }]
             : [];
           if (rules?.enforceHours === true && open.length > 0) {
-            const hours = member.availabilityRules ?? (await options.availabilityRules(context, member));
-            const windows = expandRules(hours, window, member.timezone);
+            const windows: Interval[] = memberHours.get(member.id) ?? [];
             windowsLeft -= windows.length;
             if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
             open = windows.flatMap((hoursWindow) => {
@@ -1199,8 +1247,8 @@ export function createSlotlockStoreAgentBackend(
         charge(freeBusy.busy.length);
         if (freeBusy.coverage.state !== 'complete') return { slots: [], certain: false };
         if (!search) return { slots: [], certain: true };
-        const rules = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-        const windows = expandRules(rules, search.window, resource.timezone);
+        const windows =
+          (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
         if (windows.length > MAX_REQUEST_RULE_WINDOWS) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
         const busy = bookingSearchBlocked(freeBusy.busy, search);
         // Each next slot as a search from where the last one ended would find it: the same busy
@@ -1259,9 +1307,8 @@ export function createSlotlockStoreAgentBackend(
             continue;
           }
           if (!search) continue;
-          const rules =
-            resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-          const windows = expandRules(rules, search.window, resource.timezone);
+          const windows =
+            (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
           windowsLeft -= windows.length;
           if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
           const candidate = findNextAvailable({
@@ -1558,6 +1605,36 @@ export interface SlotlockStoreApplicationBackendOptions {
    * approvals_unavailable; declining still works.
    */
   agentBackend?: SlotlockAgentCalendarBackend;
+  /**
+   * How `slotlock_import_holidays` fetches a calendar's url (RFC 0004 B1): give it a fetch that
+   * refuses private addresses (`createSlotlockGuardedFetch`). Unset: a url answers 400
+   * holiday_url_not_served and only the calendar's text is read.
+   */
+  holidayFetch?: typeof fetch;
+}
+
+/** An exception as the API answers it. */
+function exceptionOutput(exception: SlotlockAvailabilityException) {
+  return {
+    id: exception.id,
+    location: exception.location ?? null,
+    resource_id: exception.resourceId ?? null,
+    starts_on: exception.startsOn,
+    ends_on: exception.endsOn,
+    outcome: exception.outcome,
+    hours:
+      exception.hours?.map((window) => ({ start_minutes: window.startMinutes, duration_minutes: window.durationMinutes })) ??
+      null,
+    label: exception.label,
+    source: exception.source,
+    created_at: exception.createdAt.toISOString(),
+  };
+}
+
+/** Days the exports and imports of hours reach: a year on from yesterday. */
+function exportDays(): { from: string; to: string } {
+  const today = Math.floor(Date.now() / 86_400_000);
+  return { from: dayToDate(today - 1), to: dayToDate(today + 366) };
 }
 
 function storeRefusal(error: unknown): unknown {
@@ -1588,10 +1665,12 @@ function storeRefusal(error: unknown): unknown {
     code === 'pool_order_limit_reached' ||
     code === 'composite_too_deep' ||
     code === 'composite_parts_limit' ||
-    code === 'composite_busy'
+    code === 'composite_busy' ||
+    code === 'availability_exceptions_limit_reached'
   ) {
     return new SlotlockAgentOperationError(code, 409);
   }
+  if (code === 'holiday_calendar_unreachable') return new SlotlockAgentOperationError(code, 400);
   if (code.startsWith('invalid_') && code !== 'invalid_transaction_isolation') {
     return new SlotlockAgentOperationError(code, 400);
   }
@@ -1845,11 +1924,9 @@ function withApprovalPolicies(
     end: Date,
   ): Promise<boolean> {
     const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
-    const hours = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-    const windows = mergeIntervals(
-      expandRules(hours, { start: new Date(start.getTime() - 86_400_000), end: new Date(end.getTime() + 86_400_000) }, resource.timezone),
-    );
-    return !windows.some((window) => window.start <= start && window.end >= end);
+    const reach = { start: new Date(start.getTime() - 86_400_000), end: new Date(end.getTime() + 86_400_000) };
+    const windows = (await hoursWithin(tenantStore, context, [resource], reach, options)).get(resource.id) ?? [];
+    return !coveredByOpenWindows(windows, { start, end });
   }
 
   /** The write's ask and the policies that may cover it, or null when none can. */
@@ -2273,6 +2350,13 @@ function resourceOutput(resource: SlotlockResource) {
     location: resource.location ?? null,
     groups: resource.groups ?? [],
     parent_id: resource.parentId ?? null,
+    inherited_availability: resource.inheritedAvailability
+      ? {
+          source: resource.inheritedAvailability.source,
+          location: resource.inheritedAvailability.location ?? null,
+          rules: rulesOutput(resource.inheritedAvailability.rules) ?? [],
+        }
+      : null,
     part_index: resource.partIndex ?? null,
   };
 }
@@ -2693,14 +2777,27 @@ export function createSlotlockStoreApplicationBackend(
     async exportResourceAvailability(context, input) {
       return withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
-        if (resource.availabilityRules === undefined) return { icalendar: null };
-        return {
-          icalendar: emitVAvailability({
-            rules: resource.availabilityRules,
-            timezone: resource.timezone,
-            uid: `${resource.id}-hours`,
-          }),
+        const rules = resource.availabilityRules ?? resource.inheritedAvailability?.rules;
+        if (rules === undefined) return { icalendar: null };
+        // The year ahead's closures and special hours, as EXDATE and RDATE (RFC 0004 B1).
+        const span = exportDays();
+        const window = {
+          start: new Date((epochDay(span.from) as number) * 86_400_000),
+          end: new Date(((epochDay(span.to) as number) + 1) * 86_400_000),
         };
+        const exceptions = await tenant.availabilityExceptionsFor({
+          tenantRef: tenantOf(context),
+          resourceIds: [resource.id],
+          window,
+        });
+        const icalendar = emitVAvailability({
+          rules,
+          timezone: resource.timezone,
+          uid: `${resource.id}-hours`,
+          days: exceptionDays(exceptions.get(resource.id) ?? [], span.from, span.to),
+        });
+        if (icalendar.length > 200_000) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+        return { icalendar };
       });
     },
 
@@ -2729,6 +2826,14 @@ export function createSlotlockStoreApplicationBackend(
             id,
             rules: parsed.rules,
           });
+          if (resource) {
+            // The days it names replace those an earlier import of its hours made.
+            await tenant.replaceImportedExceptions({
+              tenantRef: tenantOf(context),
+              resourceId: id,
+              ranges: exceptionRanges(parsed.days),
+            });
+          }
         } catch (error) {
           throw storeRefusal(error);
         }
@@ -2860,15 +2965,161 @@ export function createSlotlockStoreApplicationBackend(
       const rules = rulesInput(input.rules);
       return withTenant(store, context, async (tenant) => {
         try {
-          return {
-            resources_updated: await tenant.setTenantAvailability({
-              tenantRef: tenantOf(context),
-              rules,
-            }),
-          };
+          const result = await tenant.setTenantAvailability({
+            tenantRef: tenantOf(context),
+            rules,
+            overrideResources: input.override_resources === true,
+          });
+          return { resources_updated: result.inheriting, resources_with_own_hours: result.ownHours };
         } catch (error) {
           throw storeRefusal(error);
         }
+      });
+    },
+
+    async getAvailabilityDefaults(context) {
+      return withTenant(store, context, async (tenant) => {
+        const defaults = await tenant.getAvailabilityDefaults({ tenantRef: tenantOf(context) });
+        return {
+          tenant: rulesOutput(defaults.tenant),
+          locations: defaults.locations.map((entry) => ({
+            location: entry.location,
+            rules: rulesOutput(entry.rules) ?? [],
+          })),
+        };
+      });
+    },
+
+    async setLocationAvailability(context, input) {
+      const rules = rulesInput(input.rules);
+      const location = input.location as string;
+      return withTenant(store, context, async (tenant) => {
+        let result: Awaited<ReturnType<typeof tenant.setLocationAvailability>>;
+        try {
+          result = await tenant.setLocationAvailability({ tenantRef: tenantOf(context), location, rules });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!result) throw new SlotlockAgentOperationError('location_not_found', 404);
+        return { location, resources_updated: result.inheriting, resources_with_own_hours: result.ownHours };
+      });
+    },
+
+    async listAvailabilityExceptions(context, input) {
+      const limit = (input.limit as number | undefined) ?? 100;
+      return withTenant(store, context, async (tenant) => {
+        let exceptions: SlotlockAvailabilityException[];
+        try {
+          exceptions = await tenant.listAvailabilityExceptions({
+            tenantRef: tenantOf(context),
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            ...(input.location !== undefined ? { location: input.location as string } : {}),
+            ...(input.from !== undefined ? { from: input.from as string } : {}),
+            ...(input.to !== undefined ? { to: input.to as string } : {}),
+            ...(input.after !== undefined ? { after: input.after as string } : {}),
+            limit: limit + 1,
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        const page = exceptions.slice(0, limit);
+        return {
+          exceptions: page.map(exceptionOutput),
+          next: exceptions.length > limit ? (page.at(-1)?.id ?? null) : null,
+        };
+      });
+    },
+
+    async createAvailabilityException(context, input) {
+      const hours = input.hours as { start_minutes: number; duration_minutes: number }[] | undefined;
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const exception = await tenant.createAvailabilityException({
+            tenantRef: tenantOf(context),
+            ...(input.location !== undefined ? { location: input.location as string } : {}),
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            startsOn: input.starts_on as string,
+            ...(input.ends_on !== undefined ? { endsOn: input.ends_on as string } : {}),
+            outcome: input.outcome as 'closed' | 'open',
+            ...(hours
+              ? { hours: hours.map((window) => ({ startMinutes: window.start_minutes, durationMinutes: window.duration_minutes })) }
+              : {}),
+            label: input.label as string,
+          });
+          return { exception: exceptionOutput(exception) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      });
+    },
+
+    async deleteAvailabilityException(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const deleted = await tenant.deleteAvailabilityException({
+          tenantRef: tenantOf(context),
+          id: input.exception_id as string,
+        });
+        if (!deleted) throw new SlotlockAgentOperationError('availability_exception_not_found', 404);
+        return { deleted: true };
+      });
+    },
+
+    async importHolidays(context, input) {
+      const given = [input.icalendar, input.url].filter((value) => value !== undefined);
+      if (given.length !== 1) {
+        throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, { reason: 'give icalendar or url' });
+      }
+      if (input.location !== undefined && input.resource_id !== undefined) {
+        throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, { reason: 'a location or a resource, not both' });
+      }
+      const today = Math.floor(Date.now() / 86_400_000);
+      const from = (input.from as string | undefined) ?? dayToDate(today);
+      const to = (input.to as string | undefined) ?? dayToDate((epochDay(from) ?? today) + 730);
+      const first = epochDay(from);
+      const last = epochDay(to);
+      if (first === null || last === null || last < first || last - first > 1_096) {
+        throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, {
+          reason: 'from and to must be days at most three years apart',
+        });
+      }
+      let text: string;
+      if (input.url !== undefined) {
+        if (!options.holidayFetch) throw new SlotlockAgentOperationError('holiday_url_not_served', 400);
+        try {
+          text = await fetchHolidayCalendar(options.holidayFetch, input.url as string);
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      } else {
+        text = input.icalendar as string;
+      }
+      let parsed: ReturnType<typeof parseHolidayCalendar>;
+      try {
+        parsed = parseHolidayCalendar(text, { from, to });
+      } catch (error) {
+        throw storeRefusal(error);
+      }
+      return withTenant(store, context, async (tenant) => {
+        let imported = 0;
+        try {
+          for (const holiday of parsed.holidays) {
+            await tenant.createAvailabilityException({
+              tenantRef: tenantOf(context),
+              ...(input.location !== undefined ? { location: input.location as string } : {}),
+              ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+              startsOn: holiday.startsOn,
+              endsOn: holiday.endsOn,
+              outcome: 'closed',
+              label: holiday.label,
+              source: 'ics',
+              sourceUid: `ics:${holiday.uid}`,
+            });
+            imported++;
+          }
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        return { imported, skipped: parsed.skipped };
       });
     },
 

@@ -5,6 +5,7 @@
 // The one exception is the API key `key create` prints: that output is the key's only copy.
 import {
   type SlotlockWebhookScheduler,
+  createSlotlockGuardedFetch,
   createSlotlockWebhookSender,
   deliverSlotlockWebhooks,
   startSlotlockWebhookDelivery,
@@ -100,6 +101,8 @@ import {
   readSlotlockOtlpConfig,
 } from './otel.js';
 import { readFile } from 'node:fs/promises';
+import type { SlotlockAvailabilityException } from './hours.js';
+import { parseHolidayCalendar } from './holidays.js';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
   SLOTLOCK_QUOTA_FUNCTIONS,
@@ -1249,6 +1252,8 @@ export async function startSlotlockServer(
                 maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
                 // A granted approval's booking is made as an agent's would be (RFC 0004 A4).
                 agentBackend,
+                // Holiday calendars by URL (RFC 0004 B1), never from a private address.
+                holidayFetch: createSlotlockGuardedFetch(),
                 partners: createSlotlockPartnerStore(sql, {
                   keys: createSlotlockApiKeyStore(sql),
                   eraseTenant: (tenantRef) => store.eraseTenant({ tenantRef }),
@@ -1596,7 +1601,137 @@ function hoursLine(resource: SlotlockResource): string {
     external_ref: resource.externalRef,
     timezone: resource.timezone,
     hours: resource.availabilityRules ?? null,
+    inherited: resource.inheritedAvailability ?? null,
   })}\n`;
+}
+
+/**
+ * `closures list|add|delete|import` (RFC 0004 B1): the tenant's closures and special days. Exit 0, 1
+ * when a name, id or file is not found or refused, as JSON lines on stdout.
+ */
+async function runClosures(
+  config: SlotlockDatabaseConfig,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  subcommand: string,
+  operands: readonly string[],
+  given: { resource?: string; location?: string; label?: string; open?: string },
+): Promise<number> {
+  const sql = connect(config.databaseUrl, 1);
+  const fail = (message: string) => {
+    io.stderr.write(`slotlock: ${message}\n`);
+    return 1;
+  };
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const line = (exception: SlotlockAvailabilityException) =>
+      io.stdout.write(
+        `${JSON.stringify({
+          id: exception.id,
+          location: exception.location ?? null,
+          resource_id: exception.resourceId ?? null,
+          starts_on: exception.startsOn,
+          ends_on: exception.endsOn,
+          outcome: exception.outcome,
+          hours: exception.hours ?? null,
+          label: exception.label,
+          source: exception.source,
+        })}\n`,
+      );
+    let scope: { location?: string; resourceId?: string } = {};
+    if (given.location !== undefined) scope = { location: given.location };
+    if (given.resource !== undefined) {
+      const resources = await tenantResources(store, tenantRef);
+      const named =
+        resources.find((resource) => resource.id === given.resource) ??
+        resources.find((resource) => resource.externalRef === given.resource);
+      if (!named) return fail('no resource with that reference or id in this tenant');
+      scope = { resourceId: named.id };
+    }
+    try {
+      if (subcommand === 'closures list') {
+        const exceptions = await store.withTenant(tenantRef, (tenant) =>
+          tenant.listAvailabilityExceptions({
+            tenantRef,
+            from: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+            limit: 1_000,
+          }),
+        );
+        for (const exception of exceptions) line(exception);
+        return 0;
+      }
+      if (subcommand === 'closures delete') {
+        const deleted = await store.withTenant(tenantRef, (tenant) =>
+          tenant.deleteAvailabilityException({ tenantRef, id: operands[0] as string }),
+        );
+        if (!deleted) return fail('no closure with that id in this tenant');
+        io.stdout.write(`${JSON.stringify({ deleted: true })}\n`);
+        return 0;
+      }
+      if (subcommand === 'closures add') {
+        let hours: { startMinutes: number; durationMinutes: number }[] | undefined;
+        if (given.open !== undefined) {
+          const match = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/.exec(given.open);
+          if (!match) return fail('--open takes HH:MM-HH:MM, like 10:00-14:00');
+          const [opens, closes] = [Number(match[1]) * 60 + Number(match[2]), Number(match[3]) * 60 + Number(match[4])];
+          hours = [{ startMinutes: opens, durationMinutes: closes > opens ? closes - opens : closes + 1_440 - opens }];
+        }
+        const exception = await store.withTenant(tenantRef, (tenant) =>
+          tenant.createAvailabilityException({
+            tenantRef,
+            ...scope,
+            startsOn: operands[0] as string,
+            ...(operands[1] !== undefined ? { endsOn: operands[1] } : {}),
+            outcome: hours ? 'open' : 'closed',
+            ...(hours ? { hours } : {}),
+            label: given.label ?? '',
+          }),
+        );
+        line(exception);
+        return 0;
+      }
+      // closures import <file>
+      let text: string;
+      try {
+        text = await readFile(operands[0] as string, 'utf8');
+      } catch {
+        return fail('that file cannot be read');
+      }
+      const today = Math.floor(Date.now() / 86_400_000);
+      const day = (offset: number) => new Date((today + offset) * 86_400_000).toISOString().slice(0, 10);
+      const parsed = parseHolidayCalendar(text, { from: day(0), to: day(730) });
+      await store.withTenant(tenantRef, async (tenant) => {
+        for (const holiday of parsed.holidays) {
+          await tenant.createAvailabilityException({
+            tenantRef,
+            ...scope,
+            startsOn: holiday.startsOn,
+            endsOn: holiday.endsOn,
+            outcome: 'closed',
+            label: holiday.label,
+            source: 'ics',
+            sourceUid: `ics:${holiday.uid}`,
+          });
+        }
+      });
+      io.stdout.write(`${JSON.stringify({ imported: parsed.holidays.length, skipped: parsed.skipped })}\n`);
+      return 0;
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (
+        code === 'invalid_availability_exception' ||
+        code === 'invalid_holiday_calendar' ||
+        code === 'location_not_found' ||
+        code === 'resource_not_found' ||
+        code === 'availability_exceptions_limit_reached'
+      ) {
+        return fail((error as Error).message);
+      }
+      throw error;
+    }
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
 }
 
 /** Every resource of the tenant in use (with `includeArchived`, every one), a page at a time. */
@@ -1629,18 +1764,28 @@ async function tenantResources(
 async function runHours(
   config: SlotlockDatabaseConfig,
   out: OutputStream,
-  target: { resource: string } | 'all' | 'show',
+  target: { resource: string } | { location: string } | 'all' | 'show',
   rules?: WeeklyAvailabilityRule[] | null,
+  override = false,
 ): Promise<boolean> {
   const sql = connect(config.databaseUrl, 1);
   try {
     const store = createSlotlockStore(sql);
     const tenantRef = config.tenantRef;
     if (target === 'all') {
-      const updated = await store.withTenant(tenantRef, (tenant) =>
-        tenant.setTenantAvailability({ tenantRef, rules: rules ?? null }),
+      // The tenant's hours, which every resource without its own inherits (RFC 0004 B2).
+      const result = await store.withTenant(tenantRef, (tenant) =>
+        tenant.setTenantAvailability({ tenantRef, rules: rules ?? null, overrideResources: override }),
       );
-      out.write(`${JSON.stringify({ updated })}\n`);
+      out.write(`${JSON.stringify({ inheriting: result.inheriting, own_hours: result.ownHours })}\n`);
+      return true;
+    }
+    if (typeof target === 'object' && 'location' in target) {
+      const result = await store.withTenant(tenantRef, (tenant) =>
+        tenant.setLocationAvailability({ tenantRef, location: target.location, rules: rules ?? null }),
+      );
+      if (!result) return false;
+      out.write(`${JSON.stringify({ location: target.location, inheriting: result.inheriting, own_hours: result.ownHours })}\n`);
       return true;
     }
     const resources = await tenantResources(store, tenantRef);
@@ -1657,6 +1802,7 @@ async function runHours(
       out.write(hoursLine(named));
       return true;
     }
+    if (!('resource' in target)) return false;
     const updated = await store.withTenant(tenantRef, (tenant) =>
       tenant.setResourceAvailability({ tenantRef, id: named.id, rules }),
     );
@@ -2289,11 +2435,24 @@ Commands:
   resource delete <ref>    Delete a resource and its history; refused while a booking, hold
                            or event on it has not ended
   hours show [--resource <ref>]
-                           Print each resource's bookable hours (null: the server's)
-  hours set <json> (--resource <ref> | --all)
-                           Give one resource, or every one, weekly hours of its own; [] closes
-  hours clear (--resource <ref> | --all)
-                           Hand one resource, or every one, back to the server's hours
+                           Print each resource's bookable hours: its own (null when none) and
+                           what it inherits from its location or the tenant
+  hours set <json> (--resource <ref> | --location <ref> | --all [--override])
+                           Give one resource, one location or the tenant weekly hours; a
+                           resource without its own inherits its location's, then the
+                           tenant's, then the server's; --override also clears resources'
+                           own hours; [] closes
+  hours clear (--resource <ref> | --location <ref> | --all)
+                           Clear those hours, so they inherit from further up
+  closures list            Print the tenant's closures and special days from yesterday on
+  closures add <first-day> [<last-day>] --label <text> [--open HH:MM-HH:MM]
+               [--resource <ref> | --location <ref>]
+                           Close whole days (YYYY-MM-DD), or with --open give them those hours
+                           instead, everywhere or for one location or resource
+  closures delete <id>     Remove a closure
+  closures import <file> [--resource <ref> | --location <ref>]
+                           Close the days an iCalendar file of holidays names (each all-day
+                           event, for the next two years); importing again updates them
   rules set <json> --resource <ref>
                            Set what a booking on the resource must satisfy, like
                            {"minNoticeMinutes":120,"slotStepMinutes":30,"turnaroundMinutes":30,"enforceHours":true}
@@ -2514,6 +2673,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'resource' ||
     command === 'key' ||
     command === 'hours' ||
+    command === 'closures' ||
     command === 'rules' ||
     command === 'tenant' ||
     command === 'plan' ||
@@ -2552,6 +2712,10 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'hours show': 1,
     'hours set': 2,
     'hours clear': 1,
+    'closures list': 1,
+    'closures add': 2,
+    'closures delete': 2,
+    'closures import': 2,
     'rules set': 2,
     'rules clear': 1,
     'partner create': 3,
@@ -2566,7 +2730,9 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'overage report': 1,
     'billing daily': 1,
   };
-  const expected = expectedOperands[subcommand];
+  // closures add takes a last day or not.
+  const expected =
+    subcommand === 'closures add' && operands.length === 3 ? 3 : expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
   if (operands.length !== expected) return usage(`wrong number of arguments for "${subcommand}"`);
   if (values.migrate && subcommand !== 'serve') return usage('--migrate applies only to serve');
@@ -2621,12 +2787,26 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   if (values.all && subcommand !== 'hours set' && subcommand !== 'hours clear') {
     return usage('--all applies only to hours set and hours clear');
   }
+  if (values.override && subcommand !== 'hours set') return usage('--override applies only to hours set --all');
   if (
     values.resource !== undefined &&
     !subcommand.startsWith('hours ') &&
-    !subcommand.startsWith('rules ')
+    !subcommand.startsWith('rules ') &&
+    !subcommand.startsWith('closures ')
   ) {
-    return usage('--resource applies only to hours and rules commands');
+    return usage('--resource applies only to hours, closures and rules commands');
+  }
+  if (values.location !== undefined && !subcommand.startsWith('hours ') && !subcommand.startsWith('closures ')) {
+    return usage('--location applies only to hours and closures commands');
+  }
+  if ((values.label !== undefined || values.open !== undefined) && subcommand !== 'closures add') {
+    return usage('--label and --open apply only to closures add');
+  }
+  if (subcommand.startsWith('closures ') && values.resource !== undefined && values.location !== undefined) {
+    return usage(`${subcommand} takes --resource or --location, not both`);
+  }
+  if (subcommand === 'closures add' && (operands.length < 2 || operands.length > 3 || values.label === undefined)) {
+    return usage('closures add needs <first-day> [<last-day>] --label <text>');
   }
   if (subcommand.startsWith('rules ') && values.resource === undefined) {
     return usage(`${subcommand} needs --resource <ref>`);
@@ -2645,10 +2825,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   }
   if (
     (subcommand === 'hours set' || subcommand === 'hours clear') &&
-    (values.resource === undefined) === (values.all !== true)
+    [values.resource !== undefined, values.location !== undefined, values.all === true].filter(Boolean).length !== 1
   ) {
-    return usage(`${subcommand} needs --resource <ref> or --all, one of them`);
+    return usage(`${subcommand} needs --resource <ref>, --location <ref> or --all, one of them`);
   }
+  if (values.override && values.all !== true) return usage('--override applies only to hours set --all');
   let hours: WeeklyAvailabilityRule[] | null = null;
   if (subcommand === 'hours set') {
     let candidate: unknown;
@@ -2924,21 +3105,38 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         const target =
           values.all === true
             ? 'all'
-            : values.resource !== undefined
-              ? { resource: values.resource }
-              : 'show';
+            : values.location !== undefined
+              ? { location: values.location }
+              : values.resource !== undefined
+                ? { resource: values.resource }
+                : 'show';
         const found = await runHours(
           readSlotlockDatabaseConfig(io.env),
           io.stdout,
           target,
           subcommand === 'hours show' ? undefined : hours,
+          values.override === true,
         );
         if (!found) {
-          io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');
+          io.stderr.write(
+            values.location !== undefined
+              ? 'slotlock: no location with that reference in this tenant\n'
+              : 'slotlock: no resource with that reference or id in this tenant\n',
+          );
           return 1;
         }
         return 0;
       }
+      case 'closures list':
+      case 'closures add':
+      case 'closures delete':
+      case 'closures import':
+        return runClosures(readSlotlockDatabaseConfig(io.env), io, subcommand, operands.slice(1), {
+          ...(values.resource !== undefined ? { resource: values.resource } : {}),
+          ...(values.location !== undefined ? { location: values.location } : {}),
+          ...(values.label !== undefined ? { label: values.label } : {}),
+          ...(values.open !== undefined ? { open: values.open } : {}),
+        });
       case 'rules set':
       case 'rules clear': {
         const found = await runRules(
@@ -3057,7 +3255,11 @@ function parseCliArguments(argv: readonly string[]) {
       month: { type: 'string' },
       event: { type: 'string' },
       resource: { type: 'string' },
+      location: { type: 'string' },
       all: { type: 'boolean' },
+      override: { type: 'boolean' },
+      label: { type: 'string' },
+      open: { type: 'string' },
       reason: { type: 'string' },
       confirm: { type: 'string' },
       from: { type: 'string' },

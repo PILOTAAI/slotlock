@@ -9,6 +9,14 @@ export interface Interval {
   end: Date;
 }
 
+/** Hours a resource without its own inherits, as the database resolves them (RFC 0004 B2). */
+export interface SlotlockInheritedAvailability {
+  source: 'location' | 'tenant';
+  /** The location whose hours apply, when `source` is `location`. */
+  location?: string;
+  rules: WeeklyAvailabilityRule[];
+}
+
 /** A schedulable resource (vehicle, room, worker, machine, or any other reservable asset). */
 export interface SlotlockResource {
   id: string;
@@ -26,6 +34,11 @@ export interface SlotlockResource {
    * uses the default (`SLOTLOCK_AVAILABILITY`, or the backend's `availabilityRules`).
    */
   availabilityRules?: WeeklyAvailabilityRule[];
+  /**
+   * The hours it inherits when it has none of its own (RFC 0004 B2): its location's, the nearest
+   * up the chain, else its tenant's. Absent when it has its own, or inherits the server's.
+   */
+  inheritedAvailability?: SlotlockInheritedAvailability;
   /**
    * `shared` resources are listed to and booked by agents; `private` ones are invisible to agents.
    * Fixed at creation; absent means shared.

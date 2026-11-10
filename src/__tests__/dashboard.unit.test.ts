@@ -1035,9 +1035,10 @@ describe('bookable hours in the dashboard', () => {
       session,
     );
     expect(saved.status).toBe(303);
+    // Stored as the tenant's, which every resource without its own inherits (RFC 0004 B2).
     expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
       { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
-    ], 'github:4242');
+    ], 'github:4242', false);
   });
 
   it.each([

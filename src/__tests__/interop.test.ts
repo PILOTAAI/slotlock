@@ -37,7 +37,7 @@ describe('VAVAILABILITY (RFC 7953)', () => {
     const text = emitVAvailability({ rules: RULES, timezone: 'Europe/London', uid: 'resource-1' });
     expect(text.endsWith('\r\n')).toBe(true);
     expect(text.split('\r\n').every((line) => Buffer.byteLength(line) <= 75)).toBe(true);
-    expect(parseVAvailability(text)).toEqual({ timezone: 'Europe/London', rules: RULES });
+    expect(parseVAvailability(text)).toEqual({ timezone: 'Europe/London', rules: RULES, days: [] });
   });
 
   it('starts each AVAILABLE on its first day, as RFC 5545 counts DTSTART as an occurrence', () => {
@@ -60,7 +60,7 @@ describe('VAVAILABILITY (RFC 7953)', () => {
   it('writes no AVAILABLE for never bookable, and reads that back as no rules', () => {
     const text = emitVAvailability({ rules: [], timezone: 'UTC', uid: 'r' });
     expect(text).not.toContain('AVAILABLE\r\nUID');
-    expect(parseVAvailability(text)).toEqual({ timezone: null, rules: [] });
+    expect(parseVAvailability(text)).toEqual({ timezone: null, rules: [], days: [] });
   });
 
   it("reads RFC 7953's own example: weekdays nine to five with DTEND, a TZID", () => {
@@ -75,7 +75,20 @@ describe('VAVAILABILITY (RFC 7953)', () => {
     expect(parseVAvailability(text)).toEqual({
       timezone: 'America/Montreal',
       rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 540, durationMinutes: 480 }],
+      days: [],
     });
+  });
+
+  it('reads a single AVAILABLE as a day of its own, and an EXDATE as a day without that window (RFC 0004 B1)', () => {
+    expect(parseVAvailability(vavailability(available(['DTSTART:20240101T080000Z', 'DURATION:PT1H'])))).toEqual({
+      timezone: 'UTC',
+      rules: [],
+      days: [{ date: '2024-01-01', windows: [{ startMinutes: 480, durationMinutes: 60 }] }],
+    });
+    const excluded = vavailability(
+      available(['DTSTART:20240101T080000Z', 'DURATION:PT1H', 'RRULE:FREQ=WEEKLY', 'EXDATE:20240108T080000Z']),
+    );
+    expect(parseVAvailability(excluded).days).toEqual([{ date: '2024-01-08', windows: [] }]);
   });
 
   it("gives an RRULE without BYDAY its DTSTART's day", () => {
@@ -101,11 +114,22 @@ describe('VAVAILABILITY (RFC 7953)', () => {
       'a bounded VAVAILABILITY',
       calendar('BEGIN:VAVAILABILITY\r\nUID:v\r\nDTSTAMP:20240101T000000Z\r\nDTSTART:20240101T000000Z\r\nEND:VAVAILABILITY'),
     ],
-    ['an AVAILABLE without RRULE', vavailability(available(['DTSTART:20240101T080000Z', 'DURATION:PT1H']))],
     [
-      'an EXDATE',
+      'a RECURRENCE-ID',
       vavailability(
-        available(['DTSTART:20240101T080000Z', 'DURATION:PT1H', 'RRULE:FREQ=WEEKLY', 'EXDATE:20240108T080000Z']),
+        available(['DTSTART:20240101T080000Z', 'DURATION:PT1H', 'RRULE:FREQ=WEEKLY', 'RECURRENCE-ID:20240108T080000Z']),
+      ),
+    ],
+    [
+      'an EXDATE at another time than its window',
+      vavailability(
+        available(['DTSTART:20240101T080000Z', 'DURATION:PT1H', 'RRULE:FREQ=WEEKLY', 'EXDATE:20240108T090000Z']),
+      ),
+    ],
+    [
+      'an EXDATE in another zone',
+      vavailability(
+        available(['DTSTART:20240101T080000Z', 'DURATION:PT1H', 'RRULE:FREQ=WEEKLY', 'EXDATE;TZID=Europe/Paris:20240108T080000']),
       ),
     ],
     ['a whole-day start', vavailability(available(['DTSTART;VALUE=DATE:20240101', 'DURATION:P1D', 'RRULE:FREQ=WEEKLY']))],

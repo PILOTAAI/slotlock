@@ -337,10 +337,52 @@ OPERATIONS: dict[str, Operation] = {
         ("event_id",),
         ("limit", "before"),
     ),
+    "slotlock_get_availability_defaults": Operation(
+        "slotlock_get_availability_defaults",
+        "GET",
+        "/v1/availability",
+        (),
+        (),
+    ),
     "slotlock_set_tenant_availability": Operation(
         "slotlock_set_tenant_availability",
         "PUT",
         "/v1/availability",
+        (),
+        (),
+    ),
+    "slotlock_set_location_availability": Operation(
+        "slotlock_set_location_availability",
+        "PUT",
+        "/v1/locations/{location}/availability",
+        ("location",),
+        (),
+    ),
+    "slotlock_list_availability_exceptions": Operation(
+        "slotlock_list_availability_exceptions",
+        "GET",
+        "/v1/availability/exceptions",
+        (),
+        ("resource_id", "location", "from", "to", "limit", "after"),
+    ),
+    "slotlock_create_availability_exception": Operation(
+        "slotlock_create_availability_exception",
+        "POST",
+        "/v1/availability/exceptions",
+        (),
+        (),
+    ),
+    "slotlock_delete_availability_exception": Operation(
+        "slotlock_delete_availability_exception",
+        "DELETE",
+        "/v1/availability/exceptions/{exception_id}",
+        ("exception_id",),
+        ("dry_run",),
+    ),
+    "slotlock_import_holidays": Operation(
+        "slotlock_import_holidays",
+        "POST",
+        "/v1/availability/holidays",
         (),
         (),
     ),
@@ -1681,9 +1723,10 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Set a resource's bookable hours.
 
-        Give one resource its own weekly bookable hours. `null` makes it use the server's default;
-        `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone:
-        start_minutes after midnight, lasting duration_minutes.
+        Give one resource its own weekly bookable hours. `null` makes it inherit: its location's
+        hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it
+        never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes
+        after midnight, lasting duration_minutes.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1699,9 +1742,11 @@ class Operations(Transport):
     def export_resource_availability(self, resource_id: str) -> dict[str, Any]:
         """Export a resource's bookable hours as iCalendar.
 
-        One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
-        calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
-        time zone. `null` when the resource uses the server's default.
+        The weekly bookable hours that apply to one resource (its own, or those it inherits) as an
+        iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
+        rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of
+        the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE
+        with RDATEs gives a day its own hours. `null` when the resource uses the server's default.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
         return self.call("slotlock_export_resource_availability", values)
@@ -1717,9 +1762,11 @@ class Operations(Transport):
 
         Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
         as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
-        a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
-        or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
-        VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+        a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the
+        resource's exceptions, replacing those an earlier import made: each day they name keeps
+        the windows left on it, or is closed with none. Times must be in the resource's time zone
+        (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded
+        VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1964,17 +2011,31 @@ class Operations(Transport):
             values["before"] = before
         return self.call("slotlock_get_tenant_event_history", values)
 
+    def get_availability_defaults(self) -> dict[str, Any]:
+        """Read stored bookable hours.
+
+        The tenant's stored weekly hours (`null` when it uses the server's default) and each
+        location's that has its own. A resource without its own uses its location's, the nearest
+        up the chain, then the tenant's, then the server's.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_get_availability_defaults", values)
+
     def set_tenant_availability(
         self,
         *,
         rules: list[dict[str, Any]] | None,
+        override_resources: bool | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
-        """Set every resource's bookable hours.
+        """Set the tenant's bookable hours.
 
-        Set the weekly bookable hours of every resource the tenant has, as
-        slotlock_set_resource_availability does for one. `null` makes them all use the server's
-        default. Returns how many resources changed.
+        Store the tenant's weekly bookable hours: every resource without hours of its own, and
+        with no location hours above it, uses them, resources added later too. `null` hands them
+        back to the server's default. Nothing is copied: a resource with its own hours keeps them,
+        unless override_resources is true, which clears them so every resource inherits.
+        resources_updated counts the resources in use these hours now apply to;
+        resources_with_own_hours, those that keep their own.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1983,9 +2044,177 @@ class Operations(Transport):
             refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"rules": rules}
+        if override_resources is not None:
+            values["override_resources"] = override_resources
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_set_tenant_availability", values)
+
+    def set_location_availability(
+        self,
+        location: str,
+        *,
+        rules: list[dict[str, Any]] | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Set a location's bookable hours.
+
+        Store a location's weekly bookable hours, each read in a resource's own time zone:
+        resources at it, or at a location inside it, without hours of their own use them, unless a
+        location nearer them has its own. `null` clears them, so they inherit from further up. 404
+        location_not_found for a location the tenant does not have.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"location": location, "rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_set_location_availability", values)
+
+    def list_availability_exceptions(
+        self,
+        *,
+        resource_id: str | None = None,
+        location: str | None = None,
+        from_: str | None = None,
+        to: str | None = None,
+        limit: int | None = None,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """List closures and special hours.
+
+        The tenant's exceptions to its weekly hours, by first day: with resource_id, those that
+        apply to that resource (the tenant's, its locations' and its own); with location, that
+        location's own; else all of them. from and to keep those that reach the days between. At
+        most limit (1-1,000, default 100); next is the cursor for after.
+        """
+        values: dict[str, Any] = {}
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if location is not None:
+            values["location"] = location
+        if from_ is not None:
+            values["from"] = from_
+        if to is not None:
+            values["to"] = to
+        if limit is not None:
+            values["limit"] = limit
+        if after is not None:
+            values["after"] = after
+        return self.call("slotlock_list_availability_exceptions", values)
+
+    def create_availability_exception(
+        self,
+        *,
+        starts_on: str,
+        outcome: str,
+        label: str,
+        location: str | None = None,
+        resource_id: str | None = None,
+        ends_on: str | None = None,
+        hours: list[dict[str, Any]] | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Add a closure or special hours.
+
+        Close whole days, or give them hours of their own, for the whole tenant, one location (and
+        every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367
+        days) are local days, read in each resource's time zone. outcome closed empties those
+        days; open replaces their weekly hours with hours (1-4 windows of start_minutes and
+        duration_minutes). Where several apply to a day, the nearest wins: the resource's own,
+        then its location's from the innermost out, then the tenant's. Search leaves the days as
+        they say; a write is refused outside_hours only under the enforce_hours booking rule. 409
+        availability_exceptions_limit_reached past 5,000 a tenant.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"starts_on": starts_on, "outcome": outcome, "label": label}
+        if location is not None:
+            values["location"] = location
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if ends_on is not None:
+            values["ends_on"] = ends_on
+        if hours is not None:
+            values["hours"] = hours
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_create_availability_exception", values)
+
+    def delete_availability_exception(
+        self,
+        exception_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Delete a closure or special hours.
+
+        Remove an exception: its days read as the weekly hours again. 404
+        availability_exception_not_found.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"exception_id": exception_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_availability_exception", values)
+
+    def import_holidays(
+        self,
+        *,
+        icalendar: str | None = None,
+        url: str | None = None,
+        location: str | None = None,
+        resource_id: str | None = None,
+        from_: str | None = None,
+        to: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Import a holiday calendar.
+
+        Close the days an iCalendar holiday calendar names, for the whole tenant, one location or
+        one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
+        seconds; private addresses refused). Each all-day event closes the days it covers, and
+        each occurrence of a recurring one within from to to (default today to two years on, at
+        most three years); timed and cancelled events are skipped. Importing the same calendar
+        again updates its closures instead of adding more. 400 invalid_holiday_calendar for text
+        that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
+        holiday_url_not_served where the server fetches no urls.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {}
+        if icalendar is not None:
+            values["icalendar"] = icalendar
+        if url is not None:
+            values["url"] = url
+        if location is not None:
+            values["location"] = location
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if from_ is not None:
+            values["from"] = from_
+        if to is not None:
+            values["to"] = to
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_import_holidays", values)
 
     def acquire_hold(
         self,

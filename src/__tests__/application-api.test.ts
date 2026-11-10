@@ -45,6 +45,20 @@ const RESOURCE = {
   groups: [],
   parent_id: null,
   part_index: null,
+  inherited_availability: null,
+};
+
+const AVAILABILITY_EXCEPTION = {
+  id: '7b3c1d9e-4f2a-4e8b-9c6d-1a2b3c4d5e6f',
+  location: null,
+  resource_id: null,
+  starts_on: '2026-12-25',
+  ends_on: '2026-12-26',
+  outcome: 'closed',
+  hours: null,
+  label: 'Christmas',
+  source: 'manual',
+  created_at: '2026-11-10T09:00:00.000Z',
 };
 const LOCATION = { ref: 'leeds', name: 'Leeds clinic', parent_ref: null, timezone: 'Europe/London', resources: 2 };
 const GROUP = { ref: 'physio', name: 'Physiotherapy team', description: null, members: 3 };
@@ -119,6 +133,12 @@ const backend = {
   listBusy: vi.fn(),
   setResourceAvailability: vi.fn(),
   setTenantAvailability: vi.fn(),
+  getAvailabilityDefaults: vi.fn(),
+  setLocationAvailability: vi.fn(),
+  listAvailabilityExceptions: vi.fn(),
+  createAvailabilityException: vi.fn(),
+  deleteAvailabilityException: vi.fn(),
+  importHolidays: vi.fn(),
   acquireHold: vi.fn(),
   getHold: vi.fn(),
   listHolds: vi.fn(),
@@ -378,7 +398,13 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   deleteResource: { deleted: true },
   listBusy: { busy: [{ start: '2027-03-29T09:00:00.000Z', end: '2027-03-29T10:00:00.000Z' }] },
   setResourceAvailability: { resource: RESOURCE },
-  setTenantAvailability: { resources_updated: 3 },
+  setTenantAvailability: { resources_updated: 3, resources_with_own_hours: 1 },
+  getAvailabilityDefaults: { tenant: null, locations: [] },
+  setLocationAvailability: { location: 'london-depot', resources_updated: 2, resources_with_own_hours: 0 },
+  listAvailabilityExceptions: { exceptions: [AVAILABILITY_EXCEPTION], next: null },
+  createAvailabilityException: { exception: AVAILABILITY_EXCEPTION },
+  deleteAvailabilityException: { deleted: true },
+  importHolidays: { imported: 8, skipped: 1 },
   exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
   importResourceAvailability: { resource: RESOURCE },
   checkInReservation: { reference: 'BK-42', checked_in_at: '2027-03-29T09:05:00.000Z' },

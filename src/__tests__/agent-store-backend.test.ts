@@ -70,6 +70,8 @@ describe('Slotlock store-backed agent server adapter', () => {
     // No approval policies (RFC 0004 A4): every write goes straight through.
     findApproval: async () => null,
     listApprovalPolicies: async () => [],
+    // No closures or special days (RFC 0004 B1).
+    availabilityExceptionsFor: async () => new Map(),
   } as unknown as SlotlockTenantStore;
   const store = { withTenant } as unknown as SlotlockStore;
 

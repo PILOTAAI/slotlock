@@ -62,7 +62,13 @@ public sealed partial class SlotlockClient
         ["slotlock_get_resource_history"] = new("GET", "/v1/resources/{resource_id}/history", ["resource_id"], ["limit", "before"]),
         ["slotlock_get_reservation_history"] = new("GET", "/v1/reservations/{reservation_ref}/history", ["reservation_ref"], ["limit", "before"]),
         ["slotlock_get_tenant_event_history"] = new("GET", "/v1/tenant/events/{event_id}/history", ["event_id"], ["limit", "before"]),
+        ["slotlock_get_availability_defaults"] = new("GET", "/v1/availability", [], []),
         ["slotlock_set_tenant_availability"] = new("PUT", "/v1/availability", [], []),
+        ["slotlock_set_location_availability"] = new("PUT", "/v1/locations/{location}/availability", ["location"], []),
+        ["slotlock_list_availability_exceptions"] = new("GET", "/v1/availability/exceptions", [], ["resource_id", "location", "from", "to", "limit", "after"]),
+        ["slotlock_create_availability_exception"] = new("POST", "/v1/availability/exceptions", [], []),
+        ["slotlock_delete_availability_exception"] = new("DELETE", "/v1/availability/exceptions/{exception_id}", ["exception_id"], ["dry_run"]),
+        ["slotlock_import_holidays"] = new("POST", "/v1/availability/holidays", [], []),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
         ["slotlock_release_hold"] = new("DELETE", "/v1/holds/{hold_id}", ["hold_id"], ["dry_run"]),
@@ -1445,9 +1451,10 @@ public sealed partial class SlotlockClient
 
     /// <summary>Set a resource's bookable hours.</summary>
     /// <remarks>
-    /// Give one resource its own weekly bookable hours. `null` makes it use the server's default;
-    /// `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone:
-    /// start_minutes after midnight, lasting duration_minutes.
+    /// Give one resource its own weekly bookable hours. `null` makes it inherit: its location's
+    /// hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it
+    /// never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes
+    /// after midnight, lasting duration_minutes.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="rules">rules</param>
@@ -1486,9 +1493,11 @@ public sealed partial class SlotlockClient
 
     /// <summary>Export a resource's bookable hours as iCalendar.</summary>
     /// <remarks>
-    /// One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
-    /// calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
-    /// time zone. `null` when the resource uses the server's default.
+    /// The weekly bookable hours that apply to one resource (its own, or those it inherits) as an
+    /// iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
+    /// rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of
+    /// the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE
+    /// with RDATEs gives a day its own hours. `null` when the resource uses the server's default.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="cancellationToken">Cancels the request.</param>
@@ -1507,9 +1516,11 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
     /// as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
-    /// a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
-    /// or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
-    /// VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+    /// a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the
+    /// resource's exceptions, replacing those an earlier import made: each day they name keeps
+    /// the windows left on it, or is closed with none. Times must be in the resource's time zone
+    /// (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded
+    /// VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="icalendar">icalendar</param>
@@ -1814,13 +1825,33 @@ public sealed partial class SlotlockClient
         return CallAsync("slotlock_get_tenant_event_history", values, cancellationToken);
     }
 
-    /// <summary>Set every resource's bookable hours.</summary>
+    /// <summary>Read stored bookable hours.</summary>
     /// <remarks>
-    /// Set the weekly bookable hours of every resource the tenant has, as
-    /// slotlock_set_resource_availability does for one. `null` makes them all use the server's
-    /// default. Returns how many resources changed.
+    /// The tenant's stored weekly hours (`null` when it uses the server's default) and each
+    /// location's that has its own. A resource without its own uses its location's, the nearest
+    /// up the chain, then the tenant's, then the server's.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetAvailabilityDefaultsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_get_availability_defaults", values, cancellationToken);
+    }
+
+    /// <summary>Set the tenant's bookable hours.</summary>
+    /// <remarks>
+    /// Store the tenant's weekly bookable hours: every resource without hours of its own, and
+    /// with no location hours above it, uses them, resources added later too. `null` hands them
+    /// back to the server's default. Nothing is copied: a resource with its own hours keeps them,
+    /// unless override_resources is true, which clears them so every resource inherits.
+    /// resources_updated counts the resources in use these hours now apply to;
+    /// resources_with_own_hours, those that keep their own.
     /// </remarks>
     /// <param name="rules">rules</param>
+    /// <param name="overrideResources">override_resources</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -1830,11 +1861,13 @@ public sealed partial class SlotlockClient
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> SetTenantAvailabilityAsync(
         JsonArray? rules,
+        Optional<bool> overrideResources = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["rules"] = Json.ToNode(rules);
+        if (overrideResources.HasValue) values["override_resources"] = Json.ToNode(overrideResources.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_set_tenant_availability", values, cancellationToken);
     }
@@ -1848,7 +1881,189 @@ public sealed partial class SlotlockClient
         SetTenantAvailabilityAsync(
             rules: rules,
             cancellationToken: cancellationToken,
+            overrideResources: default,
             dryRun: default);
+
+    /// <summary>Set a location's bookable hours.</summary>
+    /// <remarks>
+    /// Store a location's weekly bookable hours, each read in a resource's own time zone:
+    /// resources at it, or at a location inside it, without hours of their own use them, unless a
+    /// location nearer them has its own. `null` clears them, so they inherit from further up. 404
+    /// location_not_found for a location the tenant does not have.
+    /// </remarks>
+    /// <param name="location">location</param>
+    /// <param name="rules">rules</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetLocationAvailabilityAsync(
+        string location,
+        JsonArray? rules,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["location"] = Json.ToNode(location);
+        values["rules"] = Json.ToNode(rules);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_set_location_availability", values, cancellationToken);
+    }
+
+    /// <summary>List closures and special hours.</summary>
+    /// <remarks>
+    /// The tenant's exceptions to its weekly hours, by first day: with resource_id, those that
+    /// apply to that resource (the tenant's, its locations' and its own); with location, that
+    /// location's own; else all of them. from and to keep those that reach the days between. At
+    /// most limit (1-1,000, default 100); next is the cursor for after.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="location">location</param>
+    /// <param name="from">from</param>
+    /// <param name="to">to</param>
+    /// <param name="limit">limit</param>
+    /// <param name="after">after</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListAvailabilityExceptionsAsync(
+        Optional<string> resourceId = default,
+        Optional<string> location = default,
+        Optional<string> from = default,
+        Optional<string> to = default,
+        Optional<long> limit = default,
+        Optional<string> after = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (from.HasValue) values["from"] = Json.ToNode(from.Value);
+        if (to.HasValue) values["to"] = Json.ToNode(to.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (after.HasValue) values["after"] = Json.ToNode(after.Value);
+        return CallAsync("slotlock_list_availability_exceptions", values, cancellationToken);
+    }
+
+    /// <summary>Add a closure or special hours.</summary>
+    /// <remarks>
+    /// Close whole days, or give them hours of their own, for the whole tenant, one location (and
+    /// every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367
+    /// days) are local days, read in each resource's time zone. outcome closed empties those
+    /// days; open replaces their weekly hours with hours (1-4 windows of start_minutes and
+    /// duration_minutes). Where several apply to a day, the nearest wins: the resource's own,
+    /// then its location's from the innermost out, then the tenant's. Search leaves the days as
+    /// they say; a write is refused outside_hours only under the enforce_hours booking rule. 409
+    /// availability_exceptions_limit_reached past 5,000 a tenant.
+    /// </remarks>
+    /// <param name="startsOn">starts_on</param>
+    /// <param name="outcome">outcome</param>
+    /// <param name="label">label</param>
+    /// <param name="location">location</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="endsOn">ends_on</param>
+    /// <param name="hours">hours</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CreateAvailabilityExceptionAsync(
+        string startsOn,
+        string outcome,
+        string label,
+        Optional<string> location = default,
+        Optional<string> resourceId = default,
+        Optional<string> endsOn = default,
+        Optional<JsonArray> hours = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["starts_on"] = Json.ToNode(startsOn);
+        values["outcome"] = Json.ToNode(outcome);
+        values["label"] = Json.ToNode(label);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (endsOn.HasValue) values["ends_on"] = Json.ToNode(endsOn.Value);
+        if (hours.HasValue) values["hours"] = Json.ToNode(hours.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_create_availability_exception", values, cancellationToken);
+    }
+
+    /// <summary>Delete a closure or special hours.</summary>
+    /// <remarks>
+    /// Remove an exception: its days read as the weekly hours again. 404
+    /// availability_exception_not_found.
+    /// </remarks>
+    /// <param name="exceptionId">exception_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteAvailabilityExceptionAsync(
+        string exceptionId,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["exception_id"] = Json.ToNode(exceptionId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_delete_availability_exception", values, cancellationToken);
+    }
+
+    /// <summary>Import a holiday calendar.</summary>
+    /// <remarks>
+    /// Close the days an iCalendar holiday calendar names, for the whole tenant, one location or
+    /// one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
+    /// seconds; private addresses refused). Each all-day event closes the days it covers, and
+    /// each occurrence of a recurring one within from to to (default today to two years on, at
+    /// most three years); timed and cancelled events are skipped. Importing the same calendar
+    /// again updates its closures instead of adding more. 400 invalid_holiday_calendar for text
+    /// that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
+    /// holiday_url_not_served where the server fetches no urls.
+    /// </remarks>
+    /// <param name="icalendar">icalendar</param>
+    /// <param name="url">url</param>
+    /// <param name="location">location</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="from">from</param>
+    /// <param name="to">to</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ImportHolidaysAsync(
+        Optional<string> icalendar = default,
+        Optional<string> url = default,
+        Optional<string> location = default,
+        Optional<string> resourceId = default,
+        Optional<string> from = default,
+        Optional<string> to = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (icalendar.HasValue) values["icalendar"] = Json.ToNode(icalendar.Value);
+        if (url.HasValue) values["url"] = Json.ToNode(url.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
+        if (from.HasValue) values["from"] = Json.ToNode(from.Value);
+        if (to.HasValue) values["to"] = Json.ToNode(to.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_import_holidays", values, cancellationToken);
+    }
 
     /// <summary>Hold time.</summary>
     /// <remarks>

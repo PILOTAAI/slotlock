@@ -96,6 +96,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
         DELETE FROM slotlock.reservations
          WHERE resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenant})`;
       await sql`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenant}`;
+      await sql`DELETE FROM slotlock.availability_defaults WHERE tenant_ref = ${tenant}`;
     }
     await sql.end();
   });
@@ -126,6 +127,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
           groups: [],
           parent_id: null,
           part_index: null,
+          inherited_availability: null,
         },
       },
     });
@@ -150,7 +152,15 @@ describe.skipIf(!url)('the application API on the real store', () => {
       }),
     ).toMatchObject({ status: 400, body: { error: { code: expect.stringMatching(/^invalid_/) } } });
     expect((await call('a', 'PUT', `/v1/resources/${id}/availability`, { rules: [] })).body.resource.availability).toEqual([]);
-    expect((await call('a', 'PUT', '/v1/availability', { rules: null })).body).toEqual({ resources_updated: 1 });
+    // The tenant's hours are stored, not copied: the resource keeps its own unless overridden.
+    expect((await call('a', 'PUT', '/v1/availability', { rules: null })).body).toEqual({
+      resources_updated: 0,
+      resources_with_own_hours: 1,
+    });
+    expect((await call('a', 'PUT', '/v1/availability', { rules: null, override_resources: true })).body).toEqual({
+      resources_updated: 1,
+      resources_with_own_hours: 0,
+    });
     expect((await call('a', 'GET', `/v1/resources/${id}`)).body.resource.availability).toBeNull();
 
     // Tenant B sees nothing of A's resource and cannot change it, by id or with an id that is no id.
@@ -159,8 +169,14 @@ describe.skipIf(!url)('the application API on the real store', () => {
       refused(404, 'resource_not_found'),
     );
     expect(await call('b', 'GET', '/v1/resources/not-a-uuid')).toEqual(refused(404, 'resource_not_found'));
-    expect((await call('b', 'PUT', '/v1/availability', { rules })).body).toEqual({ resources_updated: 0 });
-    expect((await call('a', 'GET', `/v1/resources/${id}`)).body.resource.availability).toBeNull();
+    expect((await call('b', 'PUT', '/v1/availability', { rules })).body).toEqual({
+      resources_updated: 0,
+      resources_with_own_hours: 0,
+    });
+    expect((await call('a', 'GET', `/v1/resources/${id}`)).body.resource).toMatchObject({
+      availability: null,
+      inherited_availability: null,
+    });
     const theirs = await call('b', 'POST', '/v1/resources', { external_ref: 'van-1' });
     expect(theirs.body.resource.id).not.toBe(id);
 

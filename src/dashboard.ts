@@ -94,6 +94,9 @@ import {
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
 import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
+import type { SlotlockAvailabilityDefaults, SlotlockAvailabilityExceptionInput } from './availability-store.js';
+import { type SlotlockAvailabilityException, dayToDate, epochDay } from './hours.js';
+import { parseHolidayCalendar } from './holidays.js';
 import { SlotlockAgentOperationError } from './agent-server.js';
 import { runSlotlockApprovalGrant } from './agent-store-backend.js';
 import {
@@ -122,6 +125,8 @@ import {
 
 /** Resources one dashboard tenant may hold. */
 export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 500;
+/** Closures the Closures page shows. */
+const SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS = 200;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
 /**
@@ -170,6 +175,9 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/sandbox/reset',
   '/sandbox/fast-forward',
   '/hours',
+  '/closures',
+  '/closures/delete',
+  '/closures/import',
   '/organization',
   '/environment',
   '/teams/enable',
@@ -263,16 +271,37 @@ export interface SlotlockDashboardResources {
     actor?: string,
   ): Promise<SlotlockResource>;
   /**
-   * Set the bookable hours of one of the tenant's resources (`{ id }`) or of all of them; `null`
-   * hands them back to the server's and `[]` closes. Returns how many resources changed: 0 for an
-   * id that is not the tenant's.
+   * Set the bookable hours of one of the tenant's resources (`{ id }`), one of its locations
+   * (`{ location }`), or the tenant's own (`'all'`), which every resource without its own inherits
+   * (RFC 0004 B2); `null` hands them to what is above and `[]` closes. With `override`, the tenant's
+   * hours also clear resources' own. Returns 0 for an id or location that is not the tenant's, else
+   * at least 1 (for the tenant's, how many resources they now apply to).
    */
   setHours(
     tenantRef: string,
-    target: { id: string } | 'all',
+    target: { id: string } | { location: string } | 'all',
     rules: WeeklyAvailabilityRule[] | null,
     actor?: string,
+    override?: boolean,
   ): Promise<number>;
+  /** The tenant's stored hours and its closures and special hours (RFC 0004 B1, B2). */
+  hours?: {
+    defaults(tenantRef: string): Promise<SlotlockAvailabilityDefaults>;
+    exceptions(tenantRef: string, limit: number): Promise<SlotlockAvailabilityException[]>;
+    addException(
+      tenantRef: string,
+      exception: Omit<SlotlockAvailabilityExceptionInput, 'tenantRef'>,
+      actor?: string,
+    ): Promise<SlotlockAvailabilityException>;
+    deleteException(tenantRef: string, id: string, actor?: string): Promise<boolean>;
+    /** Each all-day event of an iCalendar text closes its days for the next two years. */
+    importHolidays(
+      tenantRef: string,
+      icalendar: string,
+      scope: { location?: string; resourceId?: string },
+      actor?: string,
+    ): Promise<{ imported: number; skipped: number }>;
+  };
   /** What occupies the tenant's resources in `window`, by start: the overview's agenda. */
   agenda?(tenantRef: string, window: Interval, limit: number): Promise<SlotlockAgendaEntry[]>;
   /** The tenant's latest changes, newest first: the overview's activity. */
@@ -726,16 +755,61 @@ export function createSlotlockDashboardResources(
           }),
         { isolation: 'read committed', ...by(actor) },
       ),
-    setHours: (tenantRef, target, rules, actor) =>
+    setHours: (tenantRef, target, rules, actor, override) =>
       store.withTenant(
         tenantRef,
         async (tenant) => {
-          if (target === 'all') return tenant.setTenantAvailability({ tenantRef, rules });
+          if (target === 'all') {
+            return (await tenant.setTenantAvailability({ tenantRef, rules, overrideResources: override === true })).inheriting;
+          }
+          if ('location' in target) {
+            const result = await tenant.setLocationAvailability({ tenantRef, location: target.location, rules });
+            return result === null ? 0 : Math.max(1, result.inheriting);
+          }
           const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
           return updated ? 1 : 0;
         },
         by(actor),
       ),
+    hours: {
+      defaults: (tenantRef) =>
+        store.withTenant(tenantRef, (tenant) => tenant.getAvailabilityDefaults({ tenantRef })),
+      exceptions: (tenantRef, limit) =>
+        store.withTenant(tenantRef, (tenant) =>
+          tenant.listAvailabilityExceptions({
+            tenantRef,
+            from: dayToDate(Math.floor(Date.now() / 86_400_000) - 1),
+            limit,
+          }),
+        ),
+      addException: (tenantRef, exception, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.createAvailabilityException({ ...exception, tenantRef }), by(actor)),
+      deleteException: (tenantRef, id, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteAvailabilityException({ tenantRef, id }), by(actor)),
+      importHolidays: (tenantRef, icalendar, scope, actor) => {
+        const today = Math.floor(Date.now() / 86_400_000);
+        const parsed = parseHolidayCalendar(icalendar, { from: dayToDate(today), to: dayToDate(today + 730) });
+        return store.withTenant(
+          tenantRef,
+          async (tenant) => {
+            for (const holiday of parsed.holidays) {
+              await tenant.createAvailabilityException({
+                tenantRef,
+                ...scope,
+                startsOn: holiday.startsOn,
+                endsOn: holiday.endsOn,
+                outcome: 'closed',
+                label: holiday.label,
+                source: 'ics',
+                sourceUid: `ics:${holiday.uid}`,
+              });
+            }
+            return { imported: parsed.holidays.length, skipped: parsed.skipped };
+          },
+          by(actor),
+        );
+      },
+    },
     agenda: (tenantRef, window, limit) =>
       store.withTenant(tenantRef, (tenant) => tenant.listAgenda({ tenantRef, window, limit })),
     recentChanges: (tenantRef, limit) =>
@@ -1533,6 +1607,26 @@ function weekFromForm(form: WeekForm): WeeklyHours {
   return week;
 }
 
+/** Minutes after midnight for `HH:MM`, or null. */
+function minutesOf(value: string): number | null {
+  const match = TIME.exec(value);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+/**
+ * A resource's hours in one line: its own, or what it inherits and from where (RFC 0004 B2), or the
+ * server's.
+ */
+function resourceHours(resource: SlotlockResource, server: readonly WeeklyAvailabilityRule[]): string {
+  if (resource.availabilityRules !== undefined) return hoursSummary(resource.availabilityRules);
+  const inherited = resource.inheritedAvailability;
+  if (inherited) {
+    const from = inherited.source === 'location' ? `${inherited.location ?? 'Location'}'s hours` : 'Your hours';
+    return `${from}: ${hoursSummary(inherited.rules)}`;
+  }
+  return server.length === 0 ? "Server's hours (none)" : `Server's hours: ${hoursSummary(server)}`;
+}
+
 export function createSlotlockDashboard(options: SlotlockDashboardOptions): SlotlockDashboard {
   const publicUrl = new URL(options.publicUrl);
   const origin = publicUrl.origin;
@@ -2209,7 +2303,7 @@ ${
     const content = html`${noticeOf(notice)}
 ${pageHead(
   'Resources',
-  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}${resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : html``}</div>`,
+  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}<a class="button" href="${root}/hours">Your hours</a>${options.resources.hours ? html`<a class="button" href="${root}/closures">Closures</a>` : html``}</div>`,
 )}
 <section class="panel" id="add-resource">
 <h2>Add a resource</h2>
@@ -2227,7 +2321,7 @@ ${
     ? emptyState(ICONS.resources, 'No resources yet. Agents can only book what is listed here.', { href: '#reference', label: 'Add a resource' })
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.name && resource.externalRef ? html`<span class="meta" title="Reference ${resource.externalRef}">${resource.externalRef}</span>` : html``}${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.name && resource.externalRef ? html`<span class="meta" title="Reference ${resource.externalRef}">${resource.externalRef}</span>` : html``}${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${resourceHours(resource, options.availability ?? [])}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
@@ -2260,7 +2354,7 @@ ${
 <td data-label="Location" class="strong"><span class="cell"><span class="truncate" title="${paths.get(location.ref) ?? location.name}">${location.name}</span><span class="meta">${location.ref}${parent ? ` · in ${parent}` : ''}</span></span></td>
 <td data-label="Time zone">${zone ? (zone.from === location ? zone.timezone : html`<span class="cell"><span>${zone.timezone}</span><span class="meta">from ${zone.from.name}</span></span>`) : html`<span class="muted">None</span>`}</td>
 <td data-label="Resources">${String(location.resources)}</td>
-<td class="actions"><details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/locations">${sent()}<input type="hidden" name="ref" value="${location.ref}">
+<td class="actions">${options.resources.hours ? html`<a class="button" href="${root}/hours?location=${location.ref}">Hours</a>` : html``}<details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/locations">${sent()}<input type="hidden" name="ref" value="${location.ref}">
 <label>Name<input name="name" required maxlength="${nameLimit}" value="${location.name}"></label>
 <label>Inside<select name="parent">${insideChoices(location.parentRef, location.ref)}</select></label>
 <label>Time zone<input name="timezone" maxlength="100" value="${location.timezone ?? ''}" placeholder="As where it is"></label>
@@ -2411,7 +2505,7 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
 ${resource.description ? html`<p>${resource.description}</p>` : html``}
-<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}${resource.location ? html`<dt>Location</dt><dd>${paths.get(resource.location) ?? resource.locationName ?? resource.location}</dd>` : html``}${resource.groups ? html`<dt>Groups</dt><dd>${resource.groups.map((ref) => groupNames.get(ref) ?? ref).join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
+<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}${resource.location ? html`<dt>Location</dt><dd>${paths.get(resource.location) ?? resource.locationName ?? resource.location}</dd>` : html``}${resource.groups ? html`<dt>Groups</dt><dd>${resource.groups.map((ref) => groupNames.get(ref) ?? ref).join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${resourceHours(resource, options.availability ?? [])} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
 <div class="split">
 <div class="stack">
 ${
@@ -4010,6 +4104,7 @@ ${upgrade}
     if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
       return locationsPage;
     }
+    if (route.startsWith('/closures') && options.resources.hours) return closuresPage;
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
@@ -4018,10 +4113,15 @@ ${upgrade}
     return overviewPage;
   }
 
+  /** Whose hours an editor sets: the tenant's, one location's, or one resource's. */
+  type HoursTarget = 'all' | { location: SlotlockLocation } | SlotlockResource;
+  const isLocationTarget = (target: HoursTarget): target is { location: SlotlockLocation } =>
+    typeof target === 'object' && 'location' in target && typeof target.location === 'object';
+
   function hoursPage(
     session: Session,
     state: {
-      target: SlotlockResource | 'all';
+      target: HoursTarget;
       mode: HoursMode;
       week: WeekForm;
       unshown?: readonly WeeklyAvailabilityRule[];
@@ -4032,10 +4132,22 @@ ${upgrade}
     const { target, mode } = state;
     const checked = (value: HoursMode) => (mode === value ? html` checked` : html``);
     const server = options.availability ?? [];
+    const place = isLocationTarget(target) ? target.location : null;
+    const resource = target !== 'all' && !place ? (target as SlotlockResource) : null;
     const title =
       target === 'all'
-        ? 'Hours for every resource'
-        : `Hours for ${target.externalRef ?? target.id}`;
+        ? 'Your hours'
+        : place
+          ? `Hours at ${place.name}`
+          : `Hours for ${resource?.externalRef ?? resource?.id ?? ''}`;
+    const inheritLabel =
+      target === 'all'
+        ? html`The server's hours (${server.length === 0 ? 'none' : hoursSummary(server)})`
+        : place
+          ? html`Inherit: a location it is in, else your hours, else the server's`
+          : resource && resource.availabilityRules === undefined
+            ? html`Inherit (${resourceHours(resource, server)})`
+            : html`Inherit: its location's hours, else yours, else the server's`;
     const rows = WEEKDAYS.map((day) => {
       const cells = state.week[day].flatMap(({ from, to }, index) => {
         const which = index + 1;
@@ -4049,13 +4161,15 @@ ${upgrade}
     });
     const content = html`${state.notice ? html`<p class="notice" role="alert">${state.notice}</p>` : html``}
 <section>
-<p><a class="back" href="${root}/resources">Resources</a></p>
+<p><a class="back" href="${root}/${place ? 'locations' : 'resources'}">${place ? 'Locations' : 'Resources'}</a></p>
 <h1>${title}</h1>
 <p>${
       target === 'all'
-        ? 'The same hours for every resource, each in its own time zone. Saving replaces their hours.'
-        : `When agents may book it, in its time zone: ${target.timezone}.`
-    }</p>
+        ? 'Every resource without hours of its own uses these, each in its own time zone, unless its location has hours. Resources you add later too.'
+        : place
+          ? `Resources at ${place.name}, or at a location inside it, without hours of their own use these, each in its own time zone, unless a location nearer them has hours.`
+          : `When agents may book it, in its time zone: ${resource?.timezone ?? ''}.`
+    }${options.resources.hours ? html` <a href="${root}/closures">Closures and special days</a> change single days.` : html``}</p>
 ${
   state.unshown
     ? html`<div class="notice warn" role="alert"><p>These hours were set outside the dashboard, so the week below cannot show them. Saving replaces them.</p><ul class="hours">${state.unshown.map(
@@ -4067,18 +4181,40 @@ ${
 <form method="post" action="${root}/hours">
 <input type="hidden" name="csrf" value="${csrfToken(session)}">
 <input type="hidden" name="once" value="${formNonce(session)}">
-<input type="hidden" name="resource" value="${target === 'all' ? 'all' : target.id}">
+${place ? html`<input type="hidden" name="location" value="${place.ref}">` : html`<input type="hidden" name="resource" value="${target === 'all' ? 'all' : (resource?.id ?? '')}">`}
 <fieldset class="modes"><legend>Bookable hours</legend>
-<label class="choice"><input type="radio" name="mode" value="server"${checked('server')}> The server's hours (${server.length === 0 ? 'none' : hoursSummary(server)})</label>
+<label class="choice"><input type="radio" name="mode" value="server"${checked('server')}> ${inheritLabel}</label>
 <label class="choice"><input type="radio" name="mode" value="closed"${checked('closed')}> Closed: agents find no free slot</label>
 <label class="choice"><input type="radio" name="mode" value="custom"${checked('custom')}> These hours</label>
 </fieldset>
 <div class="table"><table class="week"><thead><tr><th>Day</th><th>Opens</th><th>Closes</th><th>Opens</th><th>Closes</th></tr></thead><tbody>${rows}</tbody></table></div>
 <p class="fine">A closing time at or before the opening time closes the next day; 00:00 to 00:00 is the whole day. Leave a window empty for none.</p>
+${target === 'all' ? html`<label class="choice"><input type="checkbox" name="override" value="yes"> Also clear the hours resources have of their own, so every resource uses these</label>` : html``}
 <button class="primary" type="submit">Save hours</button>
 </form>
 </section>`;
     return respond(state.status ?? 200, layout('Bookable hours', content, session, 'resources'));
+  }
+
+  /** The editor's state for stored rules: inherit (null), closed ([]), or a week. */
+  function hoursState(rules: readonly WeeklyAvailabilityRule[] | null | undefined): {
+    mode: HoursMode;
+    week: WeekForm;
+    unshown?: readonly WeeklyAvailabilityRule[];
+  } {
+    if (rules === undefined || rules === null) {
+      return { mode: 'server', week: weekFormOf(rulesToWeeklyHours(options.availability ?? [])) };
+    }
+    if (rules.length === 0) return { mode: 'closed', week: emptyWeekForm() };
+    const week = rulesToWeeklyHours(rules);
+    return { mode: 'custom', week: weekFormOf(week), ...(week === null ? { unshown: rules } : {}) };
+  }
+
+  /** The tenant's location with that reference, or null. */
+  async function ownLocation(session: Session, ref: string): Promise<SlotlockLocation | null> {
+    const grouping = options.resources.grouping;
+    if (!grouping || !/^[a-z0-9][a-z0-9._-]{0,99}$/.test(ref)) return null;
+    return (await grouping.locations(tenantOf(session))).find((location) => location.ref === ref) ?? null;
   }
 
   /** The tenant's resource with that id, or null for anything else. */
@@ -4097,33 +4233,34 @@ ${
     respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
 
   async function hoursEditor(session: Session, url: URL): Promise<Response> {
+    const ref = url.searchParams.get('location');
+    if (ref !== null) {
+      const location = await ownLocation(session, ref);
+      if (!location || !options.resources.hours) return nothingHere(session);
+      const defaults = await options.resources.hours.defaults(tenantOf(session));
+      const rules = defaults.locations.find((entry) => entry.location === ref)?.rules ?? null;
+      return hoursPage(session, { target: { location }, ...hoursState(rules) });
+    }
     const id = url.searchParams.get('resource');
     if (id === null) {
-      const server = rulesToWeeklyHours(options.availability ?? []);
-      return hoursPage(session, { target: 'all', mode: 'server', week: weekFormOf(server) });
+      const defaults = await options.resources.hours?.defaults(tenantOf(session));
+      return hoursPage(session, { target: 'all', ...hoursState(defaults?.tenant ?? null) });
     }
     const resource = await ownResource(session, id);
     if (!resource) return notFound(session);
-    const rules = resource.availabilityRules;
-    if (rules === undefined) {
-      const server = rulesToWeeklyHours(options.availability ?? []);
-      return hoursPage(session, { target: resource, mode: 'server', week: weekFormOf(server) });
-    }
-    if (rules.length === 0) {
-      return hoursPage(session, { target: resource, mode: 'closed', week: emptyWeekForm() });
-    }
-    const week = rulesToWeeklyHours(rules);
-    return hoursPage(session, {
-      target: resource,
-      mode: 'custom',
-      week: weekFormOf(week),
-      ...(week === null ? { unshown: rules } : {}),
-    });
+    return hoursPage(session, { target: resource, ...hoursState(resource.availabilityRules) });
   }
 
   async function saveHours(session: Session, form: URLSearchParams): Promise<Response> {
+    const ref = form.get('location');
     const id = form.get('resource') ?? '';
-    const target = id === 'all' ? 'all' : await ownResource(session, id);
+    let target: HoursTarget | null;
+    if (ref !== null) {
+      const location = await ownLocation(session, ref);
+      target = location && options.resources.hours ? { location } : null;
+    } else {
+      target = id === 'all' ? 'all' : await ownResource(session, id);
+    }
     if (!target) return notFound(session);
     const mode = form.get('mode');
     const week = readWeekForm(form);
@@ -4156,18 +4293,173 @@ ${
         });
       }
     }
-    const changed = await options.resources.setHours(
-      tenantOf(session),
-      target === 'all' ? 'all' : { id: target.id },
-      rules,
-      personOf(session),
-    );
-    if (changed === 0) {
-      return target === 'all'
-        ? resourcesPage(session, 409, 'Add a resource first, then set its hours.')
-        : notFound(session);
+    const place = isLocationTarget(target) ? target.location : null;
+    const changed =
+      target === 'all'
+        ? await options.resources.setHours(tenantOf(session), 'all', rules, personOf(session), form.get('override') === 'yes')
+        : await options.resources.setHours(
+            tenantOf(session),
+            place ? { location: place.ref } : { id: (target as SlotlockResource).id },
+            rules,
+            personOf(session),
+          );
+    if (changed === 0 && target !== 'all') return notFound(session);
+    return redirect(303, `${root}/${place ? 'locations' : 'resources'}`);
+  }
+
+  /** The tenant's closures and special days from yesterday on, with forms to add and import more. */
+  async function closuresPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    const [exceptions, locations, resources] = await Promise.all([
+      hours.exceptions(tenantRef, SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS + 1),
+      options.resources.grouping?.locations(tenantRef) ?? Promise.resolve([] as SlotlockLocation[]),
+      options.resources.list(tenantRef),
+    ]);
+    const token = csrfToken(session);
+    const sent = () => html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const names = new Map(resources.map((resource) => [resource.id, resourceName(resource, resource.id)]));
+    const places = new Map(locations.map((location) => [location.ref, location.name]));
+    const scopeOf = (exception: SlotlockAvailabilityException) =>
+      exception.resourceId
+        ? names.get(exception.resourceId) ?? exception.resourceId
+        : exception.location
+          ? `${places.get(exception.location) ?? exception.location} (location)`
+          : 'Everywhere';
+    const days = (exception: SlotlockAvailabilityException) =>
+      exception.startsOn === exception.endsOn ? exception.startsOn : `${exception.startsOn} to ${exception.endsOn}`;
+    const what = (exception: SlotlockAvailabilityException) =>
+      exception.outcome === 'closed'
+        ? 'Closed'
+        : `Open ${(exception.hours ?? []).map((window) => hoursOf(window.startMinutes, window.durationMinutes)).join(', ')}`;
+    const scopeOptions = html`<option value="">Everywhere</option>${locations.map(
+      (location) => html`<option value="location:${location.ref}">${location.name} (location)</option>`,
+    )}${resources.slice(0, SLOTLOCK_DASHBOARD_MAX_RESOURCES).map(
+      (resource) => html`<option value="resource:${resource.id}">${resourceName(resource, resource.id)}</option>`,
+    )}`;
+    const shown = exceptions.slice(0, SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS);
+    const content = html`${noticeOf(notice)}
+<section>
+<p><a class="back" href="${root}/resources">Resources</a></p>
+<h1>Closures and special days</h1>
+<p>Each closes whole days, or gives them hours of their own instead of the weekly hours, read in each resource's time zone. Where several apply to a day, the nearest wins: a resource's own, then its location's, then everywhere's.</p>
+<div class="table"><table><thead><tr><th>Days</th><th>Applies to</th><th>Hours</th><th>Label</th><th></th></tr></thead><tbody>${
+      shown.length === 0
+        ? html`<tr><td colspan="5" class="muted">No closures from today on.</td></tr>`
+        : shown.map(
+            (exception) => html`<tr><td data-label="Days">${days(exception)}</td><td data-label="Applies to">${scopeOf(exception)}</td><td data-label="Hours">${what(exception)}</td><td data-label="Label" class="wrap">${exception.label}${exception.source === 'ics' ? html` <span class="meta">imported</span>` : html``}</td><td class="actions"><form method="post" action="${root}/closures/delete">${sent()}<input type="hidden" name="id" value="${exception.id}"><button type="submit">Delete</button></form></td></tr>`,
+          )
+    }</tbody></table></div>
+${exceptions.length > SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS ? html`<p class="fine">The first ${String(SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS)} are shown; the API lists them all.</p>` : html``}
+<h2>Add a closure or special day</h2>
+<form method="post" action="${root}/closures" class="stack">${sent()}
+<label>Applies to <select name="scope">${scopeOptions}</select></label>
+<label>First day <input type="date" name="starts_on" required></label>
+<label>Last day <input type="date" name="ends_on"></label>
+<fieldset class="modes"><legend>Those days</legend>
+<label class="choice"><input type="radio" name="outcome" value="closed" checked> Closed</label>
+<label class="choice"><input type="radio" name="outcome" value="open"> Open only from <input type="time" name="opens" aria-label="Opens"> to <input type="time" name="closes" aria-label="Closes"></label>
+</fieldset>
+<label>Label <input name="label" maxlength="200" required placeholder="Christmas Day"></label>
+<button class="primary" type="submit">Add</button>
+</form>
+<h2>Import a holiday calendar</h2>
+<p>Paste an iCalendar file of days off: each all-day event closes its days for the next two years. Importing it again updates them.</p>
+<form method="post" action="${root}/closures/import" class="stack">${sent()}
+<label>Applies to <select name="scope">${scopeOptions}</select></label>
+<label>iCalendar <textarea name="icalendar" rows="6" required placeholder="BEGIN:VCALENDAR"></textarea></label>
+<button type="submit">Import</button>
+</form>
+</section>`;
+    return respond(status, layout('Closures', content, session, 'resources'));
+  }
+
+  /** `location:<ref>` or `resource:<id>` from a closures form, checked against the tenant's. */
+  async function closureScope(session: Session, value: string): Promise<{ location?: string; resourceId?: string } | null> {
+    if (value === '') return {};
+    if (value.startsWith('location:')) {
+      const location = await ownLocation(session, value.slice(9));
+      return location ? { location: location.ref } : null;
     }
-    return redirect(303, `${root}/resources`);
+    if (value.startsWith('resource:')) {
+      const resource = await ownResource(session, value.slice(9));
+      return resource ? { resourceId: resource.id } : null;
+    }
+    return null;
+  }
+
+  async function saveClosure(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const scope = await closureScope(session, form.get('scope') ?? '');
+    if (!scope) return closuresPage(session, 400, 'Choose where it applies.');
+    const outcome = form.get('outcome') === 'open' ? 'open' : 'closed';
+    const startsOn = form.get('starts_on') ?? '';
+    const endsOn = form.get('ends_on') || startsOn;
+    let windows: { startMinutes: number; durationMinutes: number }[] | undefined;
+    if (outcome === 'open') {
+      const opens = minutesOf(form.get('opens') ?? '');
+      const closes = minutesOf(form.get('closes') ?? '');
+      if (opens === null || closes === null) return closuresPage(session, 400, 'Give the hours those days open.');
+      windows = [{ startMinutes: opens, durationMinutes: closes > opens ? closes - opens : closes + 1_440 - opens }];
+    }
+    try {
+      await hours.addException(
+        tenantOf(session),
+        {
+          ...scope,
+          startsOn,
+          endsOn,
+          outcome,
+          ...(windows ? { hours: windows } : {}),
+          label: form.get('label') ?? '',
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code === 'invalid_availability_exception' || code === 'availability_exceptions_limit_reached') {
+        return closuresPage(session, code === 'invalid_availability_exception' ? 400 : 409, (error as Error).message);
+      }
+      throw error;
+    }
+    return redirect(303, `${root}/closures`);
+  }
+
+  async function deleteClosure(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id) || !(await hours.deleteException(tenantOf(session), id, personOf(session)))) {
+      return closuresPage(session, 404, 'That closure is not one of yours.');
+    }
+    return redirect(303, `${root}/closures`);
+  }
+
+  async function importClosures(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const scope = await closureScope(session, form.get('scope') ?? '');
+    if (!scope) return closuresPage(session, 400, 'Choose where it applies.');
+    try {
+      const result = await hours.importHolidays(tenantOf(session), form.get('icalendar') ?? '', scope, personOf(session));
+      return closuresPage(
+        session,
+        200,
+        `Imported ${String(result.imported)} closure${result.imported === 1 ? '' : 's'}${result.skipped > 0 ? `; skipped ${String(result.skipped)} event${result.skipped === 1 ? '' : 's'} that were not all-day or not in the next two years` : ''}.`,
+      );
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (
+        code === 'invalid_holiday_calendar' ||
+        code === 'invalid_availability_exception' ||
+        code === 'availability_exceptions_limit_reached'
+      ) {
+        return closuresPage(session, code === 'availability_exceptions_limit_reached' ? 409 : 400, (error as Error).message);
+      }
+      throw error;
+    }
   }
 
   function shownOncePage(
@@ -4955,6 +5247,12 @@ ${
         return addResource(session, form);
       case '/hours':
         return saveHours(session, form);
+      case '/closures':
+        return saveClosure(session, form);
+      case '/closures/delete':
+        return deleteClosure(session, form);
+      case '/closures/import':
+        return importClosures(session, form);
       case '/organization':
         return switchOrganization(session, form);
       case '/environment':
@@ -5095,6 +5393,10 @@ ${
             case '/hours': {
               const session = await readSession(request);
               return session ? await hoursEditor(session, url) : redirect(303, root);
+            }
+            case '/closures': {
+              const session = await readSession(request);
+              return session ? await closuresPage(session) : redirect(303, root);
             }
             case '/locations': {
               const session = await readSession(request);

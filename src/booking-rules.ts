@@ -1,4 +1,4 @@
-import { expandRules } from './rules.js';
+import { type SlotlockRankedException, coveredByOpenWindows, openWindows } from './hours.js';
 import { zonedOffsetMinutes } from './timezone.js';
 import type { Interval, WeeklyAvailabilityRule } from './types.js';
 
@@ -208,13 +208,14 @@ export function nextStepStart(from: Date, stepMinutes: number, timezone: string,
 }
 
 /**
- * The rule a booking of `interval` made at `now` breaks, or null. `hours` (the resource's own, or
- * the default) are read only when enforced.
+ * The rule a booking of `interval` made at `now` breaks, or null. `hours` (the resource's own, else
+ * inherited, else the default) and `exceptions` are read only when enforced.
  */
 export function bookingRuleBroken(params: {
   rules: SlotlockBookingRules | undefined;
   timezone: string;
   hours: readonly WeeklyAvailabilityRule[];
+  exceptions?: readonly SlotlockRankedException[];
   interval: Interval;
   now: Date;
 }): SlotlockBookingRule | null {
@@ -237,14 +238,13 @@ export function bookingRuleBroken(params: {
     return 'slot_step';
   }
   if (rules.enforceHours === true) {
-    const open = expandRules([...params.hours], interval, params.timezone);
-    let covered = interval.start.getTime();
-    for (const window of open.sort((a, b) => a.start.getTime() - b.start.getTime())) {
-      if (window.start.getTime() > covered) break;
-      covered = Math.max(covered, window.end.getTime());
-      if (covered >= interval.end.getTime()) break;
-    }
-    if (covered < interval.end.getTime()) return 'outside_hours';
+    const open = openWindows({
+      hours: params.hours,
+      ...(params.exceptions !== undefined ? { exceptions: params.exceptions } : {}),
+      timezone: params.timezone,
+      window: interval,
+    });
+    if (!coveredByOpenWindows(open, interval)) return 'outside_hours';
   }
   return null;
 }

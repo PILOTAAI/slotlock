@@ -71,8 +71,8 @@ Evidence names the function or table. Line numbers move, so they are given only 
 
 | Item | Verdict | Evidence | What is missing |
 | --- | --- | --- | --- |
-| Working hours | Partial | `resources.availability_rules`, `expandRules` (rules.ts), tests in resource-hours | Tenant hours are only copied onto existing resources (`setTenantAvailability`), so a new resource does not inherit them. Hours block writes only with the `enforceHours` rule |
-| Exceptions and holidays | **Absent** | — | Closed dates, extra openings and holiday calendars, per tenant, location or resource. The VAVAILABILITY import refuses RDATE and EXDATE (interop.ts) |
+| Working hours | Partial (B2 built since) | `resources.availability_rules`, `expandRules` (rules.ts), tests in resource-hours | Tenant hours are only copied onto existing resources (`setTenantAvailability`), so a new resource does not inherit them. Hours block writes only with the `enforceHours` rule |
+| Exceptions and holidays | **Absent** (B1 built since) | — | Closed dates, extra openings and holiday calendars, per tenant, location or resource. The VAVAILABILITY import refuses RDATE and EXDATE (interop.ts) |
 | Buffers before and after | Present | The occupied range under the constraint (ddl.ts), `bookingJudge` | — |
 | Minimum notice, booking horizon | Present | `bookingRuleBroken` on the database clock | The agent search uses the server clock (`new Date()`) where writes use the database's |
 | Slot duration rules | Partial | Step and offset (booking-rules.ts) | A default duration, allowed durations, and a minimum or maximum length |
@@ -329,7 +329,7 @@ As proposed:
 
 ### P2: booking model completion (0.8.0)
 
-**B1. Availability exceptions and holidays (T2).** A table `availability_exceptions`:
+**B1. Availability exceptions and holidays (T2).** Status: built. A table `availability_exceptions`:
 - scope: tenant, location (inherited by its resources) or resource;
 - a date range in the scope's zone;
 - an outcome: `closed`, or `open` with its own hours for those dates;
@@ -339,9 +339,32 @@ One evaluator applies them to search and, with `enforceHours`, to writes. Holida
 imported from an ICS URL or file as `closed` exceptions. VAVAILABILITY import and export carry
 RDATE and EXDATE.
 
-**B2. Hours that inherit (T1).** Stored hours per tenant and per location. A resource without
+As built:
+- Each exception covers whole local days, read in each resource's own time zone. A tenant has no
+  zone, and a location's is optional, so the day a holiday names is the day where the resource is.
+- Where several fall on one day, they apply widest first: the tenant's, then each location's from
+  the outermost in, then the resource's own. The nearest wins.
+- At most 5,000 a tenant, each at most 367 days and 4 windows.
+- A holiday calendar's all-day events become closures. Recurring ones are expanded over a span of
+  at most three years. Timed and cancelled events are skipped. An import keys each closure by the
+  event's UID and day, so importing again updates instead of adding.
+- `serve` fetches a URL through the guarded fetch. A library backend fetches none unless given one.
+- The export writes the coming year's closures as EXDATEs on the weekly AVAILABLEs. Special hours
+  are AVAILABLEs repeated by RDATE. The import turns EXDATE, RDATE and single AVAILABLEs into the
+  resource's own exceptions, replacing those its last import made.
+- Exceptions are tenant data under row-level security. A key limited to some resources reads the
+  tenant's and locations' exceptions, which shape its resources' hours, and only its own
+  resources' exceptions.
+
+**B2. Hours that inherit (T1).** Status: built. Stored hours per tenant and per location. A resource without
 its own uses its location's, then its tenant's, then the server's. A new resource inherits.
 `setTenantAvailability` stops copying.
+
+As built: `availability_defaults` holds the tenant's and each location's rules. The database
+function `slotlock.inherited_availability` finds the nearest, and every resource read carries it.
+`setTenantAvailability` now answers `{ inheriting, ownHours }`. Hours an earlier version copied stay
+a resource's own until `overrideResources` clears them. Clearing them silently would have changed
+hours an owner may have set on purpose.
 
 **B3. Durations and multi-day (T1).**
 - Booking rules gain:

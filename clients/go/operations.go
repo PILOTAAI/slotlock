@@ -57,7 +57,13 @@ var operations = func() map[string]operation {
 		{name: "slotlock_get_resource_history", method: "GET", path: "/v1/resources/{resource_id}/history", pathParams: []string{"resource_id"}, query: []string{"limit", "before"}},
 		{name: "slotlock_get_reservation_history", method: "GET", path: "/v1/reservations/{reservation_ref}/history", pathParams: []string{"reservation_ref"}, query: []string{"limit", "before"}},
 		{name: "slotlock_get_tenant_event_history", method: "GET", path: "/v1/tenant/events/{event_id}/history", pathParams: []string{"event_id"}, query: []string{"limit", "before"}},
+		{name: "slotlock_get_availability_defaults", method: "GET", path: "/v1/availability", pathParams: nil, query: nil},
 		{name: "slotlock_set_tenant_availability", method: "PUT", path: "/v1/availability", pathParams: nil, query: nil},
+		{name: "slotlock_set_location_availability", method: "PUT", path: "/v1/locations/{location}/availability", pathParams: []string{"location"}, query: nil},
+		{name: "slotlock_list_availability_exceptions", method: "GET", path: "/v1/availability/exceptions", pathParams: nil, query: []string{"resource_id", "location", "from", "to", "limit", "after"}},
+		{name: "slotlock_create_availability_exception", method: "POST", path: "/v1/availability/exceptions", pathParams: nil, query: nil},
+		{name: "slotlock_delete_availability_exception", method: "DELETE", path: "/v1/availability/exceptions/{exception_id}", pathParams: []string{"exception_id"}, query: []string{"dry_run"}},
+		{name: "slotlock_import_holidays", method: "POST", path: "/v1/availability/holidays", pathParams: nil, query: nil},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
 		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_release_hold", method: "DELETE", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: []string{"dry_run"}},
@@ -1512,9 +1518,9 @@ func (in SetResourceAvailabilityInput) values() map[string]any {
 }
 
 // SetResourceAvailability: Set a resource's bookable hours. Give one resource its own weekly
-// bookable hours. `null` makes it use the server's default; `[]` makes it never bookable. Each
-// rule is weekly with BYDAY, in the resource's time zone: start_minutes after midnight, lasting
-// duration_minutes.
+// bookable hours. `null` makes it inherit: its location's hours (the nearest up the chain), else
+// the tenant's, else the server's; `[]` makes it never bookable. Each rule is weekly with BYDAY,
+// in the resource's time zone: start_minutes after midnight, lasting duration_minutes.
 func (c *Client) SetResourceAvailability(ctx context.Context, in SetResourceAvailabilityInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_resource_availability", in.values())
 }
@@ -1530,10 +1536,12 @@ func (in ExportResourceAvailabilityInput) values() map[string]any {
 	return values
 }
 
-// ExportResourceAvailability: Export a resource's bookable hours as iCalendar. One resource's own
-// weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling
-// tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. `null` when the
-// resource uses the server's default.
+// ExportResourceAvailability: Export a resource's bookable hours as iCalendar. The weekly
+// bookable hours that apply to one resource (its own, or those it inherits) as an iCalendar
+// VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its
+// DTSTART's TZID the resource's IANA time zone. The closures and special hours of the next year
+// are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE with RDATEs gives a
+// day its own hours. `null` when the resource uses the server's default.
 func (c *Client) ExportResourceAvailability(ctx context.Context, in ExportResourceAvailabilityInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_export_resource_availability", in.values())
 }
@@ -1564,9 +1572,11 @@ func (in ImportResourceAvailabilityInput) values() map[string]any {
 // ImportResourceAvailability: Import a resource's bookable hours from iCalendar. Set one
 // resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as
 // slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start
-// time and DTEND or DURATION. Times must be in the resource's time zone (its TZID) or floating.
-// 400 invalid_availability names what weekly hours cannot say: a bounded VAVAILABILITY, RDATE,
-// EXDATE, a single window, another zone.
+// time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the resource's
+// exceptions, replacing those an earlier import made: each day they name keeps the windows left
+// on it, or is closed with none. Times must be in the resource's time zone (its TZID) or
+// floating. 400 invalid_availability names what cannot be said: a bounded VAVAILABILITY,
+// RECURRENCE-ID, another zone, more than four windows on a day.
 func (c *Client) ImportResourceAvailability(ctx context.Context, in ImportResourceAvailabilityInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_import_resource_availability", in.values())
 }
@@ -1887,9 +1897,27 @@ func (c *Client) GetTenantEventHistory(ctx context.Context, in GetTenantEventHis
 	return c.Call(ctx, "slotlock_get_tenant_event_history", in.values())
 }
 
+// GetAvailabilityDefaultsInput holds the arguments of [Client.GetAvailabilityDefaults].
+type GetAvailabilityDefaultsInput struct {
+}
+
+func (in GetAvailabilityDefaultsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// GetAvailabilityDefaults: Read stored bookable hours. The tenant's stored weekly hours (`null`
+// when it uses the server's default) and each location's that has its own. A resource without its
+// own uses its location's, the nearest up the chain, then the tenant's, then the server's.
+func (c *Client) GetAvailabilityDefaults(ctx context.Context, in GetAvailabilityDefaultsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_availability_defaults", in.values())
+}
+
 // SetTenantAvailabilityInput holds the arguments of [Client.SetTenantAvailability].
 type SetTenantAvailabilityInput struct {
 	Rules Nullable[[]map[string]any]
+
+	OverrideResources *bool
 
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
@@ -1903,17 +1931,247 @@ func (in SetTenantAvailabilityInput) values() map[string]any {
 	if value, ok := in.Rules.get(); ok {
 		values["rules"] = value
 	}
+	if in.OverrideResources != nil {
+		values["override_resources"] = *in.OverrideResources
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
 	return values
 }
 
-// SetTenantAvailability: Set every resource's bookable hours. Set the weekly bookable hours of
-// every resource the tenant has, as slotlock_set_resource_availability does for one. `null` makes
-// them all use the server's default. Returns how many resources changed.
+// SetTenantAvailability: Set the tenant's bookable hours. Store the tenant's weekly bookable
+// hours: every resource without hours of its own, and with no location hours above it, uses them,
+// resources added later too. `null` hands them back to the server's default. Nothing is copied: a
+// resource with its own hours keeps them, unless override_resources is true, which clears them so
+// every resource inherits. resources_updated counts the resources in use these hours now apply
+// to; resources_with_own_hours, those that keep their own.
 func (c *Client) SetTenantAvailability(ctx context.Context, in SetTenantAvailabilityInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_tenant_availability", in.values())
+}
+
+// SetLocationAvailabilityInput holds the arguments of [Client.SetLocationAvailability].
+type SetLocationAvailabilityInput struct {
+	Location string
+
+	Rules Nullable[[]map[string]any]
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in SetLocationAvailabilityInput) values() map[string]any {
+	values := map[string]any{}
+	values["location"] = in.Location
+	if value, ok := in.Rules.get(); ok {
+		values["rules"] = value
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// SetLocationAvailability: Set a location's bookable hours. Store a location's weekly bookable
+// hours, each read in a resource's own time zone: resources at it, or at a location inside it,
+// without hours of their own use them, unless a location nearer them has its own. `null` clears
+// them, so they inherit from further up. 404 location_not_found for a location the tenant does
+// not have.
+func (c *Client) SetLocationAvailability(ctx context.Context, in SetLocationAvailabilityInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_location_availability", in.values())
+}
+
+// ListAvailabilityExceptionsInput holds the arguments of [Client.ListAvailabilityExceptions].
+type ListAvailabilityExceptionsInput struct {
+	ResourceID *string
+
+	Location *string
+
+	From *string
+
+	To *string
+
+	Limit *int64
+
+	After *string
+}
+
+func (in ListAvailabilityExceptionsInput) values() map[string]any {
+	values := map[string]any{}
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.From != nil {
+		values["from"] = *in.From
+	}
+	if in.To != nil {
+		values["to"] = *in.To
+	}
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	if in.After != nil {
+		values["after"] = *in.After
+	}
+	return values
+}
+
+// ListAvailabilityExceptions: List closures and special hours. The tenant's exceptions to its
+// weekly hours, by first day: with resource_id, those that apply to that resource (the tenant's,
+// its locations' and its own); with location, that location's own; else all of them. from and to
+// keep those that reach the days between. At most limit (1-1,000, default 100); next is the
+// cursor for after.
+func (c *Client) ListAvailabilityExceptions(ctx context.Context, in ListAvailabilityExceptionsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_availability_exceptions", in.values())
+}
+
+// CreateAvailabilityExceptionInput holds the arguments of [Client.CreateAvailabilityException].
+type CreateAvailabilityExceptionInput struct {
+	StartsOn string
+
+	Outcome string
+
+	Label string
+
+	Location *string
+
+	ResourceID *string
+
+	EndsOn *string
+
+	Hours []map[string]any
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in CreateAvailabilityExceptionInput) values() map[string]any {
+	values := map[string]any{}
+	values["starts_on"] = in.StartsOn
+	values["outcome"] = in.Outcome
+	values["label"] = in.Label
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.EndsOn != nil {
+		values["ends_on"] = *in.EndsOn
+	}
+	if in.Hours != nil {
+		values["hours"] = in.Hours
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// CreateAvailabilityException: Add a closure or special hours. Close whole days, or give them
+// hours of their own, for the whole tenant, one location (and every location inside it) or one
+// resource. starts_on to ends_on (inclusive, at most 367 days) are local days, read in each
+// resource's time zone. outcome closed empties those days; open replaces their weekly hours with
+// hours (1-4 windows of start_minutes and duration_minutes). Where several apply to a day, the
+// nearest wins: the resource's own, then its location's from the innermost out, then the
+// tenant's. Search leaves the days as they say; a write is refused outside_hours only under the
+// enforce_hours booking rule. 409 availability_exceptions_limit_reached past 5,000 a tenant.
+func (c *Client) CreateAvailabilityException(ctx context.Context, in CreateAvailabilityExceptionInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_availability_exception", in.values())
+}
+
+// DeleteAvailabilityExceptionInput holds the arguments of [Client.DeleteAvailabilityException].
+type DeleteAvailabilityExceptionInput struct {
+	ExceptionID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteAvailabilityExceptionInput) values() map[string]any {
+	values := map[string]any{}
+	values["exception_id"] = in.ExceptionID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteAvailabilityException: Delete a closure or special hours. Remove an exception: its days
+// read as the weekly hours again. 404 availability_exception_not_found.
+func (c *Client) DeleteAvailabilityException(ctx context.Context, in DeleteAvailabilityExceptionInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_availability_exception", in.values())
+}
+
+// ImportHolidaysInput holds the arguments of [Client.ImportHolidays].
+type ImportHolidaysInput struct {
+	Icalendar *string
+
+	URL *string
+
+	Location *string
+
+	ResourceID *string
+
+	From *string
+
+	To *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in ImportHolidaysInput) values() map[string]any {
+	values := map[string]any{}
+	if in.Icalendar != nil {
+		values["icalendar"] = *in.Icalendar
+	}
+	if in.URL != nil {
+		values["url"] = *in.URL
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.ResourceID != nil {
+		values["resource_id"] = *in.ResourceID
+	}
+	if in.From != nil {
+		values["from"] = *in.From
+	}
+	if in.To != nil {
+		values["to"] = *in.To
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// ImportHolidays: Import a holiday calendar. Close the days an iCalendar holiday calendar names,
+// for the whole tenant, one location or one resource: the text in icalendar, or an https url the
+// server fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes
+// the days it covers, and each occurrence of a recurring one within from to to (default today to
+// two years on, at most three years); timed and cancelled events are skipped. Importing the same
+// calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar for
+// text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
+// holiday_url_not_served where the server fetches no urls.
+func (c *Client) ImportHolidays(ctx context.Context, in ImportHolidaysInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_import_holidays", in.values())
 }
 
 // AcquireHoldInput holds the arguments of [Client.AcquireHold].

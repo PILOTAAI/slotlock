@@ -338,9 +338,51 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["limit", "before"],
     },
     Operation {
+        name: "slotlock_get_availability_defaults",
+        method: "GET",
+        path: "/v1/availability",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_set_tenant_availability",
         method: "PUT",
         path: "/v1/availability",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_set_location_availability",
+        method: "PUT",
+        path: "/v1/locations/{location}/availability",
+        path_params: &["location"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_availability_exceptions",
+        method: "GET",
+        path: "/v1/availability/exceptions",
+        path_params: &[],
+        query: &["resource_id", "location", "from", "to", "limit", "after"],
+    },
+    Operation {
+        name: "slotlock_create_availability_exception",
+        method: "POST",
+        path: "/v1/availability/exceptions",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_availability_exception",
+        method: "DELETE",
+        path: "/v1/availability/exceptions/{exception_id}",
+        path_params: &["exception_id"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_import_holidays",
+        method: "POST",
+        path: "/v1/availability/holidays",
         path_params: &[],
         query: &[],
     },
@@ -1418,10 +1460,104 @@ pub struct GetTenantEventHistoryInput {
     pub before: Option<String>,
 }
 
+/// The arguments of [`Client::get_availability_defaults`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetAvailabilityDefaultsInput {
+}
+
 /// The arguments of [`Client::set_tenant_availability`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantAvailabilityInput {
     pub rules: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_resources: Option<bool>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::set_location_availability`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetLocationAvailabilityInput {
+    pub location: String,
+    pub rules: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_availability_exceptions`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListAvailabilityExceptionsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// The arguments of [`Client::create_availability_exception`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateAvailabilityExceptionInput {
+    pub starts_on: String,
+    pub outcome: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ends_on: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hours: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_availability_exception`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteAvailabilityExceptionInput {
+    pub exception_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::import_holidays`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImportHolidaysInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icalendar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2305,18 +2441,21 @@ impl Client {
 
     /// Set a resource's bookable hours.
     ///
-    /// Give one resource its own weekly bookable hours. `null` makes it use the server's default;
-    /// `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone:
-    /// start_minutes after midnight, lasting duration_minutes.
+    /// Give one resource its own weekly bookable hours. `null` makes it inherit: its location's
+    /// hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it
+    /// never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes
+    /// after midnight, lasting duration_minutes.
     pub fn set_resource_availability(&self, input: &SetResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_availability", serde_json::to_value(input)?)
     }
 
     /// Export a resource's bookable hours as iCalendar.
     ///
-    /// One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
-    /// calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
-    /// time zone. `null` when the resource uses the server's default.
+    /// The weekly bookable hours that apply to one resource (its own, or those it inherits) as an
+    /// iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
+    /// rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of
+    /// the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE
+    /// with RDATEs gives a day its own hours. `null` when the resource uses the server's default.
     pub fn export_resource_availability(&self, input: &ExportResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_export_resource_availability", serde_json::to_value(input)?)
     }
@@ -2325,9 +2464,11 @@ impl Client {
     ///
     /// Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
     /// as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
-    /// a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
-    /// or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
-    /// VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+    /// a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the
+    /// resource's exceptions, replacing those an earlier import made: each day they name keeps
+    /// the windows left on it, or is closed with none. Times must be in the resource's time zone
+    /// (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded
+    /// VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.
     pub fn import_resource_availability(&self, input: &ImportResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_import_resource_availability", serde_json::to_value(input)?)
     }
@@ -2440,13 +2581,81 @@ impl Client {
         self.call("slotlock_get_tenant_event_history", serde_json::to_value(input)?)
     }
 
-    /// Set every resource's bookable hours.
+    /// Read stored bookable hours.
     ///
-    /// Set the weekly bookable hours of every resource the tenant has, as
-    /// slotlock_set_resource_availability does for one. `null` makes them all use the server's
-    /// default. Returns how many resources changed.
+    /// The tenant's stored weekly hours (`null` when it uses the server's default) and each
+    /// location's that has its own. A resource without its own uses its location's, the nearest
+    /// up the chain, then the tenant's, then the server's.
+    pub fn get_availability_defaults(&self, input: &GetAvailabilityDefaultsInput) -> Result<Value, Error> {
+        self.call("slotlock_get_availability_defaults", serde_json::to_value(input)?)
+    }
+
+    /// Set the tenant's bookable hours.
+    ///
+    /// Store the tenant's weekly bookable hours: every resource without hours of its own, and
+    /// with no location hours above it, uses them, resources added later too. `null` hands them
+    /// back to the server's default. Nothing is copied: a resource with its own hours keeps them,
+    /// unless override_resources is true, which clears them so every resource inherits.
+    /// resources_updated counts the resources in use these hours now apply to;
+    /// resources_with_own_hours, those that keep their own.
     pub fn set_tenant_availability(&self, input: &SetTenantAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_set_tenant_availability", serde_json::to_value(input)?)
+    }
+
+    /// Set a location's bookable hours.
+    ///
+    /// Store a location's weekly bookable hours, each read in a resource's own time zone:
+    /// resources at it, or at a location inside it, without hours of their own use them, unless a
+    /// location nearer them has its own. `null` clears them, so they inherit from further up. 404
+    /// location_not_found for a location the tenant does not have.
+    pub fn set_location_availability(&self, input: &SetLocationAvailabilityInput) -> Result<Value, Error> {
+        self.call("slotlock_set_location_availability", serde_json::to_value(input)?)
+    }
+
+    /// List closures and special hours.
+    ///
+    /// The tenant's exceptions to its weekly hours, by first day: with resource_id, those that
+    /// apply to that resource (the tenant's, its locations' and its own); with location, that
+    /// location's own; else all of them. from and to keep those that reach the days between. At
+    /// most limit (1-1,000, default 100); next is the cursor for after.
+    pub fn list_availability_exceptions(&self, input: &ListAvailabilityExceptionsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_availability_exceptions", serde_json::to_value(input)?)
+    }
+
+    /// Add a closure or special hours.
+    ///
+    /// Close whole days, or give them hours of their own, for the whole tenant, one location (and
+    /// every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367
+    /// days) are local days, read in each resource's time zone. outcome closed empties those
+    /// days; open replaces their weekly hours with hours (1-4 windows of start_minutes and
+    /// duration_minutes). Where several apply to a day, the nearest wins: the resource's own,
+    /// then its location's from the innermost out, then the tenant's. Search leaves the days as
+    /// they say; a write is refused outside_hours only under the enforce_hours booking rule. 409
+    /// availability_exceptions_limit_reached past 5,000 a tenant.
+    pub fn create_availability_exception(&self, input: &CreateAvailabilityExceptionInput) -> Result<Value, Error> {
+        self.call("slotlock_create_availability_exception", serde_json::to_value(input)?)
+    }
+
+    /// Delete a closure or special hours.
+    ///
+    /// Remove an exception: its days read as the weekly hours again. 404
+    /// availability_exception_not_found.
+    pub fn delete_availability_exception(&self, input: &DeleteAvailabilityExceptionInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_availability_exception", serde_json::to_value(input)?)
+    }
+
+    /// Import a holiday calendar.
+    ///
+    /// Close the days an iCalendar holiday calendar names, for the whole tenant, one location or
+    /// one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
+    /// seconds; private addresses refused). Each all-day event closes the days it covers, and
+    /// each occurrence of a recurring one within from to to (default today to two years on, at
+    /// most three years); timed and cancelled events are skipped. Importing the same calendar
+    /// again updates its closures instead of adding more. 400 invalid_holiday_calendar for text
+    /// that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
+    /// holiday_url_not_served where the server fetches no urls.
+    pub fn import_holidays(&self, input: &ImportHolidaysInput) -> Result<Value, Error> {
+        self.call("slotlock_import_holidays", serde_json::to_value(input)?)
     }
 
     /// Hold time.

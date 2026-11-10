@@ -7,6 +7,29 @@ versioning.
 
 ### Added
 
+- Hours that inherit (RFC 0004 B2). The tenant and each location store weekly hours
+  (`setTenantAvailability`, the new `setLocationAvailability`; `PUT /v1/availability`,
+  `PUT /v1/locations/{location}/availability`, `GET /v1/availability`). A resource without its own
+  uses its location's (the nearest up the chain), then the tenant's, then the server's, and a
+  resource added later inherits too. Resources carry `inherited_availability`. The dashboard has
+  "Your hours" and an Hours page for each location; the CLI has `hours set --location`.
+- Closures and special days (RFC 0004 B1, T2): new table `availability_exceptions`, for the tenant,
+  a location (and everything inside it) or one resource. Each replaces whole local days, read in
+  each resource's time zone: `closed` empties them, `open` gives them 1-4 windows of their own.
+  The nearest scope wins on a day. One evaluator (`openWindows`) serves search, pool availability,
+  approval policies' `outside_hours`, and writes under `enforceHours`. At most 5,000 a tenant
+  (`availability_exceptions_limit_reached`). API: list, create and delete under
+  `/v1/availability/exceptions`. Dashboard: a Closures page. CLI: `slotlock closures
+  list|add|delete|import`.
+- Holiday calendars (B1): `slotlock_import_holidays` (`POST /v1/availability/holidays`) and
+  `closures import` close the days an iCalendar file's all-day events cover, recurring ones
+  expanded over a bounded span; importing again updates them. `serve` fetches an `https` URL
+  through the guarded fetch (no private addresses, 1 MB, 10 seconds); the store-backed application
+  backend fetches none unless given `holidayFetch`.
+- VAVAILABILITY carries RDATE and EXDATE (B1): the export adds the next year's closures as EXDATEs
+  and special hours as AVAILABLEs with RDATEs. The import reads them, and single AVAILABLEs, as
+  the resource's own exceptions, replacing those an earlier import made.
+
 - The sandbox (RFC 0004 A6), in a test environment only: seed a scenario (car rental, clinic,
   desks) into an empty one, race agents for one slot and report who booked, who was refused and
   how long each answer took, fast-forward (holds, waitlist offers and approvals that would lapse
@@ -377,6 +400,14 @@ versioning.
 
 ### Changed
 
+- `setTenantAvailability` no longer copies hours onto every resource (RFC 0004 B2). It stores the
+  tenant's hours, which resources without their own inherit, and answers
+  `{ inheriting, ownHours }` instead of a count. A resource whose hours an earlier call copied keeps
+  them: pass `overrideResources: true` (`override_resources`, `hours set --all --override`, or the
+  dashboard's checkbox) once to clear them. `PUT /v1/availability` answers `resources_updated`
+  (resources the hours now apply to) and `resources_with_own_hours`.
+- `parseVAvailability` answers `days` as well as `rules`, and no longer refuses RDATE, EXDATE or an
+  AVAILABLE without RRULE.
 - Rust client: every write's input struct has a `dry_run: Option<bool>` field (RFC 0004 A3), and
   `PartnerCreateKeyInput` a `limits` field (A5). A struct literal that lists every field must now
   end with `..Default::default()`, as the README's examples do; the other clients take them as

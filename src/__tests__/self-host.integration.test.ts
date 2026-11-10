@@ -167,13 +167,15 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         expect.objectContaining({ id: decoy, hours: null }),
       ]);
 
-      const closedAll = await run(['hours', 'set', '[]', '--all']);
+      // The tenant's hours are stored and inherited (RFC 0004 B2); --override clears resources' own.
+      const closedAll = await run(['hours', 'set', '[]', '--all', '--override']);
       expect(closedAll.code).toBe(0);
-      const updated = lines(closedAll.stdout.text())[0]?.updated as number;
+      const updated = lines(closedAll.stdout.text())[0]?.inheriting as number;
       expect(updated).toBeGreaterThanOrEqual(2);
       for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
-        expect(line.hours).toEqual([]);
+        expect(line).toMatchObject({ hours: null, inherited: { source: 'tenant', rules: [] } });
       }
+      expect((await run(['hours', 'set', '[]', '--resource', 'hours-van'])).code).toBe(0);
 
       expect((await run(['hours', 'clear', '--resource', 'hours-van'])).code).toBe(0);
       expect(
@@ -181,7 +183,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       ).toEqual([expect.objectContaining({ hours: null })]);
       expect((await run(['hours', 'clear', '--all'])).code).toBe(0);
       for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
-        expect(line.hours).toBeNull();
+        expect(line).toMatchObject({ hours: null, inherited: null });
       }
 
       const missing = await run(['hours', 'set', '[]', '--resource', 'no-such-van']);

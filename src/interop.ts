@@ -3,6 +3,7 @@
 // (RFC 8984). Pure functions: the application API serves them, and an application may call them
 // directly.
 import ICAL from 'ical.js';
+import { type SlotlockExceptionDay, type SlotlockExceptionWindow, epochDay } from './hours.js';
 import { zonedDateTimeFields } from './timezone.js';
 import type { SlotlockCalendarEvent, WeeklyAvailabilityRule } from './types.js';
 import { invalidAvailability, parseAvailabilityRules } from './weekly-hours.js';
@@ -51,7 +52,25 @@ export interface EmitVAvailabilityOptions {
   timezone: string;
   /** The VAVAILABILITY's UID; each AVAILABLE's is this with its index. */
   uid: string;
+  /**
+   * Days exceptions replace (RFC 0004 B1): each weekly AVAILABLE gets an EXDATE for its window on
+   * them, and the hours an open day has instead are AVAILABLEs of their own, one per window with an
+   * RDATE for each further day with the same window.
+   */
+  days?: readonly SlotlockExceptionDay[];
 }
+
+/** The most days one VAVAILABILITY's EXDATEs, RDATEs and single AVAILABLEs may name. */
+export const SLOTLOCK_MAX_VAVAILABILITY_DAYS = 1_000;
+
+const compactDate = (date: string) => date.replaceAll('-', '');
+const wallStamp = (date: string, minutes: number) =>
+  `${compactDate(date)}T${pad(Math.floor(minutes / 60))}${pad(minutes % 60)}00`;
+/** The weekday codes an RRULE's BYDAY names. */
+const byDays = (rrule: string) =>
+  new Set((/(?:^|;)BYDAY=([^;]*)/.exec(rrule)?.[1] ?? '').split(',').map((day) => day.slice(-2)));
+/** The weekday code of `YYYY-MM-DD`. */
+const weekdayOf = (date: string) => DAYS[new Date(`${date}T00:00:00Z`).getUTCDay()] as string;
 
 /**
  * A VCALENDAR with one VAVAILABILITY holding an AVAILABLE per rule: DTSTART on the rule's first day
@@ -59,7 +78,7 @@ export interface EmitVAvailabilityOptions {
  * two sides agree on IANA names), DURATION and the rule's RRULE. `[]` is a VAVAILABILITY with no
  * AVAILABLE: never bookable. CRLF line endings, folded at 75 octets.
  */
-export function emitVAvailability({ rules, timezone, uid }: EmitVAvailabilityOptions): string {
+export function emitVAvailability({ rules, timezone, uid, days }: EmitVAvailabilityOptions): string {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -79,8 +98,35 @@ export function emitVAvailability({ rules, timezone, uid }: EmitVAvailabilityOpt
       `DTSTART;TZID=${timezone}:${day.getUTCFullYear()}${pad(day.getUTCMonth() + 1)}${pad(day.getUTCDate())}T${pad(hour)}${pad(minute)}00`,
       `DURATION:PT${rule.durationMinutes}M`,
       `RRULE:${rule.rrule}`,
-      'END:AVAILABLE',
     );
+    const weekdays = byDays(rule.rrule);
+    const excluded = (days ?? [])
+      .filter((day) => weekdays.has(weekdayOf(day.date)))
+      .map((day) => wallStamp(day.date, rule.startMinutes));
+    if (excluded.length > 0) lines.push(`EXDATE;TZID=${timezone}:${excluded.join(',')}`);
+    lines.push('END:AVAILABLE');
+  });
+  // An open day's hours: one AVAILABLE per window, repeated by RDATE on each further day with it.
+  const byWindow = new Map<string, { window: SlotlockExceptionWindow; dates: string[] }>();
+  for (const day of days ?? []) {
+    for (const window of day.windows) {
+      const key = `${window.startMinutes}:${window.durationMinutes}`;
+      const entry = byWindow.get(key) ?? { window, dates: [] };
+      entry.dates.push(day.date);
+      byWindow.set(key, entry);
+    }
+  }
+  [...byWindow.values()].forEach(({ window, dates }, index) => {
+    const [first, ...rest] = [...dates].sort();
+    lines.push(
+      'BEGIN:AVAILABLE',
+      `UID:${uid}-day-${index}`,
+      `DTSTAMP:${VAVAILABILITY_DTSTAMP}`,
+      `DTSTART;TZID=${timezone}:${wallStamp(first as string, window.startMinutes)}`,
+      `DURATION:PT${window.durationMinutes}M`,
+    );
+    if (rest.length > 0) lines.push(`RDATE;TZID=${timezone}:${rest.map((date) => wallStamp(date, window.startMinutes)).join(',')}`);
+    lines.push('END:AVAILABLE');
   });
   lines.push('END:VAVAILABILITY', 'END:VCALENDAR');
   return `${lines.map(fold).join(CRLF)}${CRLF}`;
@@ -90,6 +136,11 @@ export interface ParsedVAvailability {
   /** The TZID every AVAILABLE named, `UTC` for UTC times, or null when they are all floating. */
   timezone: string | null;
   rules: WeeklyAvailabilityRule[];
+  /**
+   * The days EXDATEs, RDATEs and single AVAILABLEs change, each with the windows it has: none is
+   * closed. Empty when the hours are only weekly.
+   */
+  days: SlotlockExceptionDay[];
 }
 
 type Component = InstanceType<typeof ICAL.Component>;
@@ -102,12 +153,16 @@ function single(component: Component, name: string) {
 }
 
 /**
- * Weekly rules from an iCalendar VAVAILABILITY (RFC 7953): one VAVAILABILITY, each AVAILABLE a
- * weekly RRULE with a time of day and a length. Refuses (`invalid_availability`) what weekly
- * rules cannot say: a VAVAILABILITY bounded by DTSTART or DTEND, more than one, an AVAILABLE
- * without RRULE, with RDATE, EXDATE or RECURRENCE-ID, a whole-day DTSTART, seconds, AVAILABLEs in
- * different zones, and any rule `parseAvailabilityRules` refuses. An RRULE without BYDAY takes
- * DTSTART's day, as RFC 5545 reads it.
+ * Weekly rules and the days that differ from them, from an iCalendar VAVAILABILITY (RFC 7953): one
+ * VAVAILABILITY, each AVAILABLE either a weekly RRULE with a time of day and a length, or a single
+ * window. EXDATE takes a weekly window off its day, RDATE adds a window (of the AVAILABLE's length,
+ * or a PERIOD's), and a single AVAILABLE adds its own: each day they name becomes a day with hours
+ * of its own (`days`), as exceptions keep them (RFC 0004 B1). Refuses (`invalid_availability`) what
+ * these cannot say: a VAVAILABILITY bounded by DTSTART or DTEND, more than one, RECURRENCE-ID, a
+ * whole-day DTSTART, seconds, AVAILABLEs in different zones, an EXDATE at another time than its
+ * window, a day with more than four windows or one over a day, more than
+ * SLOTLOCK_MAX_VAVAILABILITY_DAYS such days, and any rule `parseAvailabilityRules` refuses. An
+ * RRULE without BYDAY takes DTSTART's day, as RFC 5545 reads it.
  */
 export function parseVAvailability(text: string): ParsedVAvailability {
   if (text.length > SLOTLOCK_MAX_VAVAILABILITY_CHARACTERS) {
@@ -131,15 +186,25 @@ export function parseVAvailability(text: string): ParsedVAvailability {
     throw invalidAvailability('A VAVAILABILITY bounded by DTSTART or DTEND cannot be weekly hours');
   }
   const zones = new Set<string | null>();
-  const rules = availability.getAllSubcomponents('available').map((available, index) => {
-    for (const name of ['rdate', 'exdate', 'recurrence-id']) {
-      if (available.hasProperty(name)) {
-        throw invalidAvailability(`AVAILABLE ${index} has ${name.toUpperCase()}: weekly hours cannot say it`);
-      }
+  // What EXDATE, RDATE and single AVAILABLEs say, day by day: weekly windows taken away, and
+  // windows added.
+  const excluded = new Map<string, Set<number>>();
+  const added = new Map<string, SlotlockExceptionWindow[]>();
+  const named = new Set<string>();
+  const nameDay = (date: string, index: number) => {
+    named.add(date);
+    if (named.size > SLOTLOCK_MAX_VAVAILABILITY_DAYS) {
+      throw invalidAvailability(`AVAILABLE ${index}: at most ${SLOTLOCK_MAX_VAVAILABILITY_DAYS} days may differ from the week`);
+    }
+  };
+  const weekly: { rule: WeeklyAvailabilityRule; index: number }[] = [];
+  availability.getAllSubcomponents('available').forEach((available, index) => {
+    if (available.hasProperty('recurrence-id')) {
+      throw invalidAvailability(`AVAILABLE ${index} has RECURRENCE-ID: weekly hours cannot say it`);
     }
     const dtstart = single(available, 'dtstart');
     const rrule = single(available, 'rrule');
-    if (!dtstart || !rrule) throw invalidAvailability(`AVAILABLE ${index} needs DTSTART and RRULE`);
+    if (!dtstart) throw invalidAvailability(`AVAILABLE ${index} needs DTSTART`);
     const start = dtstart.getFirstValue() as InstanceType<typeof ICAL.Time>;
     if (start.isDate) throw invalidAvailability(`AVAILABLE ${index} starts on a date, not a time`);
     if (start.second !== 0) throw invalidAvailability(`AVAILABLE ${index} starts at a second`);
@@ -167,15 +232,92 @@ export function parseVAvailability(text: string): ParsedVAvailability {
       throw invalidAvailability(`AVAILABLE ${index} does not last a whole number of minutes`);
     }
 
+    const startMinutes = start.hour * 60 + start.minute;
+    const dateOf = (time: InstanceType<typeof ICAL.Time>) => `${pad(time.year, 4)}-${pad(time.month)}-${pad(time.day)}`;
+    // EXDATE and RDATE are read in DTSTART's zone: another would move them.
+    const sameZone = (property: InstanceType<typeof ICAL.Property>, name: string) => {
+      if (property.getParameter('tzid') !== dtstart.getParameter('tzid')) {
+        throw invalidAvailability(`AVAILABLE ${index} has ${name} in another zone than DTSTART`);
+      }
+    };
+    const addWindow = (date: string, minutes: number, length: number) => {
+      if (length > 1_440) {
+        throw invalidAvailability(`AVAILABLE ${index} adds a window longer than a day on ${date}`);
+      }
+      nameDay(date, index);
+      added.set(date, [...(added.get(date) ?? []), { startMinutes: minutes, durationMinutes: length }]);
+    };
+    for (const property of available.getAllProperties('rdate')) {
+      sameZone(property, 'RDATE');
+      for (const value of property.getValues() as unknown[]) {
+        if (value instanceof ICAL.Period) {
+          const from = value.start;
+          const to = value.getEnd();
+          const length = (wallSeconds(to) - wallSeconds(from)) / 60;
+          if (from.isDate || from.second !== 0 || !Number.isInteger(length) || length < 1) {
+            throw invalidAvailability(`AVAILABLE ${index} has an RDATE period that is not whole minutes`);
+          }
+          addWindow(dateOf(from), from.hour * 60 + from.minute, length);
+        } else {
+          const time = value as InstanceType<typeof ICAL.Time>;
+          if (time.isDate || time.second !== 0) {
+            throw invalidAvailability(`AVAILABLE ${index} has an RDATE that is not a time to the minute`);
+          }
+          addWindow(dateOf(time), time.hour * 60 + time.minute, durationMinutes);
+        }
+      }
+    }
+    if (!rrule) {
+      // A single window on its day.
+      addWindow(dateOf(start), startMinutes, durationMinutes);
+      if (available.hasProperty('exdate')) {
+        throw invalidAvailability(`AVAILABLE ${index} has EXDATE but no RRULE`);
+      }
+      return;
+    }
     let value = String(rrule.getFirstValue() as InstanceType<typeof ICAL.Recur>);
     if (!/(?:^|;)BYDAY=/.test(value)) {
       value = `${value};BYDAY=${DAYS[start.dayOfWeek() - 1]}`;
     }
-    return { rrule: value, startMinutes: start.hour * 60 + start.minute, durationMinutes };
+    const position = weekly.length;
+    weekly.push({ rule: { rrule: value, startMinutes, durationMinutes }, index });
+    for (const property of available.getAllProperties('exdate')) {
+      sameZone(property, 'EXDATE');
+      for (const time of property.getValues() as InstanceType<typeof ICAL.Time>[]) {
+        if (!time.isDate && time.hour * 60 + time.minute !== startMinutes) {
+          throw invalidAvailability(`AVAILABLE ${index} has an EXDATE at another time than its window`);
+        }
+        const date = dateOf(time);
+        nameDay(date, index);
+        excluded.set(date, (excluded.get(date) ?? new Set()).add(position));
+      }
+    }
   });
   if (zones.size > 1) throw invalidAvailability('The AVAILABLEs are in different time zones');
   const [timezone = null] = zones;
-  return { timezone, rules: parseAvailabilityRules(rules) };
+  const rules = parseAvailabilityRules(weekly.map(({ rule }) => rule));
+  // Each named day as it reads: the weekly windows that fall on it and are not excluded, and those
+  // added.
+  const days: SlotlockExceptionDay[] = [...named].sort().map((date) => {
+    const weekday = weekdayOf(date);
+    const untilOk = (rrule: string) => {
+      const until = /(?:^|;)UNTIL=(\d{8})/.exec(rrule)?.[1];
+      return until === undefined || compactDate(date) <= until;
+    };
+    const windows: SlotlockExceptionWindow[] = [];
+    rules.forEach((rule, position) => {
+      if (!byDays(rule.rrule).has(weekday) || !untilOk(rule.rrule) || excluded.get(date)?.has(position)) return;
+      if (rule.durationMinutes > 1_440) {
+        throw invalidAvailability(`A window longer than a day falls on ${date}, which differs from the week`);
+      }
+      windows.push({ startMinutes: rule.startMinutes, durationMinutes: rule.durationMinutes });
+    });
+    windows.push(...(added.get(date) ?? []));
+    if (windows.length > 4) throw invalidAvailability(`${date} has more than 4 windows`);
+    if (epochDay(date) === null) throw invalidAvailability(`${date} is not a day`);
+    return { date, windows };
+  });
+  return { timezone, rules, days };
 }
 
 const wallSeconds = (time: InstanceType<typeof ICAL.Time>) =>

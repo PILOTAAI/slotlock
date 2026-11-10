@@ -2004,6 +2004,14 @@ BEGIN
   DELETE FROM slotlock.approval_policies WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'availability_exceptions';
+  DELETE FROM slotlock.availability_exceptions WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'availability_defaults';
+  DELETE FROM slotlock.availability_defaults WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'reservations';
   DELETE FROM slotlock.reservations
    WHERE tenant_ref = requested_tenant_ref
@@ -2255,6 +2263,7 @@ BEGIN
   FOREACH emptied IN ARRAY ARRAY[
     'calendar_event_attendees', 'calendar_event_reminders', 'calendar_event_exceptions',
     'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
+    'availability_exceptions', 'availability_defaults',
     'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
     'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
     'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
@@ -2810,7 +2819,7 @@ AS $slotlock_location_path$
       FROM slotlock.locations place JOIN up ON place.tenant_ref = requested_tenant_ref AND place.ref = up.parent_ref
      WHERE up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
   )
-  SELECT COALESCE(array_agg(up.ref), '{}'::text[]) FROM up;
+  SELECT COALESCE(array_agg(up.ref ORDER BY up.steps), '{}'::text[]) FROM up;
 $slotlock_location_path$;
 -- 0.5 allowed a filter of at most 20 types, fewer than there are now. The wider CHECK admits every
 -- row the old one did, so it is added NOT VALID (no scan under the lock), and the old one dropped.
@@ -4861,6 +4870,95 @@ CREATE INDEX IF NOT EXISTS slotlock_approvals_pending_idx
 CREATE INDEX IF NOT EXISTS slotlock_approvals_expiry_idx
   ON slotlock.approvals (expires_at) WHERE status = 'pending';
 
+-- Stored hours (RFC 0004 B2): the tenant's (no location) and each location's. A resource without
+-- its own inherits its location's, the nearest up the chain, then its tenant's, then the server's.
+-- Rules are written validated (weekly rules, at most 50).
+CREATE TABLE IF NOT EXISTS slotlock.availability_defaults (
+  tenant_ref text NOT NULL,
+  location_ref text,
+  rules jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_availability_defaults_location_fkey FOREIGN KEY (tenant_ref, location_ref)
+    REFERENCES slotlock.locations (tenant_ref, ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_availability_defaults_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND jsonb_typeof(rules) = 'array' AND jsonb_array_length(rules) <= 50
+    AND octet_length(rules::text) <= 65536
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_availability_defaults_scope_idx
+  ON slotlock.availability_defaults (tenant_ref, (COALESCE(location_ref, '')));
+
+-- Exceptions to the weekly hours (RFC 0004 B1): whole local days, closed or open with hours of
+-- their own, for the tenant, a location (and every resource inside it) or one resource. An import
+-- names its source's id, so importing again updates the same row.
+CREATE TABLE IF NOT EXISTS slotlock.availability_exceptions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  location_ref text,
+  resource_id uuid,
+  starts_on date NOT NULL,
+  ends_on date NOT NULL,
+  outcome text NOT NULL,
+  hours jsonb,
+  label text NOT NULL,
+  source text NOT NULL DEFAULT 'manual',
+  source_uid text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_availability_exceptions_location_fkey FOREIGN KEY (tenant_ref, location_ref)
+    REFERENCES slotlock.locations (tenant_ref, ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_availability_exceptions_resource_fkey FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_availability_exceptions_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND (location_ref IS NULL OR resource_id IS NULL)
+    AND ends_on >= starts_on AND ends_on - starts_on < 367
+    AND outcome IN ('closed', 'open')
+    AND ((outcome = 'open') = (hours IS NOT NULL))
+    AND (hours IS NULL OR (jsonb_typeof(hours) = 'array' AND jsonb_array_length(hours) BETWEEN 1 AND 4))
+    AND char_length(label) BETWEEN 1 AND 200 AND btrim(label) <> ''
+    AND source IN ('manual', 'ics', 'vavailability')
+    AND (source_uid IS NULL OR octet_length(source_uid) BETWEEN 1 AND 600)
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_availability_exceptions_source_idx
+  ON slotlock.availability_exceptions
+     (tenant_ref, (COALESCE(location_ref, '')), (COALESCE(resource_id::text, '')), source_uid)
+  WHERE source_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_availability_exceptions_days_idx
+  ON slotlock.availability_exceptions (tenant_ref, ends_on, starts_on);
+CREATE INDEX IF NOT EXISTS slotlock_availability_exceptions_resource_idx
+  ON slotlock.availability_exceptions (resource_id) WHERE resource_id IS NOT NULL;
+
+-- The hours a resource without its own inherits: its location's, the nearest up the chain, else its
+-- tenant's, as {source, location?, rules}; NULL leaves the server's default. Runs as the caller, so
+-- row-level security keeps it inside the tenant.
+CREATE OR REPLACE FUNCTION slotlock.inherited_availability(requested_tenant_ref text, requested_location_ref text)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_inherited_availability$
+  WITH RECURSIVE up(ref, parent_ref, steps) AS (
+    SELECT place.ref, place.parent_ref, 1 FROM slotlock.locations place
+     WHERE requested_location_ref IS NOT NULL
+       AND place.tenant_ref = requested_tenant_ref AND place.ref = requested_location_ref
+    UNION ALL
+    SELECT place.ref, place.parent_ref, up.steps + 1
+      FROM slotlock.locations place JOIN up ON place.tenant_ref = requested_tenant_ref AND place.ref = up.parent_ref
+     WHERE up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+  )
+  SELECT COALESCE(
+    (SELECT jsonb_build_object('source', 'location', 'location', up.ref, 'rules', defaults.rules)
+       FROM up JOIN slotlock.availability_defaults defaults
+         ON defaults.tenant_ref = requested_tenant_ref AND defaults.location_ref = up.ref
+      ORDER BY up.steps LIMIT 1),
+    (SELECT jsonb_build_object('source', 'tenant', 'rules', defaults.rules)
+       FROM slotlock.availability_defaults defaults
+      WHERE defaults.tenant_ref = requested_tenant_ref AND defaults.location_ref IS NULL)
+  );
+$slotlock_inherited_availability$;
+
 -- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
 -- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
 -- so a hold could take a booking's buffer and a buffered booking could cover a hold. The upgrade
@@ -5820,6 +5918,8 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'composite_claims',
   'approval_policies',
   'approvals',
+  'availability_defaults',
+  'availability_exceptions',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -5877,6 +5977,8 @@ export const SLOTLOCK_RESOURCE_SCOPED_TABLES: Readonly<Record<string, string>> =
   // A change or a waitlist entry about no one resource (a key, a pool) is not the key's.
   outbox: resourceScopeAllows('resource_id'),
   waitlist_entries: resourceScopeAllows('resource_id'),
+  // The tenant's and locations' exceptions shape every resource's hours, so every key reads them.
+  availability_exceptions: `(resource_id IS NULL OR ${resourceScopeAllows('resource_id')})`,
   ...Object.fromEntries(
     [
       'calendar_event_attendees',
@@ -5972,6 +6074,10 @@ ALTER TABLE slotlock.approval_policies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.approval_policies FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.approvals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.approvals FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.availability_defaults ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.availability_defaults FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.availability_exceptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.availability_exceptions FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -6010,7 +6116,9 @@ BEGIN
          'pool_settings',
          'composite_claims',
          'approval_policies',
-         'approvals'
+         'approvals',
+         'availability_defaults',
+         'availability_exceptions'
        )
   LOOP
     EXECUTE format(
@@ -6321,6 +6429,26 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'availability_defaults'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.availability_defaults
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'availability_exceptions'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.availability_exceptions
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -6378,6 +6506,10 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.approval_policies
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.approvals
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.availability_defaults
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.availability_exceptions
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -6428,7 +6560,9 @@ WHERE schemaname = 'slotlock'
     'pool_settings',
     'composite_claims',
     'approval_policies',
-    'approvals'
+    'approvals',
+    'availability_defaults',
+    'availability_exceptions'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

@@ -114,9 +114,26 @@ import type {
   PutCalendarEventCommand,
   PutCalendarEventResult,
   ReleaseHoldResult,
+  SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
 } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
+import { applicableHours, exceptionQueryDays } from './hours.js';
+import {
+  type SlotlockAvailabilityDefaults,
+  type SlotlockAvailabilityDefaultsResult,
+  type SlotlockAvailabilityExceptionInput,
+  createAvailabilityException,
+  deleteAvailabilityException,
+  getAvailabilityDefaults,
+  listAvailabilityExceptions,
+  rankedExceptions,
+  replaceImportedExceptions,
+  setLocationAvailability,
+  setTenantAvailability,
+  storedInheritedAvailability,
+} from './availability-store.js';
+import type { SlotlockAvailabilityException, SlotlockRankedException } from './hours.js';
 import {
   type PutApprovalPolicyParams,
   APPROVAL_COLUMNS,
@@ -1662,27 +1679,45 @@ async function bookingJudge(
   bufferBeforeMs: number;
 }> {
   const [row] = await tx<
-    { effective_booking_rules: unknown; availability_rules: unknown; timezone: string; now: Date }[]
+    {
+      effective_booking_rules: unknown;
+      availability_rules: unknown;
+      inherited_availability: unknown;
+      timezone: string;
+      now: Date;
+      today: string;
+    }[]
   >`
-    SELECT ${tx.unsafe(EFFECTIVE_BOOKING_RULES)}, availability_rules, timezone,
-           statement_timestamp() AS now
+    SELECT ${tx.unsafe(EFFECTIVE_BOOKING_RULES)}, availability_rules,
+           CASE WHEN resources.availability_rules IS NULL
+                THEN slotlock.inherited_availability(resources.tenant_ref, resources.location_ref) END
+             AS inherited_availability,
+           timezone, statement_timestamp() AS now,
+           to_char((statement_timestamp() AT TIME ZONE 'UTC')::date - 2, 'YYYY-MM-DD') AS today
       FROM slotlock.resources WHERE id = ${resourceId}`;
   if (!row || row.effective_booking_rules === null || row.effective_booking_rules === undefined) {
     return { broken: () => null, turnaroundMs: 0, bufferBeforeMs: 0 };
   }
-  const { effectiveBookingRules: rules, availabilityRules } = toResource({
+  const resource = toResource({
     id: resourceId,
     external_ref: null,
     tenant_ref: null,
     timezone: row.timezone,
     availability_rules: row.availability_rules,
+    inherited_availability: row.inherited_availability,
     booking_rules: null,
     pool_ref: null,
     visibility: 'shared',
     archived_at: null,
     effective_booking_rules: row.effective_booking_rules,
   });
-  const hours = availabilityRules ?? defaultHours;
+  const rules = resource.effectiveBookingRules;
+  const hours = applicableHours(resource, defaultHours).rules;
+  // Enforced hours read the exceptions from two days back (a zone is at most fourteen hours from UTC).
+  const exceptions =
+    rules?.enforceHours === true
+      ? ((await rankedExceptions(tx, [resourceId], { from: row.today })).get(resourceId) ?? [])
+      : [];
   const coverage =
     rules?.requireCertain === true
       ? await tx<{ starts_at: Date; ends_at: Date; fresh: boolean }[]>`
@@ -1716,6 +1751,7 @@ async function bookingJudge(
         rules: checks.first ? rules : later,
         timezone: row.timezone,
         hours,
+        exceptions,
         interval,
         now: row.now,
       }) ?? (uncertain(interval) ? 'uncertain' : null),
@@ -1885,6 +1921,8 @@ type ResourceRow = {
   capacity?: number | null;
   labels?: string[];
   attributes?: unknown;
+  /** The hours it inherits (slotlock.inherited_availability), when it has none of its own. */
+  inherited_availability?: unknown;
   /** Where it is, and the groups it is in; absent when the query did not read them. */
   location_ref?: string | null;
   location_name?: string | null;
@@ -1899,6 +1937,9 @@ type ResourceRow = {
 const RESOURCE_COLUMNS = `id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
   visibility, archived_at, name, description, kind, capacity, labels, attributes, location_ref,
   parent_id, part_index,
+  CASE WHEN resources.availability_rules IS NULL
+       THEN slotlock.inherited_availability(resources.tenant_ref, resources.location_ref) END
+    AS inherited_availability,
   (SELECT place.name FROM slotlock.locations place
     WHERE place.tenant_ref = resources.tenant_ref AND place.ref = resources.location_ref) AS location_name,
   ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
@@ -1973,6 +2014,10 @@ function toResource(row: ResourceRow): SlotlockResource {
     } catch {
       resource.availabilityRules = [];
     }
+  }
+  if (resource.availabilityRules === undefined) {
+    const inherited = storedInheritedAvailability(row.inherited_availability);
+    if (inherited) resource.inheritedAvailability = inherited;
   }
   if (row.booking_rules !== null && row.booking_rules !== undefined) {
     // Written validated; anything else refuses every booking, never as no rule.
@@ -2694,11 +2739,71 @@ export interface SlotlockStore extends SlotlockEventFeed {
   setResourceParent(params: { tenantRef: string; id: string; parentId: string | null }): Promise<SlotlockResource | null>;
   /** Note the member a pool booking took, from which `round_robin` goes on. */
   notePoolBooking(params: { tenantRef: string; pool: string; resourceId: string }): Promise<void>;
-  /** Set (or clear, with `null`) the bookable hours of every resource the tenant has; returns how many. */
+  /**
+   * Store (or clear, with `null`) the tenant's weekly hours (RFC 0004 B2): every resource without its
+   * own and with no location hours above it uses them, new ones too. Nothing is copied: a resource
+   * keeps hours of its own unless `overrideResources` clears them. Refuses `invalid_availability`.
+   */
   setTenantAvailability(params: {
     tenantRef: string;
     rules: readonly WeeklyAvailabilityRule[] | null;
+    overrideResources?: boolean;
+  }): Promise<SlotlockAvailabilityDefaultsResult>;
+  /**
+   * Store (or clear) a location's weekly hours: resources at it or inside it without their own use
+   * them, unless a nearer location has its own. Null for a location the tenant does not have.
+   */
+  setLocationAvailability(params: {
+    tenantRef: string;
+    location: string;
+    rules: readonly WeeklyAvailabilityRule[] | null;
+  }): Promise<SlotlockAvailabilityDefaultsResult | null>;
+  /** The tenant's stored hours, and each location's that has them. */
+  getAvailabilityDefaults(params: { tenantRef: string }): Promise<SlotlockAvailabilityDefaults>;
+  /**
+   * Add a closure or a day of special hours (RFC 0004 B1) for the tenant, a location or a resource;
+   * an import's `sourceUid` already stored at that scope is updated instead. Refuses
+   * `invalid_availability_exception`, `location_not_found`, `resource_not_found` and
+   * `availability_exceptions_limit_reached`.
+   */
+  createAvailabilityException(params: SlotlockAvailabilityExceptionInput): Promise<SlotlockAvailabilityException>;
+  /**
+   * The tenant's exceptions by first day: those that apply to `resourceId`, or a `location`'s own,
+   * or all; only those reaching `from` to `to` when given.
+   */
+  listAvailabilityExceptions(params: {
+    tenantRef: string;
+    resourceId?: string;
+    location?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    after?: string;
+  }): Promise<SlotlockAvailabilityException[]>;
+  deleteAvailabilityException(params: { tenantRef: string; id: string }): Promise<boolean>;
+  /**
+   * Replace the exceptions an import of one resource's VAVAILABILITY made (source `vavailability`)
+   * with `ranges`; returns how many it keeps.
+   */
+  replaceImportedExceptions(params: {
+    tenantRef: string;
+    resourceId: string;
+    ranges: readonly {
+      startsOn: string;
+      endsOn: string;
+      outcome: 'closed' | 'open';
+      hours?: { startMinutes: number; durationMinutes: number }[];
+    }[];
   }): Promise<number>;
+  /**
+   * Each resource's exceptions that reach `window`, in the order the evaluator applies them, by
+   * resource id.
+   */
+  availabilityExceptionsFor(params: {
+    tenantRef: string;
+    resourceIds: readonly string[];
+    window: Interval;
+  }): Promise<Map<string, SlotlockRankedException[]>>;
   /** Bounded tenant resource discovery, ordered and keyset-paginated by immutable UUID. */
   listResources(params: {
     tenantRef: string;
@@ -3945,6 +4050,10 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'resetTestTenant',
   'fastForwardTestTenant',
   'setTenantAvailability',
+  'setLocationAvailability',
+  'createAvailabilityException',
+  'deleteAvailabilityException',
+  'replaceImportedExceptions',
   'createReservation',
   'createExternalReservation',
   'rescheduleExternalReservation',
@@ -5025,12 +5134,45 @@ function buildSlotlockStore(
           code: 'invalid_identity' as const,
         });
       }
-      const rules = availabilityParameter(sql, params.rules);
-      const updated = await sql`
-        UPDATE slotlock.resources
-           SET availability_rules = ${rules}::jsonb
-         WHERE tenant_ref = ${params.tenantRef}`;
-      return updated.count;
+      return setTenantAvailability(sql, params);
+    },
+
+    async setLocationAvailability(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      return setLocationAvailability(sql, params);
+    },
+
+    async getAvailabilityDefaults(params) {
+      return getAvailabilityDefaults(sql, params);
+    },
+
+    async createAvailabilityException(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      return createAvailabilityException(sql, params);
+    },
+
+    async listAvailabilityExceptions(params) {
+      return listAvailabilityExceptions(sql, params);
+    },
+
+    async deleteAvailabilityException(params) {
+      return deleteAvailabilityException(sql, params);
+    },
+
+    async replaceImportedExceptions(params) {
+      return replaceImportedExceptions(sql, params);
+    },
+
+    async availabilityExceptionsFor(params) {
+      return rankedExceptions(sql, params.resourceIds, exceptionQueryDays(params.window));
     },
 
     async listResources(params) {
