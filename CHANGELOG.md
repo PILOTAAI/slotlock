@@ -99,8 +99,14 @@ versioning.
   `groups`, `POST /v1/resources` no longer defaults `timezone` in its schema (the store still gives
   UTC), and `PATCH /v1/resources/{resource_id}` moves it. `slotlock_list_resources` shows agents each
   resource's location (with its name) and groups, and narrows by `location` and `group`, with or
-  without a pool. `resource.created` and `resource.updated` carry the location. The dashboard's
-  resource page shows them. Run `slotlock migrate`.
+  without a pool. `resource.created` and `resource.updated` carry the location. Run `slotlock
+  migrate`.
+- The dashboard edits locations and groups. Its new Locations and groups page, linked from
+  Resources, adds a location (with where it is and a time zone), moves, renames and deletes one, and
+  adds, renames and deletes a group, each refusal said in a person's words. A resource's page puts
+  it at a location and in its groups in one form, in one transaction, so a group it may not join
+  moves nothing. Resources adapters gain the optional `grouping`, which
+  `createSlotlockDashboardResources` provides; without it the page and the panel are not shown.
 - Search by selection (RFC 0003 G4). `slotlock_get_free_busy`, `slotlock_find_next_available` and
   `slotlock_find_available_slots` (and their REST routes) take `location` (with every location in
   it), `group`, `labels` (every one), `kind` or `pool` in place of `resource_ids`, one or the other.

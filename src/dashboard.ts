@@ -67,8 +67,14 @@ import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booki
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
 import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockTenantPlan } from './plans.js';
 import {
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+  type SlotlockLocation,
+  type SlotlockResourceGroup,
   type SlotlockResourceKind,
   type SlotlockResourceProfileInput,
 } from './resource-profile.js';
@@ -124,6 +130,11 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/resources/rules',
   '/resources/pool',
   '/resources/profile',
+  '/resources/place',
+  '/locations',
+  '/locations/delete',
+  '/groups',
+  '/groups/delete',
   '/webhooks',
   '/webhooks/delete',
   '/webhooks/enable',
@@ -260,6 +271,44 @@ export interface SlotlockDashboardResources {
     pool: string | null,
     actor?: string,
   ): Promise<SlotlockResource | null>;
+  /**
+   * The tenant's locations and groups (RFC 0003 G2, G3), and where each resource is in them. A
+   * refusal carries the store's `code`: `invalid_location` or `invalid_group` (with the `field`),
+   * `location_not_found`, `location_too_deep`, `location_cycle`, `location_limit_reached`,
+   * `location_in_use`, `group_not_found`, `group_limit_reached` or `resource_group_limit_reached`.
+   */
+  grouping?: {
+    /** Each under its parent, depth first, with how many resources are at each. */
+    locations(tenantRef: string): Promise<SlotlockLocation[]>;
+    /** Create the location with this reference, or change its name, parent and time zone. */
+    putLocation(
+      tenantRef: string,
+      location: { ref: string; name: string; parentRef: string | null; timezone: string | null },
+      actor?: string,
+    ): Promise<SlotlockLocation>;
+    /** False when the tenant has no such location. */
+    deleteLocation(tenantRef: string, ref: string, actor?: string): Promise<boolean>;
+    /** By reference, with how many resources are in each. */
+    groups(tenantRef: string): Promise<SlotlockResourceGroup[]>;
+    /** Create the group with this reference, or change its name and description. */
+    putGroup(
+      tenantRef: string,
+      group: { ref: string; name: string; description: string | null },
+      actor?: string,
+    ): Promise<SlotlockResourceGroup>;
+    /** Delete a group, its resources left as they are: false when the tenant has no such group. */
+    deleteGroup(tenantRef: string, ref: string, actor?: string): Promise<boolean>;
+    /**
+     * Put one of the tenant's resources at a location (or none) and in exactly these groups, in one
+     * transaction: the resource as it then is, or null when it is not the tenant's.
+     */
+    place(
+      tenantRef: string,
+      id: string,
+      place: { location: string | null; groups: readonly string[] },
+      actor?: string,
+    ): Promise<SlotlockResource | null>;
+  };
   /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
   waitlist?: {
     list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
@@ -544,6 +593,44 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
         (tenant) => tenant.updateResourceProfile({ tenantRef, id, profile }),
         by(actor),
       ),
+    grouping: {
+      locations: (tenantRef) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listLocations({ tenantRef })),
+      putLocation: (tenantRef, location, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.putLocation({ tenantRef, ...location }), by(actor)),
+      deleteLocation: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteLocation({ tenantRef, ref }), by(actor)),
+      groups: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listGroups({ tenantRef })),
+      putGroup: (tenantRef, group, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.putGroup({ tenantRef, ...group }), by(actor)),
+      deleteGroup: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteGroup({ tenantRef, ref }), by(actor)),
+      place: (tenantRef, id, place, actor) =>
+        store.withTenant(
+          tenantRef,
+          async (tenant) => {
+            // The location first, which finds the resource (null when it is not the tenant's);
+            // then its groups, in the same transaction, so a refused group moves nothing.
+            const moved = await tenant.updateResourceProfile({
+              tenantRef,
+              id,
+              profile: {},
+              location: place.location,
+            });
+            if (!moved) return null;
+            const wanted = new Set(place.groups);
+            const current = new Set(moved.groups ?? []);
+            for (const group of current) {
+              if (!wanted.has(group)) await tenant.removeGroupMember({ tenantRef, group, resourceId: id });
+            }
+            for (const group of wanted) {
+              if (!current.has(group)) await tenant.addGroupMember({ tenantRef, group, resourceId: id });
+            }
+            return tenant.getResource({ tenantRef, id });
+          },
+          by(actor),
+        ),
+    },
     waitlist: {
       list: (tenantRef, limit) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
@@ -910,6 +997,97 @@ const PROFILE_PROBLEMS = Object.freeze({
   attributes: 'Those attributes are not ones Slotlock can keep.',
   other: 'That profile is not one Slotlock can keep.',
 });
+
+const GROUPING_REF_RULE =
+  'A reference is 1 to 100 lowercase letters, digits, dots, dashes or underscores, starting with a letter or digit.';
+/** What a person is told when a location or group change is refused, by the store's code. */
+const GROUPING_PROBLEMS: Readonly<Record<string, { status: number; text: string }>> = Object.freeze({
+  location_ref: { status: 400, text: GROUPING_REF_RULE },
+  location_name: { status: 400, text: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.` },
+  location_parent: { status: 400, text: 'Choose where it is from the list, or nowhere.' },
+  location_timezone: {
+    status: 400,
+    text: 'A time zone is a name such as Europe/London. Leave it empty to take the one of the location it is in.',
+  },
+  location_other: { status: 400, text: 'That location is not one Slotlock can keep.' },
+  location_not_found: { status: 404, text: 'That location is not one of yours.' },
+  location_too_deep: { status: 409, text: `Locations go ${SLOTLOCK_MAX_LOCATION_DEPTH} levels deep at most.` },
+  location_cycle: { status: 409, text: 'A location cannot be inside itself, or inside a location that is inside it.' },
+  location_limit_reached: {
+    status: 409,
+    text: `You have ${SLOTLOCK_MAX_LOCATIONS.toLocaleString('en')} locations, the most there can be.`,
+  },
+  location_in_use: {
+    status: 409,
+    text: 'Move its resources, and the locations inside it, somewhere else first.',
+  },
+  group_ref: { status: 400, text: GROUPING_REF_RULE },
+  group_name: { status: 400, text: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.` },
+  group_description: {
+    status: 400,
+    text: `A description is at most ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description.toLocaleString('en')} characters.`,
+  },
+  group_other: { status: 400, text: 'That group is not one Slotlock can keep.' },
+  group_not_found: { status: 404, text: 'That group is not one of yours.' },
+  group_limit_reached: {
+    status: 409,
+    text: `You have ${SLOTLOCK_MAX_RESOURCE_GROUPS.toLocaleString('en')} groups, the most there can be.`,
+  },
+  resource_group_limit_reached: {
+    status: 409,
+    text: `A resource is in ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups at most.`,
+  },
+});
+
+/** The sentence for a refused location or group change, or null when it is not one. */
+function groupingProblem(error: unknown): { status: number; text: string } | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'invalid_location' || code === 'invalid_group') {
+    const kind = code === 'invalid_location' ? 'location' : 'group';
+    const field = (error as { field?: unknown }).field;
+    return GROUPING_PROBLEMS[`${kind}_${typeof field === 'string' ? field : 'other'}`] ?? GROUPING_PROBLEMS[`${kind}_other`] ?? null;
+  }
+  return typeof code === 'string' ? (GROUPING_PROBLEMS[code] ?? null) : null;
+}
+
+/** Each location's place from the top, as "London › Floor 3", by reference. */
+function locationPaths(locations: readonly SlotlockLocation[]): Map<string, string> {
+  const byRef = new Map(locations.map((location) => [location.ref, location]));
+  const paths = new Map<string, string>();
+  for (const location of locations) {
+    const names: string[] = [];
+    let at: SlotlockLocation | undefined = location;
+    for (let steps = 0; at && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+      names.unshift(at.name);
+      at = at.parentRef === null ? undefined : byRef.get(at.parentRef);
+    }
+    paths.set(location.ref, names.join(' › '));
+  }
+  return paths;
+}
+
+/** Whether `ref` is `ancestor`, or a location inside it. */
+function locationWithin(locations: ReadonlyMap<string, SlotlockLocation>, ref: string, ancestor: string): boolean {
+  let at: string | null = ref;
+  for (let steps = 0; at !== null && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+    if (at === ancestor) return true;
+    at = locations.get(at)?.parentRef ?? null;
+  }
+  return false;
+}
+
+/** The time zone a location gives a resource: its own, or the nearest one above it, and where from. */
+function locationZone(
+  locations: ReadonlyMap<string, SlotlockLocation>,
+  location: SlotlockLocation,
+): { timezone: string; from: SlotlockLocation } | null {
+  let at: SlotlockLocation | undefined = location;
+  for (let steps = 0; at && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+    if (at.timezone !== null) return { timezone: at.timezone, from: at };
+    at = at.parentRef === null ? undefined : locations.get(at.parentRef);
+  }
+  return null;
+}
 
 type Tone = 'good' | 'bad' | 'neutral';
 /** How the overview names each change the feed records. */
@@ -1673,7 +1851,10 @@ ${
     const allowance = await resourceAllowance(tenantOf(session), resources);
     const token = csrfToken(session);
     const content = html`${noticeOf(notice)}
-${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : undefined)}
+${pageHead(
+  'Resources',
+  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}${resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : html``}</div>`,
+)}
 <section class="panel" id="add-resource">
 <h2>Add a resource</h2>
 <form class="create" method="post" action="${root}/resources">
@@ -1694,6 +1875,90 @@ ${
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
+  }
+
+  /** The tenant's locations and groups (RFC 0003 G2, G3): what they are, and adding and changing them. */
+  async function locationsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    const [locations, groups] = await Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]);
+    const token = csrfToken(session);
+    const byRef = new Map(locations.map((location) => [location.ref, location]));
+    const paths = locationPaths(locations);
+    const sent = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    // Where a location may be: nowhere, or any location but itself and those inside it.
+    const insideChoices = (selected: string | null, except?: string) =>
+      html`<option value=""${selected === null ? html` selected` : html``}>Nowhere (at the top)</option>${locations
+        .filter((location) => except === undefined || !locationWithin(byRef, location.ref, except))
+        .map(
+          (location) =>
+            html`<option value="${location.ref}"${location.ref === selected ? html` selected` : html``}>${paths.get(location.ref) ?? location.name}</option>`,
+        )}`;
+    const nameLimit = String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name);
+    const locationRows = locations.map((location) => {
+      const parent = location.parentRef === null ? undefined : paths.get(location.parentRef);
+      const zone = locationZone(byRef, location);
+      return html`<tr>
+<td data-label="Location" class="strong"><span class="cell"><span class="truncate" title="${paths.get(location.ref) ?? location.name}">${location.name}</span><span class="meta">${location.ref}${parent ? ` · in ${parent}` : ''}</span></span></td>
+<td data-label="Time zone">${zone ? (zone.from === location ? zone.timezone : html`<span class="cell"><span>${zone.timezone}</span><span class="meta">from ${zone.from.name}</span></span>`) : html`<span class="muted">None</span>`}</td>
+<td data-label="Resources">${String(location.resources)}</td>
+<td class="actions"><details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/locations">${sent()}<input type="hidden" name="ref" value="${location.ref}">
+<label>Name<input name="name" required maxlength="${nameLimit}" value="${location.name}"></label>
+<label>Inside<select name="parent">${insideChoices(location.parentRef, location.ref)}</select></label>
+<label>Time zone<input name="timezone" maxlength="100" value="${location.timezone ?? ''}" placeholder="As where it is"></label>
+<button type="submit">Save location</button></form></div></details><details class="act danger"><summary>Delete</summary><div class="pop"><p>${location.resources > 0 ? 'Move its resources somewhere else first.' : 'Locations inside it must be moved or deleted first.'}</p>
+<form method="post" action="${root}/locations/delete">${sent()}<input type="hidden" name="ref" value="${location.ref}"><button class="danger" type="submit">Delete location</button></form></div></details></td>
+</tr>`;
+    });
+    const groupRows = groups.map(
+      (group) => html`<tr>
+<td data-label="Group" class="strong"><span class="cell"><span class="truncate" title="${group.name}">${group.name}</span><span class="meta">${group.ref}</span></span></td>
+<td data-label="Description" class="wrap">${group.description ?? ''}</td>
+<td data-label="Resources">${String(group.members)}</td>
+<td class="actions"><details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/groups">${sent()}<input type="hidden" name="ref" value="${group.ref}">
+<label>Name<input name="name" required maxlength="${nameLimit}" value="${group.name}"></label>
+<label>Description<textarea name="description" rows="2" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}">${group.description ?? ''}</textarea></label>
+<button type="submit">Save group</button></form></div></details><details class="act danger"><summary>Delete</summary><div class="pop"><p>Its resources stay as they are, in no group of this name.</p>
+<form method="post" action="${root}/groups/delete">${sent()}<input type="hidden" name="ref" value="${group.ref}"><button class="danger" type="submit">Delete group</button></form></div></details></td>
+</tr>`,
+    );
+    const content = html`${noticeOf(notice)}
+<p><a class="back" href="${root}/resources">Resources</a></p>
+${pageHead('Locations and groups')}
+<section class="panel" id="locations">
+<h2>Locations</h2>
+<form class="create" method="post" action="${root}/locations">${sent()}
+<label>Reference<input id="location-ref" name="ref" required maxlength="100" placeholder="floor-3"></label>
+<label class="grow">Name<input name="name" required maxlength="${nameLimit}" placeholder="Floor 3"></label>
+<label>Inside<select name="parent">${insideChoices(null)}</select></label>
+<label>Time zone<input name="timezone" maxlength="100" placeholder="As where it is"></label>
+<button class="primary" type="submit">Add location</button>
+</form>
+<p class="fine">Where resources are: a site, a building, a floor, up to ${String(SLOTLOCK_MAX_LOCATION_DEPTH)} levels. Agents searching a location search every location inside it too. A resource added at a location over the API without a time zone takes the location's, or the nearest one above it. Adding a reference you have changes that location.</p>
+${
+  locations.length === 0
+    ? html`<p class="empty">No locations yet.</p>`
+    : html`<div class="table"><table><thead><tr><th>Location</th><th>Time zone</th><th>Resources</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${locationRows}</tbody></table></div>`
+}
+</section>
+<section class="panel" id="groups">
+<h2>Groups</h2>
+<form class="create" method="post" action="${root}/groups">${sent()}
+<label>Reference<input id="group-ref" name="ref" required maxlength="100" placeholder="video-rooms"></label>
+<label class="grow">Name<input name="name" required maxlength="${nameLimit}" placeholder="Rooms with video"></label>
+<label class="grow">Description<input name="description" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}" placeholder="Optional"></label>
+<button class="primary" type="submit">Add group</button>
+</form>
+<p class="fine">Any set of resources, such as a team or the rooms with video, wherever they are. A resource is in up to ${String(SLOTLOCK_MAX_GROUPS_PER_RESOURCE)} groups; choose them on its page. Adding a reference you have changes that group.</p>
+${
+  groups.length === 0
+    ? html`<p class="empty">No groups yet.</p>`
+    : html`<div class="table"><table><thead><tr><th>Group</th><th>Description</th><th>Resources</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${groupRows}</tbody></table></div>`
+}
+</section>`;
+    return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
   async function settingsPage(
@@ -1747,12 +2012,17 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     if (!resource) return notFound(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const [agenda, changes, keys, defaults] = await Promise.all([
+    const grouping = options.resources.grouping;
+    const [agenda, changes, keys, defaults, locations, groups] = await Promise.all([
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, 100),
       options.keys.list({ tenantRef }),
       options.resources.ruleDefaults?.(tenantRef),
+      grouping?.locations(tenantRef),
+      grouping?.groups(tenantRef),
     ]);
+    const paths = locationPaths(locations ?? []);
+    const groupNames = new Map((groups ?? []).map((group) => [group.ref, group.name]));
     const byId = new Map([[resource.id, resource]]);
     const mine = agenda?.filter((entry) => entry.resourceId === resource.id);
     const activity = changes?.filter((change) => change.resourceId === resource.id).slice(0, 10);
@@ -1778,7 +2048,7 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
 ${resource.description ? html`<p>${resource.description}</p>` : html``}
-<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}${resource.location ? html`<dt>Location</dt><dd>${resource.locationName ?? resource.location}</dd>` : html``}${resource.groups ? html`<dt>Groups</dt><dd>${resource.groups.join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
+<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}${resource.location ? html`<dt>Location</dt><dd>${paths.get(resource.location) ?? resource.locationName ?? resource.location}</dd>` : html``}${resource.groups ? html`<dt>Groups</dt><dd>${resource.groups.map((ref) => groupNames.get(ref) ?? ref).join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
 <div class="split">
 <div class="stack">
 ${
@@ -1843,6 +2113,36 @@ ${
 <button type="submit">Save pool</button>
 </form>
 <p class="fine">Agents can book any free member of a pool. Leave it empty for none.</p>
+</section>`
+    : html``
+}
+${
+  grouping && locations && groups
+    ? html`<section class="panel" id="place">
+<h2>Location and groups</h2>
+${
+  locations.length === 0 && groups.length === 0
+    ? html`<p class="empty">No locations or groups yet. <a href="${root}/locations">Add them</a>, then choose them here.</p>`
+    : html`<form method="post" action="${root}/resources/place">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Location<select name="location"><option value=""${resource.location ? html`` : html` selected`}>None</option>${locations.map(
+        (location) =>
+          html`<option value="${location.ref}"${resource.location === location.ref ? html` selected` : html``}>${paths.get(location.ref) ?? location.name}</option>`,
+      )}</select></label>
+${
+  groups.length > 0
+    ? html`<fieldset class="choices"><legend>Groups</legend><div class="checks">${groups.map(
+        (group) =>
+          html`<label class="choice"><input type="checkbox" name="group" value="${group.ref}"${resource.groups?.includes(group.ref) ? html` checked` : html``}> ${group.name}</label>`,
+      )}</div></fieldset>`
+    : html``
+}
+<button class="primary" type="submit">Save location and groups</button>
+</form>
+<p class="fine">Agents can search a location, with every location inside it, or a group, in one call. <a href="${root}/locations">Locations and groups</a></p>`
+}
 </section>`
     : html``
 }
@@ -1936,6 +2236,108 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
         400,
         PROFILE_PROBLEMS[typeof field === 'string' && field in PROFILE_PROBLEMS ? (field as keyof typeof PROFILE_PROBLEMS) : 'other'],
       );
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  /** Text from a form, trimmed, or null when empty. */
+  const optionalField = (form: URLSearchParams, key: string) => {
+    const value = (form.get(key) ?? '').trim();
+    return value === '' ? null : value;
+  };
+
+  async function saveLocation(session: Session, form: URLSearchParams): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    try {
+      await grouping.putLocation(
+        tenantOf(session),
+        {
+          // A person may type a reference in capitals; references are lowercase.
+          ref: (form.get('ref') ?? '').trim().toLowerCase(),
+          name: (form.get('name') ?? '').trim(),
+          parentRef: optionalField(form, 'parent'),
+          timezone: optionalField(form, 'timezone'),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations`);
+  }
+
+  async function saveGroup(session: Session, form: URLSearchParams): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    try {
+      await grouping.putGroup(
+        tenantOf(session),
+        {
+          ref: (form.get('ref') ?? '').trim().toLowerCase(),
+          name: (form.get('name') ?? '').trim(),
+          description: optionalField(form, 'description'),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations#groups`);
+  }
+
+  async function deleteGrouping(
+    session: Session,
+    form: URLSearchParams,
+    kind: 'location' | 'group',
+  ): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    const ref = form.get('ref') ?? '';
+    let deleted: boolean;
+    try {
+      deleted =
+        kind === 'location'
+          ? await grouping.deleteLocation(tenantOf(session), ref, personOf(session))
+          : await grouping.deleteGroup(tenantOf(session), ref, personOf(session));
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    if (!deleted) {
+      const problem = GROUPING_PROBLEMS[`${kind}_not_found`] as { status: number; text: string };
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations${kind === 'group' ? '#groups' : ''}`);
+  }
+
+  async function savePlace(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    const grouping = options.resources.grouping;
+    if (!resource || !grouping) return notFound(session);
+    const groups = [...new Set(form.getAll('group'))];
+    if (groups.length > SLOTLOCK_MAX_GROUPS_PER_RESOURCE) {
+      const problem = GROUPING_PROBLEMS.resource_group_limit_reached as { status: number; text: string };
+      return resourceDetailPage(session, id, problem.status, problem.text);
+    }
+    try {
+      const placed = await grouping.place(
+        tenantOf(session),
+        id,
+        { location: optionalField(form, 'location'), groups },
+        personOf(session),
+      );
+      if (!placed) return notFound(session);
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return resourceDetailPage(session, id, problem.status, problem.text);
     }
     return redirect(303, `${root}/resources/${id}`);
   }
@@ -3072,6 +3474,9 @@ ${upgrade}
     if (route.startsWith('/keys')) return keysPage;
     if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
     if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
+    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
+      return locationsPage;
+    }
     if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
@@ -3154,6 +3559,8 @@ ${
       404,
       layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session),
     );
+  const nothingHere = (session: Session) =>
+    respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
 
   async function hoursEditor(session: Session, url: URL): Promise<Response> {
     const id = url.searchParams.get('resource');
@@ -3726,6 +4133,16 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return savePool(session, form);
       case '/resources/profile':
         return saveProfile(session, form);
+      case '/resources/place':
+        return savePlace(session, form);
+      case '/locations':
+        return saveLocation(session, form);
+      case '/locations/delete':
+        return deleteGrouping(session, form, 'location');
+      case '/groups':
+        return saveGroup(session, form);
+      case '/groups/delete':
+        return deleteGrouping(session, form, 'group');
       case '/webhooks':
         return addWebhook(session, form);
       case '/webhooks/delete':
@@ -3826,6 +4243,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
             case '/hours': {
               const session = await readSession(request);
               return session ? await hoursEditor(session, url) : redirect(303, root);
+            }
+            case '/locations': {
+              const session = await readSession(request);
+              return session ? await locationsPage(session) : redirect(303, root);
             }
             default: {
               const resourceId = RESOURCE_PAGE.exec(route)?.[1];
@@ -4115,6 +4536,12 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .types summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-md); width: fit-content; }
 .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--space-2) var(--space-4); margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
 .checks .choice { font-size: var(--text-md); margin: 0; }
+.choices { border: 0; padding: 0; margin: var(--space-4) 0; min-width: 0; }
+.choices legend { font-size: var(--text-sm); font-weight: 500; color: var(--ink-2); padding: 0; }
+.choices .checks { margin-top: 6px; }
+.fine + .table, .fine + .empty { margin-top: var(--space-4); }
+.pop label { margin-bottom: var(--space-3); }
+.pop textarea { width: 100%; }
 
 /* Buttons */
 button, .button { font: inherit; font-size: var(--text-md); font-weight: 500; height: 36px; padding: 0 var(--space-4); border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); white-space: nowrap; transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease), transform var(--fast) var(--ease); }

@@ -1908,6 +1908,22 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(store.setPool).toHaveBeenLastCalledWith('github:4242', OWN, null, 'github:4242');
   });
 
+  it('offers no locations and groups without a store that keeps them', async () => {
+    const { store } = full();
+    const target = dashboard({ resources: store });
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    expect(await (await get(target, '/base/dashboard/resources', session)).text()).not.toContain('Locations and groups');
+    expect(await (await get(target, `/base/dashboard/resources/${OWN}`, session)).text()).not.toContain('Location and groups');
+    expect((await get(target, '/base/dashboard/locations', session)).status).toBe(404);
+    for (const path of ['/locations', '/locations/delete', '/groups', '/groups/delete']) {
+      expect((await post(target, `/base/dashboard${path}`, { csrf: token, ref: 'x', name: 'X' }, session)).status, path).toBe(404);
+    }
+    expect((await post(target, '/base/dashboard/resources/place', { csrf: token, id: OWN, location: 'x' }, session)).status).toBe(404);
+    // Signed out, the page sends a person to sign in.
+    expect((await get(target, '/base/dashboard/locations')).status).toBe(303);
+  });
+
   it("edits a resource's profile, shows its name in place of the reference, and says what it could not keep", async () => {
     const { store } = full();
     const setProfile = vi.fn(async (tenantRef: string, id: string, profile: SlotlockResourceProfileInput) => {

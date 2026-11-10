@@ -262,8 +262,8 @@ resources, so you can give each person API keys without running `slotlock key cr
 
 - Its pages: an Overview with the coming week's bookings, events and live holds across every
   resource (each in its resource's time zone) and the latest changes agents made, named by key;
-  Resources, each with its own page for bookable hours, booking rules, pool, coming bookings and
-  activity; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
+  Resources, each with its own page for bookable hours, booking rules, profile, pool, location and
+  groups, coming bookings and activity; Locations and groups, to add, move and delete them; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
   endpoints; Webhooks, to add, delete and re-enable endpoints and see which are failing; and
   Settings.
   Everything on them is read from the tenant's own data. `SLOTLOCK_DASHBOARD_NAME` sets what the

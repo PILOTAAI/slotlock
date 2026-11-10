@@ -263,8 +263,8 @@ optional:
 - The privacy notice lists resource names and descriptions under calendar content.
 
 **G2. Locations (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below; `POST
-/v1/locations` creates or updates by reference, and the dashboard shows a resource's location but
-does not edit locations yet. `slotlock.locations (tenant_ref, ref, name, parent_ref, timezone)`, forced
+/v1/locations` creates or updates by reference, and the dashboard's Locations and groups page edits
+them, and a resource's page sets its location. `slotlock.locations (tenant_ref, ref, name, parent_ref, timezone)`, forced
 RLS like every tenant table; depth at most 5 (region, site, building, floor, zone); 1,000 per
 tenant; deleting one is refused while a resource or child uses it. A resource has at most one
 `location_ref`; a new resource takes its location's time zone when none is given. API:
@@ -272,8 +272,8 @@ tenant; deleting one is refused while a resource or child uses it. A resource ha
 locations below it.
 
 **G3. Groups (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, with `DELETE
-/v1/groups/{ref}` too; membership changes are not on the feed yet, and the dashboard shows a
-resource's groups but does not edit them. `slotlock.resource_groups (tenant_ref, ref, name, description)` and
+/v1/groups/{ref}` too; membership changes are not on the feed yet. The dashboard's Locations and
+groups page edits groups, and a resource's page sets its groups. `slotlock.resource_groups (tenant_ref, ref, name, description)` and
 `slotlock.resource_group_members (tenant_ref, group_ref, resource_id)`; 500 groups a tenant, 20
 groups a resource. API: `GET/POST /v1/groups`, `PUT` and `DELETE
 /v1/groups/{ref}/members/{resource_id}`. Pools stay as they are; a pool is not a group.
