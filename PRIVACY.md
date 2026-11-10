@@ -31,6 +31,8 @@ protection officer.
 | --- | --- | --- |
 | Your GitHub user id, which names your account (`github:<id>`) | GitHub, when you sign in to the dashboard | While your account exists |
 | Your GitHub login | GitHub, when you sign in | Only in your session cookie, never in the database |
+| Once teams are offered: the GitHub organizations you are an owner or member of (up to 20: their ids, logins and your role) | GitHub, when you sign in | Only in your session cookie, never in the database |
+| Once teams are offered: each organization turned on for Slotlock, by its GitHub id and login, whether it is on, and the GitHub user id of the owner who last turned it on or off, and when | An owner of the organization, on the Teams page | Until the organization's account is erased |
 | Your API keys: name, scopes, expiry, the first characters and a SHA-256 digest of each key (never the key itself), who created it (a GitHub user id), and when it was created, last used and revoked | You, in the dashboard or the API | While your account exists; a revoked or expired key stays listed until your account is erased |
 | Calendar content: resources with their names, descriptions, labels, the attributes you give them, time zones, weekly hours, booking rules and pools, and the locations and groups you put them in, with their names; holds, bookings and waitlist entries with their times, references and the holder names your agents give; events with their titles, descriptions, locations, organisers, attendees' names and email addresses, reminders and recurrence; and the outside calendars you record coverage from, by the source name you give (which can be a calendar address) with the last error reported for it | You and your agents | While your account exists, or until you delete it. Holds end when they expire and are then deleted; finished waitlist entries are deleted 30 days after their window |
 | Webhooks: each endpoint's address, its signing secret, the change types it receives, and its delivery state and last error | You | While your account exists, or until you delete the endpoint |
@@ -61,8 +63,10 @@ Expired holds, finished waitlist entries and the records kept for 30 days are de
 maintenance job that runs every hour for every account that has data, whether or not its keys are
 in use.
 
-Sign-in asks GitHub for no permissions beyond your public profile. GitHub's token is used once, to
-read your user id and login, and is then dropped. The dashboard sets two cookies, both needed for
+Sign-in asks GitHub for no permissions beyond your public profile; once teams are offered, it also
+asks to read which organizations you belong to (`read:org`), so you can work in the ones turned on.
+GitHub's token is used once, to read your user id and login (and those organizations), and is then
+dropped. The dashboard sets two cookies, both needed for
 sign-in to work: `__Host-slotlock-oauth` for the ten minutes a sign-in takes, and
 `__Host-slotlock-session` for your session. Both are secure, HTTP-only and limited to the dashboard's
 own site. We use no analytics or advertising cookies, so there is nothing to consent to or turn off.

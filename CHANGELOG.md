@@ -122,6 +122,16 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Teams on Cloud (RFC 0003, T2): `SLOTLOCK_DASHBOARD_ORGS=enabled` gives every person their own
+  tenant and the GitHub organizations they belong to that an owner turned on, from the dashboard's
+  new Teams page (`POST /teams/enable`, `/teams/disable`, the latter confirmed with the
+  organization's name). The workspace menu switches between them; a session in an organization
+  turned off is back in its own tenant at its next request, and `serve` refuses the
+  organization's keys (checked in the database, kept 30 seconds: `createSlotlockOrganizationCheck`).
+  New owner-only table `slotlock.dashboard_organizations` with `enabled_organizations`,
+  `enable_organization` and `disable_organization`, granted by `slotlock migrate`; erasing an
+  organization's tenant removes its row. `createSlotlockDashboardTeams` (teams.ts), the dashboard's
+  `teams` option. Run `slotlock migrate`.
 - Acting for a partner's account (RFC 0003 P3, T2): a partner key with a `Slotlock-Account` field
   runs the request as that account, with the contract's key scopes, where the contract allows it
   (`act_on_behalf`, off by default). The principal carries `onBehalfOf`, the history records the

@@ -1494,6 +1494,53 @@ describe('organizations', () => {
     expect(failed.session).toBeUndefined();
   });
 
+  it('lets an owner turn an organization on, its members switch to it, and turning it off end that', async () => {
+    const on = new Set<string>();
+    const teams = {
+      enabled: vi.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => on.has(id)))),
+      enable: vi.fn(async (org: { id: string }) => !on.has(org.id) && Boolean(on.add(org.id))),
+      disable: vi.fn(async (id: string) => on.delete(id)),
+    };
+    const target = orgDashboard([{ ...ACME, role: 'admin' }, GLOBEX], { organizations: 'enabled', teams });
+    const { start, session } = await signIn(target);
+    // Organizations are read at sign-in, and the person starts in their own tenant.
+    expect(new URL(start.headers.get('location') ?? '').searchParams.get('scope')).toBe('read:org');
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'Mine', access: 'read', expires: '30' }, session);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242' }));
+    const page = await (await get(target, '/base/dashboard/teams', session)).text();
+    expect(page).toContain('acme-fleet');
+    expect(page).toContain('An owner can turn it on'); // globex: a member only
+    // Nobody switches to an organization that is off, and a member cannot turn one on.
+    const refused = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(refused.status).toBe(400);
+    expect((await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(GLOBEX.id) }, session)).status).toBe(403);
+    expect(teams.enable).not.toHaveBeenCalled();
+    // The owner turns it on; then anyone in it can switch to it, and its keys are the organization's.
+    const enabled = await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(await enabled.text()).toContain('Slotlock is on for acme-fleet');
+    expect(teams.enable).toHaveBeenCalledWith({ id: String(ACME.id), login: 'acme-fleet' }, 'github:4242');
+    const switched = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(switched.status).toBe(303);
+    const inOrg = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, inOrg), name: 'Shared', access: 'read', expires: '30' }, inOrg);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: `github-org:${ACME.id}` }));
+    // Back to their own, from the workspace menu.
+    const home = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, inOrg), organization: '' }, inOrg);
+    const personal = cookie(home, '__Host-slotlock-session')?.pair as string;
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, personal), name: 'Mine again', access: 'read', expires: '30' }, personal);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242' }));
+    // Turning it off needs its name, and then a session still in it is back in its own tenant.
+    expect((await post(target, '/base/dashboard/teams/disable', { csrf: await csrf(target, inOrg), organization: String(ACME.id), confirm: 'acme' }, inOrg)).status).toBe(400);
+    const off = await post(target, '/base/dashboard/teams/disable', { csrf: await csrf(target, inOrg), organization: String(ACME.id), confirm: 'acme-fleet' }, inOrg);
+    expect(await off.text()).toContain('Slotlock is off for acme-fleet');
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, inOrg), name: 'After', access: 'read', expires: '30' }, inOrg);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242' }));
+  });
+
+  it('needs the teams store to serve organizations turned on', () => {
+    expect(() => dashboard({ organizations: 'enabled' })).toThrow(/needs the teams store/);
+  });
+
   it('lets a member of two served organizations switch, and only between them', async () => {
     const target = orgDashboard([ACME, GLOBEX]);
     const { session } = await signIn(target);

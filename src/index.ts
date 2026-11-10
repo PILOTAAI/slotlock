@@ -248,6 +248,8 @@ export {
   SLOTLOCK_PARTNER_ID,
   SLOTLOCK_PARTNER_SCOPE,
 } from './partners.js';
+export { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+export type { SlotlockDashboardTeams } from './teams.js';
 export {
   closeSlotlockPartnerMonth,
   priceSlotlockPartnerMonth,

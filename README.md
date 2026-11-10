@@ -356,8 +356,19 @@ resources, so you can give each person API keys without running `slotlock key cr
   key records the person who created it (`github:<user id>`): erasing that person's own tenant
   leaves it on keys they made in an organization, which go with the organization's erasure. Only the
   first 100 memberships GitHub lists, and the first 20 served organizations by login, are read.
+- **People and their organizations (Teams on Cloud)**: set `SLOTLOCK_DASHBOARD_ORGS=enabled`.
+  Every person signs in to their own tenant, `github:<user id>`, and the dashboard reads which
+  GitHub organizations they belong to (`read:org`, up to 20, kept in the session). On its Teams
+  page an owner of one turns Slotlock on for it; then each owner and member picks it from the
+  workspace menu and shares its tenant, `github-org:<id>`, as above. Turning it off (the owner types
+  its name) ends every session's use of it at once and stops its keys within 30 seconds on every
+  server; what it holds stays, for an owner to turn it on again and erase it. The organizations
+  turned on are in `slotlock.dashboard_organizations` (who turned each on or off, and when),
+  erased with the organization's tenant. Set it on the server too, which checks the database
+  before taking an organization's key.
 - Sign-in uses `state` and PKCE, and keeps nothing from GitHub but the user id and login (and, with
-  organizations, the served ones the person belongs to): the GitHub token is used once and dropped.
+  organizations, the served ones the person belongs to, or with `enabled` up to 20 of theirs): the
+  GitHub token is used once and dropped.
   It asks for no scope, or `read:org` with organizations.
 - A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist is checked on every
   request, dashboard and API alike: removing an id and restarting the server signs that person out
@@ -540,8 +551,8 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
   binding's limit to one client's. The example configuration also removes query strings (a
   callback's OAuth code) from the URLs Workers Logs keep.
 - With organizations, set `SLOTLOCK_DASHBOARD_ORGS` on both the Worker and the server: the server
-  takes an organization's keys only while its own list names it, whether or not it serves the
-  dashboard.
+  takes an organization's keys only while its own list names it (or, with `enabled`, while an
+  owner has it turned on), whether or not it serves the dashboard.
 - Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
   keys only while its own list allows them, whether or not it serves the dashboard, so removing a
   person from both lists signs them out and stops their keys. A server without it takes every

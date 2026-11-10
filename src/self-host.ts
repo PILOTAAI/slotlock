@@ -80,6 +80,7 @@ import {
   slotlockPartnerContractJson,
 } from './partners.js';
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
+import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
 import { readFile } from 'node:fs/promises';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
@@ -257,9 +258,10 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
   dashboard?: SlotlockServeDashboardConfig;
   /**
    * GitHub organization ids (SLOTLOCK_DASHBOARD_ORGS) whose `github-org:<id>` tenants this server's
-   * keys may act for, whether it serves the dashboard or another server (a Worker) does.
+   * keys may act for, whether it serves the dashboard or another server (a Worker) does; or
+   * `'enabled'`, those an owner turned on from the dashboard (teams.ts), checked in the database.
    */
-  organizations?: string[];
+  organizations?: string[] | 'enabled';
   /**
    * GitHub user ids (SLOTLOCK_DASHBOARD_USERS), or `'*'`, whose `github:<id>` tenants this server's
    * keys may act for, whether it serves the dashboard or another server (a Worker) does.
@@ -823,7 +825,8 @@ export function slotlockServeAllowsTenant(
   // A test environment (RFC 0003 G9) is let through exactly as its live tenant.
   const live = slotlockLiveTenant(tenantRef);
   const orgId = /^github-org:(\d+)$/.exec(live)?.[1];
-  if (orgId !== undefined) return config.organizations?.includes(orgId) === true;
+  // With `enabled`, the database decides, as serve's authenticate asks (createSlotlockOrganizationCheck).
+  if (orgId !== undefined) return config.organizations === 'enabled' || config.organizations?.includes(orgId) === true;
   const users = config.allowedUsers;
   if (users === undefined || users === '*') return true;
   const githubId = /^github:(\d+)$/.exec(live)?.[1];
@@ -1059,6 +1062,9 @@ export async function startSlotlockServer(
             ...(process.versions.tz ? { tzdata: process.versions.tz } : {}),
           });
     const knownClients: ReadonlySet<string> = new Set(config.knownClients ?? []);
+    // Teams on Cloud: an organization's keys work while an owner has it turned on.
+    const organizationEnabled =
+      config.organizations === 'enabled' ? createSlotlockOrganizationCheck(sql) : null;
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
       ...(config.sharedLimits
@@ -1091,6 +1097,8 @@ export async function startSlotlockServer(
           (await authenticatePartner(request)) ??
           (await authenticateKey(request));
         if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
+        const orgId = organizationEnabled ? /^github-org:(\d+)$/.exec(slotlockLiveTenant(principal.tenantRef))?.[1] : undefined;
+        if (orgId !== undefined && !(await organizationEnabled?.(orgId))) return null;
         // Slotlock-Account is a partner key's alone (RFC 0003 P3): with any other credential, or one
         // that could not act for that account, the request is refused rather than run elsewhere.
         if (request.headers.has(SLOTLOCK_ACCOUNT_FIELD) && principal.onBehalfOf === undefined) return null;
@@ -1201,6 +1209,7 @@ export async function startSlotlockServer(
             ...(config.dashboard.organizations
               ? { organizations: config.dashboard.organizations }
               : {}),
+            ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             keys: createSlotlockApiKeyStore(sql),
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
@@ -2084,7 +2093,9 @@ Environment:
                                  or metadata address; on: allow them, for a self-hosted model
                                  (Ollama, vLLM) on this machine or network
   SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in and whose keys work
-  SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant
+  SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant;
+                                 or enabled: each person's own tenant, plus the organizations an
+                                 owner turns on from the dashboard's Teams page
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)

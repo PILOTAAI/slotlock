@@ -658,7 +658,9 @@ before merge (GOVERNANCE.md).
 
 - **Teams on Cloud (T2):** organizations that enable themselves (an owner signs in with
   `read:org` and turns Slotlock on for the organization, stored in the database rather than in
-  `SLOTLOCK_DASHBOARD_ORGS`), then a Team plan per organization.
+  `SLOTLOCK_DASHBOARD_ORGS`), then a Team plan per organization. Status: built on
+  `claude/inspiring-dijkstra-bfvqif` as `SLOTLOCK_DASHBOARD_ORGS=enabled`, with each person's own
+  tenant beside the organizations turned on; the Team plan follows.
 - **Sign-in without GitHub (T2):** Google (OpenID Connect) for the people who run a front desk, a
   clinic's rota or a depot and use the assistant, who often have no GitHub account.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**

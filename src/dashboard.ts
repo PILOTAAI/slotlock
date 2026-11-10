@@ -15,6 +15,7 @@
 // is held in the database too.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
+import type { SlotlockDashboardTeams } from './teams.js';
 import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
   type SlotlockApiKey,
@@ -147,6 +148,8 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/hours',
   '/organization',
   '/environment',
+  '/teams/enable',
+  '/teams/disable',
   '/assistant',
   '/assistant/approve',
   '/assistant/dismiss',
@@ -497,8 +500,14 @@ export interface SlotlockDashboardOptions {
    * ends access at the next sign-in, at most a session (12 hours) later, and removing an
    * organization from this list signs its sessions out at once. Without it, each person is their
    * own tenant (`github:<id>`).
+   *
+   * `'enabled'` (Teams on Cloud, with `teams`): each person signs in to their own tenant and may
+   * switch to any organization they belong to that an owner turned on, on the Teams page; turning
+   * one off ends its use at once.
    */
-  organizations?: readonly string[];
+  organizations?: readonly string[] | 'enabled';
+  /** The organizations turned on, with `organizations: 'enabled'` (teams.ts). */
+  teams?: SlotlockDashboardTeams;
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
@@ -971,6 +980,7 @@ const ICONS = Object.freeze({
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
   plan: icon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>'),
+  teams: icon('<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3.3 2.7-5 6-5s6 1.7 6 5M15 14.5c3 0 6 1.4 6 4.5"/>'),
   settings: icon(
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
@@ -1383,10 +1393,19 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const membershipsUrl =
     options.github.membershipsUrl ??
     'https://api.github.com/user/memberships/orgs?state=active&per_page=100';
-  const served = options.organizations ? new Set(options.organizations) : null;
+  const served = Array.isArray(options.organizations) ? new Set<string>(options.organizations) : null;
   if (served && (served.size === 0 || [...served].some((id) => !ORGANIZATION_ID.test(id)))) {
     throw new Error('Slotlock dashboard organizations must be GitHub organization ids');
   }
+  // Teams on Cloud: organizations turned on in the database, beside every person's own tenant.
+  const teams = options.organizations === 'enabled' ? (options.teams ?? null) : null;
+  if (options.organizations === 'enabled' && !teams) {
+    throw new Error('Slotlock dashboard organizations "enabled" needs the teams store');
+  }
+  /** Sign-in reads the person's organizations: a fixed list, or those turned on. */
+  const readsOrganizations = served !== null || teams !== null;
+  /** Each session's organizations turned on, read with it (teams mode). */
+  const enabledOf = new WeakMap<Session, ReadonlySet<string>>();
   const brandName = options.name ?? 'Slotlock';
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
@@ -1482,7 +1501,18 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ) {
       return null;
     }
-    return payload as unknown as Session;
+    const session = payload as unknown as Session;
+    if (teams) {
+      // Which of the person's organizations are on now: one turned off since is left at once.
+      const enabled = session.orgs?.length ? await teams.enabled(session.orgs.map((org) => org.id)) : new Set<string>();
+      if (session.org !== undefined && !enabled.has(session.org)) {
+        const { org: _, ...personal } = session;
+        enabledOf.set(personal, enabled);
+        return personal;
+      }
+      enabledOf.set(session, enabled);
+    }
+    return session;
   }
 
   /**
@@ -1490,6 +1520,14 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
    * them, it names none. A session from the other mode is signed out.
    */
   function organizationsHold(payload: Record<string, unknown>): boolean {
+    if (teams) {
+      if (payload.orgs === undefined) return payload.org === undefined;
+      if (!Array.isArray(payload.orgs)) return false;
+      const listed = (payload.orgs as unknown[]).filter(
+        (org): org is Organization => isRecord(org) && typeof org.id === 'string' && typeof org.login === 'string',
+      );
+      return payload.org === undefined || (typeof payload.org === 'string' && listed.some((org) => org.id === payload.org));
+    }
     if (!served) return payload.org === undefined && payload.orgs === undefined;
     if (typeof payload.org !== 'string' || !served.has(payload.org) || !Array.isArray(payload.orgs)) {
       return false;
@@ -1505,7 +1543,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       .digest('base64url');
   /** The tenant the session acts in: the workspace's, or its test environment's (`~test`). */
   const tenantOf = (session: Session) =>
-    `${served ? `github-org:${session.org as string}` : `github:${session.uid}`}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
+    `${session.org !== undefined ? `github-org:${session.org}` : `github:${session.uid}`}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
   const personOf = (session: Session) => `github:${session.uid}`;
 
@@ -1544,6 +1582,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     | 'webhooks'
     | 'assistant'
     | 'plan'
+    | 'teams'
     | 'settings';
   // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
   // request: on Workers the adapter exists only inside one.
@@ -1563,6 +1602,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ...(options.billing
       ? [{ section: 'plan' as const, label: 'Plan', path: '/plan', icon: ICONS.plan }]
       : []),
+    ...(teams ? [{ section: 'teams' as const, label: 'Teams', path: '/teams', icon: ICONS.teams }] : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
 
@@ -1579,6 +1619,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const choices = (session.orgs ?? []).filter((org) => served?.has(org.id));
     const name = current?.login ?? session.login;
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
+    const enabled = teams ? (session.orgs ?? []).filter((org) => enabledOf.get(session)?.has(org.id)) : [];
+    if (teams && enabled.length > 0) {
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${current ? html`` : html` selected`}>@${session.login}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+    }
     if (current && choices.length > 1) {
       return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization" title="${current.login}">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
@@ -1647,7 +1691,9 @@ ${live}
 ${noticeOf(notice)}
 <a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>
 <p class="fine">${
-      served
+      teams
+        ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and up to ${String(MAX_SESSION_ORGANIZATIONS)} of those organizations, for you to work in the ones turned on.`
+        : served
         ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and the organizations it serves.`
         : `${brandName} reads only your public GitHub profile, and keeps only your user id and login.`
     }</p>
@@ -1667,7 +1713,7 @@ ${noticeOf(notice)}
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${served ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
+<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${session.org !== undefined ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
 <td data-label="Access">${
         key.resourceScope
@@ -1866,7 +1912,7 @@ ${limitChoices}
 ${
   keys.length === 0
     ? emptyState(ICONS.keys, 'No keys yet. Give every agent its own, with the least access it needs.', { href: '#key-name', label: 'Create a key' })
-    : html`${served ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+    : html`${session.org !== undefined ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
 <tbody>${keyRows(keys, token, session)}</tbody></table></div>`
 }`;
     return respond(status, layout('API keys', content, session, 'keys'));
@@ -2724,8 +2770,9 @@ ${
   }
 
   /** Owners of the organization in use may change its assistant; a person always may their own. */
+  /** An owner of the workspace: the person in their own, an organization's owner in its. */
   const isAdmin = (session: Session) =>
-    !served || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
+    session.org === undefined || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
   const assistantPrincipal = (session: Session): SlotlockAgentPrincipal => ({
     subject: assistantActor(session),
     tenantRef: tenantOf(session),
@@ -3538,6 +3585,7 @@ ${upgrade}
     if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
     if (route.startsWith('/settings')) return settingsPage;
     if (route.startsWith('/plan') && options.billing) return planPage;
+    if (route.startsWith('/teams') && teams) return teamsPage;
     return overviewPage;
   }
 
@@ -3726,8 +3774,74 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
   }
 
-  function switchOrganization(session: Session, form: URLSearchParams): Response {
+  /**
+   * Teams on Cloud: the person's GitHub organizations, as read at sign-in, each on or off. An owner
+   * turns one on or off; a member asks an owner; one that is on is a workspace to switch to.
+   */
+  async function teamsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    if (!teams) return nothingHere(session);
+    const orgs = session.orgs ?? [];
+    const enabled = orgs.length > 0 ? await teams.enabled(orgs.map((org) => org.id)) : new Set<string>();
+    enabledOf.set(session, enabled);
+    const token = csrfToken(session);
+    const hidden = (org: Organization) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="organization" value="${org.id}">`;
+    const rows = orgs.map((org) => {
+      const on = enabled.has(org.id);
+      const owner = org.role === 'admin';
+      const actions = on
+        ? html`${org.id === session.org ? html`<span class="muted">In use</span>` : html`<form class="inline" method="post" action="${root}/organization">${hidden(org)}<button type="submit">Switch to it</button></form>`}${
+            owner
+              ? html`<details class="act danger"><summary>Turn off</summary><div class="pop"><p>Its keys stop at once and no member can open it. What it holds stays until an owner turns it on again or erases it.</p>
+<form method="post" action="${root}/teams/disable">${hidden(org)}<label for="confirm-${org.id}">Type ${org.login} to confirm</label><input id="confirm-${org.id}" name="confirm" autocomplete="off" required><button class="danger" type="submit">Turn off</button></form></div></details>`
+              : html``
+          }`
+        : owner
+          ? html`<form class="inline" method="post" action="${root}/teams/enable">${hidden(org)}<button class="primary" type="submit">Turn on</button></form>`
+          : html`<span class="muted">An owner can turn it on</span>`;
+      return html`<tr><td data-label="Organization" class="strong">${org.login}</td><td data-label="You are">${owner ? 'Owner' : 'Member'}</td><td data-label="Slotlock"><span class="pill ${on ? 'active' : 'revoked'}">${on ? 'On' : 'Off'}</span></td><td class="actions">${actions}</td></tr>`;
+    });
+    const content = html`${noticeOf(notice)}${pageHead('Teams')}
+<p>Work with the people in a GitHub organization: once an owner turns Slotlock on for it, every owner and member shares its resources, keys and history, and picks it from the workspace menu. Your own workspace stays yours.</p>
+${
+  rows.length === 0
+    ? emptyState(ICONS.teams, 'Slotlock sees none of your GitHub organizations. It reads them as you sign in: after joining one, sign out and in again. An organization that restricts OAuth apps needs an owner to approve this one.')
+    : html`<div class="table"><table><thead><tr><th>Organization</th><th>You are</th><th>Slotlock</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>
+<p class="fine">Who owns an organization is read from GitHub as you sign in. Leaving one ends your access at your next sign-in.</p>`
+}`;
+    return respond(status, layout('Teams', content, session, 'teams'));
+  }
+
+  async function changeTeam(session: Session, form: URLSearchParams, on: boolean): Promise<Response> {
+    if (!teams) return nothingHere(session);
+    const org = session.orgs?.find((candidate) => candidate.id === form.get('organization'));
+    if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
+    if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    if (on) {
+      await teams.enable({ id: org.id, login: org.login }, personOf(session));
+      return teamsPage(session, 200, `Slotlock is on for ${org.login}. Its members pick it from the workspace menu.`);
+    }
+    if (form.get('confirm') !== org.login) return teamsPage(session, 400, `Type ${org.login} to turn it off.`);
+    await teams.disable(org.id, personOf(session));
+    return teamsPage(session, 200, `Slotlock is off for ${org.login}: its keys stopped. What it holds stays until it is turned on again or erased.`);
+  }
+
+  async function switchOrganization(session: Session, form: URLSearchParams): Promise<Response> {
     const wanted = form.get('organization') ?? '';
+    if (teams) {
+      // Their own tenant, or an organization of theirs that is turned on now.
+      const org = session.orgs?.find((candidate) => candidate.id === wanted);
+      if (wanted !== '' && (!org || !(await teams.enabled([wanted])).has(wanted))) {
+        return respond(
+          400,
+          layout('Refused', html`<p class="notice">You cannot act for that organization. An owner turns it on from Teams.</p>`, session),
+        );
+      }
+      const { org: _, ...personal } = session;
+      const sealed = seal('slotlock-dashboard-session-v1', wanted === '' ? personal : { ...personal, org: wanted });
+      const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+      return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+    }
     const org = session.orgs?.find(
       (candidate) => candidate.id === wanted && served?.has(candidate.id),
     );
@@ -3754,7 +3868,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       code_challenge: challenge,
       code_challenge_method: 'S256',
       // Reading organization membership needs read:org; a personal tenant needs no scope at all.
-      ...(served ? { scope: 'read:org' } : {}),
+      ...(readsOrganizations ? { scope: 'read:org' } : {}),
     }).toString();
     const sealed = seal('slotlock-dashboard-sign-in-v1', {
       state,
@@ -3869,7 +3983,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         continue;
       }
       const id = String(organization.id);
-      if (served?.has(id)) {
+      if (teams || served?.has(id)) {
         found.set(id, { id, login: organization.login, role: membership.role === 'admin' ? 'admin' : 'member' });
       }
     }
@@ -3886,7 +4000,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       const token = await exchangeCode(code, verifier);
       if (token === null) return null;
       const user = await readGitHubUser(token);
-      if (!user || !served) return user;
+      if (!user || !readsOrganizations) return user;
       const orgs = await readMemberships(token);
       return orgs === null ? null : { ...user, orgs };
     } catch (error) {
@@ -3967,7 +4081,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       login: user.login,
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
-      ...(served ? { orgs, org: (orgs[0] as Organization).id } : {}),
+      ...(served ? { orgs, org: (orgs[0] as Organization).id } : teams ? { orgs } : {}),
     });
     return redirect(303, root, [
       clearSignIn,
@@ -4261,6 +4375,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return upgradePlan(session, form);
       case '/plan/manage':
         return manageBilling(session);
+      case '/teams/enable':
+        return changeTeam(session, form, true);
+      case '/teams/disable':
+        return changeTeam(session, form, false);
       default:
         return respond(
           404,
@@ -4291,9 +4409,11 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
             case '/waitlist':
             case '/assistant':
             case '/plan':
+            case '/teams':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
+              if (route === '/teams') return await teamsPage(session);
               if (route === '/plan') {
                 return await planPage(
                   session,

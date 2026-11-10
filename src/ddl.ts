@@ -244,12 +244,15 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
  * The table behind the dashboard's shared records (dashboard.ts). No role but its owner holds a
  * right on it; it is reached only through SLOTLOCK_DASHBOARD_FUNCTIONS.
  */
-export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens'] as const);
+export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens', 'dashboard_organizations'] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
 export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.use_dashboard_token(text, bytea, timestamptz, bytea)',
   'slotlock.dashboard_session_ended(bytea, timestamptz)',
+  'slotlock.enabled_organizations(text)',
+  'slotlock.enable_organization(text, text, text)',
+  'slotlock.disable_organization(text, text)',
 ] as const);
 
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
@@ -962,6 +965,79 @@ AS $slotlock_dashboard_session_ended$
               AND ended.expires_at > now());
 $slotlock_dashboard_session_ended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[1]} FROM PUBLIC;
+
+-- GitHub organizations an owner turned Slotlock on for (Teams on Cloud, RFC 0003, with
+-- SLOTLOCK_DASHBOARD_ORGS=enabled): their github-org:<id> tenants are served while enabled. Turning
+-- one off stops its keys at once and keeps its data, which the organization can turn back on to
+-- reach, or erase. Owner-only; read and written through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.dashboard_organizations (
+  org_id text PRIMARY KEY,
+  login text NOT NULL,
+  enabled boolean NOT NULL,
+  changed_by text NOT NULL,
+  changed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_dashboard_organizations_valid CHECK (
+    org_id ~ '^[1-9][0-9]{0,19}$'
+    AND login ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'
+    AND changed_by ~ '^github:[1-9][0-9]{0,19}$'
+  )
+);
+ALTER TABLE slotlock.dashboard_organizations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.dashboard_organizations FROM PUBLIC;
+
+-- Of these organization ids (comma-separated), the ones turned on.
+CREATE OR REPLACE FUNCTION slotlock.enabled_organizations(requested_ids text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_enabled_organizations$
+  SELECT org.org_id FROM slotlock.dashboard_organizations org
+   WHERE org.enabled
+     AND org.org_id = ANY (pg_catalog.string_to_array(requested_ids, ','));
+$slotlock_enabled_organizations$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[2]} FROM PUBLIC;
+
+-- Turn Slotlock on for an organization; true when it was not on. Who may (an owner of it, read from
+-- GitHub at sign-in) is the dashboard's to check.
+CREATE OR REPLACE FUNCTION slotlock.enable_organization(requested_org text, requested_login text, requested_by text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_enable_organization$
+DECLARE
+  was boolean;
+BEGIN
+  SELECT org.enabled INTO was FROM slotlock.dashboard_organizations org
+   WHERE org.org_id = requested_org FOR UPDATE;
+  INSERT INTO slotlock.dashboard_organizations AS org (org_id, login, enabled, changed_by)
+  VALUES (requested_org, requested_login, true, requested_by)
+  ON CONFLICT (org_id) DO UPDATE
+    SET login = EXCLUDED.login, enabled = true,
+        changed_by = CASE WHEN org.enabled THEN org.changed_by ELSE EXCLUDED.changed_by END,
+        changed_at = CASE WHEN org.enabled THEN org.changed_at ELSE statement_timestamp() END;
+  RETURN was IS NOT TRUE;
+END
+$slotlock_enable_organization$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[3]} FROM PUBLIC;
+
+-- Turn it off; true when it was on.
+CREATE OR REPLACE FUNCTION slotlock.disable_organization(requested_org text, requested_by text)
+RETURNS boolean
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_disable_organization$
+  UPDATE slotlock.dashboard_organizations org
+     SET enabled = false, changed_by = requested_by, changed_at = statement_timestamp()
+   WHERE org.org_id = requested_org AND org.enabled
+  RETURNING true;
+$slotlock_disable_organization$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[4]} FROM PUBLIC;
 `;
 
 // The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly
@@ -1920,6 +1996,13 @@ BEGIN
     ON CONFLICT DO NOTHING
   )
   SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  -- An organization's record of being turned on goes with its tenant (Teams on Cloud).
+  erased_table := 'dashboard_organizations';
+  DELETE FROM slotlock.dashboard_organizations org
+   WHERE requested_tenant_ref ~ '^github-org:[1-9][0-9]{0,19}$'
+     AND org.org_id = substr(requested_tenant_ref, 12);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'dashboard_tokens';
   erased_rows := 0;

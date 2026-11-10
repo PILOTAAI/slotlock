@@ -529,6 +529,10 @@ describe('slotlock serve configuration', () => {
       expect(slotlockServeAllowsTenant(config, 'github:999~test')).toBe(false);
       expect(slotlockServeAllowsTenant({ organizations: ['7'] }, 'github-org:8~test')).toBe(false);
       expect(slotlockServeAllowsTenant({ organizations: ['7'] }, 'github-org:7~test')).toBe(true);
+      // With enabled, organizations are the database's to allow (serve's organization check).
+      const teams = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: 'enabled' }));
+      expect(teams.organizations).toBe('enabled');
+      expect(slotlockServeAllowsTenant(teams, 'github-org:8')).toBe(true);
       const open = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '*' }));
       expect(open.allowedUsers).toBe('*');
       expect(slotlockServeAllowsTenant(open, 'github:999')).toBe(true);

@@ -59,6 +59,7 @@ import {
   slotlockClientNetwork,
 } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
+import { createSlotlockDashboardTeams } from '../../src/teams.js';
 
 /**
  * A Workers rate limiting binding (developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit,
@@ -303,6 +304,17 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       sessionSecret: config.sessionSecret,
       allowedUsers: config.allowedUsers,
       ...(config.organizations ? { organizations: config.organizations } : {}),
+      // Teams on Cloud: the organizations turned on, through the request's client.
+      ...(config.organizations === 'enabled'
+        ? {
+            teams: {
+              enabled: (ids: readonly string[]) => createSlotlockDashboardTeams(current().sql).enabled(ids),
+              enable: (org: { id: string; login: string }, by: string) =>
+                createSlotlockDashboardTeams(current().sql).enable(org, by),
+              disable: (id: string, by: string) => createSlotlockDashboardTeams(current().sql).disable(id, by),
+            },
+          }
+        : {}),
       ...(config.name ? { name: config.name } : {}),
       availability: readAvailability(vars),
       // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through

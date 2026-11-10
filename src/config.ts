@@ -128,8 +128,11 @@ export interface SlotlockServeDashboardConfig {
   sessionSecret: string;
   /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
   allowedUsers: '*' | string[];
-  /** GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS). */
-  organizations?: string[];
+  /**
+   * GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS), or
+   * `'enabled'`: those an owner turned on from the dashboard (Teams on Cloud, teams.ts).
+   */
+  organizations?: string[] | 'enabled';
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -293,12 +296,13 @@ function readAssistantPreviousSecrets(
  * well: a server whose dashboard runs elsewhere (on Cloudflare Workers) still takes those
  * organizations' keys, and only theirs.
  */
-export function readDashboardOrganizations(env: SlotlockEnv): string[] | undefined {
+export function readDashboardOrganizations(env: SlotlockEnv): string[] | 'enabled' | undefined {
   const orgs = optional(env, 'SLOTLOCK_DASHBOARD_ORGS')?.replaceAll(' ', '');
   if (orgs === undefined) return undefined;
+  if (orgs === 'enabled') return 'enabled';
   if (!/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(orgs)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id)',
+      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id), or enabled',
     );
   }
   return [...new Set(orgs.split(','))];
