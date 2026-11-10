@@ -7,6 +7,14 @@ versioning.
 
 ### Added
 
+- Per-key limits (RFC 0004 A5): a key can be held below the server's limits, never above them:
+  its live holds and the hours they hold, its requests a minute (a bucket of its own, `key_limit`),
+  and `requires_approval`, which makes every booking it asks for wait for a person (policy
+  `api-key`). Set with `slotlock key create`/`key limits`, the dashboard's key form and Limits
+  action, or the partner API's `limits`; kept through rotation, erased with the tenant. The
+  principal carries them as `limits`. `slotlock.api_key_limits` is owner-only behind three new
+  functions: run `slotlock migrate` (or `grantApplicationRole`) so the serving role may call them;
+  until then keys authenticate without limits.
 - Approval policies (RFC 0004 A4): an admin names which agent bookings a person approves first, or
   which are refused, by resource, pool, location or group, narrowed by length, time outside the
   resource's hours and kind (single, pool, bundle, move). A covered booking is tried as a dry run,
@@ -352,9 +360,10 @@ versioning.
 
 ### Changed
 
-- Rust client: every write's input struct has a `dry_run: Option<bool>` field (RFC 0004 A3). A
-  struct literal that lists every field must now end with `..Default::default()`, as the README's
-  examples do; the other clients take it as an optional argument.
+- Rust client: every write's input struct has a `dry_run: Option<bool>` field (RFC 0004 A3), and
+  `PartnerCreateKeyInput` a `limits` field (A5). A struct literal that lists every field must now
+  end with `..Default::default()`, as the README's examples do; the other clients take them as
+  optional arguments.
 - `resource_ids` is optional on `slotlock_get_free_busy`, `slotlock_find_next_available` and
   `slotlock_find_available_slots`, since a selection can stand in for it. Calls written before
   still compile in every client: Rust keeps the field a `Vec<String>` (left out when empty), Java

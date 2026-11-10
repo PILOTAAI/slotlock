@@ -2747,6 +2747,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
      */
     holderRef?: string;
     /**
+     * Lower the holder's caps for this hold (an API key's own limits, RFC 0004 A5): never above
+     * `maxHoldsPerHolder` and `maxHeldHoursPerHolder`, which win where they are lower.
+     */
+    holderCaps?: { maxHolds?: number; maxHeldHours?: number };
+    /**
      * Holds taken as alternatives for one booking share a group (a UUID): booking one with
      * `fromHold` releases the rest, and releasing one with a holder releases them all.
      */
@@ -5522,6 +5527,19 @@ function buildSlotlockStore(
         ...(holderRef !== undefined ? { holderRef } : {}),
       });
       const ttlSeconds = params.ttlMs / 1000;
+      // The holder's caps: the store's, lowered by its key's own (RFC 0004 A5), never raised.
+      const asked = params.holderCaps;
+      const holdCap = Math.min(maxHoldsPerHolder, asked?.maxHolds ?? Number.POSITIVE_INFINITY);
+      const heldHoursCap =
+        asked?.maxHeldHours !== undefined
+          ? Math.min(maxHeldHoursPerHolder ?? Number.POSITIVE_INFINITY, asked.maxHeldHours)
+          : maxHeldHoursPerHolder;
+      if (
+        (asked?.maxHolds !== undefined && !(Number.isSafeInteger(asked.maxHolds) && asked.maxHolds >= 1)) ||
+        (asked?.maxHeldHours !== undefined && !(Number.isSafeInteger(asked.maxHeldHours) && asked.maxHeldHours >= 1))
+      ) {
+        return { ok: false, code: 'invalid_identity' };
+      }
       // The buffer asked for, raised to the resource's turnaround, and its rule's leading buffer.
       let written = bufferAfterMs;
       let writtenBefore = 0;
@@ -5580,10 +5598,10 @@ function buildSlotlockStore(
                  WHERE holder_ref = ${holderRef} AND tenant_ref IS NULL AND status = 'held'
                    AND expires_at > statement_timestamp()
                    AND resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef ?? null})`;
-              if ((held?.count ?? 0) >= maxHoldsPerHolder) {
-                return { ok: false, code: 'hold_limit_reached', limit: maxHoldsPerHolder };
+              if ((held?.count ?? 0) >= holdCap) {
+                return { ok: false, code: 'hold_limit_reached', limit: holdCap };
               }
-              if (maxHeldHoursPerHolder !== undefined) heldSeconds = held?.seconds ?? 0;
+              if (heldHoursCap !== undefined) heldSeconds = held?.seconds ?? 0;
             }
             const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
@@ -5592,11 +5610,11 @@ function buildSlotlockStore(
             const reach = occupiedTime({ ...params, bufferBeforeMs: writtenBefore, bufferAfterMs: written });
             if (
               heldSeconds !== null &&
-              maxHeldHoursPerHolder !== undefined &&
+              heldHoursCap !== undefined &&
               heldSeconds + (reach.end.getTime() - reach.start.getTime()) / 1000 >
-                maxHeldHoursPerHolder * 3_600
+                heldHoursCap * 3_600
             ) {
-              return { ok: false, code: 'held_time_limit_reached', limit: maxHeldHoursPerHolder };
+              return { ok: false, code: 'held_time_limit_reached', limit: heldHoursCap };
             }
             if (
               resource.tenant_ref !== null &&

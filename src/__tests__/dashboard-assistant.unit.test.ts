@@ -114,6 +114,7 @@ const noKeys: SlotlockApiKeyStore = {
   revoke: async () => null,
   authenticate: async () => null,
   erase: async () => 0,
+  setLimits: async () => false,
 };
 
 let backend: ReturnType<typeof fakeBackend>;

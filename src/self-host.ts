@@ -29,6 +29,7 @@ import {
   SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS,
   SLOTLOCK_API_KEY_SCOPES,
   type SlotlockApiKey,
+  type SlotlockApiKeyLimits,
   type SlotlockApiKeyScope,
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
@@ -1986,8 +1987,45 @@ function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
     last_used_at: apiKey.lastUsedAt?.toISOString() ?? null,
     revoked_at: apiKey.revokedAt?.toISOString() ?? null,
     ...(apiKey.resourceScope ? { resource_scope: apiKey.resourceScope } : {}),
+    ...(apiKey.limits ? { limits: apiKeyLimitsJson(apiKey.limits) } : {}),
     ...(key !== undefined ? { key } : {}),
   })}\n`;
+}
+
+/** A key's limits as the CLI prints them: snake_case, as the API names them. */
+function apiKeyLimitsJson(limits: SlotlockApiKeyLimits) {
+  return {
+    ...(limits.maxHolds !== undefined ? { max_holds: limits.maxHolds } : {}),
+    ...(limits.maxHeldHours !== undefined ? { max_held_hours: limits.maxHeldHours } : {}),
+    ...(limits.requestsPerMinute !== undefined ? { requests_per_minute: limits.requestsPerMinute } : {}),
+    ...(limits.requiresApproval ? { requires_approval: true } : {}),
+  };
+}
+
+/** `--max-holds`, `--max-held-hours`, `--requests-per-minute`, `--requires-approval` (RFC 0004 A5). */
+function parseKeyLimits(values: {
+  'max-holds'?: string;
+  'max-held-hours'?: string;
+  'requests-per-minute'?: string;
+  'requires-approval'?: boolean;
+}): SlotlockApiKeyLimits {
+  const whole = (option: string, value: string | undefined, most: number) => {
+    if (value === undefined) return undefined;
+    const parsed = /^[0-9]{1,7}$/.test(value) ? Number(value) : Number.NaN;
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > most) {
+      throw new Error(`--${option} must be a whole number from 1 to ${most.toLocaleString('en-US')}`);
+    }
+    return parsed;
+  };
+  const maxHolds = whole('max-holds', values['max-holds'], 10_000);
+  const maxHeldHours = whole('max-held-hours', values['max-held-hours'], 876_000);
+  const requestsPerMinute = whole('requests-per-minute', values['requests-per-minute'], 100_000);
+  return {
+    ...(maxHolds !== undefined ? { maxHolds } : {}),
+    ...(maxHeldHours !== undefined ? { maxHeldHours } : {}),
+    ...(requestsPerMinute !== undefined ? { requestsPerMinute } : {}),
+    ...(values['requires-approval'] === true ? { requiresApproval: true } : {}),
+  };
 }
 
 /** `--locations` and `--groups`: references, comma-separated; neither for a key of the whole tenant. */
@@ -2159,6 +2197,14 @@ Commands:
                            SHA-256 is stored. With --locations or --groups, the key reaches
                            only the resources there (each location with those in it), read and
                            write only
+             [--max-holds <n>] [--max-held-hours <n>] [--requests-per-minute <n>]
+             [--requires-approval]
+                           ... and hold the key below the server's limits: its live holds, the
+                           hours they hold, its requests a minute, and every booking it makes
+                           waiting for a person (the dashboard's Approvals)
+  key limits <id> [--max-holds <n>] [--max-held-hours <n>] [--requests-per-minute <n>]
+             [--requires-approval]
+                           Replace an active key's limits; none at all gives it the server's
   key list                 Print the tenant's API keys, one JSON object per line
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
@@ -2375,6 +2421,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'key list': 1,
     'key rotate': 2,
     'key revoke': 2,
+    'key limits': 2,
     'hours show': 1,
     'hours set': 2,
     'hours clear': 1,
@@ -2494,6 +2541,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   let keyScopes: SlotlockApiKeyScope[] = [];
   let keyLifetimeDays: number | undefined;
   let keyResourceScope: SlotlockResourceScope | undefined;
+  let keyLimits: SlotlockApiKeyLimits = {};
   if (subcommand === 'key create') {
     try {
       keyScopes = parseKeyScopes(values.scope);
@@ -2504,6 +2552,16 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     }
   } else if (values.locations !== undefined || values.groups !== undefined) {
     return usage('--locations and --groups are for key create');
+  }
+  const limitOptions = ['max-holds', 'max-held-hours', 'requests-per-minute', 'requires-approval'] as const;
+  if (subcommand === 'key create' || subcommand === 'key limits') {
+    try {
+      keyLimits = parseKeyLimits(values);
+    } catch (error) {
+      return usage((error as Error).message);
+    }
+  } else if (limitOptions.some((option) => values[option] !== undefined)) {
+    return usage('--max-holds, --max-held-hours, --requests-per-minute and --requires-approval are for key create and key limits');
   }
 
   const log = createLogger(io);
@@ -2769,6 +2827,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
             scopes: keyScopes,
             createdBy: CLI_KEY_CREATOR,
             ...(keyResourceScope ? { resourceScope: keyResourceScope } : {}),
+            ...(Object.keys(keyLimits).length > 0 ? { limits: keyLimits } : {}),
             ...(keyLifetimeDays !== undefined
               ? { expiresAt: new Date(Date.now() + keyLifetimeDays * DAY_MS) }
               : {}),
@@ -2801,6 +2860,19 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         io.stderr.write(
           'slotlock: the new key is shown once and the old one no longer works; keep it in a secret manager\n',
         );
+        return 0;
+      }
+      case 'key limits': {
+        const config = readSlotlockDatabaseConfig(io.env);
+        const id = operands[1] as string;
+        const set = await withApiKeys(config, (keys) =>
+          keys.setLimits({ tenantRef: config.tenantRef, id, limits: keyLimits }),
+        );
+        if (!set) {
+          io.stderr.write('slotlock: no active API key with that id in this tenant\n');
+          return 1;
+        }
+        io.stdout.write(`${JSON.stringify({ id, limits: apiKeyLimitsJson(keyLimits) })}\n`);
         return 0;
       }
       case 'key revoke': {
@@ -2840,6 +2912,10 @@ function parseCliArguments(argv: readonly string[]) {
       'expires-in-days': { type: 'string' },
       locations: { type: 'string' },
       groups: { type: 'string' },
+      'max-holds': { type: 'string' },
+      'max-held-hours': { type: 'string' },
+      'requests-per-minute': { type: 'string' },
+      'requires-approval': { type: 'boolean' },
       contract: { type: 'string' },
       month: { type: 'string' },
       event: { type: 'string' },

@@ -524,6 +524,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         name: 'Depot key',
         scopes: ['read'],
         resourceScope: { locations: ['depot'], groups: [] },
+        // And held below the server's limits (RFC 0004 A5).
+        limits: { maxHolds: 2 },
       });
       await keys.revoke({
         tenantRef,

@@ -71,6 +71,55 @@ export interface SlotlockApiKey {
   revokedAt: Date | null;
   /** For a key limited to part of its tenant (RFC 0003 G6), the locations and groups it reaches. */
   resourceScope?: SlotlockResourceScope;
+  /** What the key may do below the server's limits (RFC 0004 A5), when anything is set. */
+  limits?: SlotlockApiKeyLimits;
+}
+
+/**
+ * One agent's key held below the server's limits (RFC 0004 A5). Each only lowers: the server's own
+ * limit applies where it is lower, and on a hosted plan the plan's. Unset fields are the server's.
+ */
+export interface SlotlockApiKeyLimits {
+  /** Live holds at once (the server's `holder_holds`, 20 by default), 1-10,000. */
+  maxHolds?: number;
+  /** Hours its live holds may hold together (`holder_held_hours`, 2,160), 1-876,000. */
+  maxHeldHours?: number;
+  /** Requests a minute, reads and writes alike, on top of the server's per-key rates; 1-100,000. */
+  requestsPerMinute?: number;
+  /** Every booking it makes waits for a person (RFC 0004 A4), as an approval policy would hold it. */
+  requiresApproval?: boolean;
+}
+
+/** Whether `value` is a valid SlotlockApiKeyLimits. */
+export function isSlotlockApiKeyLimits(value: unknown): value is SlotlockApiKeyLimits {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const limits = value as Record<string, unknown>;
+  const known = new Set(['maxHolds', 'maxHeldHours', 'requestsPerMinute', 'requiresApproval']);
+  if (Object.keys(limits).some((key) => !known.has(key))) return false;
+  const whole = (field: unknown, most: number) =>
+    field === undefined || (Number.isSafeInteger(field) && (field as number) >= 1 && (field as number) <= most);
+  return (
+    whole(limits.maxHolds, 10_000) &&
+    whole(limits.maxHeldHours, 876_000) &&
+    whole(limits.requestsPerMinute, 100_000) &&
+    (limits.requiresApproval === undefined || typeof limits.requiresApproval === 'boolean')
+  );
+}
+
+/** Limits as the database row has them, or undefined when the key has none. */
+function limitsFrom(row: {
+  max_holds: number | null;
+  max_held_hours: number | null;
+  requests_per_minute: number | null;
+  requires_approval: boolean | null;
+}): SlotlockApiKeyLimits | undefined {
+  const limits: SlotlockApiKeyLimits = {
+    ...(row.max_holds !== null ? { maxHolds: row.max_holds } : {}),
+    ...(row.max_held_hours !== null ? { maxHeldHours: row.max_held_hours } : {}),
+    ...(row.requests_per_minute !== null ? { requestsPerMinute: row.requests_per_minute } : {}),
+    ...(row.requires_approval === true ? { requiresApproval: true } : {}),
+  };
+  return Object.keys(limits).length > 0 ? limits : undefined;
 }
 
 /** What an active key authenticates as. */
@@ -80,6 +129,8 @@ export interface SlotlockApiKeyIdentity {
   scopes: SlotlockApiKeyScope[];
   /** Set for a key limited to part of its tenant: withTenant holds it to these resources. */
   resourceScope?: SlotlockResourceScope;
+  /** Set for a key with limits of its own (RFC 0004 A5). */
+  limits?: SlotlockApiKeyLimits;
 }
 
 export interface CreateSlotlockApiKeyInput {
@@ -100,6 +151,8 @@ export interface CreateSlotlockApiKeyInput {
    * `admin` is refused (`invalid_api_key_scopes`), since admin operations are the whole tenant's.
    */
   resourceScope?: SlotlockResourceScope;
+  /** Hold the key below the server's limits (RFC 0004 A5); `setLimits` changes them later. */
+  limits?: SlotlockApiKeyLimits;
 }
 
 /** Who rotates or revokes a key and from where, recorded on the feed as `create`'s are. */
@@ -133,6 +186,11 @@ export interface SlotlockApiKeyStore {
    * Revoking a revoked key returns it unchanged. Nothing un-revokes a key.
    */
   revoke(input: { tenantRef: string; id: string } & SlotlockApiKeyChange): Promise<SlotlockApiKey | null>;
+  /**
+   * Replace an active key's limits (RFC 0004 A5); `{}` removes them. False when the tenant has no
+   * active key with that id. Throws `invalid_api_key_limits` for limits out of range.
+   */
+  setLimits(input: { tenantRef: string; id: string; limits: SlotlockApiKeyLimits }): Promise<boolean>;
   /** Resolve a presented key to its tenant and scopes; null unless it is active. */
   authenticate(key: string): Promise<SlotlockApiKeyIdentity | null>;
   /**
@@ -140,6 +198,45 @@ export interface SlotlockApiKeyStore {
    * digests stay, in a list of retired digests no key may use again.
    */
   erase(input: { tenantRef: string }): Promise<number>;
+}
+
+const LIMITS_MESSAGE =
+  'Slotlock key limits are maxHolds (1-10,000), maxHeldHours (1-876,000), requestsPerMinute (1-100,000) and requiresApproval, each optional';
+
+interface LimitsRow {
+  max_holds: number | null;
+  max_held_hours: number | null;
+  requests_per_minute: number | null;
+  requires_approval: boolean | null;
+}
+
+function rowOfLimits(limits: SlotlockApiKeyLimits): LimitsRow {
+  return {
+    max_holds: limits.maxHolds ?? null,
+    max_held_hours: limits.maxHeldHours ?? null,
+    requests_per_minute: limits.requestsPerMinute ?? null,
+    requires_approval: limits.requiresApproval ?? null,
+  };
+}
+
+async function setKeyLimits(
+  sql: SlotlockSql,
+  tenantRef: string,
+  id: string,
+  limits: SlotlockApiKeyLimits,
+): Promise<boolean> {
+  const row = rowOfLimits(limits);
+  const [set] = await sql<{ set: boolean }[]>`
+    SELECT slotlock.set_api_key_limits(
+      ${tenantRef}::text, ${id}::uuid, ${row.max_holds}::integer, ${row.max_held_hours}::integer,
+      ${row.requests_per_minute}::integer, ${row.requires_approval === true}::boolean) AS set`;
+  return set?.set === true;
+}
+
+/** A function the role was not granted, or that this database does not have yet. */
+function isNotGranted(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === '42501' || code === '42883';
 }
 
 function invalid(code: string, message: string): Error {
@@ -364,6 +461,8 @@ async function asChange<T>(
  * before a query runs; the functions and the table's constraints check the same rules again.
  */
 export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore {
+  // Whether the role may read key limits; a role granted before them may not, until granted again.
+  let limitsGranted = true;
   return {
     async create(input) {
       assertTenantRef(input.tenantRef);
@@ -393,6 +492,10 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
             'Slotlock keys limited to locations or groups read and write only: admin is the whole tenant',
           );
         }
+      }
+      const limits = input.limits;
+      if (limits !== undefined && !isSlotlockApiKeyLimits(limits)) {
+        throw invalid('invalid_api_key_limits', LIMITS_MESSAGE);
       }
       const expiresAt = input.expiresAt;
       if (
@@ -445,6 +548,9 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
                 pg_catalog.string_to_array(${resourceScope.locations.join(',')}::text, ','),
                 pg_catalog.string_to_array(${resourceScope.groups.join(',')}::text, ','))`;
           }
+          if (created[0] && limits && limitsFrom(rowOfLimits(limits))) {
+            await setKeyLimits(tx, input.tenantRef, created[0].key_id, limits);
+          }
           return created;
         },
       );
@@ -456,21 +562,40 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       }
       const apiKey = apiKeyFrom(row);
       if (resourceScope) apiKey.resourceScope = canonicalResourceScope(resourceScope.locations, resourceScope.groups);
+      const kept = limits ? limitsFrom(rowOfLimits(limits)) : undefined;
+      if (kept) apiKey.limits = kept;
       return { key, apiKey };
+    },
+
+    async setLimits({ tenantRef, id, limits }) {
+      assertTenantRef(tenantRef);
+      if (typeof id !== 'string' || !UUID_PATTERN.test(id)) return false;
+      if (!isSlotlockApiKeyLimits(limits)) throw invalid('invalid_api_key_limits', LIMITS_MESSAGE);
+      return setKeyLimits(sql, tenantRef, id, limits);
     },
 
     async list({ tenantRef }) {
       assertTenantRef(tenantRef);
-      const [rows, limited] = await Promise.all([
+      const [rows, limited, bounded] = await Promise.all([
         sql<ApiKeyRow[]>`SELECT * FROM slotlock.list_api_keys(${tenantRef}::text)`,
         sql<{ key_id: string; locations: string[]; groups: string[] }[]>`
           SELECT key_id::text, locations, groups FROM slotlock.list_api_key_resource_scopes(${tenantRef}::text)`,
+        // A role granted before key limits cannot read them yet: its keys show none.
+        sql<(LimitsRow & { key_id: string })[]>`
+          SELECT key_id::text, max_holds, max_held_hours, requests_per_minute, requires_approval
+            FROM slotlock.list_api_key_limits(${tenantRef}::text)`.catch((error: unknown) => {
+          if (isNotGranted(error)) return [];
+          throw error;
+        }),
       ]);
       const scopes = new Map(limited.map((row) => [row.key_id, canonicalResourceScope(row.locations, row.groups)]));
+      const limitsByKey = new Map(bounded.map((row) => [row.key_id, limitsFrom(row)]));
       return rows.map((row) => {
         const apiKey = apiKeyFrom(row);
         const scope = scopes.get(row.key_id);
         if (scope) apiKey.resourceScope = scope;
+        const keyLimits = limitsByKey.get(row.key_id);
+        if (keyLimits) apiKey.limits = keyLimits;
         return apiKey;
       });
     },
@@ -496,15 +621,28 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
 
     async authenticate(key) {
       if (!isSlotlockApiKey(key)) return null;
-      const [row] = await sql<
-        {
-          key_id: string;
-          key_tenant_ref: string;
-          key_scopes: string[];
-          scope_locations: string[] | null;
-          scope_groups: string[] | null;
-        }[]
-      >`SELECT * FROM slotlock.authenticate_scoped_api_key(${slotlockApiKeyDigest(key)}::bytea)`;
+      type Row = {
+        key_id: string;
+        key_tenant_ref: string;
+        key_scopes: string[];
+        scope_locations: string[] | null;
+        scope_groups: string[] | null;
+      } & Partial<LimitsRow>;
+      const digest = slotlockApiKeyDigest(key);
+      let row: Row | undefined;
+      if (limitsGranted) {
+        try {
+          [row] = await sql<Row[]>`SELECT * FROM slotlock.authenticate_limited_api_key(${digest}::bytea)`;
+        } catch (error) {
+          // A role granted before key limits (grantApplicationRole not run again since): keys
+          // still authenticate, without limits, and this process stops asking.
+          if (!isNotGranted(error)) throw error;
+          limitsGranted = false;
+        }
+      }
+      if (!limitsGranted) {
+        [row] = await sql<Row[]>`SELECT * FROM slotlock.authenticate_scoped_api_key(${digest}::bytea)`;
+      }
       if (!row) return null;
       const identity: SlotlockApiKeyIdentity = {
         id: row.key_id,
@@ -514,6 +652,13 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       if (row.scope_locations !== null || row.scope_groups !== null) {
         identity.resourceScope = canonicalResourceScope(row.scope_locations ?? [], row.scope_groups ?? []);
       }
+      const keyLimits = limitsFrom({
+        max_holds: row.max_holds ?? null,
+        max_held_hours: row.max_held_hours ?? null,
+        requests_per_minute: row.requests_per_minute ?? null,
+        requires_approval: row.requires_approval ?? null,
+      });
+      if (keyLimits) identity.limits = keyLimits;
       return identity;
     },
 
@@ -599,6 +744,7 @@ export function createSlotlockApiKeyAuthenticator(
         scopes: identity.scopes,
         keyId: identity.id,
         ...(identity.resourceScope ? { resourceScope: identity.resourceScope } : {}),
+        ...(identity.limits ? { limits: identity.limits } : {}),
       };
     } finally {
       const next = waitingKnown.shift() ?? waiting.shift();

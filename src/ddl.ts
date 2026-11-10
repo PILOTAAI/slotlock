@@ -223,6 +223,7 @@ export const SLOTLOCK_API_KEY_TABLES = Object.freeze([
   'api_keys',
   'api_key_retired_digests',
   'api_key_resource_scopes',
+  'api_key_limits',
 ] as const);
 
 /**
@@ -239,6 +240,9 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
   'slotlock.set_api_key_resource_scope(text, uuid, text[], text[])',
   'slotlock.authenticate_scoped_api_key(bytea)',
   'slotlock.list_api_key_resource_scopes(text)',
+  'slotlock.set_api_key_limits(text, uuid, integer, integer, integer, boolean)',
+  'slotlock.list_api_key_limits(text)',
+  'slotlock.authenticate_limited_api_key(bytea)',
 ] as const);
 
 
@@ -795,6 +799,103 @@ AS $slotlock_list_api_key_resource_scopes$
    WHERE scope.tenant_ref = requested_tenant_ref;
 $slotlock_list_api_key_resource_scopes$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[8]} FROM PUBLIC;
+
+-- What one agent's key may do, below the server's limits (RFC 0004 A5): its live holds and the
+-- hours they hold, its requests a minute, and whether its bookings wait for a person. Null is the
+-- server's. Kept through rotation (the key keeps its id); gone with the key. Owner-only, reached
+-- through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.api_key_limits (
+  key_id uuid PRIMARY KEY REFERENCES slotlock.api_keys (id) ON DELETE CASCADE,
+  tenant_ref text NOT NULL,
+  max_holds integer,
+  max_held_hours integer,
+  requests_per_minute integer,
+  requires_approval boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_api_key_limits_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND (max_holds IS NULL OR max_holds BETWEEN 1 AND 10000)
+    AND (max_held_hours IS NULL OR max_held_hours BETWEEN 1 AND 876000)
+    AND (requests_per_minute IS NULL OR requests_per_minute BETWEEN 1 AND 100000)
+  )
+);
+ALTER TABLE slotlock.api_key_limits ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.api_key_limits FROM PUBLIC;
+
+-- Set one of the tenant's active keys' limits, replacing what it had; none at all removes them.
+-- False when the tenant has no such active key.
+CREATE OR REPLACE FUNCTION slotlock.set_api_key_limits(
+  requested_tenant_ref text, requested_id uuid, requested_max_holds integer,
+  requested_max_held_hours integer, requested_requests_per_minute integer, requested_approval boolean
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_api_key_limits$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM slotlock.api_keys limited
+                  WHERE limited.tenant_ref = requested_tenant_ref AND limited.id = requested_id
+                    AND limited.revoked_at IS NULL) THEN
+    RETURN false;
+  END IF;
+  IF requested_max_holds IS NULL AND requested_max_held_hours IS NULL
+     AND requested_requests_per_minute IS NULL AND requested_approval IS NOT TRUE THEN
+    DELETE FROM slotlock.api_key_limits WHERE key_id = requested_id;
+    RETURN true;
+  END IF;
+  INSERT INTO slotlock.api_key_limits (
+    key_id, tenant_ref, max_holds, max_held_hours, requests_per_minute, requires_approval
+  ) VALUES (
+    requested_id, requested_tenant_ref, requested_max_holds, requested_max_held_hours,
+    requested_requests_per_minute, requested_approval IS TRUE
+  )
+  ON CONFLICT (key_id) DO UPDATE
+    SET max_holds = EXCLUDED.max_holds, max_held_hours = EXCLUDED.max_held_hours,
+        requests_per_minute = EXCLUDED.requests_per_minute,
+        requires_approval = EXCLUDED.requires_approval, updated_at = statement_timestamp();
+  RETURN true;
+END
+$slotlock_set_api_key_limits$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[9]} FROM PUBLIC;
+
+-- The limits of the tenant's keys that have any, for its key list.
+CREATE OR REPLACE FUNCTION slotlock.list_api_key_limits(requested_tenant_ref text)
+RETURNS TABLE (key_id uuid, max_holds integer, max_held_hours integer, requests_per_minute integer, requires_approval boolean)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_api_key_limits$
+  SELECT limits.key_id, limits.max_holds, limits.max_held_hours, limits.requests_per_minute,
+         limits.requires_approval
+    FROM slotlock.api_key_limits limits
+   WHERE limits.tenant_ref = requested_tenant_ref;
+$slotlock_list_api_key_limits$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[10]} FROM PUBLIC;
+
+-- As authenticate_scoped_api_key, with the key's limits (null for the server's).
+CREATE OR REPLACE FUNCTION slotlock.authenticate_limited_api_key(presented_secret_hash bytea)
+RETURNS TABLE (
+  key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[],
+  max_holds integer, max_held_hours integer, requests_per_minute integer, requires_approval boolean
+)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_limited_api_key$
+BEGIN
+  RETURN QUERY
+  SELECT found.key_id, found.key_tenant_ref, found.key_scopes, found.scope_locations,
+         found.scope_groups, limits.max_holds, limits.max_held_hours, limits.requests_per_minute,
+         COALESCE(limits.requires_approval, false)
+    FROM slotlock.authenticate_scoped_api_key(presented_secret_hash) found
+    LEFT JOIN slotlock.api_key_limits limits ON limits.key_id = found.key_id;
+END
+$slotlock_authenticate_limited_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[11]} FROM PUBLIC;
 
 -- A key created, given a new secret or revoked appends to its tenant's feed (key.created,
 -- key.rotated, key.revoked): its id, scopes and expiry, never its digest, prefix or name. Only the
@@ -2049,6 +2150,10 @@ BEGIN
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   -- Before the keys, so their count is reported (the key's deletion would take them too).
+  erased_table := 'api_key_limits';
+  DELETE FROM slotlock.api_key_limits WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'api_key_resource_scopes';
   DELETE FROM slotlock.api_key_resource_scopes WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;

@@ -3052,14 +3052,18 @@ public sealed partial class SlotlockClient
     /// any key. environment: test makes it in the account's test environment instead (a tenant of
     /// its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
     /// ones your contract allows (read and write unless it says), by default all of them;
-    /// expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
-    /// api_key_limit_reached past the account plan's keys.
+    /// expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits:
+    /// max_holds live at once, max_held_hours they hold together, requests_per_minute, and
+    /// requires_approval to make every booking it asks for wait for a person (the account's
+    /// Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past
+    /// the account plan's keys.
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="name">name</param>
     /// <param name="scopes">scopes</param>
     /// <param name="expiresInDays">expires_in_days</param>
     /// <param name="environment">environment</param>
+    /// <param name="limits">limits</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -3069,6 +3073,7 @@ public sealed partial class SlotlockClient
         Optional<IEnumerable<string>> scopes = default,
         Optional<long> expiresInDays = default,
         Optional<string> environment = default,
+        Optional<JsonObject> limits = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -3077,6 +3082,7 @@ public sealed partial class SlotlockClient
         if (scopes.HasValue) values["scopes"] = Json.ToNode(scopes.Value);
         if (expiresInDays.HasValue) values["expires_in_days"] = Json.ToNode(expiresInDays.Value);
         if (environment.HasValue) values["environment"] = Json.ToNode(environment.Value);
+        if (limits.HasValue) values["limits"] = Json.ToNode(limits.Value);
         return CallAsync("slotlock_partner_create_key", values, cancellationToken);
     }
 

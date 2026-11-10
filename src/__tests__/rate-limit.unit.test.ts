@@ -491,6 +491,45 @@ describe('token buckets', () => {
     expect((await post('/v1/events')).status).toBe(429);
   });
 
+  it("holds a key to its own rate below the server's, once a request (RFC 0004 A5)", async () => {
+    const time = clock();
+    const limited: SlotlockAgentPrincipal = {
+      subject: 'api_key:9',
+      tenantRef: 'fleet-7',
+      scopes: ['read', 'write'],
+      limits: { requestsPerMinute: 2 },
+    };
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ rates: { address: null } }),
+      basePath: '',
+      now: time.now,
+      authenticate: async () => limited,
+    });
+    const target = limiter.serve({
+      async fetch(request) {
+        const principal = (await limiter.authenticate(request)) as SlotlockAgentPrincipal;
+        // A tool call charges the request once and its operation again: the key's rate counts it once.
+        const ok =
+          (await limiter.consumeRateLimit({ principal, operation: 'protocol' })) &&
+          (await limiter.consumeRateLimit({ principal, operation: 'slotlock_create_event' }));
+        return ok ? Response.json({ ok: true }) : Response.json({ error: { code: 'rate_limited' } }, { status: 429 });
+      },
+    });
+    const post = () =>
+      target.fetch(new Request('http://localhost/mcp', { method: 'POST', headers: { authorization: 'Bearer x' } }), {
+        remoteAddress: '127.0.0.1',
+      });
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(200);
+    const refused = await post();
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('ratelimit')).toMatch(/^"key_limit";r=0;t=\d+$/);
+    expect(refused.headers.get('ratelimit-policy')).toBe('"key_limit";q=2;w=60');
+    // Half a minute later, one more.
+    time.advance(30_000);
+    expect((await post()).status).toBe(200);
+  });
+
   it("charges a key that may not use the application API its own buckets, not the application's", async () => {
     // A read-only key's refused application calls must not empty the tenant's app budgets.
     const { target } = setup(limitsWith({ rates: { address: null } }), { now: clock().now });

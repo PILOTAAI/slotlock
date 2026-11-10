@@ -309,6 +309,15 @@ const PARTNER_ACCOUNT_OUTPUT = z
 const PARTNER_ENVIRONMENT = z.enum(['live', 'test']).optional();
 const ACCOUNT_KEY = z.string().regex(/^slk_(test_)?[0-9A-Za-z]{46}$/);
 
+/** An agent key held below the server's limits (RFC 0004 A5): each field only lowers. */
+const KEY_LIMITS = z
+  .object({
+    max_holds: z.number().int().min(1).max(10_000).optional(),
+    max_held_hours: z.number().int().min(1).max(876_000).optional(),
+    requests_per_minute: z.number().int().min(1).max(100_000).optional(),
+    requires_approval: z.boolean().optional(),
+  })
+  .strict();
 const PARTNER_KEY_OUTPUT = z
   .object({
     id: z.string().uuid(),
@@ -319,6 +328,8 @@ const PARTNER_KEY_OUTPUT = z
     expires_at: z.string().datetime().nullable(),
     last_used_at: z.string().datetime().nullable(),
     revoked_at: z.string().datetime().nullable(),
+    /** What the key may do below the server's limits (RFC 0004 A5); null for the server's. */
+    limits: KEY_LIMITS.nullable(),
   })
   .strict();
 const RESOURCE_ID = z.string().trim().min(1).max(200);
@@ -1908,7 +1919,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_partner_create_key',
       title: 'Create a key for an account',
       description:
-        "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the account's test environment instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
+        "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the account's test environment instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits: max_holds live at once, max_held_hours they hold together, requests_per_minute, and requires_approval to make every booking it asks for wait for a person (the account's Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
       method: 'POST',
       path: '/v1/partner/accounts/{account}/keys',
       input: z
@@ -1918,6 +1929,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           scopes: z.array(z.enum(['read', 'write', 'admin'])).min(1).max(3).optional(),
           expires_in_days: z.number().int().min(1).max(3650).optional(),
           environment: PARTNER_ENVIRONMENT,
+          limits: KEY_LIMITS.optional(),
         })
         .strict(),
       output: z.object({ key: ACCOUNT_KEY, api_key: PARTNER_KEY_OUTPUT }).strict(),

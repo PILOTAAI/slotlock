@@ -153,7 +153,14 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
     expect(first.api_key.scopes).toEqual(['read', 'write']);
     const authenticateKey = createSlotlockApiKeyAuthenticator(keys);
     expect(await authenticateKey(bearer(first.key))).toMatchObject({ tenantRef, scopes: ['read', 'write'] });
-    await call('partnerCreateKey', { account: 'user-1', name: 'Second' });
+    // One held below the server's limits for the account's agent (RFC 0004 A5).
+    const bounded = (await call('partnerCreateKey', {
+      account: 'user-1',
+      name: 'Second',
+      limits: { max_holds: 2, requires_approval: true },
+    })) as { key: string; api_key: { limits: unknown } };
+    expect(bounded.api_key.limits).toEqual({ max_holds: 2, requires_approval: true });
+    expect(await authenticateKey(bearer(bounded.key))).toMatchObject({ limits: { maxHolds: 2, requiresApproval: true } });
     await expect(call('partnerCreateKey', { account: 'user-1', name: 'Third' })).rejects.toMatchObject({
       code: 'api_key_limit_reached',
     });

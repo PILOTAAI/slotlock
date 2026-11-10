@@ -327,6 +327,7 @@ const PARTNER_KEY = {
   expires_at: null,
   last_used_at: null,
   revoked_at: null,
+  limits: null,
 };
 const APPROVAL_POLICY = {
   policy_ref: 'long-van-hires',

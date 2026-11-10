@@ -57,6 +57,7 @@ function memoryKeys() {
         lastUsedAt: null,
         revokedAt: null,
         ...(input.resourceScope ? { resourceScope: input.resourceScope } : {}),
+        ...(input.limits ? { limits: input.limits } : {}),
       });
     }),
     list: vi.fn(async ({ tenantRef }: { tenantRef: string }) =>
@@ -76,6 +77,13 @@ function memoryKeys() {
     }),
     authenticate: vi.fn(async () => null),
     erase: vi.fn(async () => 0),
+    setLimits: vi.fn(async ({ tenantRef, id, limits }: { tenantRef: string; id: string; limits: Record<string, unknown> }) => {
+      const row = rows.get(id);
+      if (!row || row.tenantRef !== tenantRef || row.revokedAt) return false;
+      if (Object.keys(limits).length === 0) delete (row as { limits?: unknown }).limits;
+      else (row as { limits?: unknown }).limits = limits;
+      return true;
+    }),
   } satisfies SlotlockApiKeyStore;
   return { store, rows };
 }
@@ -645,6 +653,41 @@ describe('API keys in the dashboard', () => {
     const html = await (await get(target, '/base/dashboard/keys', session)).text();
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img src=x');
+  });
+
+  it("holds a key below the server's limits, from its form and later (RFC 0004 A5)", async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const made = await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: token, name: 'Bounded', access: 'read_write', expires: 'never', max_holds: '3', requests_per_minute: '60' },
+      session,
+    );
+    expect(made.status).toBe(200);
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ limits: { maxHolds: 3, requestsPerMinute: 60 } }));
+    const [row] = [...keys.rows.values()];
+    expect(await (await get(target, '/base/dashboard/keys', session)).text()).toContain(
+      '<span class="meta wrap">At most 3 live holds, 60 requests a minute</span>',
+    );
+    const saved = await post(
+      target,
+      '/base/dashboard/keys/limits',
+      { csrf: token, id: row?.id as string, max_held_hours: '48', requires_approval: 'on' },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(keys.store.setLimits).toHaveBeenLastCalledWith({
+      tenantRef: 'github:4242',
+      id: row?.id,
+      limits: { maxHeldHours: 48, requiresApproval: true },
+    });
+    const bad = await post(target, '/base/dashboard/keys/limits', { csrf: token, id: row?.id as string, max_holds: '0' }, session);
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain('Give each limit as a whole number');
+    const elsewhere = await post(target, '/base/dashboard/keys/limits', { csrf: token, id: randomUUID(), max_holds: '2' }, session);
+    expect(elsewhere.status).toBe(404);
   });
 
   it("rotates and revokes keys in the person's tenant only", async () => {

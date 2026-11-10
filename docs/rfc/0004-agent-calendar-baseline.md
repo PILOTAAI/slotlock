@@ -267,8 +267,13 @@ People approve or decline in the dashboard, or with `POST /v1/approvals/{id}`. T
 `approval_pending` with the hold's id and expiry, and can wait on the feed. This replaces nothing:
 `SLOTLOCK_CONFIRM_WRITES` stays for interactive confirmation.
 
-**A5. Agent identity (T2).**
-- Settings per key: a hold cap, a rate, and which writes need confirmation or approval. These
+**A5. Agent identity (T2).** Status: per-key settings built; OAuth waits on decision D2.
+- Built: a key's live holds, held hours and requests a minute, each only lowering the server's,
+  and `requires_approval`, which holds every booking it makes for a person under A4 (policy
+  `api-key`). Kept in `api_key_limits` (owner-only), set from the CLI, the dashboard and the
+  partner API, carried on the principal, and enforced by the store's hold caps, the limiter and
+  A4's gate. Per-write confirmation stays the server's (`SLOTLOCK_CONFIRM_WRITES`).
+- As proposed: settings per key: a hold cap, a rate, and which writes need confirmation or approval. These
   override the tenant's settings, never upwards past the plan.
 - OAuth 2.1 for MCP clients, for the hosted service. An authorization server with client ID
   metadata documents (no open dynamic registration) issues tokens bound to a key's scopes. Owner

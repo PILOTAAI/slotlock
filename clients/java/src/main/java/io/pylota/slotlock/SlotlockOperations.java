@@ -2975,13 +2975,16 @@ public abstract class SlotlockOperations {
    * MCP, A2A and REST, as any key. environment: test makes it in the account's test environment
    * instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_).
    * scopes: some of the ones your contract allows (read and write unless it says), by default all
-   * of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
-   * api_key_limit_reached past the account plan's keys.
+   * of them; expires_in_days: 1-3650, or none. limits hold the key's agent below the server's
+   * limits: max_holds live at once, max_held_hours they hold together, requests_per_minute, and
+   * requires_approval to make every booking it asks for wait for a person (the account's
+   * Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the
+   * account plan's keys.
    *
    * @param account {@code account}, string
    * @param name {@code name}, string
    * @param optional the optional arguments, or null: {@code scopes} (list of string), {@code
-   * expires_in_days} (integer), {@code environment} (string)
+   * expires_in_days} (integer), {@code environment} (string), {@code limits} (object)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2989,7 +2992,7 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("account", account);
     values.put("name", name);
-    putOptional(values, optional, Set.of("scopes", "expires_in_days", "environment"), "slotlock_partner_create_key");
+    putOptional(values, optional, Set.of("scopes", "expires_in_days", "environment", "limits"), "slotlock_partner_create_key");
     return call("slotlock_partner_create_key", values);
   }
 
@@ -2999,8 +3002,11 @@ public abstract class SlotlockOperations {
    * MCP, A2A and REST, as any key. environment: test makes it in the account's test environment
    * instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_).
    * scopes: some of the ones your contract allows (read and write unless it says), by default all
-   * of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
-   * api_key_limit_reached past the account plan's keys.
+   * of them; expires_in_days: 1-3650, or none. limits hold the key's agent below the server's
+   * limits: max_holds live at once, max_held_hours they hold together, requests_per_minute, and
+   * requires_approval to make every booking it asks for wait for a person (the account's
+   * Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the
+   * account plan's keys.
    *
    * @param account {@code account}, string
    * @param name {@code name}, string

@@ -11,6 +11,8 @@ type StoreSql = Sql | TransactionSql;
 export const SLOTLOCK_MAX_APPROVAL_MINUTES = 30 * 24 * 60;
 /** The wait a policy that names none gives a person: a day. */
 export const SLOTLOCK_DEFAULT_APPROVAL_MINUTES = 24 * 60;
+/** The policy reference a key whose bookings all wait for a person is held by (RFC 0004 A5). */
+export const SLOTLOCK_KEY_APPROVAL_POLICY = 'api-key';
 /** Policies one tenant may have. */
 export const SLOTLOCK_MAX_APPROVAL_POLICIES = 50;
 export const SLOTLOCK_APPROVAL_KINDS: readonly SlotlockApprovalKind[] = Object.freeze(['single', 'pool', 'bundle', 'move']);
@@ -89,6 +91,9 @@ function refList(values: readonly string[] | undefined, pattern: RegExp, what: s
 /** A policy's stored shape, checked: applies_to and conditions in snake_case JSON. */
 function storedPolicy(params: PutApprovalPolicyParams) {
   if (!POLICY_REF.test(params.ref)) throw new SlotlockApprovalPolicyError('ref must be 1-63 of a-z, 0-9, _ and -');
+  if (params.ref === SLOTLOCK_KEY_APPROVAL_POLICY) {
+    throw new SlotlockApprovalPolicyError(`ref ${SLOTLOCK_KEY_APPROVAL_POLICY} is the one a key's own approval uses`);
+  }
   const name = params.name.trim();
   if (name.length < 1 || name.length > 200) throw new SlotlockApprovalPolicyError('name must be 1-200 characters');
   if (params.outcome !== 'require_approval' && params.outcome !== 'refuse') {

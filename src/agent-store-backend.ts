@@ -20,7 +20,12 @@ import type { SlotlockAgentChangeSource } from './change-watch.js';
 import { type SlotlockChangeOrigin, type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
-import { SLOTLOCK_MAX_APPROVAL_MINUTES, SlotlockApprovalPolicyError } from './approvals.js';
+import {
+  SLOTLOCK_DEFAULT_APPROVAL_MINUTES,
+  SLOTLOCK_KEY_APPROVAL_POLICY,
+  SLOTLOCK_MAX_APPROVAL_MINUTES,
+  SlotlockApprovalPolicyError,
+} from './approvals.js';
 import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentInvocationContext,
@@ -652,6 +657,14 @@ export function createSlotlockStoreAgentBackend(
       const slots = input.slots as { resource_id: string; start: string; end: string }[];
       const key = input.idempotency_key as string;
       const holderRef = agentOwnerRef(context);
+      const limits = context.principal.limits;
+      const holderCaps =
+        limits?.maxHolds !== undefined || limits?.maxHeldHours !== undefined
+          ? {
+              ...(limits.maxHolds !== undefined ? { maxHolds: limits.maxHolds } : {}),
+              ...(limits.maxHeldHours !== undefined ? { maxHeldHours: limits.maxHeldHours } : {}),
+            }
+          : undefined;
       // One group per agent and key, so a retry answers with the same holds and group.
       const groupId = uuidFromDigest(`slotlock-hold-group\0${holderRef}\0${key}`);
       return withTenant(store, context, async (tenantStore) => {
@@ -676,6 +689,8 @@ export function createSlotlockStoreAgentBackend(
             end: new Date(slot.end),
             ttlMs: (input.ttl_seconds as number) * 1_000,
             source: 'agent-server',
+            // The key's own caps, below the server's (RFC 0004 A5).
+            ...(holderCaps ? { holderCaps } : {}),
           });
           if (result.ok) {
             holds.push({
@@ -1532,6 +1547,17 @@ function storeRefusal(error: unknown): unknown {
   return error;
 }
 
+/** A key's limits as the API takes them (snake_case), as the key store takes them. */
+function keyLimitsFromInput(value: unknown) {
+  const given = value as { max_holds?: number; max_held_hours?: number; requests_per_minute?: number; requires_approval?: boolean };
+  return {
+    ...(given.max_holds !== undefined ? { maxHolds: given.max_holds } : {}),
+    ...(given.max_held_hours !== undefined ? { maxHeldHours: given.max_held_hours } : {}),
+    ...(given.requests_per_minute !== undefined ? { requestsPerMinute: given.requests_per_minute } : {}),
+    ...(given.requires_approval === true ? { requiresApproval: true } : {}),
+  };
+}
+
 /** An approval decision refused: 404 for none, 409 for one decided or past its wait. */
 function approvalRefusal(code: 'approval_not_found' | 'approval_not_pending' | 'approval_expired'): SlotlockAgentOperationError {
   return new SlotlockAgentOperationError(code, code === 'approval_not_found' ? 404 : 409);
@@ -1653,6 +1679,26 @@ interface ApprovalPlan {
   consumeHold?: { holdId: string; holderRef: string };
   pool?: string;
   policies: SlotlockApprovalPolicy[];
+  /** The key's own approval (RFC 0004 A5), beside the tenant's policies. */
+  keyPolicy?: SlotlockApprovalPolicy;
+}
+
+/**
+ * The policy a key whose bookings wait for a person (`requiresApproval`, RFC 0004 A5) is held by:
+ * every resource, a day's wait. A tenant cannot name a policy of its own `api-key`.
+ */
+function keyApprovalPolicy(): SlotlockApprovalPolicy {
+  return {
+    ref: SLOTLOCK_KEY_APPROVAL_POLICY,
+    name: 'Bookings by this API key',
+    appliesTo: {},
+    conditions: {},
+    outcome: 'require_approval',
+    approvalTtlMinutes: SLOTLOCK_DEFAULT_APPROVAL_MINUTES,
+    leadMinutes: 0,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  };
 }
 
 /** A JSON value with its object keys sorted, so two requests compare by content. */
@@ -1757,8 +1803,10 @@ function withApprovalPolicies(
     const tenantRef = context.principal.tenantRef;
     const ownerRef = agentOwnerRef(context);
     const key = input.idempotency_key as string;
+    // A key whose bookings all wait for a person (RFC 0004 A5) is a policy of its own.
+    const keyPolicy = context.principal.limits?.requiresApproval === true ? keyApprovalPolicy() : undefined;
     // Most tenants have none: one small indexed read, and nothing else looked up.
-    if ((await tenantStore.listApprovalPolicies({ tenantRef })).length === 0) return null;
+    if (!keyPolicy && (await tenantStore.listApprovalPolicies({ tenantRef })).length === 0) return null;
     let asked: Omit<ApprovalPlan, 'policies'>;
     if (operation === 'slotlock_create_event') {
       asked = {
@@ -1827,7 +1875,8 @@ function withApprovalPolicies(
         (policy.conditions.kinds === undefined || policy.conditions.kinds.includes(asked.kind)) &&
         (policy.conditions.longerThanMinutes === undefined || minutes > policy.conditions.longerThanMinutes),
     );
-    return policies.length === 0 ? null : { ...asked, policies };
+    if (policies.length === 0 && !keyPolicy) return null;
+    return { ...asked, policies, ...(keyPolicy ? { keyPolicy } : {}) };
   }
 
   function gated(operation: GatedOperation, method: Method): Method {
@@ -1883,11 +1932,14 @@ function withApprovalPolicies(
       const written = [...new Set(occupied.map((occupation) => occupation.resourceId))];
       const decided = await withTenant(store, { ...context, dryRun: false }, async (tenantStore) => {
         // A pool's policies are those of the member the write would take, and its pool.
-        const candidates = ask.pool
-          ? (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: written })).filter((policy) =>
-              ask.policies.some((known) => known.ref === policy.ref),
-            )
-          : ask.policies;
+        const candidates = [
+          ...(ask.pool
+            ? (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: written })).filter((policy) =>
+                ask.policies.some((known) => known.ref === policy.ref),
+              )
+            : ask.policies),
+          ...(ask.keyPolicy ? [ask.keyPolicy] : []),
+        ];
         const applying: SlotlockApprovalPolicy[] = [];
         for (const policy of candidates) {
           if (policy.conditions.outsideHours === true) {
@@ -3220,6 +3272,7 @@ export function createSlotlockStoreApplicationBackend(
           actor: context.principal.subject,
           origin: 'application',
           ...(days !== undefined ? { expiresAt: new Date(Date.now() + days * 86_400_000) } : {}),
+          ...(input.limits !== undefined ? { limits: keyLimitsFromInput(input.limits) } : {}),
         });
         return { key: created.key, api_key: slotlockPartnerKeyOutput(created.apiKey) };
       } catch (error) {

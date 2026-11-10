@@ -1863,6 +1863,8 @@ pub struct PartnerCreateKeyInput {
     pub expires_in_days: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Value>,
 }
 
 /// The arguments of [`Client::partner_rotate_key`].
@@ -2815,8 +2817,11 @@ impl Client {
     /// any key. environment: test makes it in the account's test environment instead (a tenant of
     /// its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
     /// ones your contract allows (read and write unless it says), by default all of them;
-    /// expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
-    /// api_key_limit_reached past the account plan's keys.
+    /// expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits:
+    /// max_holds live at once, max_held_hours they hold together, requests_per_minute, and
+    /// requires_approval to make every booking it asks for wait for a person (the account's
+    /// Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past
+    /// the account plan's keys.
     pub fn partner_create_key(&self, input: &PartnerCreateKeyInput) -> Result<Value, Error> {
         self.call("slotlock_partner_create_key", serde_json::to_value(input)?)
     }

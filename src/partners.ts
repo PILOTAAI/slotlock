@@ -534,6 +534,16 @@ export function slotlockPartnerKeyOutput(apiKey: SlotlockApiKey): Record<string,
     expires_at: apiKey.expiresAt?.toISOString() ?? null,
     last_used_at: apiKey.lastUsedAt?.toISOString() ?? null,
     revoked_at: apiKey.revokedAt?.toISOString() ?? null,
+    limits: apiKey.limits
+      ? {
+          ...(apiKey.limits.maxHolds !== undefined ? { max_holds: apiKey.limits.maxHolds } : {}),
+          ...(apiKey.limits.maxHeldHours !== undefined ? { max_held_hours: apiKey.limits.maxHeldHours } : {}),
+          ...(apiKey.limits.requestsPerMinute !== undefined
+            ? { requests_per_minute: apiKey.limits.requestsPerMinute }
+            : {}),
+          ...(apiKey.limits.requiresApproval ? { requires_approval: true } : {}),
+        }
+      : null,
   };
 }
 

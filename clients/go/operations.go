@@ -3130,6 +3130,8 @@ type PartnerCreateKeyInput struct {
 	ExpiresInDays *int64
 
 	Environment *string
+
+	Limits map[string]any
 }
 
 func (in PartnerCreateKeyInput) values() map[string]any {
@@ -3145,6 +3147,9 @@ func (in PartnerCreateKeyInput) values() map[string]any {
 	if in.Environment != nil {
 		values["environment"] = *in.Environment
 	}
+	if in.Limits != nil {
+		values["limits"] = in.Limits
+	}
 	return values
 }
 
@@ -3153,8 +3158,11 @@ func (in PartnerCreateKeyInput) values() map[string]any {
 // account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the
 // account's test environment instead (a tenant of its own, on the same plan, never billed; its
 // keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it
-// says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
-// another scope; 409 api_key_limit_reached past the account plan's keys.
+// says), by default all of them; expires_in_days: 1-3650, or none. limits hold the key's agent
+// below the server's limits: max_holds live at once, max_held_hours they hold together,
+// requests_per_minute, and requires_approval to make every booking it asks for wait for a person
+// (the account's Approvals). 403 scope_not_in_contract for another scope; 409
+// api_key_limit_reached past the account plan's keys.
 func (c *Client) PartnerCreateKey(ctx context.Context, in PartnerCreateKeyInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_partner_create_key", in.values())
 }

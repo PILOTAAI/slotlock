@@ -163,6 +163,9 @@ export interface SlotlockRequestLimits {
 
 type Route = 'mcp' | 'a2a' | 'rest' | 'sign_in' | 'health' | 'other';
 
+/** Distinct per-key rates (RFC 0004 A5) one server keeps buckets for; past this the oldest goes. */
+const MAX_KEY_LIMIT_RATES = 1_000;
+
 interface Policy {
   name: string;
   rate: SlotlockRate;
@@ -192,6 +195,8 @@ interface RequestState {
   /** Aborted when the client goes, which ends a wait for a slot. */
   signal: AbortSignal;
   charged: { read: boolean; write: boolean };
+  /** The key's own rate (RFC 0004 A5) taken, once for the request. */
+  chargedKeyLimit?: boolean;
   refusal?: { reason: SlotlockRefusalReason; fields: Record<string, string> };
   tightest?: Verdict;
   /** The tenant's quotas as its last operation found them, for the answer's RateLimit fields. */
@@ -605,6 +610,19 @@ export function createSlotlockRequestLimits(
   for (const [name, rate] of Object.entries(rates) as [SlotlockRateName, SlotlockRate | null][]) {
     if (rate !== null) policies.set(name, { policy: { name, rate }, buckets: bucketsFor(rate) });
   }
+  // Keys' own rates (RFC 0004 A5), one set of buckets for each rate in use; a key's bucket is keyed
+  // by key and rate, so a changed rate starts a fresh bucket.
+  const keyLimits = new Map<number, { policy: Policy; buckets: ReturnType<typeof bucketsFor> }>();
+  const keyLimitEntry = (perMinute: number) => {
+    let entry = keyLimits.get(perMinute);
+    if (!entry) {
+      if (keyLimits.size >= MAX_KEY_LIMIT_RATES) keyLimits.delete(keyLimits.keys().next().value as number);
+      const rate = { perSecond: perMinute / 60, burst: perMinute };
+      entry = { policy: { name: 'key_limit', rate }, buckets: bucketsFor(rate) };
+      keyLimits.set(perMinute, entry);
+    }
+    return entry;
+  };
   const states = new AsyncLocalStorage<RequestState>();
   const looked = new WeakMap<Request, SlotlockAgentPrincipal | null>();
   const addresses = new WeakMap<Request, string>();
@@ -682,13 +700,15 @@ export function createSlotlockRequestLimits(
    * Take a token from every bucket named, or from none: one with less than a token refuses the
    * request, and the one that frees soonest is not the answer, the one that frees last is.
    */
-  function charge(checks: Array<{ name: SlotlockRateName; key: string }>): {
+  function charge(
+    checks: Array<{ name: SlotlockRateName; key: string; entry?: { policy: Policy; buckets: ReturnType<typeof bucketsFor> } }>,
+  ): {
     ok: boolean;
     verdict?: Verdict;
   } {
     const at = now();
-    const found = checks.flatMap(({ name, key }) => {
-      const entry = policies.get(name);
+    const found = checks.flatMap(({ name, key, entry: given }) => {
+      const entry = given ?? policies.get(name);
       return entry ? [{ policy: entry.policy, bucket: entry.buckets.get(key, at) }] : [];
     });
     if (found.length === 0) return { ok: true };
@@ -733,7 +753,14 @@ export function createSlotlockRequestLimits(
     const application =
       state.application &&
       (principal.scopes === undefined || principal.scopes.includes(SLOTLOCK_APPLICATION_SCOPE));
-    const checks = due.flatMap((kind) => [
+    // A key's own rate (RFC 0004 A5): a minute's requests, reads and writes alike, as a bucket of
+    // its own beside the server's, so it only ever lowers what the key may do.
+    const own = principal.limits?.requestsPerMinute;
+    const keyLimit =
+      own !== undefined && Number.isSafeInteger(own) && own >= 1 && !state.chargedKeyLimit
+        ? [{ name: 'key_limit' as SlotlockRateName, key: `${keyOf}\0${own}`, entry: keyLimitEntry(own) }]
+        : [];
+    const checks = [...keyLimit, ...due.flatMap((kind) => [
       ...(application
         ? [{ name: `app_${kind}` as SlotlockRateName, key: principal.tenantRef }]
         : [
@@ -741,7 +768,7 @@ export function createSlotlockRequestLimits(
             { name: `tenant_${kind}` as SlotlockRateName, key: principal.tenantRef },
           ]),
       { name: `global_${kind}` as SlotlockRateName, key: '' },
-    ]);
+    ])];
     const outcome = charge(checks);
     if (!outcome.ok) {
       state.refusal = {
@@ -771,6 +798,7 @@ export function createSlotlockRequestLimits(
       }
     }
     for (const kind of due) state.charged[kind] = true;
+    if (keyLimit.length > 0) state.chargedKeyLimit = true;
     if (outcome.verdict) state.tightest = outcome.verdict;
     return true;
   }

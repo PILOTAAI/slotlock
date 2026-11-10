@@ -19,6 +19,7 @@ import type { SlotlockDashboardTeams } from './teams.js';
 import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
   type SlotlockApiKey,
+  type SlotlockApiKeyLimits,
   type SlotlockApiKeyScope,
   type SlotlockApiKeyStore,
 } from './api-keys.js';
@@ -142,6 +143,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/keys',
   '/keys/rotate',
   '/keys/revoke',
+  '/keys/limits',
   '/resources',
   '/resources/rules',
   '/resources/pool',
@@ -1838,13 +1840,33 @@ ${noticeOf(notice)}
     return respond(status, layout('Sign in', content, null), {}, cookies);
   }
 
+  /** A key's own limits (RFC 0004 A5) as fields, filled with what it has. */
+  const keyLimitFields = (limits?: SlotlockApiKeyLimits) =>
+    html`<label>Live holds at most<input name="max_holds" inputmode="numeric" pattern="[0-9]*" maxlength="5" value="${limits?.maxHolds !== undefined ? String(limits.maxHolds) : ''}" placeholder="Server's"></label>
+<label>Hours held at most<input name="max_held_hours" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${limits?.maxHeldHours !== undefined ? String(limits.maxHeldHours) : ''}" placeholder="Server's"></label>
+<label>Requests a minute<input name="requests_per_minute" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${limits?.requestsPerMinute !== undefined ? String(limits.requestsPerMinute) : ''}" placeholder="Server's"></label>
+<label class="choice"><input type="checkbox" name="requires_approval" value="on"${limits?.requiresApproval ? html` checked` : html``}> Its bookings wait for approval</label>`;
+
+  /** A key's limits in words, for its row. */
+  const keyLimitsText = (limits: SlotlockApiKeyLimits) =>
+    [
+      limits.maxHolds !== undefined ? `${String(limits.maxHolds)} live holds` : '',
+      limits.maxHeldHours !== undefined ? `${String(limits.maxHeldHours)} hours held` : '',
+      limits.requestsPerMinute !== undefined ? `${String(limits.requestsPerMinute)} requests a minute` : '',
+      limits.requiresApproval ? 'bookings need approval' : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+
   function keyRows(keys: SlotlockApiKey[], token: string, session: Session): Html[] {
     return keys.map((key) => {
       const expired = key.expiresAt !== null && key.expiresAt.getTime() <= now();
       const status = key.revokedAt ? 'Revoked' : expired ? 'Expired' : 'Active';
       const actions =
         status === 'Active'
-          ? html`<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
+          ? html`<details class="act"><summary>Limits</summary><div class="pop"><p>Hold this key below the server's limits. Empty is the server's.</p>
+<form method="post" action="${root}/keys/limits"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}">${keyLimitFields(key.limits)}<button type="submit">Save limits</button></form></div></details>
+<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
 <form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></div></details>
 <details class="act danger"><summary>Revoke</summary><div class="pop"><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
@@ -1853,8 +1875,8 @@ ${noticeOf(notice)}
 <td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${session.org !== undefined ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : key.createdBy?.startsWith('google:') ? 'a Google user' : 'someone unknown'}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
 <td data-label="Access">${
-        key.resourceScope
-          ? html`<span class="cell"><span>${accessOf(key)}</span><span class="meta wrap">Only ${[...key.resourceScope.locations, ...key.resourceScope.groups.map((group) => `group ${group}`)].join(', ')}</span></span>`
+        key.resourceScope || key.limits
+          ? html`<span class="cell"><span>${accessOf(key)}</span>${key.resourceScope ? html`<span class="meta wrap">Only ${[...key.resourceScope.locations, ...key.resourceScope.groups.map((group) => `group ${group}`)].join(', ')}</span>` : html``}${key.limits ? html`<span class="meta wrap">At most ${keyLimitsText(key.limits)}</span>` : html``}</span>`
           : accessOf(key)
       }</td>
 <td data-label="Created">${dateCell(key.createdAt)}</td>
@@ -2048,6 +2070,7 @@ ${endpoints()}
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
 ${limitChoices}
+<details class="types"><summary>Agent limits (optional)</summary><div class="checks">${keyLimitFields()}</div><p class="fine">Below the server's own limits, never above them. A key whose bookings wait for approval sends each to the Approvals page.</p></details>
 </form>
 </section>
 ${
@@ -4595,6 +4618,8 @@ ${
       groups: [...new Set(form.getAll('limit_group'))],
     };
     const resourceScope = limited.locations.length + limited.groups.length > 0 ? limited : undefined;
+    const limits = keyLimitsOf(form);
+    if (typeof limits === 'string') return keysPage(session, 400, limits);
     if (resourceScope) {
       if (scopes.includes('admin')) {
         return keysPage(session, 400, 'A key limited to locations or groups reads and writes only: choose that access.');
@@ -4614,6 +4639,7 @@ ${
         createdBy: personOf(session),
         origin: 'dashboard',
         ...(resourceScope ? { resourceScope } : {}),
+        ...(Object.keys(limits).length > 0 ? { limits } : {}),
         ...(typeof days === 'number' ? { expiresAt: new Date(now() + days * DAY_MS) } : {}),
       });
       return shownOncePage(session, created.key, created.apiKey, false);
@@ -4644,6 +4670,39 @@ ${
     actor: personOf(session),
     origin: 'dashboard' as const,
   });
+
+  /** A key's limits from its form (RFC 0004 A5): each empty field the server's; else what is wrong. */
+  function keyLimitsOf(form: URLSearchParams): SlotlockApiKeyLimits | string {
+    const whole = (name: string, most: number): number | undefined | null => {
+      const text = (form.get(name) ?? '').trim();
+      if (text === '') return undefined;
+      const value = /^[0-9]{1,7}$/.test(text) ? Number(text) : Number.NaN;
+      return Number.isSafeInteger(value) && value >= 1 && value <= most ? value : null;
+    };
+    const maxHolds = whole('max_holds', 10_000);
+    const maxHeldHours = whole('max_held_hours', 876_000);
+    const requestsPerMinute = whole('requests_per_minute', 100_000);
+    if (maxHolds === null || maxHeldHours === null || requestsPerMinute === null) {
+      return 'Give each limit as a whole number: live holds 1 to 10,000, hours held 1 to 876,000, requests a minute 1 to 100,000. Leave one empty for the server’s.';
+    }
+    return {
+      ...(maxHolds !== undefined ? { maxHolds } : {}),
+      ...(maxHeldHours !== undefined ? { maxHeldHours } : {}),
+      ...(requestsPerMinute !== undefined ? { requestsPerMinute } : {}),
+      ...(form.get('requires_approval') === 'on' ? { requiresApproval: true } : {}),
+    };
+  }
+
+  async function saveKeyLimits(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id)) return keysPage(session, 404, 'That key is not one of yours.');
+    const limits = keyLimitsOf(form);
+    if (typeof limits === 'string') return keysPage(session, 400, limits);
+    if (!(await options.keys.setLimits({ tenantRef: tenantOf(session), id, limits }))) {
+      return keysPage(session, 404, 'That key is not an active key of yours.');
+    }
+    return redirect(303, `${root}/keys`);
+  }
 
   async function changeKey(session: Session, form: URLSearchParams, change: 'rotate' | 'revoke') {
     const id = form.get('id') ?? '';
@@ -4791,6 +4850,8 @@ ${
         return changeKey(session, form, 'rotate');
       case '/keys/revoke':
         return changeKey(session, form, 'revoke');
+      case '/keys/limits':
+        return saveKeyLimits(session, form);
       case '/resources':
         return addResource(session, form);
       case '/hours':

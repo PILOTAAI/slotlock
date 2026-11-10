@@ -730,10 +730,17 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     expect(expiresIn).toBeGreaterThan(30 * 86_400_000 - 60_000);
     expect(expiresIn).toBeLessThan(30 * 86_400_000 + 60_000);
 
+    // Held below the server's limits (RFC 0004 A5), then changed.
+    const bounded = await run(['key', 'limits', reader.id as string, '--max-holds', '2', '--requires-approval']);
+    expect(bounded.code).toBe(0);
+    expect(JSON.parse(bounded.stdout.text())).toEqual({ id: reader.id, limits: { max_holds: 2, requires_approval: true } });
+    expect((await run(['key', 'limits', reader.id as string, '--max-holds', '0'])).code).toBe(2);
+
     const listed = await run(['key', 'list']);
     expect(listed.code).toBe(0);
     const rows = listed.stdout.events();
     expect(rows.map(({ id }) => id)).toEqual([reader.id, writer.id]);
+    expect(rows[0]?.limits).toEqual({ max_holds: 2, requires_approval: true });
     expect(rows.every((row) => !('key' in row))).toBe(true);
     expect(listed.stdout.text()).not.toContain(writer.key as string);
 

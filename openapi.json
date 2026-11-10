@@ -19071,6 +19071,37 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "limits": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "max_holds": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 10000
+                                  },
+                                  "max_held_hours": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 876000
+                                  },
+                                  "requests_per_minute": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 100000
+                                  },
+                                  "requires_approval": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -19081,7 +19112,8 @@
                           "created_at",
                           "expires_at",
                           "last_used_at",
-                          "revoked_at"
+                          "revoked_at",
+                          "limits"
                         ],
                         "additionalProperties": false
                       }
@@ -19118,7 +19150,7 @@
       "post": {
         "operationId": "slotlock_partner_create_key",
         "summary": "Create a key for an account",
-        "description": "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the account's test environment instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
+        "description": "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the account's test environment instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits: max_holds live at once, max_held_hours they hold together, requests_per_minute, and requires_approval to make every booking it asks for wait for a person (the account's Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
         "tags": [
           "Partner"
         ],
@@ -19159,6 +19191,30 @@
                       "live",
                       "test"
                     ]
+                  },
+                  "limits": {
+                    "type": "object",
+                    "properties": {
+                      "max_holds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10000
+                      },
+                      "max_held_hours": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 876000
+                      },
+                      "requests_per_minute": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100000
+                      },
+                      "requires_approval": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -19256,6 +19312,37 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "limits": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "max_holds": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 10000
+                                },
+                                "max_held_hours": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 876000
+                                },
+                                "requests_per_minute": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 100000
+                                },
+                                "requires_approval": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -19266,7 +19353,8 @@
                         "created_at",
                         "expires_at",
                         "last_used_at",
-                        "revoked_at"
+                        "revoked_at",
+                        "limits"
                       ],
                       "additionalProperties": false
                     }
@@ -19430,6 +19518,37 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "limits": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "max_holds": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 10000
+                                },
+                                "max_held_hours": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 876000
+                                },
+                                "requests_per_minute": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 100000
+                                },
+                                "requires_approval": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -19440,7 +19559,8 @@
                         "created_at",
                         "expires_at",
                         "last_used_at",
-                        "revoked_at"
+                        "revoked_at",
+                        "limits"
                       ],
                       "additionalProperties": false
                     }
@@ -19591,6 +19711,37 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "limits": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "max_holds": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 10000
+                                },
+                                "max_held_hours": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 876000
+                                },
+                                "requests_per_minute": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 100000
+                                },
+                                "requires_approval": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -19601,7 +19752,8 @@
                         "created_at",
                         "expires_at",
                         "last_used_at",
-                        "revoked_at"
+                        "revoked_at",
+                        "limits"
                       ],
                       "additionalProperties": false
                     }

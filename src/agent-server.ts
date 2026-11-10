@@ -745,6 +745,17 @@ export interface SlotlockAgentPrincipal {
    */
   resourceScope?: { readonly locations: readonly string[]; readonly groups: readonly string[] };
   /**
+   * For a key held below the server's limits (RFC 0004 A5): its live holds and held hours (the store
+   * backend lowers the store's caps to them), its requests a minute (`slotlock serve`'s limiter),
+   * and whether its bookings wait for a person (the store backend's approval policies).
+   */
+  limits?: {
+    readonly maxHolds?: number;
+    readonly maxHeldHours?: number;
+    readonly requestsPerMinute?: number;
+    readonly requiresApproval?: boolean;
+  };
+  /**
    * For a partner key (RFC 0003 P1), its partner: with the `partner` scope, the partner API acts
    * for this partner's accounts and no other (partners.ts).
    */

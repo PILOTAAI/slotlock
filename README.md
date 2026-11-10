@@ -222,6 +222,8 @@ slotlock key create "Booking agent"
 slotlock key create "Availability bot" --scope read --expires-in-days 90
 slotlock key create "Booking site" --scope read,write,admin
 slotlock key create "North desk" --locations north --groups night-shift
+slotlock key create "Trial agent" --max-holds 3 --requests-per-minute 60 --requires-approval
+slotlock key limits <id> --max-held-hours 48
 slotlock key list
 slotlock key rotate <id>
 slotlock key revoke <id>
@@ -240,6 +242,15 @@ slotlock key revoke <id>
   server: `withTenant` sets the key's resources for the transaction and a restrictive row-level
   security policy (`resource_scope_v1`) on every table keyed by resource narrows each read and
   write to them. A limited key reads and writes only (no `admin`), and keeps its limit for good.
+- A key can be held below the server's limits, never above them: `--max-holds` (its live holds,
+  under `holder_holds`), `--max-held-hours` (under `holder_held_hours`), `--requests-per-minute`
+  (reads and writes alike, beside the server's per-key rates; a refusal names `key_limit`) and
+  `--requires-approval` (every booking it makes waits for a person, as an
+  [approval policy](#tools) named `api-key` would hold it). `slotlock key limits <id>`
+  replaces them, and none at all gives the key the server's again; the dashboard's key form and
+  "Limits" do the same, and so does the partner API's `limits` for an account's key. They apply
+  from the key's next request and are kept through rotation. A role granted before them
+  authenticates keys without their limits until `grantApplicationRole` (`slotlock migrate`) runs.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
 - Every tenant has a test environment, `<tenant>~test`: a tenant of its own (its own resources,

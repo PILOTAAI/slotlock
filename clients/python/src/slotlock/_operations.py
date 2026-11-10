@@ -2823,6 +2823,7 @@ class Operations(Transport):
         scopes: list[str] | None = None,
         expires_in_days: int | None = None,
         environment: str | None = None,
+        limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a key for an account.
 
@@ -2831,8 +2832,11 @@ class Operations(Transport):
         any key. environment: test makes it in the account's test environment instead (a tenant of
         its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
         ones your contract allows (read and write unless it says), by default all of them;
-        expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
-        api_key_limit_reached past the account plan's keys.
+        expires_in_days: 1-3650, or none. limits hold the key's agent below the server's limits:
+        max_holds live at once, max_held_hours they hold together, requests_per_minute, and
+        requires_approval to make every booking it asks for wait for a person (the account's
+        Approvals). 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past
+        the account plan's keys.
         """
         values: dict[str, Any] = {"account": account, "name": name}
         if scopes is not None:
@@ -2841,6 +2845,8 @@ class Operations(Transport):
             values["expires_in_days"] = expires_in_days
         if environment is not None:
             values["environment"] = environment
+        if limits is not None:
+            values["limits"] = limits
         return self.call("slotlock_partner_create_key", values)
 
     def partner_rotate_key(
