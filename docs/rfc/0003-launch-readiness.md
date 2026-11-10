@@ -275,13 +275,19 @@ resource's groups but does not edit them. `slotlock.resource_groups (tenant_ref,
 groups a resource. API: `GET/POST /v1/groups`, `PUT` and `DELETE
 /v1/groups/{ref}/members/{resource_id}`. Pools stay as they are; a pool is not a group.
 
-**G4. Search by selection (T1).** `free-busy`, `next-available`, `available-slots` and their tools
+**G4. Search by selection (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, with the
+selection as top-level fields (`location`, `group`, `labels`, `kind`, `pool`) rather than a `select`
+object, as a GET query string carries them, and resolved by the backend's `selectResources` as the
+call starts rather than in the search's own transaction, so a backend that only searches named
+resources works unchanged; `selection_empty` answers a selection that matches none. `free-busy`, `next-available`, `available-slots` and their tools
 accept a `select` of `location`, `group`, `labels`, `kind` and `pool` in place of `resource_ids`.
 It resolves inside the same transaction, in a stable order, to at most the operation's limit (100,
 or 20 for slots), and is refused with `selection_too_large` beyond it, so a search is never silently
 partial. The answer names the resources it covered.
 
-**G5. Webhook filters (T1).** An endpoint may also filter by `resource_ids`, `pools`, `locations`
+**G5. Webhook filters (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, set
+when the endpoint is created (there is no route to change an endpoint) and shown on the dashboard;
+with any filter, changes about no resource are not sent. An endpoint may also filter by `resource_ids`, `pools`, `locations`
 or `groups`, matched when the change is delivered (the outbox row has the resource id).
 
 **G6. Keys limited to part of a tenant (T2, 0.8.0).** An API key may carry a scope of locations

@@ -2065,6 +2065,12 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect(listed).toContain('Delivering');
 
     const endpoint = endpoints[0] as SlotlockWebhookEndpoint;
+    // A filter set over the API is shown, in a few words.
+    endpoint.filter = { resourceIds: ['0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b'], locations: ['north', 'leeds'] };
+    expect(await (await get(target, '/base/dashboard/webhooks', session)).text()).toContain(
+      '<span class="meta">Only 1 resource; locations north, leeds</span>',
+    );
+    delete endpoint.filter;
     Object.assign(endpoint, { failingSince: new Date(now - 3_600_000), attempts: 4, lastStatus: 503 });
     expect(await (await get(target, '/base/dashboard/webhooks', session)).text()).toMatch(/Failing[\s\S]*4 attempts, last HTTP 503/);
     Object.assign(endpoint, { disabledAt: new Date(now), disabledReason: 'Failing for a day' });

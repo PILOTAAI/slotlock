@@ -628,6 +628,16 @@ export interface SlotlockAgentCalendarBackend {
     resourceId: string,
   ): Promise<{ name: string | null; timezone: string | null } | null>;
   /**
+   * Optional. The ids of the resources a search selects instead of naming them (RFC 0003 G4): the
+   * principal's shared, unarchived resources that match every criterion given, in a stable order (by
+   * id). More than `limit` is refused with `selection_too_large`, so a search is never silently
+   * partial. Without it, a search by selection answers `selection_not_supported`.
+   */
+  selectResources?(
+    context: SlotlockAgentInvocationContext,
+    selection: SlotlockResourceSelection & { limit: number },
+  ): Promise<string[]>;
+  /**
    * Optional. Hold up to five candidate slots for this principal, as alternatives in one group
    * (`slotlock_hold_slots`); a tool without it answers `holds_unavailable`.
    */
@@ -950,6 +960,34 @@ export interface SlotlockAgentOperationDispatchOptions {
   onUsage?: (usage: SlotlockAgentUsage) => void;
 }
 
+/** What a search may select resources by, in place of naming them (RFC 0003 G4). */
+export interface SlotlockResourceSelection {
+  /** At this location or one in it. */
+  location?: string;
+  /** In this group. */
+  group?: string;
+  /** With every one of these labels. */
+  labels?: string[];
+  /** Of this kind. */
+  kind?: string;
+  /** In this pool. */
+  pool?: string;
+}
+
+/** The searches that take a selection, and the most resources each may cover. */
+const SELECTING_OPERATIONS: ReadonlyMap<SlotlockAgentOperation, number> = new Map([
+  ['slotlock_get_free_busy', 100],
+  ['slotlock_find_next_available', 100],
+  ['slotlock_find_available_slots', 20],
+]);
+const SELECTION_FIELDS = ['location', 'group', 'labels', 'kind', 'pool'] as const;
+
+/** Whether a search's input names its resources, or selects them, and not both or neither. */
+function selectsOrNames(input: { resource_ids?: unknown }): boolean {
+  const selects = SELECTION_FIELDS.some((field) => (input as Record<string, unknown>)[field] !== undefined);
+  return (input.resource_ids !== undefined) !== selects;
+}
+
 /** One reason `invalid_arguments` refused a call: where in the arguments, and what is wrong there. */
 export interface SlotlockArgumentIssue {
   /** The field's path in the arguments, outermost first (`["rules", 0, "rrule"]`); `[]` is the arguments as a whole. */
@@ -1089,14 +1127,21 @@ const OPERATION_DEFINITIONS = [
   {
     name: 'slotlock_get_free_busy',
     title: 'Get free-busy',
-    description: 'Return privacy-minimized busy intervals and explicit coverage certainty.',
+    description:
+      'Return privacy-minimized busy intervals and explicit coverage certainty. Name the resources with resource_ids, or select them instead by location (and every location in it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large, none selection_empty), named in selected_resource_ids.',
     input: z
       .object({
-        resource_ids: z.array(RESOURCE_ID).min(1).max(100),
+        resource_ids: z.array(RESOURCE_ID).min(1).max(100).optional(),
+        location: GROUPING_REF.optional(),
+        group: GROUPING_REF.optional(),
+        labels: z.array(RESOURCE_LABEL).min(1).max(MAX_RESOURCE_LABELS).optional(),
+        kind: RESOURCE_KIND.optional(),
+        pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
       })
       .strict()
+      .refine(selectsOrNames, 'Give resource_ids, or select resources by location, group, labels, kind or pool: one or the other')
       .refine(boundedAgentWindow),
     output: z
       .object({
@@ -1111,6 +1156,8 @@ const OPERATION_DEFINITIONS = [
               .strict(),
           )
           .max(100),
+        /** The resources a selection covered, when the call selected rather than named them. */
+        selected_resource_ids: z.array(RESOURCE_ID).max(100).optional(),
       })
       .strict(),
     risk: { readOnly: true, destructive: false, idempotent: true },
@@ -1121,15 +1168,21 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_find_next_available',
     title: 'Find next available interval',
     description:
-      'Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found).',
+      'Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found). Name the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 100.',
     input: z
       .object({
-        resource_ids: z.array(RESOURCE_ID).min(1).max(100),
+        resource_ids: z.array(RESOURCE_ID).min(1).max(100).optional(),
+        location: GROUPING_REF.optional(),
+        group: GROUPING_REF.optional(),
+        labels: z.array(RESOURCE_LABEL).min(1).max(MAX_RESOURCE_LABELS).optional(),
+        kind: RESOURCE_KIND.optional(),
+        pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
         duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
       })
       .strict()
+      .refine(selectsOrNames, 'Give resource_ids, or select resources by location, group, labels, kind or pool: one or the other')
       .refine(boundedAgentWindow),
     output: z
       .object({
@@ -1137,6 +1190,8 @@ const OPERATION_DEFINITIONS = [
         start: DATE_TIME.nullable(),
         end: DATE_TIME.nullable(),
         coverage: COVERAGE,
+        /** The resources a selection covered, when the call selected rather than named them. */
+        selected_resource_ids: z.array(RESOURCE_ID).max(100).optional(),
       })
       .strict(),
     risk: { readOnly: true, destructive: false, idempotent: true },
@@ -1147,10 +1202,15 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_find_available_slots',
     title: 'Find available slots',
     description:
-      'List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource\'s hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource\'s coverage is certain.',
+      'List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource\'s hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource\'s coverage is certain. Name the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 20.',
     input: z
       .object({
-        resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES),
+        resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES).optional(),
+        location: GROUPING_REF.optional(),
+        group: GROUPING_REF.optional(),
+        labels: z.array(RESOURCE_LABEL).min(1).max(MAX_RESOURCE_LABELS).optional(),
+        kind: RESOURCE_KIND.optional(),
+        pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
         duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
@@ -1158,6 +1218,7 @@ const OPERATION_DEFINITIONS = [
         require_free: z.number().int().min(1).max(MAX_SLOT_RESOURCES).optional(),
       })
       .strict()
+      .refine(selectsOrNames, 'Give resource_ids, or select resources by location, group, labels, kind or pool: one or the other')
       .refine(boundedAgentWindow),
     output: z
       .object({
@@ -1174,6 +1235,8 @@ const OPERATION_DEFINITIONS = [
           )
           .max(MAX_LISTED_SLOTS),
         coverage: COVERAGE,
+        /** The resources a selection covered, when the call selected rather than named them. */
+        selected_resource_ids: z.array(RESOURCE_ID).max(MAX_SLOT_RESOURCES).optional(),
       })
       .strict(),
     risk: { readOnly: true, destructive: false, idempotent: true },
@@ -1956,7 +2019,29 @@ export async function invokeSlotlockAgentOperation(args: {
       operation: operation.name,
       origin: args.origin ?? 'library',
     });
-    const data = await method.call(backend, context, parsed.data);
+    // A search that selects its resources by what they are is run as one naming them: the
+    // selection is resolved first, by the backend, and the answer says which it covered.
+    let input = parsed.data;
+    let selected: string[] | undefined;
+    const most = SELECTING_OPERATIONS.get(operation.name);
+    if (most !== undefined && input.resource_ids === undefined) {
+      if (!backend.selectResources) return { ok: false, status: 400, code: 'selection_not_supported' };
+      const selection: SlotlockResourceSelection = {};
+      for (const field of SELECTION_FIELDS) {
+        if (input[field] !== undefined) (selection as Record<string, unknown>)[field] = input[field];
+      }
+      selected = await backend.selectResources(
+        { ...context, operation: operation.name },
+        { ...selection, limit: most },
+      );
+      if (selected.length === 0) return { ok: false, status: 404, code: 'selection_empty' };
+      input = Object.fromEntries(
+        Object.entries(input).filter(([key]) => !(SELECTION_FIELDS as readonly string[]).includes(key)),
+      );
+      input.resource_ids = selected;
+    }
+    const answered = await method.call(backend, context, input);
+    const data = selected ? { ...answered, selected_resource_ids: selected } : answered;
     if (!operation.output.safeParse(data).success) {
       // Neither the result nor the schema's complaint about it: either may hold tenant data.
       reportUnexpected(

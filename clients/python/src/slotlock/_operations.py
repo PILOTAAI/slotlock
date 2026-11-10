@@ -27,21 +27,21 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/free-busy",
         (),
-        ("resource_ids", "start", "end"),
+        ("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"),
     ),
     "slotlock_find_next_available": Operation(
         "slotlock_find_next_available",
         "GET",
         "/v1/next-available",
         (),
-        ("resource_ids", "start", "end", "duration_minutes"),
+        ("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"),
     ),
     "slotlock_find_available_slots": Operation(
         "slotlock_find_available_slots",
         "GET",
         "/v1/available-slots",
         (),
-        ("resource_ids", "start", "end", "duration_minutes", "limit", "require_free"),
+        ("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"),
     ),
     "slotlock_hold_slots": Operation(
         "slotlock_hold_slots",
@@ -611,42 +611,86 @@ class Operations(Transport):
             values["location"] = location
         return self.call("slotlock_create_resource", values)
 
-    def get_free_busy(self, *, resource_ids: list[str], start: str, end: str) -> dict[str, Any]:
+    def get_free_busy(
+        self,
+        *,
+        start: str,
+        end: str,
+        resource_ids: list[str] | None = None,
+        location: str | None = None,
+        group: str | None = None,
+        labels: list[str] | None = None,
+        kind: str | None = None,
+        pool: str | None = None,
+    ) -> dict[str, Any]:
         """Get free-busy.
 
-        Return privacy-minimized busy intervals and explicit coverage certainty.
+        Return privacy-minimized busy intervals and explicit coverage certainty. Name the
+        resources with resource_ids, or select them instead by location (and every location in
+        it), group, labels (every one), kind or pool: at most 100 (more answers
+        selection_too_large, none selection_empty), named in selected_resource_ids.
         """
-        values: dict[str, Any] = {"resource_ids": resource_ids, "start": start, "end": end}
+        values: dict[str, Any] = {"start": start, "end": end}
+        if resource_ids is not None:
+            values["resource_ids"] = resource_ids
+        if location is not None:
+            values["location"] = location
+        if group is not None:
+            values["group"] = group
+        if labels is not None:
+            values["labels"] = labels
+        if kind is not None:
+            values["kind"] = kind
+        if pool is not None:
+            values["pool"] = pool
         return self.call("slotlock_get_free_busy", values)
 
     def find_next_available(
         self,
         *,
-        resource_ids: list[str],
         start: str,
         end: str,
         duration_minutes: int,
+        resource_ids: list[str] | None = None,
+        location: str | None = None,
+        group: str | None = None,
+        labels: list[str] | None = None,
+        kind: str | None = None,
+        pool: str | None = None,
     ) -> dict[str, Any]:
         """Find next available interval.
 
         Find the earliest certain interval that satisfies the requested duration (up to the
-        367-day search window, so a multi-month rental slot can be found).
+        367-day search window, so a multi-month rental slot can be found). Name the resources with
+        resource_ids, or select them as slotlock_get_free_busy does: at most 100.
         """
-        values: dict[str, Any] = {
-            "resource_ids": resource_ids,
-            "start": start,
-            "end": end,
-            "duration_minutes": duration_minutes,
-        }
+        values: dict[str, Any] = {"start": start, "end": end, "duration_minutes": duration_minutes}
+        if resource_ids is not None:
+            values["resource_ids"] = resource_ids
+        if location is not None:
+            values["location"] = location
+        if group is not None:
+            values["group"] = group
+        if labels is not None:
+            values["labels"] = labels
+        if kind is not None:
+            values["kind"] = kind
+        if pool is not None:
+            values["pool"] = pool
         return self.call("slotlock_find_next_available", values)
 
     def find_available_slots(
         self,
         *,
-        resource_ids: list[str],
         start: str,
         end: str,
         duration_minutes: int,
+        resource_ids: list[str] | None = None,
+        location: str | None = None,
+        group: str | None = None,
+        labels: list[str] | None = None,
+        kind: str | None = None,
+        pool: str | None = None,
         limit: int | None = None,
         require_free: int | None = None,
     ) -> dict[str, Any]:
@@ -657,14 +701,22 @@ class Operations(Transport):
         choice. With require_free, only times when at least that many of the resources are free
         together, each slot naming them in resource_ids: every resource for a booking that needs
         them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
-        every resource's coverage is certain.
+        every resource's coverage is certain. Name the resources with resource_ids, or select them
+        as slotlock_get_free_busy does: at most 20.
         """
-        values: dict[str, Any] = {
-            "resource_ids": resource_ids,
-            "start": start,
-            "end": end,
-            "duration_minutes": duration_minutes,
-        }
+        values: dict[str, Any] = {"start": start, "end": end, "duration_minutes": duration_minutes}
+        if resource_ids is not None:
+            values["resource_ids"] = resource_ids
+        if location is not None:
+            values["location"] = location
+        if group is not None:
+            values["group"] = group
+        if labels is not None:
+            values["labels"] = labels
+        if kind is not None:
+            values["kind"] = kind
+        if pool is not None:
+            values["pool"] = pool
         if limit is not None:
             values["limit"] = limit
         if require_free is not None:
@@ -1764,18 +1816,39 @@ class Operations(Transport):
         values: dict[str, Any] = {}
         return self.call("slotlock_list_webhooks", values)
 
-    def create_webhook(self, *, url: str, event_types: list[str] | None = None) -> dict[str, Any]:
+    def create_webhook(
+        self,
+        *,
+        url: str,
+        event_types: list[str] | None = None,
+        resource_ids: list[str] | None = None,
+        pools: list[str] | None = None,
+        locations: list[str] | None = None,
+        groups: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Add a webhook.
 
         Send the changes slotlock_list_changes lists from now on to an https URL, each as a
         CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
         in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
         410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
-        here only. At most 10 per tenant.
+        here only. At most 10 per tenant. With resource_ids, pools, locations (each with every
+        location in it) or groups, only changes about a resource that matches one of them, as it
+        is when the change is delivered: a change about no resource (a key, a webhook, a usage
+        notice) is not sent. At most 100 resource ids and 20 of each other kind (400
+        invalid_webhook_filter).
         """
         values: dict[str, Any] = {"url": url}
         if event_types is not None:
             values["event_types"] = event_types
+        if resource_ids is not None:
+            values["resource_ids"] = resource_ids
+        if pools is not None:
+            values["pools"] = pools
+        if locations is not None:
+            values["locations"] = locations
+        if groups is not None:
+            values["groups"] = groups
         return self.call("slotlock_create_webhook", values)
 
     def delete_webhook(self, webhook_id: str) -> dict[str, Any]:

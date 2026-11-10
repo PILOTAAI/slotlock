@@ -1081,6 +1081,12 @@ Where a resource is, and the sets it is in, are kept apart from its pool, which 
   20 of the tenant's 500 groups. Deleting a group leaves its resources as they were.
 - `slotlock_list_resources` shows agents each resource's `location` (with its name) and `groups`,
   and narrows by `location` and `group`, with or without a `pool`.
+- The searches (`slotlock_get_free_busy`, `slotlock_find_next_available`,
+  `slotlock_find_available_slots`) take a selection in place of `resource_ids`: any of `location`,
+  `group`, `labels`, `kind` and `pool`, every one given matched. It covers the shared resources in
+  use that match, in a stable order, at most 100 (20 for slots): more answers `400
+  selection_too_large`, none `404 selection_empty`, so a search is never partial; the answer names
+  them in `selected_resource_ids`. "A room for ten with video on floor 3" is one call.
 
 Rentals sell a class, not a plate. Put interchangeable resources in a pool
 (`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
@@ -1402,6 +1408,10 @@ webhook URLs or secrets.
   change's id, the same on every retry), `webhook-timestamp` and `webhook-signature`, keyed by the
   `whsec_` secret the call returns once. `event_types` takes any of the types above. Verify it with any Standard Webhooks library, and use
   `webhook-id` to drop a repeat: delivery is at least once.
+- A webhook can also take only the changes about some resources: `resource_ids` (up to 100),
+  `pools`, `locations` (each with every location in it) or `groups` (up to 20 of each), matched
+  against the resource as it is when the change is delivered. With any of them, a change about no
+  resource (a key, a webhook, a usage notice) is not sent to it.
 - Changes go to each webhook in order, one at a time, until one fails; that one is retried after
   5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
   the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`

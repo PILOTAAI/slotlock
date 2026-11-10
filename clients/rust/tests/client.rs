@@ -230,6 +230,7 @@ fn books_holds_and_reservations_without_double_booking() {
             resource_ids: vec![id.clone()],
             start: s.at(0.0),
             end: s.at(24.0),
+            ..Default::default()
         })
         .unwrap();
     let busy: Vec<(String, String)> = free_busy["resources"][0]["busy"]

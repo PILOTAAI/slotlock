@@ -2,6 +2,7 @@ import {
   SLOTLOCK_RESOURCE_PROFILE_FIELDS,
   type SlotlockLocation,
   type SlotlockResourceGroup,
+  type SlotlockResourceKind,
   type SlotlockResourceProfileInput,
   slotlockResourceHasLabels,
 } from './resource-profile.js';
@@ -803,6 +804,31 @@ export function createSlotlockStoreAgentBackend(
       });
     },
 
+    async selectResources(context, selection) {
+      return withTenant(store, context, async (tenantStore) => {
+        let resources: SlotlockResource[];
+        try {
+          // Shared and in use, as an agent may search them, in the store's stable order.
+          resources = await tenantStore.listResources({
+            tenantRef: context.principal.tenantRef,
+            visibility: 'shared',
+            limit: selection.limit + 1,
+            ...(selection.kind !== undefined ? { kind: selection.kind as SlotlockResourceKind } : {}),
+            ...(selection.labels !== undefined ? { labels: selection.labels } : {}),
+            ...(selection.location !== undefined ? { location: selection.location } : {}),
+            ...(selection.group !== undefined ? { group: selection.group } : {}),
+            ...(selection.pool !== undefined ? { pool: selection.pool } : {}),
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (resources.length > selection.limit) {
+          throw new SlotlockAgentOperationError('selection_too_large', 400, { limit: String(selection.limit) });
+        }
+        return resources.map((resource) => resource.id);
+      });
+    },
+
     async listResources(context, input) {
       const cursor = parseResourceCursor(input.cursor);
       const kind = input.kind as SlotlockResource['kind'] | 'other' | undefined;
@@ -1329,6 +1355,14 @@ function webhookOutput(endpoint: SlotlockWebhookEndpoint) {
     last_error: endpoint.lastError,
     disabled_at: endpoint.disabledAt?.toISOString() ?? null,
     disabled_reason: endpoint.disabledReason as 'gone' | 'failing' | null,
+    filter: endpoint.filter
+      ? {
+          ...(endpoint.filter.resourceIds ? { resource_ids: endpoint.filter.resourceIds } : {}),
+          ...(endpoint.filter.pools ? { pools: endpoint.filter.pools } : {}),
+          ...(endpoint.filter.locations ? { locations: endpoint.filter.locations } : {}),
+          ...(endpoint.filter.groups ? { groups: endpoint.filter.groups } : {}),
+        }
+      : null,
   };
 }
 
@@ -2335,6 +2369,16 @@ export function createSlotlockStoreApplicationBackend(
           tenantRef: tenantOf(context),
           url: input.url as string,
           ...(input.event_types !== undefined ? { eventTypes: input.event_types as string[] } : {}),
+          ...(['resource_ids', 'pools', 'locations', 'groups'].some((field) => input[field] !== undefined)
+            ? {
+                filter: {
+                  ...(input.resource_ids !== undefined ? { resourceIds: input.resource_ids as string[] } : {}),
+                  ...(input.pools !== undefined ? { pools: input.pools as string[] } : {}),
+                  ...(input.locations !== undefined ? { locations: input.locations as string[] } : {}),
+                  ...(input.groups !== undefined ? { groups: input.groups as string[] } : {}),
+                },
+              }
+            : {}),
         });
         if (!created.ok) {
           throw new SlotlockAgentOperationError(

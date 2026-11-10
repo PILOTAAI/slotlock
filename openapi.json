@@ -757,7 +757,7 @@
       "get": {
         "operationId": "slotlock_get_free_busy",
         "summary": "Get free-busy",
-        "description": "Return privacy-minimized busy intervals and explicit coverage certainty.",
+        "description": "Return privacy-minimized busy intervals and explicit coverage certainty. Name the resources with resource_ids, or select them instead by location (and every location in it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large, none selection_empty), named in selected_resource_ids.",
         "tags": [
           "Agent tools"
         ],
@@ -766,7 +766,7 @@
           {
             "name": "resource_ids",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "minItems": 1,
               "maxItems": 100,
@@ -776,6 +776,66 @@
                 "minLength": 1,
                 "maxLength": 200
               }
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "labels",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              }
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "person",
+                "room",
+                "desk",
+                "space",
+                "vehicle",
+                "machine",
+                "equipment",
+                "service",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "pool",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
           },
           {
@@ -884,6 +944,15 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "selected_resource_ids": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
                     }
                   },
                   "required": [
@@ -919,7 +988,7 @@
       "get": {
         "operationId": "slotlock_find_next_available",
         "summary": "Find next available interval",
-        "description": "Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found).",
+        "description": "Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found). Name the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 100.",
         "tags": [
           "Agent tools"
         ],
@@ -928,7 +997,7 @@
           {
             "name": "resource_ids",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "minItems": 1,
               "maxItems": 100,
@@ -938,6 +1007,66 @@
                 "minLength": 1,
                 "maxLength": 200
               }
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "labels",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              }
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "person",
+                "room",
+                "desk",
+                "space",
+                "vehicle",
+                "machine",
+                "equipment",
+                "service",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "pool",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
           },
           {
@@ -1048,6 +1177,15 @@
                         "reason"
                       ],
                       "additionalProperties": false
+                    },
+                    "selected_resource_ids": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
                     }
                   },
                   "required": [
@@ -1086,7 +1224,7 @@
       "get": {
         "operationId": "slotlock_find_available_slots",
         "summary": "Find available slots",
-        "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource's coverage is certain.",
+        "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource's coverage is certain. Name the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 20.",
         "tags": [
           "Agent tools"
         ],
@@ -1095,7 +1233,7 @@
           {
             "name": "resource_ids",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "minItems": 1,
               "maxItems": 20,
@@ -1105,6 +1243,66 @@
                 "minLength": 1,
                 "maxLength": 200
               }
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "labels",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              }
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "person",
+                "room",
+                "desk",
+                "space",
+                "vehicle",
+                "machine",
+                "equipment",
+                "service",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "pool",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
           },
           {
@@ -1240,6 +1438,15 @@
                         "reason"
                       ],
                       "additionalProperties": false
+                    },
+                    "selected_resource_ids": {
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
                     }
                   },
                   "required": [
@@ -13772,7 +13979,7 @@
       "post": {
         "operationId": "slotlock_create_webhook",
         "summary": "Add a webhook",
-        "description": "Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant.",
+        "description": "Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant. With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter).",
         "tags": [
           "Application"
         ],
@@ -13830,6 +14037,42 @@
                         "key.rotated",
                         "key.revoked"
                       ]
+                    }
+                  },
+                  "resource_ids": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "pools": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                    }
+                  },
+                  "locations": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                    }
+                  },
+                  "groups": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                     }
                   }
                 },
@@ -13975,6 +14218,51 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "filter": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "resource_ids": {
+                                  "maxItems": 100,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  }
+                                },
+                                "pools": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                  }
+                                },
+                                "locations": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                  }
+                                },
+                                "groups": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                  }
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -13987,7 +14275,8 @@
                         "last_status",
                         "last_error",
                         "disabled_at",
-                        "disabled_reason"
+                        "disabled_reason",
+                        "filter"
                       ],
                       "additionalProperties": false
                     },
@@ -14173,6 +14462,51 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "filter": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "resource_ids": {
+                                    "maxItems": 100,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "format": "uuid"
+                                    }
+                                  },
+                                  "pools": {
+                                    "maxItems": 20,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                    }
+                                  },
+                                  "locations": {
+                                    "maxItems": 20,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                    }
+                                  },
+                                  "groups": {
+                                    "maxItems": 20,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                    }
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -14185,7 +14519,8 @@
                           "last_status",
                           "last_error",
                           "disabled_at",
-                          "disabled_reason"
+                          "disabled_reason",
+                          "filter"
                         ],
                         "additionalProperties": false
                       }
@@ -14451,6 +14786,51 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "filter": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "resource_ids": {
+                                  "maxItems": 100,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  }
+                                },
+                                "pools": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                  }
+                                },
+                                "locations": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                  }
+                                },
+                                "groups": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                  }
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -14463,7 +14843,8 @@
                         "last_status",
                         "last_error",
                         "disabled_at",
-                        "disabled_reason"
+                        "disabled_reason",
+                        "filter"
                       ],
                       "additionalProperties": false
                     }

@@ -1956,6 +1956,18 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     return redirect(303, `${root}/resources/${id}`);
   }
 
+  /** An endpoint's filter (set over the API), in a few words. */
+  function webhookFilterText(filter: NonNullable<SlotlockWebhookEndpoint['filter']>): string {
+    return [
+      filter.resourceIds ? `${filter.resourceIds.length} resource${filter.resourceIds.length === 1 ? '' : 's'}` : null,
+      filter.pools ? `pools ${filter.pools.join(', ')}` : null,
+      filter.locations ? `locations ${filter.locations.join(', ')}` : null,
+      filter.groups ? `groups ${filter.groups.join(', ')}` : null,
+    ]
+      .filter((part) => part !== null)
+      .join('; ');
+  }
+
   function endpointState(endpoint: SlotlockWebhookEndpoint): { text: string; tone: string } {
     if (endpoint.disabledAt) return { text: 'Disabled', tone: 'revoked' };
     if (endpoint.failingSince) return { text: 'Failing', tone: 'held' };
@@ -1978,7 +1990,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
           : '';
       return html`<tr>
 <td data-label="URL" class="strong"><code class="truncate url" title="${endpoint.url}">${endpoint.url}</code></td>
-<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}</td>
+<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}${endpoint.filter ? html`<span class="meta">Only ${webhookFilterText(endpoint.filter)}</span>` : html``}</td>
 <td data-label="Status"><span class="cell"><span class="pill ${state.tone}">${state.text}</span>${problem ? html`<span class="meta wrap">${problem}</span>` : html``}</span></td>
 <td data-label="Added">${dateCell(endpoint.createdAt)}</td>
 <td class="actions">${

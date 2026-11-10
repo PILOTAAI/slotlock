@@ -8,7 +8,13 @@
 //
 // Contract only (names, schemas, routes); nothing from the agent server at runtime. The
 // store-backed implementation is createSlotlockStoreApplicationBackend.
-import { SLOTLOCK_CHANGE_ORIGINS, SLOTLOCK_CHANGE_TYPES, type SlotlockChangeOrigin } from './event-feed.js';
+import {
+  SLOTLOCK_CHANGE_ORIGINS,
+  SLOTLOCK_CHANGE_TYPES,
+  SLOTLOCK_WEBHOOK_FILTER_REFS,
+  SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
+  type SlotlockChangeOrigin,
+} from './event-feed.js';
 import { z } from 'zod';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
@@ -434,6 +440,16 @@ const WEBHOOK = z
     last_error: z.string().max(500).nullable(),
     disabled_at: DATE_TIME.nullable(),
     disabled_reason: z.enum(['gone', 'failing']).nullable(),
+    /** Only changes about these resources; `null` when it has no such filter. */
+    filter: z
+      .object({
+        resource_ids: z.array(z.string().uuid()).max(SLOTLOCK_WEBHOOK_FILTER_RESOURCES).optional(),
+        pools: z.array(GROUPING_REF).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+        locations: z.array(GROUPING_REF).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+        groups: z.array(GROUPING_REF).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+      })
+      .strict()
+      .nullable(),
   })
   .strict();
 
@@ -1442,13 +1458,17 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_webhook',
       title: 'Add a webhook',
       description:
-        'Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant.',
+        `Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant. With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES} resource ids and ${SLOTLOCK_WEBHOOK_FILTER_REFS} of each other kind (400 invalid_webhook_filter).`,
       method: 'POST',
       path: '/v1/webhooks',
       input: z
         .object({
           url: z.string().url().max(2048),
           event_types: z.array(z.enum(SLOTLOCK_CHANGE_TYPES)).min(1).max(SLOTLOCK_CHANGE_TYPES.length).optional(),
+          resource_ids: z.array(z.string().uuid()).min(1).max(SLOTLOCK_WEBHOOK_FILTER_RESOURCES).optional(),
+          pools: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+          locations: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
+          groups: z.array(GROUPING_REF).min(1).max(SLOTLOCK_WEBHOOK_FILTER_REFS).optional(),
         })
         .strict(),
       output: z.object({ webhook: WEBHOOK, secret: z.string().regex(/^whsec_/) }).strict(),

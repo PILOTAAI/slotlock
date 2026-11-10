@@ -101,6 +101,22 @@ versioning.
   resource's location (with its name) and groups, and narrows by `location` and `group`, with or
   without a pool. `resource.created` and `resource.updated` carry the location. The dashboard's
   resource page shows them. Run `slotlock migrate`.
+- Search by selection (RFC 0003 G4). `slotlock_get_free_busy`, `slotlock_find_next_available` and
+  `slotlock_find_available_slots` (and their REST routes) take `location` (with every location in
+  it), `group`, `labels` (every one), `kind` or `pool` in place of `resource_ids`, one or the other.
+  The agent server resolves the selection through the backend's new optional `selectResources` (the
+  shared, unarchived resources that match, by id, at most 100, or 20 for slots), runs the search on
+  them and names them in `selected_resource_ids`; more than the limit is refused whole with `400
+  selection_too_large`, none with `404 selection_empty`, and a backend without `selectResources`
+  answers `400 selection_not_supported`. The store's `listResources` also narrows by `pool`.
+- Webhook filters (RFC 0003 G5). `POST /v1/webhooks` takes `resource_ids` (up to 100), `pools`,
+  `locations` and `groups` (up to 20 each): the endpoint then receives only changes about a resource
+  that matches one of them, as it is when the change is delivered, a location matching every
+  location in it, and no change about no resource. New columns on `slotlock.webhook_endpoints`
+  (bounded by a CHECK added NOT VALID), and `slotlock.location_path(text, text)`. The store's
+  `createWebhookEndpoint` takes a `filter` (`invalid_webhook_filter` past its bounds), an endpoint
+  carries its `filter`, `webhook.created` on the feed records it, and the dashboard's webhooks page
+  shows it.
 - Monthly quotas, off unless `SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`; RFC 0003
   part 3). A tenant on a plan may run so many operations and make so many bookings a UTC calendar
   month (`SLOTLOCK_PLAN_QUOTAS`): Free 25,000 and 1,000, refused at 100%; Developer 500,000 and
@@ -131,6 +147,14 @@ versioning.
   secret no longer makes owners enter their keys again.
 
 ### Changed
+
+- `resource_ids` is optional on `slotlock_get_free_busy`, `slotlock_find_next_available` and
+  `slotlock_find_available_slots`, since a selection can stand in for it. Calls written before
+  still compile in every client: Rust keeps the field a `Vec<String>` (left out when empty), Java
+  keeps the methods that take it first beside new ones that take it in `optional`, and .NET keeps
+  its 0.2.0 overloads (the generator now keeps a parameter that became optional, which
+  `RELAXED_ARGUMENTS` in `clients/generate.ts` lists). A Rust caller that names every field of an
+  input struct, rather than ending with `..Default::default()`, gains new fields to name.
 
 - The dashboard Worker no longer reads `SLOTLOCK_FREE_PLAN_FROM` and answers 503 while it is set,
   naming `slotlock plan default` instead: the date is the database's now.

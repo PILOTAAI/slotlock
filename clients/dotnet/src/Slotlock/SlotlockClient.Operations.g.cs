@@ -17,9 +17,9 @@ public sealed partial class SlotlockClient
     {
         ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool", "kind", "labels", "location", "group"]),
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
-        ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
-        ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
-        ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"]),
+        ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"]),
+        ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"]),
+        ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"]),
         ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
         ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
         ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
@@ -223,53 +223,127 @@ public sealed partial class SlotlockClient
 
     /// <summary>Get free-busy.</summary>
     /// <remarks>
-    /// Return privacy-minimized busy intervals and explicit coverage certainty.
+    /// Return privacy-minimized busy intervals and explicit coverage certainty. Name the
+    /// resources with resource_ids, or select them instead by location (and every location in
+    /// it), group, labels (every one), kind or pool: at most 100 (more answers
+    /// selection_too_large, none selection_empty), named in selected_resource_ids.
     /// </remarks>
-    /// <param name="resourceIds">resource_ids</param>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="location">location</param>
+    /// <param name="group">group</param>
+    /// <param name="labels">labels</param>
+    /// <param name="kind">kind</param>
+    /// <param name="pool">pool</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> GetFreeBusyAsync(
-        IEnumerable<string> resourceIds,
         string start,
         string end,
+        Optional<IEnumerable<string>> resourceIds = default,
+        Optional<string> location = default,
+        Optional<string> group = default,
+        Optional<IEnumerable<string>> labels = default,
+        Optional<string> kind = default,
+        Optional<string> pool = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
-        values["resource_ids"] = Json.ToNode(resourceIds);
         values["start"] = Json.ToNode(start);
         values["end"] = Json.ToNode(end);
+        if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (group.HasValue) values["group"] = Json.ToNode(group.Value);
+        if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
+        if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         return CallAsync("slotlock_get_free_busy", values, cancellationToken);
     }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>GetFreeBusyAsync</c>, kept so code
+    /// written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<JsonObject> GetFreeBusyAsync(
+        IEnumerable<string> resourceIds,
+        string start,
+        string end,
+        CancellationToken cancellationToken) =>
+        GetFreeBusyAsync(
+            resourceIds: resourceIds,
+            start: start,
+            end: end,
+            cancellationToken: cancellationToken,
+            location: default,
+            group: default,
+            labels: default,
+            kind: default,
+            pool: default);
 
     /// <summary>Find next available interval.</summary>
     /// <remarks>
     /// Find the earliest certain interval that satisfies the requested duration (up to the
-    /// 367-day search window, so a multi-month rental slot can be found).
+    /// 367-day search window, so a multi-month rental slot can be found). Name the resources with
+    /// resource_ids, or select them as slotlock_get_free_busy does: at most 100.
     /// </remarks>
-    /// <param name="resourceIds">resource_ids</param>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
     /// <param name="durationMinutes">duration_minutes</param>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="location">location</param>
+    /// <param name="group">group</param>
+    /// <param name="labels">labels</param>
+    /// <param name="kind">kind</param>
+    /// <param name="pool">pool</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> FindNextAvailableAsync(
+        string start,
+        string end,
+        long durationMinutes,
+        Optional<IEnumerable<string>> resourceIds = default,
+        Optional<string> location = default,
+        Optional<string> group = default,
+        Optional<IEnumerable<string>> labels = default,
+        Optional<string> kind = default,
+        Optional<string> pool = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["start"] = Json.ToNode(start);
+        values["end"] = Json.ToNode(end);
+        values["duration_minutes"] = Json.ToNode(durationMinutes);
+        if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (group.HasValue) values["group"] = Json.ToNode(group.Value);
+        if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
+        if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        return CallAsync("slotlock_find_next_available", values, cancellationToken);
+    }
+
+    /// <summary>Slotlock.Client 0.2.0's parameters for <c>FindNextAvailableAsync</c>, kept so
+    /// code written against them compiles.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
     public Task<JsonObject> FindNextAvailableAsync(
         IEnumerable<string> resourceIds,
         string start,
         string end,
         long durationMinutes,
-        CancellationToken cancellationToken = default)
-    {
-        var values = new JsonObject();
-        values["resource_ids"] = Json.ToNode(resourceIds);
-        values["start"] = Json.ToNode(start);
-        values["end"] = Json.ToNode(end);
-        values["duration_minutes"] = Json.ToNode(durationMinutes);
-        return CallAsync("slotlock_find_next_available", values, cancellationToken);
-    }
+        CancellationToken cancellationToken) =>
+        FindNextAvailableAsync(
+            resourceIds: resourceIds,
+            start: start,
+            end: end,
+            durationMinutes: durationMinutes,
+            cancellationToken: cancellationToken,
+            location: default,
+            group: default,
+            labels: default,
+            kind: default,
+            pool: default);
 
     /// <summary>Find available slots.</summary>
     /// <remarks>
@@ -278,31 +352,47 @@ public sealed partial class SlotlockClient
     /// choice. With require_free, only times when at least that many of the resources are free
     /// together, each slot naming them in resource_ids: every resource for a booking that needs
     /// them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
-    /// every resource's coverage is certain.
+    /// every resource's coverage is certain. Name the resources with resource_ids, or select them
+    /// as slotlock_get_free_busy does: at most 20.
     /// </remarks>
-    /// <param name="resourceIds">resource_ids</param>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
     /// <param name="durationMinutes">duration_minutes</param>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="location">location</param>
+    /// <param name="group">group</param>
+    /// <param name="labels">labels</param>
+    /// <param name="kind">kind</param>
+    /// <param name="pool">pool</param>
     /// <param name="limit">limit</param>
     /// <param name="requireFree">require_free</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> FindAvailableSlotsAsync(
-        IEnumerable<string> resourceIds,
         string start,
         string end,
         long durationMinutes,
+        Optional<IEnumerable<string>> resourceIds = default,
+        Optional<string> location = default,
+        Optional<string> group = default,
+        Optional<IEnumerable<string>> labels = default,
+        Optional<string> kind = default,
+        Optional<string> pool = default,
         Optional<long> limit = default,
         Optional<long> requireFree = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
-        values["resource_ids"] = Json.ToNode(resourceIds);
         values["start"] = Json.ToNode(start);
         values["end"] = Json.ToNode(end);
         values["duration_minutes"] = Json.ToNode(durationMinutes);
+        if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (group.HasValue) values["group"] = Json.ToNode(group.Value);
+        if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
+        if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
         if (requireFree.HasValue) values["require_free"] = Json.ToNode(requireFree.Value);
         return CallAsync("slotlock_find_available_slots", values, cancellationToken);
@@ -2021,21 +2111,37 @@ public sealed partial class SlotlockClient
     /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
     /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
     /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
-    /// here only. At most 10 per tenant.
+    /// here only. At most 10 per tenant. With resource_ids, pools, locations (each with every
+    /// location in it) or groups, only changes about a resource that matches one of them, as it
+    /// is when the change is delivered: a change about no resource (a key, a webhook, a usage
+    /// notice) is not sent. At most 100 resource ids and 20 of each other kind (400
+    /// invalid_webhook_filter).
     /// </remarks>
     /// <param name="url">url</param>
     /// <param name="eventTypes">event_types</param>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="pools">pools</param>
+    /// <param name="locations">locations</param>
+    /// <param name="groups">groups</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> CreateWebhookAsync(
         string url,
         Optional<IEnumerable<string>> eventTypes = default,
+        Optional<IEnumerable<string>> resourceIds = default,
+        Optional<IEnumerable<string>> pools = default,
+        Optional<IEnumerable<string>> locations = default,
+        Optional<IEnumerable<string>> groups = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["url"] = Json.ToNode(url);
         if (eventTypes.HasValue) values["event_types"] = Json.ToNode(eventTypes.Value);
+        if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
+        if (pools.HasValue) values["pools"] = Json.ToNode(pools.Value);
+        if (locations.HasValue) values["locations"] = Json.ToNode(locations.Value);
+        if (groups.HasValue) values["groups"] = Json.ToNode(groups.Value);
         return CallAsync("slotlock_create_webhook", values, cancellationToken);
     }
 

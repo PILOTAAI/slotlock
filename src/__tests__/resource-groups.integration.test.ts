@@ -6,10 +6,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { invokeSlotlockAgentOperation } from '../agent-server.js';
 import {
   createSlotlockStoreAgentBackend,
   createSlotlockStoreApplicationBackend,
 } from '../agent-store-backend.js';
+import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { type SlotlockStore, type SlotlockTenantStore, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -329,6 +331,168 @@ describe.skipIf(!url)('locations and groups (real Postgres, application role)', 
       await application.removeGroupMember(as_('slotlock_remove_group_member'), { group_ref: 'airport-vans', resource_id: van.resource.id }),
     ).toEqual({ removed: true });
     expect(await application.deleteGroup(as_('slotlock_delete_group'), { group_ref: 'airport-vans' })).toEqual({ deleted: true });
+  });
+
+  it('searches the resources a selection names, by location, group, labels, kind or pool, never partially', async () => {
+    const acme = tenant('select');
+    const make = (externalRef: string, extra: Record<string, unknown> = {}) =>
+      as(acme, (scoped) => scoped.createResource({ tenantRef: acme, externalRef, timezone: 'UTC', ...extra }));
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'leeds', name: 'Leeds' }));
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'leeds.2', name: 'Floor 2', parentRef: 'leeds' }));
+    await as(acme, (scoped) => scoped.putGroup({ tenantRef: acme, ref: 'physio', name: 'Physio' }));
+    const a = await make('room-a', { location: 'leeds.2', profile: { kind: 'room', labels: ['video'] } });
+    const b = await make('room-b', { location: 'leeds', profile: { kind: 'room' } });
+    const c = await make('dr-c', { profile: { kind: 'person' } });
+    await make('private-room', { location: 'leeds', visibility: 'private', profile: { kind: 'room' } });
+    const archived = await make('old-room', { location: 'leeds', profile: { kind: 'room' } });
+    await as(acme, (scoped) => scoped.archiveResource({ tenantRef: acme, id: archived.id }));
+    await as(acme, (scoped) => scoped.addGroupMember({ tenantRef: acme, group: 'physio', resourceId: c.id }));
+    await as(acme, (scoped) => scoped.setResourcePool({ tenantRef: acme, id: b.id, pool: 'rooms' }));
+    const backend = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => [] });
+    const principal = { subject: 'agent', tenantRef: acme, scopes: ['read', 'write'] };
+    const call = (operation: string, input: Record<string, unknown>) =>
+      invokeSlotlockAgentOperation({
+        operation,
+        input,
+        request: new Request('http://localhost/mcp'),
+        options: { backend, authenticate: async () => principal, authorize: async () => true },
+      });
+    const start = new Date(Date.now() + 86_400_000);
+    start.setUTCHours(0, 0, 0, 0);
+    const window = { start: start.toISOString(), end: new Date(start.getTime() + 86_400_000).toISOString() };
+    const sorted = (ids: string[]) => [...ids].sort();
+    // Every location in Leeds; never a private or archived one.
+    const busy = await call('slotlock_get_free_busy', { location: 'leeds', ...window });
+    expect(busy).toMatchObject({ ok: true });
+    const data = (busy as unknown as { data: { resources: { resource_id: string }[]; selected_resource_ids: string[] } }).data;
+    expect(data.selected_resource_ids).toEqual(sorted([a.id, b.id]));
+    expect(data.resources.map((resource) => resource.resource_id)).toEqual(data.selected_resource_ids);
+    // By kind and labels, group and pool, each alone or together.
+    const selected = async (input: Record<string, unknown>) =>
+      ((await call('slotlock_get_free_busy', { ...input, ...window })) as unknown as { data?: { selected_resource_ids: string[] } }).data
+        ?.selected_resource_ids;
+    expect(await selected({ kind: 'room', labels: ['video'] })).toEqual([a.id]);
+    expect(await selected({ group: 'physio' })).toEqual([c.id]);
+    expect(await selected({ pool: 'rooms' })).toEqual([b.id]);
+    expect(await selected({ kind: 'room', location: 'leeds.2' })).toEqual([a.id]);
+    // The other two searches take it too, and say what they covered.
+    const next = await call('slotlock_find_next_available', { kind: 'room', ...window, duration_minutes: 60 });
+    expect(next).toMatchObject({ ok: true, data: { selected_resource_ids: sorted([a.id, b.id]) } });
+    const slots = await call('slotlock_find_available_slots', { group: 'physio', ...window, duration_minutes: 60 });
+    expect(slots).toMatchObject({ ok: true, data: { selected_resource_ids: [c.id] } });
+    // None selected; both or neither of names and a selection; a bad criterion.
+    expect(await call('slotlock_get_free_busy', { group: 'nobody', ...window })).toMatchObject({
+      ok: false,
+      status: 404,
+      code: 'selection_empty',
+    });
+    for (const input of [{ resource_ids: [a.id], kind: 'room' }, {}]) {
+      expect(await call('slotlock_get_free_busy', { ...input, ...window }), JSON.stringify(input)).toMatchObject({
+        ok: false,
+        code: 'invalid_arguments',
+      });
+    }
+    expect(await call('slotlock_get_free_busy', { kind: 'spaceship', ...window })).toMatchObject({
+      ok: false,
+      code: 'invalid_arguments',
+    });
+    // Past an operation's limit, refused whole: slots search at most 20.
+    for (let i = 0; i < 20; i += 1) await make(`desk-${i}`, { profile: { kind: 'desk' } });
+    expect(await selected({ kind: 'desk' })).toHaveLength(20);
+    await make('desk-20', { profile: { kind: 'desk' } });
+    expect(await call('slotlock_find_available_slots', { kind: 'desk', ...window, duration_minutes: 60 })).toMatchObject({
+      ok: false,
+      status: 400,
+      code: 'selection_too_large',
+      details: { limit: '20' },
+    });
+    expect(await selected({ kind: 'desk' })).toHaveLength(21);
+    // A backend that cannot select says so.
+    const { selectResources: _unused, ...plain } = backend;
+    expect(
+      await invokeSlotlockAgentOperation({
+        operation: 'slotlock_get_free_busy',
+        input: { kind: 'room', ...window },
+        request: new Request('http://localhost/mcp'),
+        options: { backend: plain, authenticate: async () => principal, authorize: async () => true },
+      }),
+    ).toMatchObject({ ok: false, code: 'selection_not_supported' });
+  });
+
+  it('sends a filtered webhook only the changes about the resources it names, by id, pool, location or group', async () => {
+    const acme = tenant('hooks');
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'north', name: 'North' }));
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'leeds', name: 'Leeds', parentRef: 'north' }));
+    await as(acme, (scoped) => scoped.putGroup({ tenantRef: acme, ref: 'team', name: 'Team' }));
+    const make = (externalRef: string, extra: Record<string, unknown> = {}) =>
+      as(acme, (scoped) => scoped.createResource({ tenantRef: acme, externalRef, timezone: 'UTC', ...extra }));
+    const placed = await make('at-leeds', { location: 'leeds' });
+    const pooled = await make('in-vans');
+    await as(acme, (scoped) => scoped.setResourcePool({ tenantRef: acme, id: pooled.id, pool: 'vans' }));
+    const grouped = await make('in-team');
+    await as(acme, (scoped) => scoped.addGroupMember({ tenantRef: acme, group: 'team', resourceId: grouped.id }));
+    const named = await make('named');
+    const create = (url: string, extra: Record<string, unknown>) =>
+      as(acme, (scoped) => scoped.createWebhookEndpoint({ tenantRef: acme, url, ...extra }));
+    const endpoint = async (url: string, extra: Record<string, unknown>) => {
+      const created = await create(url, extra);
+      if (!created.ok) throw new Error(created.code);
+      return created.endpoint;
+    };
+    const byLocation = await endpoint('https://example.com/north', { filter: { locations: ['north'] } });
+    const byPool = await endpoint('https://example.com/vans', { filter: { pools: ['vans'] } });
+    const byGroup = await endpoint('https://example.com/team', { filter: { groups: ['team'] } });
+    const byId = await endpoint('https://example.com/named', {
+      filter: { resourceIds: [named.id.toUpperCase()] },
+      eventTypes: ['resource.updated'],
+    });
+    const everything = await endpoint('https://example.com/all', {});
+    expect(byLocation.filter).toEqual({ locations: ['north'] });
+    expect(byId.filter).toEqual({ resourceIds: [named.id] });
+    expect(everything).not.toHaveProperty('filter');
+    // From now on: a change about each resource, and one about none (a key).
+    for (const resource of [placed, pooled, grouped, named]) {
+      await as(acme, (scoped) =>
+        scoped.updateResourceProfile({ tenantRef: acme, id: resource.id, profile: { name: `Name of ${resource.externalRef}` } }),
+      );
+    }
+    await createSlotlockApiKeyStore(application).create({ tenantRef: acme, name: 'agent', scopes: ['read'] });
+    const claims = await as(acme, (scoped) => scoped.claimWebhookDeliveries({ tenantRef: acme, leaseMs: 30_000, batch: 100 }));
+    const delivered = (id: string) =>
+      claims
+        .find((claim) => claim.endpoint.id === id)
+        ?.changes.map((change) => `${change.type} ${change.resourceId ?? '-'}`) ?? [];
+    expect(delivered(byLocation.id)).toEqual([`resource.updated ${placed.id}`]);
+    expect(delivered(byPool.id)).toEqual([`resource.updated ${pooled.id}`]);
+    expect(delivered(byGroup.id)).toEqual([`resource.updated ${grouped.id}`]);
+    expect(delivered(byId.id)).toEqual([`resource.updated ${named.id}`]);
+    // Unfiltered, it gets everything from its own creation on.
+    expect(delivered(everything.id)).toEqual([
+      'webhook.created -',
+      `resource.updated ${placed.id}`,
+      `resource.updated ${pooled.id}`,
+      `resource.updated ${grouped.id}`,
+      `resource.updated ${named.id}`,
+      'key.created -',
+    ]);
+    // Listed with the filter, and the feed says what each was made to receive.
+    const listed = await as(acme, (scoped) => scoped.listWebhookEndpoints({ tenantRef: acme }));
+    expect(listed.find((hook) => hook.id === byPool.id)?.filter).toEqual({ pools: ['vans'] });
+    const [created] = await admin<{ data: Record<string, unknown> }[]>`
+      SELECT data FROM slotlock.outbox WHERE tenant_ref = ${acme} AND type = 'webhook.created' AND subject = ${byGroup.id}`;
+    expect(created?.data).toMatchObject({ filter: { groups: ['team'] } });
+    // Out of bounds: refused whole.
+    for (const filter of [
+      { resourceIds: ['not-a-uuid'] },
+      { pools: ['Bad Pool'] },
+      { locations: Array.from({ length: 21 }, (_, i) => `l${i}`) },
+      { groups: 'team' },
+    ]) {
+      expect(await create('https://example.com/bad', { filter }), JSON.stringify(filter)).toEqual({
+        ok: false,
+        code: 'invalid_webhook_filter',
+      });
+    }
   });
 
   it("erases a tenant's locations, groups and memberships with it, and keeps them from other tenants", async () => {

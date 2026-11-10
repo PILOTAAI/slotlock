@@ -12,9 +12,9 @@ var operations = func() map[string]operation {
 	list := []operation{
 		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool", "kind", "labels", "location", "group"}},
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
-		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
-		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
-		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes", "limit", "require_free"}},
+		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"}},
+		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"}},
+		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"}},
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
@@ -217,63 +217,130 @@ func (c *Client) CreateResource(ctx context.Context, in CreateResourceInput) (ma
 
 // GetFreeBusyInput holds the arguments of [Client.GetFreeBusy].
 type GetFreeBusyInput struct {
-	ResourceIDs []string
-
 	Start string
 
 	End string
+
+	ResourceIDs []string
+
+	Location *string
+
+	Group *string
+
+	Labels []string
+
+	Kind *string
+
+	Pool *string
 }
 
 func (in GetFreeBusyInput) values() map[string]any {
 	values := map[string]any{}
-	values["resource_ids"] = in.ResourceIDs
 	values["start"] = in.Start
 	values["end"] = in.End
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	return values
 }
 
 // GetFreeBusy: Get free-busy. Return privacy-minimized busy intervals and explicit coverage
-// certainty.
+// certainty. Name the resources with resource_ids, or select them instead by location (and every
+// location in it), group, labels (every one), kind or pool: at most 100 (more answers
+// selection_too_large, none selection_empty), named in selected_resource_ids.
 func (c *Client) GetFreeBusy(ctx context.Context, in GetFreeBusyInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_free_busy", in.values())
 }
 
 // FindNextAvailableInput holds the arguments of [Client.FindNextAvailable].
 type FindNextAvailableInput struct {
-	ResourceIDs []string
-
 	Start string
 
 	End string
 
 	DurationMinutes int64
+
+	ResourceIDs []string
+
+	Location *string
+
+	Group *string
+
+	Labels []string
+
+	Kind *string
+
+	Pool *string
 }
 
 func (in FindNextAvailableInput) values() map[string]any {
 	values := map[string]any{}
-	values["resource_ids"] = in.ResourceIDs
 	values["start"] = in.Start
 	values["end"] = in.End
 	values["duration_minutes"] = in.DurationMinutes
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	return values
 }
 
 // FindNextAvailable: Find next available interval. Find the earliest certain interval that
 // satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot
-// can be found).
+// can be found). Name the resources with resource_ids, or select them as slotlock_get_free_busy
+// does: at most 100.
 func (c *Client) FindNextAvailable(ctx context.Context, in FindNextAvailableInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_next_available", in.values())
 }
 
 // FindAvailableSlotsInput holds the arguments of [Client.FindAvailableSlots].
 type FindAvailableSlotsInput struct {
-	ResourceIDs []string
-
 	Start string
 
 	End string
 
 	DurationMinutes int64
+
+	ResourceIDs []string
+
+	Location *string
+
+	Group *string
+
+	Labels []string
+
+	Kind *string
+
+	Pool *string
 
 	Limit *int64
 
@@ -282,10 +349,27 @@ type FindAvailableSlotsInput struct {
 
 func (in FindAvailableSlotsInput) values() map[string]any {
 	values := map[string]any{}
-	values["resource_ids"] = in.ResourceIDs
 	values["start"] = in.Start
 	values["end"] = in.End
 	values["duration_minutes"] = in.DurationMinutes
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
+	if in.Labels != nil {
+		values["labels"] = in.Labels
+	}
+	if in.Kind != nil {
+		values["kind"] = *in.Kind
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
 	if in.Limit != nil {
 		values["limit"] = *in.Limit
 	}
@@ -300,7 +384,8 @@ func (in FindAvailableSlotsInput) values() map[string]any {
 // resource's hours, to offer a person a choice. With require_free, only times when at least that
 // many of the resources are free together, each slot naming them in resource_ids: every resource
 // for a booking that needs them all (book it with slotlock_book_together), or any n of them. No
-// slot is listed unless every resource's coverage is certain.
+// slot is listed unless every resource's coverage is certain. Name the resources with
+// resource_ids, or select them as slotlock_get_free_busy does: at most 20.
 func (c *Client) FindAvailableSlots(ctx context.Context, in FindAvailableSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_available_slots", in.values())
 }
@@ -2032,6 +2117,14 @@ type CreateWebhookInput struct {
 	URL string
 
 	EventTypes []string
+
+	ResourceIDs []string
+
+	Pools []string
+
+	Locations []string
+
+	Groups []string
 }
 
 func (in CreateWebhookInput) values() map[string]any {
@@ -2040,6 +2133,18 @@ func (in CreateWebhookInput) values() map[string]any {
 	if in.EventTypes != nil {
 		values["event_types"] = in.EventTypes
 	}
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Pools != nil {
+		values["pools"] = in.Pools
+	}
+	if in.Locations != nil {
+		values["locations"] = in.Locations
+	}
+	if in.Groups != nil {
+		values["groups"] = in.Groups
+	}
 	return values
 }
 
@@ -2047,7 +2152,10 @@ func (in CreateWebhookInput) values() map[string]any {
 // https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
 // webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of
 // failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret
-// is returned here only. At most 10 per tenant.
+// is returned here only. At most 10 per tenant. With resource_ids, pools, locations (each with
+// every location in it) or groups, only changes about a resource that matches one of them, as it
+// is when the change is delivered: a change about no resource (a key, a webhook, a usage notice)
+// is not sent. At most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter).
 func (c *Client) CreateWebhook(ctx context.Context, in CreateWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_webhook", in.values())
 }

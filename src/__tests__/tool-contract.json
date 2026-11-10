@@ -196,7 +196,7 @@
   {
     "name": "slotlock_get_free_busy",
     "title": "Get free-busy",
-    "description": "Return privacy-minimized busy intervals and explicit coverage certainty.",
+    "description": "Return privacy-minimized busy intervals and explicit coverage certainty. Name the resources with resource_ids, or select them instead by location (and every location in it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large, none selection_empty), named in selected_resource_ids.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -210,6 +210,41 @@
             "maxLength": 200
           }
         },
+        "location": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "group": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "labels": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "room",
+            "desk",
+            "space",
+            "vehicle",
+            "machine",
+            "equipment",
+            "service",
+            "other"
+          ]
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
         "start": {
           "type": "string",
           "format": "date-time"
@@ -220,7 +255,6 @@
         }
       },
       "required": [
-        "resource_ids",
         "start",
         "end"
       ],
@@ -308,6 +342,15 @@
             ],
             "additionalProperties": false
           }
+        },
+        "selected_resource_ids": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
         }
       },
       "required": [
@@ -335,7 +378,7 @@
   {
     "name": "slotlock_find_next_available",
     "title": "Find next available interval",
-    "description": "Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found).",
+    "description": "Find the earliest certain interval that satisfies the requested duration (up to the 367-day search window, so a multi-month rental slot can be found). Name the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 100.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -348,6 +391,41 @@
             "minLength": 1,
             "maxLength": 200
           }
+        },
+        "location": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "group": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "labels": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "room",
+            "desk",
+            "space",
+            "vehicle",
+            "machine",
+            "equipment",
+            "service",
+            "other"
+          ]
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
         },
         "start": {
           "type": "string",
@@ -364,7 +442,6 @@
         }
       },
       "required": [
-        "resource_ids",
         "start",
         "end",
         "duration_minutes"
@@ -445,6 +522,15 @@
             "reason"
           ],
           "additionalProperties": false
+        },
+        "selected_resource_ids": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
         }
       },
       "required": [
@@ -475,7 +561,7 @@
   {
     "name": "slotlock_find_available_slots",
     "title": "Find available slots",
-    "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource's coverage is certain.",
+    "description": "List up to `limit` certain slots of the requested duration, earliest first across the resources, each one free of busy time and inside the resource's hours, to offer a person a choice. With require_free, only times when at least that many of the resources are free together, each slot naming them in resource_ids: every resource for a booking that needs them all (book it with slotlock_book_together), or any n of them. No slot is listed unless every resource's coverage is certain. Name the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 20.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -488,6 +574,41 @@
             "minLength": 1,
             "maxLength": 200
           }
+        },
+        "location": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "group": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "labels": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "room",
+            "desk",
+            "space",
+            "vehicle",
+            "machine",
+            "equipment",
+            "service",
+            "other"
+          ]
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
         },
         "start": {
           "type": "string",
@@ -515,7 +636,6 @@
         }
       },
       "required": [
-        "resource_ids",
         "start",
         "end",
         "duration_minutes"
@@ -600,6 +720,15 @@
             "reason"
           ],
           "additionalProperties": false
+        },
+        "selected_resource_ids": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
         }
       },
       "required": [

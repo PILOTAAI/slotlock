@@ -16,7 +16,12 @@ import {
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
 } from './resource-profile.js';
-import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
+import {
+  SLOTLOCK_CHANGE_ORIGINS,
+  SLOTLOCK_WEBHOOK_FILTER_REFS,
+  SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
+  legacyCoverageSourceDigestSql,
+} from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -2195,6 +2200,50 @@ CREATE TABLE IF NOT EXISTS slotlock.webhook_endpoints (
   )
 );
 ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS changes_pruned boolean NOT NULL DEFAULT false;
+-- Which resources' changes an endpoint receives (RFC 0003 G5): with any of these, only changes about
+-- a resource it names, or one in a pool, at a location (or a location in it) or in a group it names,
+-- matched as the change is delivered. Null: no such filter.
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_resource_ids uuid[];
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_pools text[];
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_locations text[];
+ALTER TABLE slotlock.webhook_endpoints ADD COLUMN IF NOT EXISTS filter_groups text[];
+DO $slotlock_webhook_filter$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.webhook_endpoints'::regclass
+       AND conname = 'slotlock_webhook_endpoints_filter_valid'
+  ) THEN
+    ALTER TABLE slotlock.webhook_endpoints
+      ADD CONSTRAINT slotlock_webhook_endpoints_filter_valid CHECK (
+        (filter_resource_ids IS NULL
+         OR cardinality(filter_resource_ids) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES})
+        AND (filter_pools IS NULL OR cardinality(filter_pools) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_REFS})
+        AND (filter_locations IS NULL OR cardinality(filter_locations) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_REFS})
+        AND (filter_groups IS NULL OR cardinality(filter_groups) BETWEEN 1 AND ${SLOTLOCK_WEBHOOK_FILTER_REFS})
+      ) NOT VALID;
+  END IF;
+END
+$slotlock_webhook_filter$;
+
+-- A location and every location it is in, by reference (none for none): what a location filter
+-- matches a resource's location against. Run as its caller, in the tenant's context.
+CREATE OR REPLACE FUNCTION slotlock.location_path(requested_tenant_ref text, requested_ref text)
+RETURNS text[]
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_location_path$
+  WITH RECURSIVE up(ref, parent_ref, steps) AS (
+    SELECT place.ref, place.parent_ref, 1 FROM slotlock.locations place
+     WHERE place.tenant_ref = requested_tenant_ref AND place.ref = requested_ref
+    UNION ALL
+    SELECT place.ref, place.parent_ref, up.steps + 1
+      FROM slotlock.locations place JOIN up ON place.tenant_ref = requested_tenant_ref AND place.ref = up.parent_ref
+     WHERE up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+  )
+  SELECT COALESCE(array_agg(up.ref), '{}'::text[]) FROM up;
+$slotlock_location_path$;
 -- 0.5 allowed a filter of at most 20 types, fewer than there are now. The wider CHECK admits every
 -- row the old one did, so it is added NOT VALID (no scan under the lock), and the old one dropped.
 DO $slotlock_webhook_type_count$
@@ -2669,7 +2718,14 @@ BEGIN
   INSERT INTO slotlock.outbox (tenant_ref, type, subject, data, actor)
   VALUES (
     changed.tenant_ref, kind, changed.id::text,
-    jsonb_build_object('id', changed.id, 'event_types', to_jsonb(changed.event_types)),
+    jsonb_build_object('id', changed.id, 'event_types', to_jsonb(changed.event_types))
+      || CASE WHEN changed.filter_resource_ids IS NULL AND changed.filter_pools IS NULL
+                   AND changed.filter_locations IS NULL AND changed.filter_groups IS NULL
+              THEN '{}'::jsonb
+              ELSE jsonb_build_object('filter', jsonb_strip_nulls(jsonb_build_object(
+                'resource_ids', to_jsonb(changed.filter_resource_ids), 'pools', to_jsonb(changed.filter_pools),
+                'locations', to_jsonb(changed.filter_locations), 'groups', to_jsonb(changed.filter_groups))))
+         END,
     NULLIF(current_setting('slotlock.actor', true), '')
   );
   RETURN NULL;

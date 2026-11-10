@@ -255,6 +255,11 @@ export const CONFIRMATION_ERRORS = [
  */
 export const REFINEMENTS = [
   {
+    matches: (text) => text.startsWith('selectsOrNames'),
+    note: () =>
+      'Name the resources with `resource_ids`, or select them with any of `location`, `group`, `labels`, `kind` and `pool`: one or the other, not both.',
+  },
+  {
     matches: (text) => text === 'boundedAgentWindow',
     note: (facts) => `\`end\` must be after \`start\`, at most ${facts.horizonDays} days later.`,
   },

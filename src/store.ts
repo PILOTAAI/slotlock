@@ -2562,6 +2562,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
     location?: string;
     /** Only resources in this group. */
     group?: string;
+    /** Only this pool's members. */
+    pool?: string;
   }): Promise<SlotlockResource[]>;
   /**
    * How many resources the tenant has, archived ones included: the count a resource limit (a hosted
@@ -4573,6 +4575,8 @@ function buildSlotlockStore(
       // The filters are checked as a profile is, so a bad one is refused rather than matching none.
       const place = params.location === undefined ? null : slotlockGroupingRef('invalid_location', params.location);
       const group = params.group === undefined ? null : slotlockGroupingRef('invalid_group', params.group);
+      if (params.pool !== undefined && !isPoolName(params.pool)) throw invalidPoolError();
+      const pool = params.pool ?? null;
       const filter = parseSlotlockResourceProfile({
         ...(params.kind !== undefined ? { kind: params.kind } : {}),
         ...(params.labels !== undefined ? { labels: params.labels } : {}),
@@ -4602,6 +4606,7 @@ function buildSlotlockStore(
                  SELECT 1 FROM slotlock.resource_group_members member
                   WHERE member.tenant_ref = resources.tenant_ref AND member.resource_id = resources.id
                     AND member.group_ref = ${group}::text))
+           AND (${pool}::text IS NULL OR pool_ref = ${pool}::text)
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);

@@ -27,21 +27,21 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/free-busy",
         path_params: &[],
-        query: &["resource_ids", "start", "end"],
+        query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"],
     },
     Operation {
         name: "slotlock_find_next_available",
         method: "GET",
         path: "/v1/next-available",
         path_params: &[],
-        query: &["resource_ids", "start", "end", "duration_minutes"],
+        query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"],
     },
     Operation {
         name: "slotlock_find_available_slots",
         method: "GET",
         path: "/v1/available-slots",
         path_params: &[],
-        query: &["resource_ids", "start", "end", "duration_minutes", "limit", "require_free"],
+        query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"],
     },
     Operation {
         name: "slotlock_hold_slots",
@@ -570,27 +570,63 @@ pub struct CreateResourceInput {
 /// The arguments of [`Client::get_free_busy`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetFreeBusyInput {
-    pub resource_ids: Vec<String>,
     pub start: String,
     pub end: String,
+    /// Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 /// The arguments of [`Client::find_next_available`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FindNextAvailableInput {
-    pub resource_ids: Vec<String>,
     pub start: String,
     pub end: String,
     pub duration_minutes: i64,
+    /// Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 /// The arguments of [`Client::find_available_slots`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FindAvailableSlotsInput {
-    pub resource_ids: Vec<String>,
     pub start: String,
     pub end: String,
     pub duration_minutes: i64,
+    /// Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1193,6 +1229,14 @@ pub struct CreateWebhookInput {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
 }
 
 /// The arguments of [`Client::delete_webhook`].
@@ -1248,7 +1292,10 @@ impl Client {
 
     /// Get free-busy.
     ///
-    /// Return privacy-minimized busy intervals and explicit coverage certainty.
+    /// Return privacy-minimized busy intervals and explicit coverage certainty. Name the
+    /// resources with resource_ids, or select them instead by location (and every location in
+    /// it), group, labels (every one), kind or pool: at most 100 (more answers
+    /// selection_too_large, none selection_empty), named in selected_resource_ids.
     pub fn get_free_busy(&self, input: &GetFreeBusyInput) -> Result<Value, Error> {
         self.call("slotlock_get_free_busy", serde_json::to_value(input)?)
     }
@@ -1256,7 +1303,8 @@ impl Client {
     /// Find next available interval.
     ///
     /// Find the earliest certain interval that satisfies the requested duration (up to the
-    /// 367-day search window, so a multi-month rental slot can be found).
+    /// 367-day search window, so a multi-month rental slot can be found). Name the resources with
+    /// resource_ids, or select them as slotlock_get_free_busy does: at most 100.
     pub fn find_next_available(&self, input: &FindNextAvailableInput) -> Result<Value, Error> {
         self.call("slotlock_find_next_available", serde_json::to_value(input)?)
     }
@@ -1268,7 +1316,8 @@ impl Client {
     /// choice. With require_free, only times when at least that many of the resources are free
     /// together, each slot naming them in resource_ids: every resource for a booking that needs
     /// them all (book it with slotlock_book_together), or any n of them. No slot is listed unless
-    /// every resource's coverage is certain.
+    /// every resource's coverage is certain. Name the resources with resource_ids, or select them
+    /// as slotlock_get_free_busy does: at most 20.
     pub fn find_available_slots(&self, input: &FindAvailableSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
     }
@@ -1888,7 +1937,11 @@ impl Client {
     /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
     /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
     /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
-    /// here only. At most 10 per tenant.
+    /// here only. At most 10 per tenant. With resource_ids, pools, locations (each with every
+    /// location in it) or groups, only changes about a resource that matches one of them, as it
+    /// is when the change is delivered: a change about no resource (a key, a webhook, a usage
+    /// notice) is not sent. At most 100 resource ids and 20 of each other kind (400
+    /// invalid_webhook_filter).
     pub fn create_webhook(&self, input: &CreateWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_create_webhook", serde_json::to_value(input)?)
     }

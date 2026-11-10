@@ -14,9 +14,9 @@ public abstract class SlotlockOperations {
       Map.ofEntries(
           Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool", "kind", "labels", "location", "group"))),
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
-          Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
-          Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
-          Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "start", "end", "duration_minutes", "limit", "require_free"))),
+          Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"))),
+          Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"))),
+          Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"))),
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
@@ -195,40 +195,144 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Get free-busy. Return privacy-minimized busy intervals and explicit coverage certainty.
+   * Get free-busy. Return privacy-minimized busy intervals and explicit coverage certainty. Name
+   * the resources with resource_ids, or select them instead by location (and every location in
+   * it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large,
+   * none selection_empty), named in selected_resource_ids.
    *
-   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param optional the optional arguments, or null: {@code resource_ids} (list of string),
+   * {@code location} (string), {@code group} (string), {@code labels} (list of string), {@code
+   * kind} (string), {@code pool} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getFreeBusy(String start, String end, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("start", start);
+    values.put("end", end);
+    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool"), "slotlock_get_free_busy");
+    return call("slotlock_get_free_busy", values);
+  }
+
+  /**
+   * Get free-busy. Return privacy-minimized busy intervals and explicit coverage certainty. Name
+   * the resources with resource_ids, or select them instead by location (and every location in
+   * it), group, labels (every one), kind or pool: at most 100 (more answers selection_too_large,
+   * none selection_empty), named in selected_resource_ids.
+   *
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
+  public Map<String, Object> getFreeBusy(String start, String end) {
+    return getFreeBusy(start, end, null);
+  }
+
+  /**
+   * Get free-busy, as earlier releases took it: {@code resource_ids} in its old place. See the
+   * method that takes them in {@code optional}.
+   *
+   * @param resourceIds {@code resource_ids}
+   * @param start {@code start}
+   * @param end {@code end}
+   * @param optional the other optional arguments, or null
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getFreeBusy(List<?> resourceIds, String start, String end, Map<String, ?> optional) {
+    Map<String, Object> merged = new LinkedHashMap<>();
+    if (optional != null) merged.putAll(optional);
+    merged.put("resource_ids", resourceIds);
+    return getFreeBusy(start, end, merged);
+  }
+
+  /**
+   * Get free-busy, as earlier releases took it: {@code resource_ids} in its old place. See the
+   * method that takes them in {@code optional}.
+   *
+   * @param resourceIds {@code resource_ids}
+   * @param start {@code start}
+   * @param end {@code end}
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> getFreeBusy(List<?> resourceIds, String start, String end) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_ids", resourceIds);
-    values.put("start", start);
-    values.put("end", end);
-    return call("slotlock_get_free_busy", values);
+    return getFreeBusy(resourceIds, start, end, null);
   }
 
   /**
    * Find next available interval. Find the earliest certain interval that satisfies the requested
-   * duration (up to the 367-day search window, so a multi-month rental slot can be found).
+   * duration (up to the 367-day search window, so a multi-month rental slot can be found). Name
+   * the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 100.
    *
-   * @param resourceIds {@code resource_ids}, list of string
+   * @param start {@code start}, string
+   * @param end {@code end}, string
+   * @param durationMinutes {@code duration_minutes}, integer
+   * @param optional the optional arguments, or null: {@code resource_ids} (list of string),
+   * {@code location} (string), {@code group} (string), {@code labels} (list of string), {@code
+   * kind} (string), {@code pool} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findNextAvailable(String start, String end, long durationMinutes, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("start", start);
+    values.put("end", end);
+    values.put("duration_minutes", durationMinutes);
+    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool"), "slotlock_find_next_available");
+    return call("slotlock_find_next_available", values);
+  }
+
+  /**
+   * Find next available interval. Find the earliest certain interval that satisfies the requested
+   * duration (up to the 367-day search window, so a multi-month rental slot can be found). Name
+   * the resources with resource_ids, or select them as slotlock_get_free_busy does: at most 100.
+   *
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @param durationMinutes {@code duration_minutes}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
+  public Map<String, Object> findNextAvailable(String start, String end, long durationMinutes) {
+    return findNextAvailable(start, end, durationMinutes, null);
+  }
+
+  /**
+   * Find next available interval, as earlier releases took it: {@code resource_ids} in its old
+   * place. See the method that takes them in {@code optional}.
+   *
+   * @param resourceIds {@code resource_ids}
+   * @param start {@code start}
+   * @param end {@code end}
+   * @param durationMinutes {@code duration_minutes}
+   * @param optional the other optional arguments, or null
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findNextAvailable(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+    Map<String, Object> merged = new LinkedHashMap<>();
+    if (optional != null) merged.putAll(optional);
+    merged.put("resource_ids", resourceIds);
+    return findNextAvailable(start, end, durationMinutes, merged);
+  }
+
+  /**
+   * Find next available interval, as earlier releases took it: {@code resource_ids} in its old
+   * place. See the method that takes them in {@code optional}.
+   *
+   * @param resourceIds {@code resource_ids}
+   * @param start {@code start}
+   * @param end {@code end}
+   * @param durationMinutes {@code duration_minutes}
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
   public Map<String, Object> findNextAvailable(List<?> resourceIds, String start, String end, long durationMinutes) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_ids", resourceIds);
-    values.put("start", start);
-    values.put("end", end);
-    values.put("duration_minutes", durationMinutes);
-    return call("slotlock_find_next_available", values);
+    return findNextAvailable(resourceIds, start, end, durationMinutes, null);
   }
 
   /**
@@ -237,24 +341,25 @@ public abstract class SlotlockOperations {
    * offer a person a choice. With require_free, only times when at least that many of the
    * resources are free together, each slot naming them in resource_ids: every resource for a
    * booking that needs them all (book it with slotlock_book_together), or any n of them. No slot
-   * is listed unless every resource's coverage is certain.
+   * is listed unless every resource's coverage is certain. Name the resources with resource_ids,
+   * or select them as slotlock_get_free_busy does: at most 20.
    *
-   * @param resourceIds {@code resource_ids}, list of string
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @param durationMinutes {@code duration_minutes}, integer
-   * @param optional the optional arguments, or null: {@code limit} (integer), {@code
-   * require_free} (integer)
+   * @param optional the optional arguments, or null: {@code resource_ids} (list of string),
+   * {@code location} (string), {@code group} (string), {@code labels} (list of string), {@code
+   * kind} (string), {@code pool} (string), {@code limit} (integer), {@code require_free}
+   * (integer)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+  public Map<String, Object> findAvailableSlots(String start, String end, long durationMinutes, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    values.put("resource_ids", resourceIds);
     values.put("start", start);
     values.put("end", end);
     values.put("duration_minutes", durationMinutes);
-    putOptional(values, optional, Set.of("limit", "require_free"), "slotlock_find_available_slots");
+    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool", "limit", "require_free"), "slotlock_find_available_slots");
     return call("slotlock_find_available_slots", values);
   }
 
@@ -264,12 +369,46 @@ public abstract class SlotlockOperations {
    * offer a person a choice. With require_free, only times when at least that many of the
    * resources are free together, each slot naming them in resource_ids: every resource for a
    * booking that needs them all (book it with slotlock_book_together), or any n of them. No slot
-   * is listed unless every resource's coverage is certain.
+   * is listed unless every resource's coverage is certain. Name the resources with resource_ids,
+   * or select them as slotlock_get_free_busy does: at most 20.
    *
-   * @param resourceIds {@code resource_ids}, list of string
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @param durationMinutes {@code duration_minutes}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableSlots(String start, String end, long durationMinutes) {
+    return findAvailableSlots(start, end, durationMinutes, null);
+  }
+
+  /**
+   * Find available slots, as earlier releases took it: {@code resource_ids} in its old place. See
+   * the method that takes them in {@code optional}.
+   *
+   * @param resourceIds {@code resource_ids}
+   * @param start {@code start}
+   * @param end {@code end}
+   * @param durationMinutes {@code duration_minutes}
+   * @param optional the other optional arguments, or null
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+    Map<String, Object> merged = new LinkedHashMap<>();
+    if (optional != null) merged.putAll(optional);
+    merged.put("resource_ids", resourceIds);
+    return findAvailableSlots(start, end, durationMinutes, merged);
+  }
+
+  /**
+   * Find available slots, as earlier releases took it: {@code resource_ids} in its old place. See
+   * the method that takes them in {@code optional}.
+   *
+   * @param resourceIds {@code resource_ids}
+   * @param start {@code start}
+   * @param end {@code end}
+   * @param durationMinutes {@code duration_minutes}
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -1790,17 +1929,23 @@ public abstract class SlotlockOperations {
    * as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
    * webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours
    * of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The
-   * secret is returned here only. At most 10 per tenant.
+   * secret is returned here only. At most 10 per tenant. With resource_ids, pools, locations
+   * (each with every location in it) or groups, only changes about a resource that matches one of
+   * them, as it is when the change is delivered: a change about no resource (a key, a webhook, a
+   * usage notice) is not sent. At most 100 resource ids and 20 of each other kind (400
+   * invalid_webhook_filter).
    *
    * @param url {@code url}, string
-   * @param optional the optional arguments, or null: {@code event_types} (list of string)
+   * @param optional the optional arguments, or null: {@code event_types} (list of string), {@code
+   * resource_ids} (list of string), {@code pools} (list of string), {@code locations} (list of
+   * string), {@code groups} (list of string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> createWebhook(String url, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("url", url);
-    putOptional(values, optional, Set.of("event_types"), "slotlock_create_webhook");
+    putOptional(values, optional, Set.of("event_types", "resource_ids", "pools", "locations", "groups"), "slotlock_create_webhook");
     return call("slotlock_create_webhook", values);
   }
 
@@ -1809,7 +1954,11 @@ public abstract class SlotlockOperations {
    * as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
    * webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours
    * of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The
-   * secret is returned here only. At most 10 per tenant.
+   * secret is returned here only. At most 10 per tenant. With resource_ids, pools, locations
+   * (each with every location in it) or groups, only changes about a resource that matches one of
+   * them, as it is when the change is delivered: a change about no resource (a key, a webhook, a
+   * usage notice) is not sent. At most 100 resource ids and 20 of each other kind (400
+   * invalid_webhook_filter).
    *
    * @param url {@code url}, string
    * @return the response body

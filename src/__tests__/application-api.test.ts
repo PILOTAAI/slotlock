@@ -269,6 +269,7 @@ const WEBHOOK = {
   last_error: null,
   disabled_at: null,
   disabled_reason: null,
+  filter: null,
 };
 
 const WAITLIST_ENTRY = {
