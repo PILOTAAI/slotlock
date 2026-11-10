@@ -33,9 +33,19 @@ import {
   type SlotlockApiKeyScope,
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
+  SLOTLOCK_TEST_TENANT_SUFFIX,
   slotlockBearerCredential,
   slotlockLiveTenant,
 } from './api-keys.js';
+import {
+  SLOTLOCK_SANDBOX_MAX_RACERS,
+  SLOTLOCK_SANDBOX_SCENARIOS,
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  raceSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
 import {
   createSlotlockDashboard,
   createSlotlockDashboardResources,
@@ -1443,6 +1453,100 @@ function resourceLine(resource: SlotlockResource): string {
 }
 
 /** `resource add`: create (or, for an existing reference, re-zone) one resource in the tenant. */
+/**
+ * `slotlock sandbox …` (RFC 0004 A6), in the tenant SLOTLOCK_TENANT names, which must be a test
+ * environment (`<tenant>~test`): seed a scenario, reset, fast-forward, or race agents for one slot.
+ */
+async function runSandboxCommand(
+  subcommand: 'sandbox seed' | 'sandbox reset' | 'sandbox fast-forward' | 'sandbox race',
+  operands: readonly string[],
+  values: { agents?: string; start?: string },
+  io: SlotlockCliIo,
+): Promise<number> {
+  const config = readSlotlockDatabaseConfig(io.env);
+  if (!config.tenantRef.endsWith(SLOTLOCK_TEST_TENANT_SUFFIX)) {
+    io.stderr.write(`slotlock: the sandbox works only in a test environment: SLOTLOCK_TENANT=${config.tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}\n`);
+    return 2;
+  }
+  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  const sql = connect(config.databaseUrl, subcommand === 'sandbox race' ? 20 : 1);
+  const store = createSlotlockStore(sql);
+  try {
+    if (subcommand === 'sandbox seed') {
+      const scenario = operands[1] as SlotlockSandboxScenario;
+      if (!(SLOTLOCK_SANDBOX_SCENARIOS as readonly string[]).includes(scenario)) {
+        io.stderr.write(`slotlock: the scenarios are ${SLOTLOCK_SANDBOX_SCENARIOS.join(', ')}\n`);
+        return 2;
+      }
+      line(await seedSlotlockSandbox(store, config.tenantRef, scenario));
+      return 0;
+    }
+    if (subcommand === 'sandbox reset') {
+      line({ removed: await resetSlotlockSandbox(store, config.tenantRef) });
+      return 0;
+    }
+    if (subcommand === 'sandbox fast-forward') {
+      const minutes = /^[1-9][0-9]{0,5}$/.test(operands[1] ?? '') ? Number(operands[1]) : Number.NaN;
+      if (!(minutes >= 1 && minutes <= 525_600)) {
+        io.stderr.write('slotlock: fast-forward takes whole minutes, 1 to 525,600\n');
+        return 2;
+      }
+      const forward = await fastForwardSlotlockSandbox(store, config.tenantRef, minutes);
+      line({ minutes, holds: forward.holds, approvals: forward.approvals, pruned: forward.maintenance.pruned, approvals_expired: forward.maintenance.approvalsExpired });
+      return 0;
+    }
+    // A race: on the resource named, from --start (an hour from tomorrow's 10:00 UTC by default).
+    const agents = values.agents === undefined ? 100 : /^[0-9]{1,3}$/.test(values.agents) ? Number(values.agents) : Number.NaN;
+    if (!(agents >= 2 && agents <= SLOTLOCK_SANDBOX_MAX_RACERS)) {
+      io.stderr.write(`slotlock: --agents must be 2 to ${SLOTLOCK_SANDBOX_MAX_RACERS}\n`);
+      return 2;
+    }
+    const tomorrow = new Date(Date.now() + 86_400_000);
+    const start = values.start !== undefined
+      ? new Date(values.start)
+      : new Date(Date.UTC(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth(), tomorrow.getUTCDate(), 10));
+    if (!Number.isFinite(start.getTime())) {
+      io.stderr.write('slotlock: --start must be a date and time, like 2027-03-02T10:00:00Z\n');
+      return 2;
+    }
+    const resource = (
+      await store.withTenant(config.tenantRef, (tenant) => tenant.listResources({ tenantRef: config.tenantRef, limit: 1000 }))
+    ).find((candidate) => candidate.externalRef === operands[1] || candidate.id === operands[1]);
+    if (!resource) {
+      io.stderr.write('slotlock: no resource with that reference in the test environment\n');
+      return 1;
+    }
+    const raced = await raceSlotlockSandbox({
+      backend: createSlotlockStoreAgentBackend(store, { availabilityRules: async () => [...readAvailability(io.env)] }),
+      tenantRef: config.tenantRef,
+      resourceId: resource.id,
+      start,
+      end: new Date(start.getTime() + 3_600_000),
+      agents,
+    });
+    line({
+      agents: raced.agents,
+      booked: raced.booked,
+      refused: raced.refused,
+      with_alternatives: raced.withAlternatives,
+      server_errors: raced.serverErrors,
+      p50_ms: raced.p50Ms,
+      p99_ms: raced.p99Ms,
+      max_ms: raced.maxMs,
+    });
+    return raced.booked === 1 && raced.serverErrors === 0 ? 0 : 1;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === 'sandbox_not_empty') {
+      io.stderr.write('slotlock: the test environment has resources already; run slotlock sandbox reset first\n');
+      return 1;
+    }
+    throw error;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 async function addResource(
   config: SlotlockDatabaseConfig,
   externalRef: string,
@@ -2209,6 +2313,16 @@ Commands:
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
   key revoke <id>          Revoke one of the tenant's API keys at once
+  sandbox seed <car-rental|clinic|desks>
+                           Fill an empty test environment (SLOTLOCK_TENANT=<tenant>~test) with a
+                           scenario: locations, groups, resources, hours, rules and bookings
+  sandbox reset            Empty the test environment; its keys, webhooks and plan stay
+  sandbox fast-forward <minutes>
+                           Make what would lapse in the test environment within that time lapse
+                           now (holds, offers, approvals), then run maintenance
+  sandbox race <resource-ref> [--agents <n>] [--start <date-time>]
+                           Race agents (default 100) for one hour on a test resource and print who
+                           booked, who was refused and why, and how long the answers took
   partner create <id> <name> --contract <json | @file>
                            Create a partner reselling Slotlock, or change its name and contract:
                            its plans (limits and quotas), its accounts' key scopes and its prices
@@ -2397,7 +2511,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'plan' ||
     command === 'partner' ||
     command === 'overage' ||
-    command === 'billing'
+    command === 'billing' ||
+    command === 'sandbox'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -2422,6 +2537,10 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'key rotate': 2,
     'key revoke': 2,
     'key limits': 2,
+    'sandbox seed': 2,
+    'sandbox reset': 1,
+    'sandbox fast-forward': 2,
+    'sandbox race': 2,
     'hours show': 1,
     'hours set': 2,
     'hours clear': 1,
@@ -2553,6 +2672,9 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   } else if (values.locations !== undefined || values.groups !== undefined) {
     return usage('--locations and --groups are for key create');
   }
+  if ((values.agents !== undefined || values.start !== undefined) && subcommand !== 'sandbox race') {
+    return usage('--agents and --start apply only to sandbox race');
+  }
   const limitOptions = ['max-holds', 'max-held-hours', 'requests-per-minute', 'requires-approval'] as const;
   if (subcommand === 'key create' || subcommand === 'key limits') {
     try {
@@ -2590,6 +2712,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         io.stdout.write(`${JSON.stringify(result)}\n`);
         return 0;
       }
+      case 'sandbox seed':
+      case 'sandbox reset':
+      case 'sandbox fast-forward':
+      case 'sandbox race':
+        return await runSandboxCommand(subcommand, operands, values, io);
       case 'resource add': {
         const config = readSlotlockDatabaseConfig(io.env);
         const resource = await addResource(config, operands[1] as string, values.timezone ?? 'UTC');
@@ -2916,6 +3043,8 @@ function parseCliArguments(argv: readonly string[]) {
       'max-held-hours': { type: 'string' },
       'requests-per-minute': { type: 'string' },
       'requires-approval': { type: 'boolean' },
+      agents: { type: 'string' },
+      start: { type: 'string' },
       contract: { type: 'string' },
       month: { type: 'string' },
       event: { type: 'string' },

@@ -280,7 +280,19 @@ People approve or decline in the dashboard, or with `POST /v1/approvals/{id}`. T
   decision: build it, or use a provider such as WorkOS or Stytch behind the existing
   protected-resource metadata.
 
-**A6. Sandbox and simulation (T2).**
+**A6. Sandbox and simulation (T2).** Status: built, but for the simulated clock.
+- Built: seed (`car-rental`, `clinic`, `desks`), reset, race and fast-forward, from the CLI
+  (`slotlock sandbox …`), four admin operations (`/v1/sandbox/seed`, `/race`, `/fast-forward`,
+  `/reset`) and the dashboard's Test overview. Each refuses a live tenant; the database's
+  `reset_test_tenant` refuses one too, and any tenant but the one the caller acts in.
+- Instead of a simulated clock, fast-forward makes what would lapse within N minutes lapse now
+  (holds, waitlist offers, approvals) and runs maintenance. That covers what agents most need to
+  rehearse (a hold that lapsed, an approval that expired, an offer passed on) without touching
+  how production code reads the time. No-shows and series rolls follow the real clock: a
+  per-tenant clock offset in every rule, hold and maintenance check would change the write path
+  for every tenant, which the T2 review should weigh before it is built.
+
+As proposed:
 - `slotlock sandbox seed --scenario car-rental|clinic|desks`, and the same from the dashboard in
   Test. It creates resources, pools, locations, hours and bookings in the test tenant.
   `slotlock sandbox reset` empties it.

@@ -99,6 +99,10 @@ public sealed partial class SlotlockClient
         ["slotlock_list_approvals"] = new("GET", "/v1/approvals", [], ["status", "limit"]),
         ["slotlock_get_approval"] = new("GET", "/v1/approvals/{approval_id}", ["approval_id"], []),
         ["slotlock_decide_approval"] = new("POST", "/v1/approvals/{approval_id}/decision", ["approval_id"], []),
+        ["slotlock_sandbox_seed"] = new("POST", "/v1/sandbox/seed", [], []),
+        ["slotlock_sandbox_reset"] = new("POST", "/v1/sandbox/reset", [], []),
+        ["slotlock_sandbox_fast_forward"] = new("POST", "/v1/sandbox/fast-forward", [], []),
+        ["slotlock_sandbox_race"] = new("POST", "/v1/sandbox/race", [], []),
         ["slotlock_partner_get_account"] = new("GET", "/v1/partner/accounts/{account}", ["account"], []),
         ["slotlock_partner_put_account"] = new("PUT", "/v1/partner/accounts/{account}", ["account"], []),
         ["slotlock_partner_list_accounts"] = new("GET", "/v1/partner/accounts", [], []),
@@ -2965,6 +2969,94 @@ public sealed partial class SlotlockClient
         if (reason.HasValue) values["reason"] = Json.ToNode(reason.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_decide_approval", values, cancellationToken);
+    }
+
+    /// <summary>Seed the test environment.</summary>
+    /// <remarks>
+    /// Fill an empty test environment (a key starting slk_test_) with a scenario to try an agent
+    /// against: car-rental (cars and vans in pools at two branches, 30-minute turnaround), clinic
+    /// (practitioners and treatment rooms, half-hour slots on weekdays) or desks (desks on two
+    /// floors, and a hall that splits in two). Locations, groups, resources with profiles, hours
+    /// and booking rules, and three bookings tomorrow. 409 sandbox_not_empty when it has
+    /// resources: reset it first. 403 sandbox_test_only for a live key.
+    /// </remarks>
+    /// <param name="scenario">scenario</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SandboxSeedAsync(
+        string scenario,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["scenario"] = Json.ToNode(scenario);
+        return CallAsync("slotlock_sandbox_seed", values, cancellationToken);
+    }
+
+    /// <summary>Empty the test environment.</summary>
+    /// <remarks>
+    /// Empty the test environment as if new: its resources, locations, groups, bookings, events,
+    /// holds, waitlist, approval policies and feed. Its API keys, webhooks, plan and usage stay.
+    /// Rows removed, by table. 403 sandbox_test_only for a live key.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SandboxResetAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_sandbox_reset", values, cancellationToken);
+    }
+
+    /// <summary>Move the test environment's waiting forward.</summary>
+    /// <remarks>
+    /// Make what would lapse in the test environment within minutes (1-525,600) lapse now: holds
+    /// (a waitlist offer's and an approval's among them) and pending approvals; then a
+    /// maintenance pass reaps them as it would have, releasing holds, passing offers on and
+    /// expiring approvals, on the feed as usual. Bookings and events keep their times; no-shows
+    /// and series follow the real clock. 403 sandbox_test_only for a live key.
+    /// </remarks>
+    /// <param name="minutes">minutes</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SandboxFastForwardAsync(
+        long minutes,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["minutes"] = Json.ToNode(minutes);
+        return CallAsync("slotlock_sandbox_fast_forward", values, cancellationToken);
+    }
+
+    /// <summary>Race agents for one slot in the test environment.</summary>
+    /// <remarks>
+    /// Race agents (2-200, default 100), each an agent of its own, for one time on one resource
+    /// of the test environment, through the same path MCP, A2A and REST use: how many booked
+    /// (one), how many were refused and why (overlap, with alternatives), any server errors, and
+    /// how long the answers took. 403 sandbox_test_only for a live key.
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="startsAt">starts_at</param>
+    /// <param name="endsAt">ends_at</param>
+    /// <param name="agents">agents</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SandboxRaceAsync(
+        string resourceId,
+        string startsAt,
+        string endsAt,
+        Optional<long> agents = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["starts_at"] = Json.ToNode(startsAt);
+        values["ends_at"] = Json.ToNode(endsAt);
+        if (agents.HasValue) values["agents"] = Json.ToNode(agents.Value);
+        return CallAsync("slotlock_sandbox_race", values, cancellationToken);
     }
 
     /// <summary>Read an account.</summary>

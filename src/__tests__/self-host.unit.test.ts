@@ -793,6 +793,8 @@ describe('slotlock command line', () => {
     [['key', 'create'], /wrong number of arguments for "key create"/],
     [['key', 'revoke'], /wrong number of arguments for "key revoke"/],
     [['key', 'limits'], /wrong number of arguments for "key limits"/],
+    [['sandbox', 'seed'], /wrong number of arguments for "sandbox seed"/],
+    [['sandbox', 'reset', '--agents', '5'], /--agents and --start apply only to sandbox race/],
     [['key', 'list', '--max-holds', '2'], /--max-holds, --max-held-hours, --requests-per-minute and --requires-approval are for key create and key limits/],
     [['key', 'create', 'agent', '--requests-per-minute', '100001'], /--requests-per-minute must be a whole number from 1 to 100,000/],
     [['key', 'list', 'all'], /wrong number of arguments for "key list"/],

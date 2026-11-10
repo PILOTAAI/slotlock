@@ -68,6 +68,13 @@ import type {
   WeeklyAvailabilityRule,
 } from './types.js';
 import { maintainSlotlockTenant } from './maintenance.js';
+import {
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  raceSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
 import { SLOTLOCK_TEST_TENANT_SUFFIX, type SlotlockApiKeyScope } from './api-keys.js';
 import {
   type SlotlockPartnerAccount,
@@ -1600,6 +1607,14 @@ function keyLimitsFromInput(value: unknown) {
     ...(given.requests_per_minute !== undefined ? { requestsPerMinute: given.requests_per_minute } : {}),
     ...(given.requires_approval === true ? { requiresApproval: true } : {}),
   };
+}
+
+/** A sandbox refusal as the API answers it: 403 for a live tenant, 409 for one not empty. */
+function sandboxRefusal(error: unknown): unknown {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'sandbox_test_only') return new SlotlockAgentOperationError(code, 403);
+  if (code === 'sandbox_not_empty') return new SlotlockAgentOperationError(code, 409);
+  return error;
 }
 
 /** An approval decision refused: 404 for none, 409 for one decided or past its wait. */
@@ -3567,6 +3582,58 @@ export function createSlotlockStoreApplicationBackend(
         : await withTenant(store, context, (tenant) => tenant.getApproval({ tenantRef, id }));
       if (!granted) throw new SlotlockAgentOperationError('store_inconsistent', 503);
       return { approval: approvalOutput(granted), booking };
+    },
+
+    async sandboxSeed(context, input) {
+      try {
+        return { ...(await seedSlotlockSandbox(store, tenantOf(context), input.scenario as SlotlockSandboxScenario)) };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
+    async sandboxReset(context) {
+      try {
+        return { removed: await resetSlotlockSandbox(store, tenantOf(context)) };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
+    async sandboxFastForward(context, input) {
+      try {
+        const forward = await fastForwardSlotlockSandbox(store, tenantOf(context), input.minutes as number);
+        const { rollPending: _, ...maintenance } = forward.maintenance;
+        return { minutes: forward.minutes, holds: forward.holds, approvals: forward.approvals, maintenance };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
+    },
+
+    async sandboxRace(context, input) {
+      if (!options.agentBackend) throw new SlotlockAgentOperationError('sandbox_unavailable', 409);
+      try {
+        const raced = await raceSlotlockSandbox({
+          backend: options.agentBackend,
+          tenantRef: tenantOf(context),
+          resourceId: input.resource_id as string,
+          start: new Date(input.starts_at as string),
+          end: new Date(input.ends_at as string),
+          ...(input.agents !== undefined ? { agents: input.agents as number } : {}),
+        });
+        return {
+          agents: raced.agents,
+          booked: raced.booked,
+          refused: raced.refused,
+          with_alternatives: raced.withAlternatives,
+          server_errors: raced.serverErrors,
+          p50_ms: raced.p50Ms,
+          p99_ms: raced.p99Ms,
+          max_ms: raced.maxMs,
+        };
+      } catch (error) {
+        throw sandboxRefusal(error);
+      }
     },
 
     async runMaintenance(context) {

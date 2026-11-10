@@ -107,6 +107,10 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_approvals'
   | 'slotlock_get_approval'
   | 'slotlock_decide_approval'
+  | 'slotlock_sandbox_seed'
+  | 'slotlock_sandbox_reset'
+  | 'slotlock_sandbox_fast_forward'
+  | 'slotlock_sandbox_race'
   | 'slotlock_partner_put_account'
   | 'slotlock_partner_list_accounts'
   | 'slotlock_partner_get_account'
@@ -147,6 +151,10 @@ export interface SlotlockApplicationInvocationContext {
 const NOT_DRY_RUNNABLE: ReadonlySet<string> = new Set([
   'slotlock_erase_tenant',
   'slotlock_run_maintenance',
+  'slotlock_sandbox_seed',
+  'slotlock_sandbox_reset',
+  'slotlock_sandbox_fast_forward',
+  'slotlock_sandbox_race',
   'slotlock_partner_put_account',
   'slotlock_partner_create_key',
   'slotlock_partner_rotate_key',
@@ -240,6 +248,10 @@ export interface SlotlockApplicationBackend {
   listApprovals: Handler;
   getApproval: Handler;
   decideApproval: Handler;
+  sandboxSeed: Handler;
+  sandboxReset: Handler;
+  sandboxFastForward: Handler;
+  sandboxRace: Handler;
   partnerPutAccount: Handler;
   partnerListAccounts: Handler;
   partnerGetAccount: Handler;
@@ -1859,6 +1871,94 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: false },
       invoke: 'decideApproval',
       example: { approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d', decision: 'grant' },
+    },
+    // The sandbox (RFC 0004 A6): a test environment's only (`sandbox_test_only` elsewhere).
+    {
+      name: 'slotlock_sandbox_seed',
+      title: 'Seed the test environment',
+      description:
+        "Fill an empty test environment (a key starting slk_test_) with a scenario to try an agent against: car-rental (cars and vans in pools at two branches, 30-minute turnaround), clinic (practitioners and treatment rooms, half-hour slots on weekdays) or desks (desks on two floors, and a hall that splits in two). Locations, groups, resources with profiles, hours and booking rules, and three bookings tomorrow. 409 sandbox_not_empty when it has resources: reset it first. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/seed',
+      input: z.object({ scenario: z.enum(['car-rental', 'clinic', 'desks']) }).strict(),
+      output: z
+        .object({
+          scenario: z.enum(['car-rental', 'clinic', 'desks']),
+          resources: z.number().int().min(0),
+          locations: z.number().int().min(0),
+          groups: z.number().int().min(0),
+          pools: z.number().int().min(0),
+          bookings: z.number().int().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'sandboxSeed',
+      example: { scenario: 'car-rental' },
+    },
+    {
+      name: 'slotlock_sandbox_reset',
+      title: 'Empty the test environment',
+      description:
+        "Empty the test environment as if new: its resources, locations, groups, bookings, events, holds, waitlist, approval policies and feed. Its API keys, webhooks, plan and usage stay. Rows removed, by table. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/reset',
+      input: z.object({}).strict(),
+      output: z.object({ removed: z.record(z.string(), z.number().int().min(0)) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'sandboxReset',
+      example: {},
+    },
+    {
+      name: 'slotlock_sandbox_fast_forward',
+      title: "Move the test environment's waiting forward",
+      description:
+        "Make what would lapse in the test environment within minutes (1-525,600) lapse now: holds (a waitlist offer's and an approval's among them) and pending approvals; then a maintenance pass reaps them as it would have, releasing holds, passing offers on and expiring approvals, on the feed as usual. Bookings and events keep their times; no-shows and series follow the real clock. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/fast-forward',
+      input: z.object({ minutes: z.number().int().min(1).max(525_600) }).strict(),
+      output: z
+        .object({
+          minutes: z.number().int(),
+          holds: z.number().int().min(0),
+          approvals: z.number().int().min(0),
+          maintenance: z.record(z.string(), z.unknown()),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'sandboxFastForward',
+      example: { minutes: 60 },
+    },
+    {
+      name: 'slotlock_sandbox_race',
+      title: 'Race agents for one slot in the test environment',
+      description:
+        "Race agents (2-200, default 100), each an agent of its own, for one time on one resource of the test environment, through the same path MCP, A2A and REST use: how many booked (one), how many were refused and why (overlap, with alternatives), any server errors, and how long the answers took. 403 sandbox_test_only for a live key.",
+      method: 'POST',
+      path: '/v1/sandbox/race',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID,
+          starts_at: DATE_TIME,
+          ends_at: DATE_TIME,
+          agents: z.number().int().min(2).max(200).optional(),
+        })
+        .strict()
+        .refine((value) => Date.parse(value.ends_at) > Date.parse(value.starts_at)),
+      output: z
+        .object({
+          agents: z.number().int(),
+          booked: z.number().int().min(0),
+          refused: z.record(z.string(), z.number().int().min(0)),
+          with_alternatives: z.number().int().min(0),
+          server_errors: z.number().int().min(0),
+          p50_ms: z.number().min(0),
+          p99_ms: z.number().min(0),
+          max_ms: z.number().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'sandboxRace',
+      example: { resource_id: '00000000-0000-4000-8000-000000000001', starts_at: '2027-03-02T09:00:00Z', ends_at: '2027-03-02T10:00:00Z', agents: 100 },
     },
     // The partner API (RFC 0003 P3): a partner key's, for that partner's own accounts only.
     {

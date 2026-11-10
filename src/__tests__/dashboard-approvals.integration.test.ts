@@ -43,6 +43,7 @@ describe.skipIf(!url)('dashboard approvals (real Postgres)', () => {
 
   afterAll(async () => {
     await admin`SELECT * FROM slotlock.erase_tenant(${tenantRef}::text)`;
+    await admin`SELECT * FROM slotlock.erase_tenant(${`${tenantRef}~test`}::text)`;
     await application?.end({ timeout: 5 });
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
@@ -152,5 +153,65 @@ describe.skipIf(!url)('dashboard approvals (real Postgres)', () => {
     const again = await post('/dashboard/approvals/decide', { id: first.details?.approval_id as string, decision: 'grant' }, session);
     expect(again.status).toBe(409);
     expect(await again.text()).toContain('That approval was already decided.');
+  });
+
+  it('loads a sample into Test, moves its waiting forward and empties it, and never in Live (RFC 0004 A6)', async () => {
+    const store = createSlotlockStore(application);
+    const dashboard = createSlotlockDashboard({
+      publicUrl: ORIGIN,
+      github: { clientId: 'Ov23liSandbox', clientSecret: randomBytes(20).toString('hex') },
+      sessionSecret: randomBytes(32).toString('hex'),
+      allowedUsers: [String(githubId)],
+      keys: createSlotlockApiKeyStore(application),
+      resources: createSlotlockDashboardResources(store),
+      state: createSlotlockDashboardState(application),
+      fetch: async (input) =>
+        String(input).endsWith('/access_token')
+          ? Response.json({ access_token: 'gho_fake' })
+          : Response.json({ id: githubId, login: 'fleet-manager' }),
+    });
+    const get = (path: string, cookie?: string) =>
+      dashboard.fetch(new Request(`${ORIGIN}${path}`, cookie ? { headers: { cookie } } : {}));
+    const post = async (path: string, fields: Record<string, string>, cookie: string) => {
+      const sent = new URLSearchParams(fields);
+      const page = await (await get('/dashboard/keys', cookie)).text();
+      sent.set('csrf', /name="csrf" value="([^"]+)"/.exec(page)?.[1] as string);
+      sent.set('once', /name="once" value="([^"]+)"/.exec(page)?.[1] as string);
+      return dashboard.fetch(
+        new Request(`${ORIGIN}${path}`, {
+          method: 'POST',
+          headers: { cookie, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: sent.toString(),
+        }),
+      );
+    };
+    const start = await get('/dashboard/sign-in');
+    const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+    const pending = start.headers.getSetCookie()[0]?.split('; ')[0] as string;
+    const callback = await get(`/dashboard/callback?code=c&state=${state}`, pending);
+    let session = callback.headers
+      .getSetCookie()
+      .find((value) => value.startsWith('__Host-slotlock-session='))
+      ?.split('; ')[0] as string;
+    // Live has no sandbox, and refuses its actions.
+    expect(await (await get('/dashboard', session)).text()).not.toContain('id="sandbox"');
+    expect((await post('/dashboard/sandbox/seed', { scenario: 'clinic' }, session)).status).toBe(400);
+    const switched = await post('/dashboard/environment', { environment: 'test' }, session);
+    session =
+      switched.headers
+        .getSetCookie()
+        .find((value) => value.startsWith('__Host-slotlock-session='))
+        ?.split('; ')[0] ?? session;
+    expect(await (await get('/dashboard', session)).text()).toContain('id="sandbox"');
+    const seeded = await post('/dashboard/sandbox/seed', { scenario: 'clinic' }, session);
+    expect(seeded.status).toBe(200);
+    expect(await seeded.text()).toContain('Loaded 4 resources and 3 bookings for tomorrow.');
+    const test = `${tenantRef}~test`;
+    expect(await store.withTenant(test, (tenant) => tenant.countResources({ tenantRef: test }))).toBe(4);
+    expect(await store.withTenant(tenantRef, (tenant) => tenant.countResources({ tenantRef }))).toBe(1);
+    const moved = await post('/dashboard/sandbox/fast-forward', { minutes: '60' }, session);
+    expect(await moved.text()).toContain('0 holds and 0 approvals lapsed.');
+    expect((await post('/dashboard/sandbox/reset', {}, session)).status).toBe(303);
+    expect(await store.withTenant(test, (tenant) => tenant.countResources({ tenantRef: test }))).toBe(0);
   });
 });

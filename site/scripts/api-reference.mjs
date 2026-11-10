@@ -129,6 +129,10 @@ export const GROUPS = [
     ],
   },
   {
+    name: 'Sandbox',
+    operations: ['slotlock_sandbox_seed', 'slotlock_sandbox_race', 'slotlock_sandbox_fast_forward', 'slotlock_sandbox_reset'],
+  },
+  {
     name: 'Tenant',
     operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
   },

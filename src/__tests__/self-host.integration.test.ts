@@ -91,6 +91,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
   });
 
   afterAll(async () => {
+    await admin`SELECT * FROM slotlock.erase_tenant(${`${tenantRef}~test`}::text)`;
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef})`;
     await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref IN (${tenantRef}, ${otherTenantRef}, 'github:4242', 'github:999', 'github-org:91', 'github-org:92')`;
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
@@ -706,6 +707,31 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     for (const secret of [token, confirmationSecret, password]) {
       expect(stdout.text()).not.toContain(secret);
     }
+  });
+
+  it('seeds, races, fast-forwards and resets a test environment from the command line, and no other', async () => {
+    const test = { ...env, SLOTLOCK_TENANT: `${tenantRef}~test` };
+    const sandbox = async (argv: string[], on: SlotlockEnv = test) => {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(argv, { env: on, stdout, stderr, signal: new AbortController().signal });
+      return { code, stdout, stderr };
+    };
+    const live = await sandbox(['sandbox', 'seed', 'clinic'], env);
+    expect(live.code).toBe(2);
+    expect(live.stderr.text()).toMatch(/only in a test environment/);
+    const seeded = await sandbox(['sandbox', 'seed', 'car-rental']);
+    expect(seeded.code).toBe(0);
+    expect(JSON.parse(seeded.stdout.text())).toMatchObject({ scenario: 'car-rental', resources: 5, bookings: 3 });
+    expect((await sandbox(['sandbox', 'seed', 'car-rental'])).stderr.text()).toMatch(/sandbox reset first/);
+    const raced = await sandbox(['sandbox', 'race', 'car-1', '--agents', '20', '--start', `${new Date().getUTCFullYear() + 1}-03-02T10:00:00Z`]);
+    expect(raced.code).toBe(0);
+    expect(JSON.parse(raced.stdout.text())).toMatchObject({ agents: 20, booked: 1, refused: { overlap: 19 }, server_errors: 0 });
+    expect(JSON.parse((await sandbox(['sandbox', 'fast-forward', '60'])).stdout.text())).toMatchObject({ minutes: 60, holds: 0 });
+    const reset = await sandbox(['sandbox', 'reset']);
+    expect(reset.code).toBe(0);
+    expect(JSON.parse(reset.stdout.text()).removed).toMatchObject({ resources: 5 });
+    expect((await sandbox(['sandbox', 'seed', 'unknown'])).code).toBe(2);
   });
 
   it("manages API keys from the command line and serves each as its key's tenant and scopes", async () => {

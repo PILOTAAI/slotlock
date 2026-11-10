@@ -165,6 +165,8 @@ const expectedFiles = new Set([
   'rest-api.d.ts',
   'rules.js',
   'rules.d.ts',
+  'sandbox.js',
+  'sandbox.d.ts',
   'self-host.js',
   'self-host.d.ts',
   'store.js',

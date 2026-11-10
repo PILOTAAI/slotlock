@@ -314,6 +314,7 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.tenant_quota_usage(text, date)',
   'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
   'slotlock.tenant_plan_quotas(text)',
+  'slotlock.reset_test_tenant(text)',
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -2212,6 +2213,76 @@ BEGIN
 END
 $slotlock_erase_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
+
+-- Empty a test environment (RFC 0004 A6 sandbox reset): its resources, locations and groups, every
+-- booking, event, hold and waitlist entry, its approval policies, booking rule defaults and pool
+-- settings, and its feed, as if it were new. What sets it up is kept: its API keys (and their
+-- scopes and limits), webhook endpoints, plan, usage and assistant. Only a test environment
+-- (a tenant ending ~test, api-keys.ts), and only the one the caller acts in (its tenant context), so
+-- a server resets nothing it was not asked to; a live tenant is never touched.
+CREATE OR REPLACE FUNCTION slotlock.reset_test_tenant(requested_tenant_ref text)
+RETURNS TABLE (reset_table text, reset_rows bigint)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_reset_test_tenant$
+DECLARE
+  emptied text;
+  gone bigint;
+BEGIN
+  IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500
+     OR right(requested_tenant_ref, 5) <> '~test' THEN
+    RAISE EXCEPTION 'Slotlock resets only a test environment (a tenant ending ~test)'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'sandbox_test_only';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts contract
+                  WHERE current_setting(contract.tenant_context_setting, true) = requested_tenant_ref) THEN
+    RAISE EXCEPTION 'Slotlock resets only the tenant the caller acts in'
+      USING ERRCODE = 'insufficient_privilege', HINT = 'sandbox_test_only';
+  END IF;
+  -- Waits for the tenant's transactions under way, as erasure does.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || requested_tenant_ref, 0));
+  -- Nothing reset is a change anyone is told of: the feed goes with what it described.
+  PERFORM set_config('slotlock.erasing', requested_tenant_ref, true);
+  reset_table := 'reservations';
+  DELETE FROM slotlock.reservations
+   WHERE tenant_ref = requested_tenant_ref
+      OR resource_id IN (SELECT owned.id FROM slotlock.resources owned
+                          WHERE owned.tenant_ref = requested_tenant_ref);
+  GET DIAGNOSTICS reset_rows = ROW_COUNT;
+  RETURN NEXT;
+  FOREACH emptied IN ARRAY ARRAY[
+    'calendar_event_attendees', 'calendar_event_reminders', 'calendar_event_exceptions',
+    'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
+    'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
+    'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
+    'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
+    'resources', 'resource_groups', 'outbox'
+  ] LOOP
+    reset_table := emptied;
+    EXECUTE format('DELETE FROM slotlock.%I WHERE tenant_ref = $1', emptied) USING requested_tenant_ref;
+    GET DIAGNOSTICS reset_rows = ROW_COUNT;
+    RETURN NEXT;
+  END LOOP;
+  -- Locations last: one may be inside another, so the innermost go first.
+  reset_table := 'locations';
+  reset_rows := 0;
+  LOOP
+    DELETE FROM slotlock.locations place
+     WHERE place.tenant_ref = requested_tenant_ref
+       AND NOT EXISTS (SELECT 1 FROM slotlock.locations inner_place
+                        WHERE inner_place.tenant_ref = requested_tenant_ref
+                          AND inner_place.parent_ref = place.ref);
+    GET DIAGNOSTICS gone = ROW_COUNT;
+    EXIT WHEN gone = 0;
+    reset_rows := reset_rows + gone;
+  END LOOP;
+  RETURN NEXT;
+  PERFORM set_config('slotlock.erasing', '', true);
+END
+$slotlock_reset_test_tenant$;
+REVOKE ALL ON FUNCTION slotlock.reset_test_tenant(text) FROM PUBLIC;
 
 -- The tenants with a webhook endpoint, which a server delivers for. Row-level security hides every
 -- other tenant's endpoints from the serving role, so this list (names only) is how a server that

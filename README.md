@@ -259,6 +259,18 @@ slotlock key revoke <id>
   `SLOTLOCK_TENANT=<tenant>~test slotlock key create …` or the dashboard's Live/Test switch. It is
   suspended with its live tenant and erased with it, and a server that refuses a person's keys
   refuses their test keys too.
+- A test environment is a sandbox to try an agent against (`SLOTLOCK_TENANT=<tenant>~test`, a
+  `slk_test_` key, or the dashboard's Test overview). `slotlock sandbox seed car-rental` (or
+  `clinic`, `desks`) fills an empty one with locations, groups, resources with profiles, hours,
+  booking rules, pools, a composite and three bookings tomorrow. `slotlock sandbox race car-1
+  --agents 100` races that many agents for one hour on a resource and prints who booked, who was
+  refused and why, and how long the answers took. `slotlock sandbox fast-forward 60` makes the
+  holds, waitlist offers and approvals that would lapse within an hour lapse now and runs
+  maintenance, so an agent's handling of a lapsed hold or an expired approval can be tried
+  without waiting; bookings and events keep their times. `slotlock sandbox reset` empties it,
+  keeping its keys, webhooks and plan. The same are `POST /v1/sandbox/seed`, `/race`,
+  `/fast-forward` and `/reset` for an admin test key. Each refuses a live tenant
+  (`sandbox_test_only`), and so does the database's reset.
 
 ### Partner accounts
 

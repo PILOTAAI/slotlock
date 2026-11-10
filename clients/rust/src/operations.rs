@@ -597,6 +597,34 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_sandbox_seed",
+        method: "POST",
+        path: "/v1/sandbox/seed",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_reset",
+        method: "POST",
+        path: "/v1/sandbox/reset",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_fast_forward",
+        method: "POST",
+        path: "/v1/sandbox/fast-forward",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_sandbox_race",
+        method: "POST",
+        path: "/v1/sandbox/race",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_partner_get_account",
         method: "GET",
         path: "/v1/partner/accounts/{account}",
@@ -1826,6 +1854,33 @@ pub struct DecideApprovalInput {
     pub dry_run: Option<bool>,
 }
 
+/// The arguments of [`Client::sandbox_seed`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxSeedInput {
+    pub scenario: String,
+}
+
+/// The arguments of [`Client::sandbox_reset`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxResetInput {
+}
+
+/// The arguments of [`Client::sandbox_fast_forward`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxFastForwardInput {
+    pub minutes: i64,
+}
+
+/// The arguments of [`Client::sandbox_race`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SandboxRaceInput {
+    pub resource_id: String,
+    pub starts_at: String,
+    pub ends_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<i64>,
+}
+
 /// The arguments of [`Client::partner_get_account`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PartnerGetAccountInput {
@@ -2774,6 +2829,48 @@ impl Client {
     /// 409 approval_expired after its wait.
     pub fn decide_approval(&self, input: &DecideApprovalInput) -> Result<Value, Error> {
         self.call("slotlock_decide_approval", serde_json::to_value(input)?)
+    }
+
+    /// Seed the test environment.
+    ///
+    /// Fill an empty test environment (a key starting slk_test_) with a scenario to try an agent
+    /// against: car-rental (cars and vans in pools at two branches, 30-minute turnaround), clinic
+    /// (practitioners and treatment rooms, half-hour slots on weekdays) or desks (desks on two
+    /// floors, and a hall that splits in two). Locations, groups, resources with profiles, hours
+    /// and booking rules, and three bookings tomorrow. 409 sandbox_not_empty when it has
+    /// resources: reset it first. 403 sandbox_test_only for a live key.
+    pub fn sandbox_seed(&self, input: &SandboxSeedInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_seed", serde_json::to_value(input)?)
+    }
+
+    /// Empty the test environment.
+    ///
+    /// Empty the test environment as if new: its resources, locations, groups, bookings, events,
+    /// holds, waitlist, approval policies and feed. Its API keys, webhooks, plan and usage stay.
+    /// Rows removed, by table. 403 sandbox_test_only for a live key.
+    pub fn sandbox_reset(&self, input: &SandboxResetInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_reset", serde_json::to_value(input)?)
+    }
+
+    /// Move the test environment's waiting forward.
+    ///
+    /// Make what would lapse in the test environment within minutes (1-525,600) lapse now: holds
+    /// (a waitlist offer's and an approval's among them) and pending approvals; then a
+    /// maintenance pass reaps them as it would have, releasing holds, passing offers on and
+    /// expiring approvals, on the feed as usual. Bookings and events keep their times; no-shows
+    /// and series follow the real clock. 403 sandbox_test_only for a live key.
+    pub fn sandbox_fast_forward(&self, input: &SandboxFastForwardInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_fast_forward", serde_json::to_value(input)?)
+    }
+
+    /// Race agents for one slot in the test environment.
+    ///
+    /// Race agents (2-200, default 100), each an agent of its own, for one time on one resource
+    /// of the test environment, through the same path MCP, A2A and REST use: how many booked
+    /// (one), how many were refused and why (overlap, with alternatives), any server errors, and
+    /// how long the answers took. 403 sandbox_test_only for a live key.
+    pub fn sandbox_race(&self, input: &SandboxRaceInput) -> Result<Value, Error> {
+        self.call("slotlock_sandbox_race", serde_json::to_value(input)?)
     }
 
     /// Read an account.

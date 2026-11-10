@@ -1080,6 +1080,13 @@ function pageLimit(limit: number | undefined): number {
   return value;
 }
 
+function sandboxTestOnlyError(): Error & { code: 'sandbox_test_only' } {
+  return Object.assign(
+    new Error('Slotlock does this only in a test environment (a tenant ending ~test)'),
+    { code: 'sandbox_test_only' as const },
+  );
+}
+
 function invalidIdentityError(message: string): Error & { code: 'invalid_identity' } {
   return Object.assign(new Error(message), { code: 'invalid_identity' as const });
 }
@@ -2909,6 +2916,19 @@ export interface SlotlockStore extends SlotlockEventFeed {
   /** Maintenance: up to `limit` pending approvals past their wait expire and free their time. */
   expireApprovals(params: { tenantRef: string; limit?: number }): Promise<{ expired: number }>;
   /**
+   * Empty a test environment (RFC 0004 A6): its resources, locations, groups, bookings, events,
+   * holds, waitlist, approval policies and feed; its keys, webhooks, plan and usage stay. Refused
+   * (`sandbox_test_only`) for a tenant that is not a test environment (`~test`). Rows removed, by
+   * table.
+   */
+  resetTestTenant(params: { tenantRef: string }): Promise<Record<string, number>>;
+  /**
+   * In a test environment, make what would lapse within `minutes` lapse now (RFC 0004 A6): holds
+   * (a waitlist offer's and an approval's among them) and pending approvals. Maintenance then
+   * reaps them as it would have. Refused (`sandbox_test_only`) elsewhere.
+   */
+  fastForwardTestTenant(params: { tenantRef: string; minutes: number }): Promise<{ holds: number; approvals: number }>;
+  /**
    * The tenant's bookings on one resource whose occupied time meets `window` (at most 367 days),
    * by start then id, keyset-paginated: pass the last one's `{ start, id }` as `after`.
    */
@@ -3922,6 +3942,8 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'beginApprovalGrant',
   'finishApprovalGrant',
   'declineApproval',
+  'resetTestTenant',
+  'fastForwardTestTenant',
   'setTenantAvailability',
   'createReservation',
   'createExternalReservation',
@@ -6051,6 +6073,49 @@ function buildSlotlockStore(
         throw invalidIdentityError('Slotlock approval reason must be at most 500 characters');
       }
       return declineApproval(sql, params);
+    },
+
+    async resetTestTenant(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!params.tenantRef.endsWith('~test')) throw sandboxTestOnlyError();
+      const rows = await sql<{ reset_table: string; reset_rows: string | number }[]>`
+        SELECT * FROM slotlock.reset_test_tenant(${params.tenantRef}::text)`.catch((error: unknown) => {
+        if ((error as { hint?: unknown }).hint === 'sandbox_test_only') throw sandboxTestOnlyError();
+        throw error;
+      });
+      return Object.fromEntries(rows.map((row) => [row.reset_table, Number(row.reset_rows)]));
+    },
+
+    async fastForwardTestTenant(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!params.tenantRef.endsWith('~test')) throw sandboxTestOnlyError();
+      if (!Number.isSafeInteger(params.minutes) || params.minutes < 1 || params.minutes > 525_600) {
+        throw invalidIdentityError('Slotlock fast-forward is 1 to 525,600 minutes');
+      }
+      const [counted] = await sql<{ holds: number; approvals: number }[]>`
+        WITH lapsed_holds AS (
+          UPDATE slotlock.reservations hold
+             SET expires_at = statement_timestamp() - interval '1 millisecond'
+           WHERE hold.status = 'held'
+             AND hold.expires_at > statement_timestamp()
+             AND hold.expires_at <= statement_timestamp() + make_interval(mins => ${params.minutes})
+             AND hold.resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${params.tenantRef})
+          RETURNING 1
+        ), lapsed_approvals AS (
+          UPDATE slotlock.approvals
+             SET expires_at = statement_timestamp() - interval '1 millisecond'
+           WHERE tenant_ref = ${params.tenantRef} AND status = 'pending'
+             AND expires_at > statement_timestamp()
+             AND expires_at <= statement_timestamp() + make_interval(mins => ${params.minutes})
+          RETURNING 1
+        )
+        SELECT (SELECT count(*) FROM lapsed_holds)::int AS holds,
+               (SELECT count(*) FROM lapsed_approvals)::int AS approvals`;
+      return { holds: counted?.holds ?? 0, approvals: counted?.approvals ?? 0 };
     },
 
     async expireApprovals(params) {

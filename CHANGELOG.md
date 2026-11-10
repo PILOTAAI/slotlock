@@ -7,6 +7,13 @@ versioning.
 
 ### Added
 
+- The sandbox (RFC 0004 A6), in a test environment only: seed a scenario (car rental, clinic,
+  desks) into an empty one, race agents for one slot and report who booked, who was refused and
+  how long each answer took, fast-forward (holds, waitlist offers and approvals that would lapse
+  within some minutes lapse now, then maintenance reaps them), and reset (everything but its keys,
+  webhooks, plan and usage). `slotlock sandbox …`, four admin operations (`/v1/sandbox/*`) and the
+  dashboard's Test overview. Each refuses a live tenant, and so does the database's
+  `slotlock.reset_test_tenant`, which acts only in the caller's own test tenant.
 - Contention at scale (RFC 0004 A7): a CI test races 100 REST clients for one slot (one booking, 99
   `overlap` refusals with alternatives, no 5xx, p99 under a second), and the benchmark runs three
   write workloads against Slotlock's own schema as a new column. A refusal's alternatives now come

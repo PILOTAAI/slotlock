@@ -96,6 +96,10 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_list_approvals", new Operation("GET", "/v1/approvals", List.of(), List.of("status", "limit"))),
           Map.entry("slotlock_get_approval", new Operation("GET", "/v1/approvals/{approval_id}", List.of("approval_id"), List.of())),
           Map.entry("slotlock_decide_approval", new Operation("POST", "/v1/approvals/{approval_id}/decision", List.of("approval_id"), List.of())),
+          Map.entry("slotlock_sandbox_seed", new Operation("POST", "/v1/sandbox/seed", List.of(), List.of())),
+          Map.entry("slotlock_sandbox_reset", new Operation("POST", "/v1/sandbox/reset", List.of(), List.of())),
+          Map.entry("slotlock_sandbox_fast_forward", new Operation("POST", "/v1/sandbox/fast-forward", List.of(), List.of())),
+          Map.entry("slotlock_sandbox_race", new Operation("POST", "/v1/sandbox/race", List.of(), List.of())),
           Map.entry("slotlock_partner_get_account", new Operation("GET", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
           Map.entry("slotlock_partner_put_account", new Operation("PUT", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
           Map.entry("slotlock_partner_list_accounts", new Operation("GET", "/v1/partner/accounts", List.of(), List.of())),
@@ -2893,6 +2897,94 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> decideApproval(String approvalId, String decision) {
     return decideApproval(approvalId, decision, null);
+  }
+
+  /**
+   * Seed the test environment. Fill an empty test environment (a key starting slk_test_) with a
+   * scenario to try an agent against: car-rental (cars and vans in pools at two branches,
+   * 30-minute turnaround), clinic (practitioners and treatment rooms, half-hour slots on
+   * weekdays) or desks (desks on two floors, and a hall that splits in two). Locations, groups,
+   * resources with profiles, hours and booking rules, and three bookings tomorrow. 409
+   * sandbox_not_empty when it has resources: reset it first. 403 sandbox_test_only for a live
+   * key.
+   *
+   * @param scenario {@code scenario}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> sandboxSeed(String scenario) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("scenario", scenario);
+    return call("slotlock_sandbox_seed", values);
+  }
+
+  /**
+   * Empty the test environment. Empty the test environment as if new: its resources, locations,
+   * groups, bookings, events, holds, waitlist, approval policies and feed. Its API keys,
+   * webhooks, plan and usage stay. Rows removed, by table. 403 sandbox_test_only for a live key.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> sandboxReset() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_sandbox_reset", values);
+  }
+
+  /**
+   * Move the test environment's waiting forward. Make what would lapse in the test environment
+   * within minutes (1-525,600) lapse now: holds (a waitlist offer's and an approval's among them)
+   * and pending approvals; then a maintenance pass reaps them as it would have, releasing holds,
+   * passing offers on and expiring approvals, on the feed as usual. Bookings and events keep
+   * their times; no-shows and series follow the real clock. 403 sandbox_test_only for a live key.
+   *
+   * @param minutes {@code minutes}, integer
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> sandboxFastForward(long minutes) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("minutes", minutes);
+    return call("slotlock_sandbox_fast_forward", values);
+  }
+
+  /**
+   * Race agents for one slot in the test environment. Race agents (2-200, default 100), each an
+   * agent of its own, for one time on one resource of the test environment, through the same path
+   * MCP, A2A and REST use: how many booked (one), how many were refused and why (overlap, with
+   * alternatives), any server errors, and how long the answers took. 403 sandbox_test_only for a
+   * live key.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @param optional the optional arguments, or null: {@code agents} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> sandboxRace(String resourceId, String startsAt, String endsAt, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("starts_at", startsAt);
+    values.put("ends_at", endsAt);
+    putOptional(values, optional, Set.of("agents"), "slotlock_sandbox_race");
+    return call("slotlock_sandbox_race", values);
+  }
+
+  /**
+   * Race agents for one slot in the test environment. Race agents (2-200, default 100), each an
+   * agent of its own, for one time on one resource of the test environment, through the same path
+   * MCP, A2A and REST use: how many booked (one), how many were refused and why (overlap, with
+   * alternatives), any server errors, and how long the answers took. 403 sandbox_test_only for a
+   * live key.
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param startsAt {@code starts_at}, string
+   * @param endsAt {@code ends_at}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> sandboxRace(String resourceId, String startsAt, String endsAt) {
+    return sandboxRace(resourceId, startsAt, endsAt, null);
   }
 
   /**

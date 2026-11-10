@@ -94,6 +94,10 @@ var operations = func() map[string]operation {
 		{name: "slotlock_list_approvals", method: "GET", path: "/v1/approvals", pathParams: nil, query: []string{"status", "limit"}},
 		{name: "slotlock_get_approval", method: "GET", path: "/v1/approvals/{approval_id}", pathParams: []string{"approval_id"}, query: nil},
 		{name: "slotlock_decide_approval", method: "POST", path: "/v1/approvals/{approval_id}/decision", pathParams: []string{"approval_id"}, query: nil},
+		{name: "slotlock_sandbox_seed", method: "POST", path: "/v1/sandbox/seed", pathParams: nil, query: nil},
+		{name: "slotlock_sandbox_reset", method: "POST", path: "/v1/sandbox/reset", pathParams: nil, query: nil},
+		{name: "slotlock_sandbox_fast_forward", method: "POST", path: "/v1/sandbox/fast-forward", pathParams: nil, query: nil},
+		{name: "slotlock_sandbox_race", method: "POST", path: "/v1/sandbox/race", pathParams: nil, query: nil},
 		{name: "slotlock_partner_get_account", method: "GET", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_put_account", method: "PUT", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_list_accounts", method: "GET", path: "/v1/partner/accounts", pathParams: nil, query: nil},
@@ -3039,6 +3043,95 @@ func (in DecideApprovalInput) values() map[string]any {
 // when already decided; 409 approval_expired after its wait.
 func (c *Client) DecideApproval(ctx context.Context, in DecideApprovalInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_decide_approval", in.values())
+}
+
+// SandboxSeedInput holds the arguments of [Client.SandboxSeed].
+type SandboxSeedInput struct {
+	Scenario string
+}
+
+func (in SandboxSeedInput) values() map[string]any {
+	values := map[string]any{}
+	values["scenario"] = in.Scenario
+	return values
+}
+
+// SandboxSeed: Seed the test environment. Fill an empty test environment (a key starting
+// slk_test_) with a scenario to try an agent against: car-rental (cars and vans in pools at two
+// branches, 30-minute turnaround), clinic (practitioners and treatment rooms, half-hour slots on
+// weekdays) or desks (desks on two floors, and a hall that splits in two). Locations, groups,
+// resources with profiles, hours and booking rules, and three bookings tomorrow. 409
+// sandbox_not_empty when it has resources: reset it first. 403 sandbox_test_only for a live key.
+func (c *Client) SandboxSeed(ctx context.Context, in SandboxSeedInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_seed", in.values())
+}
+
+// SandboxResetInput holds the arguments of [Client.SandboxReset].
+type SandboxResetInput struct {
+}
+
+func (in SandboxResetInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// SandboxReset: Empty the test environment. Empty the test environment as if new: its resources,
+// locations, groups, bookings, events, holds, waitlist, approval policies and feed. Its API keys,
+// webhooks, plan and usage stay. Rows removed, by table. 403 sandbox_test_only for a live key.
+func (c *Client) SandboxReset(ctx context.Context, in SandboxResetInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_reset", in.values())
+}
+
+// SandboxFastForwardInput holds the arguments of [Client.SandboxFastForward].
+type SandboxFastForwardInput struct {
+	Minutes int64
+}
+
+func (in SandboxFastForwardInput) values() map[string]any {
+	values := map[string]any{}
+	values["minutes"] = in.Minutes
+	return values
+}
+
+// SandboxFastForward: Move the test environment's waiting forward. Make what would lapse in the
+// test environment within minutes (1-525,600) lapse now: holds (a waitlist offer's and an
+// approval's among them) and pending approvals; then a maintenance pass reaps them as it would
+// have, releasing holds, passing offers on and expiring approvals, on the feed as usual. Bookings
+// and events keep their times; no-shows and series follow the real clock. 403 sandbox_test_only
+// for a live key.
+func (c *Client) SandboxFastForward(ctx context.Context, in SandboxFastForwardInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_fast_forward", in.values())
+}
+
+// SandboxRaceInput holds the arguments of [Client.SandboxRace].
+type SandboxRaceInput struct {
+	ResourceID string
+
+	StartsAt string
+
+	EndsAt string
+
+	Agents *int64
+}
+
+func (in SandboxRaceInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	values["starts_at"] = in.StartsAt
+	values["ends_at"] = in.EndsAt
+	if in.Agents != nil {
+		values["agents"] = *in.Agents
+	}
+	return values
+}
+
+// SandboxRace: Race agents for one slot in the test environment. Race agents (2-200, default
+// 100), each an agent of its own, for one time on one resource of the test environment, through
+// the same path MCP, A2A and REST use: how many booked (one), how many were refused and why
+// (overlap, with alternatives), any server errors, and how long the answers took. 403
+// sandbox_test_only for a live key.
+func (c *Client) SandboxRace(ctx context.Context, in SandboxRaceInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_sandbox_race", in.values())
 }
 
 // PartnerGetAccountInput holds the arguments of [Client.PartnerGetAccount].

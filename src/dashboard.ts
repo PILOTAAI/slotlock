@@ -96,6 +96,13 @@ import {
 import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
 import { SlotlockAgentOperationError } from './agent-server.js';
 import { runSlotlockApprovalGrant } from './agent-store-backend.js';
+import {
+  SLOTLOCK_SANDBOX_SCENARIOS,
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
 import type {
   Interval,
   SlotlockAgendaEntry,
@@ -159,6 +166,9 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/webhooks/enable',
   '/waitlist/leave',
   '/approvals/decide',
+  '/sandbox/seed',
+  '/sandbox/reset',
+  '/sandbox/fast-forward',
   '/hours',
   '/organization',
   '/environment',
@@ -353,6 +363,15 @@ export interface SlotlockDashboardResources {
       actor?: string,
       reason?: string,
     ): Promise<{ ok: true } | { ok: false; code: string }>;
+  };
+  /**
+   * The sandbox (RFC 0004 A6), for a test environment only: fill it with a scenario, empty it, and
+   * make what would lapse within some minutes lapse now. Each refuses a live tenant.
+   */
+  sandbox?: {
+    seed(tenantRef: string, scenario: SlotlockSandboxScenario): Promise<{ resources: number; bookings: number }>;
+    reset(tenantRef: string): Promise<void>;
+    fastForward(tenantRef: string, minutes: number): Promise<{ holds: number; approvals: number }>;
   };
   /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
   waitlist?: {
@@ -631,6 +650,16 @@ export function createSlotlockDashboardResources(
     actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
   const agentBackend = options.agentBackend;
   return {
+    sandbox: {
+      seed: (tenantRef, scenario) => seedSlotlockSandbox(store, tenantRef, scenario),
+      async reset(tenantRef) {
+        await resetSlotlockSandbox(store, tenantRef);
+      },
+      async fastForward(tenantRef, minutes) {
+        const forward = await fastForwardSlotlockSandbox(store, tenantRef, minutes);
+        return { holds: forward.holds, approvals: forward.approvals };
+      },
+    },
     ...(agentBackend
       ? {
           approvals: {
@@ -2018,11 +2047,57 @@ ${agenda ? stat('Live holds', counted(held), `${root}#upcoming`) : html``}
 ${stat('Resources', String(resources.length), `${root}/resources`)}
 ${stat('Active keys', String(active.length), `${root}/keys`)}
 </div>
+${session.env === 'test' && options.resources.sandbox ? sandboxPanel(session, resources.length) : html``}
 <div class="split">
 ${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
 ${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
 </div>`;
     return respond(status, layout('Overview', content, session, 'overview'));
+  }
+
+  /** In Test: load a scenario to try an agent against, move waiting forward, or start again (RFC 0004 A6). */
+  function sandboxPanel(session: Session, resourceCount: number): Html {
+    const token = csrfToken(session);
+    const hidden = html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const names: Record<SlotlockSandboxScenario, string> = { 'car-rental': 'Car rental', clinic: 'Clinic', desks: 'Desks and a hall' };
+    return html`<section class="panel" id="sandbox"><h2>Sandbox</h2>
+<p class="fine">Test only. Try an agent against sample data, make holds and approvals that would lapse lapse now, or start again. Keys and webhooks stay.</p>
+${
+  resourceCount === 0
+    ? html`<form class="create" method="post" action="${root}/sandbox/seed">${hidden}<label>Sample data<select name="scenario">${SLOTLOCK_SANDBOX_SCENARIOS.map(
+        (scenario) => html`<option value="${scenario}">${names[scenario]}</option>`,
+      )}</select></label><button class="primary" type="submit">Load it</button></form>`
+    : html`<form class="create" method="post" action="${root}/sandbox/fast-forward">${hidden}<label>Move waiting forward<select name="minutes"><option value="15">15 minutes</option><option value="60">An hour</option><option value="1440">A day</option></select></label><button type="submit">Move forward</button></form>
+<details class="act danger"><summary>Start again</summary><div class="pop"><p>Every resource, booking, hold and policy in Test goes. Keys and webhooks stay.</p><form method="post" action="${root}/sandbox/reset">${hidden}<button class="danger" type="submit">Empty Test</button></form></div></details>`
+}
+</section>`;
+  }
+
+  async function sandboxAction(session: Session, form: URLSearchParams, action: 'seed' | 'reset' | 'fast-forward'): Promise<Response> {
+    const sandbox = options.resources.sandbox;
+    if (!sandbox || session.env !== 'test') return overviewPage(session, 400, 'The sandbox is in Test only.');
+    const tenantRef = tenantOf(session);
+    try {
+      if (action === 'seed') {
+        const scenario = form.get('scenario') as SlotlockSandboxScenario;
+        if (!SLOTLOCK_SANDBOX_SCENARIOS.includes(scenario)) return overviewPage(session, 400, 'Choose a sample from the list.');
+        const seeded = await sandbox.seed(tenantRef, scenario);
+        return overviewPage(session, 200, `Loaded ${String(seeded.resources)} resources and ${String(seeded.bookings)} bookings for tomorrow.`);
+      }
+      if (action === 'reset') {
+        await sandbox.reset(tenantRef);
+        return redirect(303, `${root}#sandbox`);
+      }
+      const minutes = Number(form.get('minutes'));
+      if (![15, 60, 1440].includes(minutes)) return overviewPage(session, 400, 'Choose how far from the list.');
+      const moved = await sandbox.fastForward(tenantRef, minutes);
+      return overviewPage(session, 200, `${String(moved.holds)} holds and ${String(moved.approvals)} approvals lapsed.`);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 'sandbox_not_empty') {
+        return overviewPage(session, 409, 'Test has resources already. Start again first.');
+      }
+      throw error;
+    }
   }
 
   function endpoints(): Html {
@@ -4888,6 +4963,12 @@ ${
         return leaveWaitlist(session, form);
       case '/approvals/decide':
         return decideApproval(session, form);
+      case '/sandbox/seed':
+        return sandboxAction(session, form, 'seed');
+      case '/sandbox/reset':
+        return sandboxAction(session, form, 'reset');
+      case '/sandbox/fast-forward':
+        return sandboxAction(session, form, 'fast-forward');
       case '/assistant':
         return sendToAssistant(session, form);
       case '/assistant/approve':

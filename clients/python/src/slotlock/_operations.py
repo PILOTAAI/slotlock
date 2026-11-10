@@ -596,6 +596,34 @@ OPERATIONS: dict[str, Operation] = {
         ("approval_id",),
         (),
     ),
+    "slotlock_sandbox_seed": Operation(
+        "slotlock_sandbox_seed",
+        "POST",
+        "/v1/sandbox/seed",
+        (),
+        (),
+    ),
+    "slotlock_sandbox_reset": Operation(
+        "slotlock_sandbox_reset",
+        "POST",
+        "/v1/sandbox/reset",
+        (),
+        (),
+    ),
+    "slotlock_sandbox_fast_forward": Operation(
+        "slotlock_sandbox_fast_forward",
+        "POST",
+        "/v1/sandbox/fast-forward",
+        (),
+        (),
+    ),
+    "slotlock_sandbox_race": Operation(
+        "slotlock_sandbox_race",
+        "POST",
+        "/v1/sandbox/race",
+        (),
+        (),
+    ),
     "slotlock_partner_get_account": Operation(
         "slotlock_partner_get_account",
         "GET",
@@ -2774,6 +2802,65 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_decide_approval", values)
+
+    def sandbox_seed(self, *, scenario: str) -> dict[str, Any]:
+        """Seed the test environment.
+
+        Fill an empty test environment (a key starting slk_test_) with a scenario to try an agent
+        against: car-rental (cars and vans in pools at two branches, 30-minute turnaround), clinic
+        (practitioners and treatment rooms, half-hour slots on weekdays) or desks (desks on two
+        floors, and a hall that splits in two). Locations, groups, resources with profiles, hours
+        and booking rules, and three bookings tomorrow. 409 sandbox_not_empty when it has
+        resources: reset it first. 403 sandbox_test_only for a live key.
+        """
+        values: dict[str, Any] = {"scenario": scenario}
+        return self.call("slotlock_sandbox_seed", values)
+
+    def sandbox_reset(self) -> dict[str, Any]:
+        """Empty the test environment.
+
+        Empty the test environment as if new: its resources, locations, groups, bookings, events,
+        holds, waitlist, approval policies and feed. Its API keys, webhooks, plan and usage stay.
+        Rows removed, by table. 403 sandbox_test_only for a live key.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_sandbox_reset", values)
+
+    def sandbox_fast_forward(self, *, minutes: int) -> dict[str, Any]:
+        """Move the test environment's waiting forward.
+
+        Make what would lapse in the test environment within minutes (1-525,600) lapse now: holds
+        (a waitlist offer's and an approval's among them) and pending approvals; then a
+        maintenance pass reaps them as it would have, releasing holds, passing offers on and
+        expiring approvals, on the feed as usual. Bookings and events keep their times; no-shows
+        and series follow the real clock. 403 sandbox_test_only for a live key.
+        """
+        values: dict[str, Any] = {"minutes": minutes}
+        return self.call("slotlock_sandbox_fast_forward", values)
+
+    def sandbox_race(
+        self,
+        *,
+        resource_id: str,
+        starts_at: str,
+        ends_at: str,
+        agents: int | None = None,
+    ) -> dict[str, Any]:
+        """Race agents for one slot in the test environment.
+
+        Race agents (2-200, default 100), each an agent of its own, for one time on one resource
+        of the test environment, through the same path MCP, A2A and REST use: how many booked
+        (one), how many were refused and why (overlap, with alternatives), any server errors, and
+        how long the answers took. 403 sandbox_test_only for a live key.
+        """
+        values: dict[str, Any] = {
+            "resource_id": resource_id,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+        }
+        if agents is not None:
+            values["agents"] = agents
+        return self.call("slotlock_sandbox_race", values)
 
     def partner_get_account(self, account: str) -> dict[str, Any]:
         """Read an account.
