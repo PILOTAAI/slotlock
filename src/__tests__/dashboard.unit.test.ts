@@ -706,6 +706,32 @@ describe('API keys in the dashboard', () => {
 });
 
 describe('resources in the dashboard', () => {
+  it('makes a resource a part of a whole, shows a whole its parts, and says why one is refused', async () => {
+    const setParent = vi.fn(async (_tenantRef: string, id: string, parentId: string | null) => {
+      if (parentId === 'busy') throw Object.assign(new Error('busy'), { code: 'composite_busy' });
+      const row = resources.rows.find((candidate) => candidate.id === id) as SlotlockResource;
+      if (parentId === null) delete row.parentId;
+      else Object.assign(row, { parentId, partIndex: 0 });
+      return row;
+    });
+    const target = dashboard({ resources: { ...resources.store, setParent } });
+    const { session } = await signIn(target);
+    const hall = await resources.store.add('github:4242', 'hall', 'UTC');
+    const room = await resources.store.add('github:4242', 'room-1', 'UTC');
+    const page = await (await get(target, `/base/dashboard/resources/${room.id}`, session)).text();
+    expect(page).toContain('id="composite"');
+    expect(page).toContain(`<option value="${hall.id}">hall</option>`);
+    const saved = await post(target, '/base/dashboard/resources/parent', { csrf: await csrf(target, session), id: room.id, parent: hall.id }, session);
+    expect(saved.status).toBe(303);
+    expect(setParent).toHaveBeenCalledWith('github:4242', room.id, hall.id, 'github:4242');
+    // The whole lists its parts instead of a choice.
+    const whole = await (await get(target, `/base/dashboard/resources/${hall.id}`, session)).text();
+    expect(whole).toContain('A whole of 1 part');
+    expect(whole).toContain(`href="/base/dashboard/resources/${room.id}"`);
+    // Another tenant's resource is not a choice, and a refusal is said in words.
+    expect((await post(target, '/base/dashboard/resources/parent', { csrf: await csrf(target, session), id: room.id, parent: randomUUID() }, session)).status).toBe(400);
+  });
+
   it("adds resources to the person's tenant, up to the cap", async () => {
     const target = dashboard();
     const { session } = await signIn(target);

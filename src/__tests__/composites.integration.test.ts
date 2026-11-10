@@ -65,6 +65,12 @@ describe.skipIf(!url)('composite resources (real Postgres, application role)', (
       [ids.hall, 0],
       [ids.hall, 1],
     ]);
+    // On the feed: the room's resource.updated with its parent before and after.
+    const [change] = await admin<{ data: { before: { parent: string | null }; after: { parent: string | null } } }[]>`
+      SELECT data FROM slotlock.outbox
+       WHERE tenant_ref = ${tenantRef} AND resource_id = ${ids['room-a'] as string} AND type = 'resource.updated'
+       ORDER BY id DESC LIMIT 1`;
+    expect(change?.data).toMatchObject({ before: { parent: null }, after: { parent: ids.hall } });
     const refused = (id: string, parentId: string | null) =>
       store.withTenant(tenantRef, (tenant) => tenant.setResourceParent({ tenantRef, id, parentId }));
     // A part has no parts, and a parent is no part.
@@ -75,12 +81,23 @@ describe.skipIf(!url)('composite resources (real Postgres, application role)', (
   });
 
   it('keeps the whole and its parts apart, and never two parts', async () => {
-    expect(await hold('room-a', 10)).toMatchObject({ ok: true });
+    const roomA = await hold('room-a', 10);
+    expect(roomA).toMatchObject({ ok: true });
     expect(await hold('room-b', 10)).toMatchObject({ ok: true });
-    // The hall as a whole, while a room is held: refused, as an overlap on the hall itself would be.
-    expect(await hold('hall', 10)).toMatchObject({ ok: false });
-    expect(await hold('hall', 12)).toMatchObject({ ok: true });
-    expect(await hold('room-a', 12)).toMatchObject({ ok: false });
+    // The hall as a whole, while a room is held: refused, naming a room's booking in the way.
+    const blocked = await hold('hall', 10);
+    expect(blocked).toMatchObject({ ok: false, code: 'overlap', conflictingReservationId: expect.any(String) });
+    expect([ids['room-a'], ids['room-b']]).toContain(
+      (await admin`SELECT resource_id::text AS id FROM slotlock.reservations WHERE id = ${(blocked as { conflictingReservationId: string }).conflictingReservationId}`)[0]?.id,
+    );
+    expect(roomA.ok).toBe(true);
+    const whole = await hold('hall', 12);
+    expect(whole).toMatchObject({ ok: true });
+    expect(await hold('room-a', 12)).toMatchObject({
+      ok: false,
+      code: 'overlap',
+      conflictingReservationId: (whole as { hold: { id: string } }).hold.id,
+    });
     expect(await hold('room-b', 12)).toMatchObject({ ok: false });
     // A resource outside the composite is untouched.
     expect(await hold('other', 12)).toMatchObject({ ok: true });

@@ -3564,7 +3564,26 @@ async function overlapLoss(
        AND (status <> 'held' OR expires_at > statement_timestamp())
      ORDER BY starts_at
      LIMIT 1`;
-  return { ok: false, code: 'overlap', conflictingReservationId: winners[0]?.id ?? null };
+  if (winners[0]) return { ok: false, code: 'overlap', conflictingReservationId: winners[0].id };
+  // Lost to a composite's claim (RFC 0003 G8): the booking on the whole, or on a part, in the way.
+  const claimed = await sql<{ id: string }[]>`
+    SELECT claim.reservation_id::text AS id
+      FROM slotlock.resources me
+      JOIN slotlock.composite_claims claim
+        ON claim.resource_id = COALESCE(me.parent_id, me.id)
+       AND claim.booked_resource_id <> me.id
+       AND (me.parent_id IS NULL OR claim.span @> me.part_index)
+     WHERE me.id = ${resourceId}
+       AND (${excludeReservationId ?? null}::uuid IS NULL OR claim.reservation_id <> ${excludeReservationId ?? null}::uuid)
+       AND claim.during && tstzrange(
+             ${start}::timestamptz - ${bufferBeforeMs} * interval '1 millisecond',
+             ${end}::timestamptz + ${bufferAfterMs} * interval '1 millisecond',
+             '[)'
+           )
+       AND (claim.status <> 'held' OR claim.expires_at > statement_timestamp())
+     ORDER BY lower(claim.during)
+     LIMIT 1`;
+  return { ok: false, code: 'overlap', conflictingReservationId: claimed[0]?.id ?? null };
 }
 
 export interface SlotlockHoldTenantOptions {

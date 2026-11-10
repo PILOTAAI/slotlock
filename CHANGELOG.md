@@ -153,7 +153,9 @@ versioning.
   `parent_id` and `part_index` (the foreign key and check added NOT VALID); the application API's
   resource gains `parent_id` and `part_index`, and `slotlock_list_resources` shows `part_of`. A
   composite changes only while neither side has a booking or live hold to come
-  (`composite_busy`). Run `slotlock migrate`.
+  (`composite_busy`). A booking refused by the composite names the booking in its way; the feed's
+  `resource.updated` carries `parent` before and after; the dashboard's resource page has a
+  Composite panel. Run `slotlock migrate`.
 - Sign-in with Google (OpenID Connect, RFC 0003 Later, T2), with `SLOTLOCK_GOOGLE_CLIENT_ID` and
   `SLOTLOCK_GOOGLE_CLIENT_SECRET`: Continue with Google on the sign-in page (`/sign-in?with=google`,
   back to the same callback), `openid email` with `state`, PKCE and a nonce; the ID token from

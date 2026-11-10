@@ -3026,6 +3026,12 @@ BEGIN
       before := before || jsonb_build_object('location', OLD.location_ref);
       after := after || jsonb_build_object('location', NEW.location_ref);
     END IF;
+    -- The composite it is a part of (RFC 0003 G8), read through to_jsonb: a migration that runs
+    -- this before the column exists sees no change rather than an error.
+    IF (to_jsonb(OLD) -> 'parent_id') IS DISTINCT FROM (to_jsonb(NEW) -> 'parent_id') THEN
+      before := before || jsonb_build_object('parent', to_jsonb(OLD) -> 'parent_id');
+      after := after || jsonb_build_object('parent', to_jsonb(NEW) -> 'parent_id');
+    END IF;
     IF OLD.availability_rules IS DISTINCT FROM NEW.availability_rules THEN
       before := before || jsonb_build_object('availability', OLD.availability_rules);
       after := after || jsonb_build_object('availability', NEW.availability_rules);

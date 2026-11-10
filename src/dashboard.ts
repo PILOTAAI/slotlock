@@ -144,6 +144,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/resources/pool',
   '/resources/profile',
   '/resources/place',
+  '/resources/parent',
   '/locations',
   '/locations/delete',
   '/groups',
@@ -282,6 +283,12 @@ export interface SlotlockDashboardResources {
     profile: SlotlockResourceProfileInput,
     actor?: string,
   ): Promise<SlotlockResource | null>;
+  /**
+   * Make one of the tenant's resources a part of a composite (RFC 0003 G8), or no part. A refusal
+   * carries the store's `code`: `parent_not_found`, `composite_too_deep`, `composite_parts_limit`
+   * or `composite_busy`.
+   */
+  setParent?(tenantRef: string, id: string, parentId: string | null, actor?: string): Promise<SlotlockResource | null>;
   /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
   setPool?(
     tenantRef: string,
@@ -638,6 +645,8 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       store.withTenant(tenantRef, (tenant) => tenant.getBookingRuleDefaults({ tenantRef })),
     setPool: (tenantRef, id, pool, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool }), by(actor)),
+    setParent: (tenantRef, id, parentId, actor) =>
+      store.withTenant(tenantRef, (tenant) => tenant.setResourceParent({ tenantRef, id, parentId }), by(actor)),
     setProfile: (tenantRef, id, profile, actor) =>
       store.withTenant(
         tenantRef,
@@ -2160,14 +2169,19 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
     const grouping = options.resources.grouping;
-    const [agenda, changes, keys, defaults, locations, groups] = await Promise.all([
+    const [agenda, changes, keys, defaults, locations, groups, everyResource] = await Promise.all([
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, 100),
       options.keys.list({ tenantRef }),
       options.resources.ruleDefaults?.(tenantRef),
       grouping?.locations(tenantRef),
       grouping?.groups(tenantRef),
+      // For a composite: its parts, or the wholes it can be a part of.
+      options.resources.setParent ? options.resources.list(tenantRef) : undefined,
     ]);
+    const parts = everyResource?.filter((other) => other.parentId === resource.id) ?? [];
+    const wholes =
+      everyResource?.filter((other) => other.id !== resource.id && other.parentId === undefined && other.archivedAt === undefined) ?? [];
     const paths = locationPaths(locations ?? []);
     const groupNames = new Map((groups ?? []).map((group) => [group.ref, group.name]));
     const byId = new Map([[resource.id, resource]]);
@@ -2260,6 +2274,28 @@ ${
 <button type="submit">Save pool</button>
 </form>
 <p class="fine">Agents can book any free member of a pool. Leave it empty for none.</p>
+</section>`
+    : html``
+}
+${
+  options.resources.setParent && everyResource
+    ? html`<section class="panel" id="composite">
+<h2>Composite</h2>
+${
+  parts.length > 0
+    ? html`<p>A whole of ${String(parts.length)} part${parts.length === 1 ? '' : 's'}: ${parts.map((part, index) => html`${index > 0 ? ', ' : ''}<a href="${root}/resources/${part.id}">${resourceName(part, part.id)}</a>`)}. Booking it takes every part, and a booking of any part keeps it from being booked.</p>`
+    : html`<form class="create" method="post" action="${root}/resources/parent">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Part of<select name="parent"><option value=""${resource.parentId ? html`` : html` selected`}>Nothing: it stands alone</option>${wholes.map(
+        (whole) =>
+          html`<option value="${whole.id}"${resource.parentId === whole.id ? html` selected` : html``}>${resourceName(whole, whole.id)}</option>`,
+      )}</select></label>
+<button type="submit">Save</button>
+</form>
+<p class="fine">A room of a hall, a half of a court: booking the whole then takes every part, and two parts never get in each other's way. It changes only while neither has a booking or hold to come.</p>`
+}
 </section>`
     : html``
 }
@@ -2482,6 +2518,24 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
       const problem = groupingProblem(error);
       if (!problem) throw error;
       return resourceDetailPage(session, id, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  async function saveParent(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setParent) return notFound(session);
+    const wanted = (form.get('parent') ?? '').trim();
+    const parent = wanted === '' ? null : await ownResource(session, wanted);
+    if (wanted !== '' && !parent) return resourceDetailPage(session, id, 400, 'That is not one of your resources.');
+    try {
+      const changed = await options.resources.setParent(tenantOf(session), id, parent?.id ?? null, personOf(session));
+      if (!changed) return notFound(session);
+    } catch (error) {
+      const text = COMPOSITE_PROBLEMS[String((error as { code?: unknown } | null)?.code)];
+      if (!text) throw error;
+      return resourceDetailPage(session, id, 409, text);
     }
     return redirect(303, `${root}/resources/${id}`);
   }
@@ -4563,6 +4617,8 @@ ${
         return saveProfile(session, form);
       case '/resources/place':
         return savePlace(session, form);
+      case '/resources/parent':
+        return saveParent(session, form);
       case '/locations':
         return saveLocation(session, form);
       case '/locations/delete':
@@ -5171,6 +5227,14 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .pill, .chip, .nav a[aria-current="page"] { border: 1px solid CanvasText; }
 }
 `;
+
+/** A composite the store refused, in a person's words. */
+const COMPOSITE_PROBLEMS: Readonly<Record<string, string>> = Object.freeze({
+  parent_not_found: 'That is not one of your resources.',
+  composite_too_deep: 'A part has no parts of its own, and a whole is no part: choose a resource that stands alone.',
+  composite_parts_limit: 'A whole has at most 50 parts.',
+  composite_busy: 'One of them has a booking or hold still to come. A composite changes only while neither does.',
+});
 
 /** What the Plan page calls each plan. */
 const PLAN_NAMES: Readonly<Record<SlotlockPlan, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });

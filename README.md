@@ -1231,7 +1231,9 @@ of its parts, and two parts never with each other, held by PostgreSQL itself: ea
 on a part also claims its place on the whole, `[i, i+1)`, and one on the whole claims every place,
 in `slotlock.composite_claims` under `EXCLUDE (resource_id WITH =, during WITH &&, span WITH &&)`.
 A part's free/busy (and next-free search) shows the whole's bookings, and the whole's shows its
-parts'; agents see a part's `part_of`. One level deep, at most 50 parts. A composite changes only
+parts'; agents see a part's `part_of`; a booking refused by the composite names the booking in its
+way (`conflicting_reservation_id`); the feed's `resource.updated` carries `parent` before and
+after; and the dashboard's resource page sets it, or lists a whole's parts. One level deep, at most 50 parts. A composite changes only
 while neither side has a booking or live hold still to come (`409 composite_busy`); one level only
 (`composite_too_deep`). A resource that is neither a part nor a whole has no claims, and nothing
 about it changes.
