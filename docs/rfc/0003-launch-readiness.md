@@ -108,9 +108,17 @@ Findings, each checked against the branch:
 6. **A personal address is the default contact.** `readBilling` defaults `SLOTLOCK_PLAN_CONTACT` to
    a personal Gmail address, which is then published in the page and in this public repository.
    *Fix:* require the setting (or default to `mailto:support@pylota.io`) and remove the address.
-7. **Managed Payments is unverified in live mode.** The PR notes that live mode may refuse
-   `managed_payments[enabled]`. *Fix:* the owner runs one live Checkout before 9 December, and
-   [Billing facts](#billing-facts-to-verify) lists what to check.
+7. **Managed Payments needs three things the PR does not set.** The parameter is right: Stripe
+   documents `managed_payments[enabled]=true` on the Checkout Session, Managed Payments has been
+   generally available since 22 April 2026, and the United Kingdom is an eligible seller country.
+   But it must also be activated in the Stripe Dashboard (accepting its terms), every product needs
+   an eligible tax code (SaaS for business use is `txcd_10103001`), and the request needs API
+   version `2025-03-31.basil` or later, while the PR sends `Stripe-Version` only when
+   `STRIPE_API_VERSION` is set and otherwise uses the account's default. *Fix:* pin
+   `STRIPE_API_VERSION` to a current version (the PR already reads `current_period_end` from both
+   places it has lived), set the tax code, and run one live Checkout and cancellation before 9
+   December. The PR's Checkout uses none of the parameters Managed Payments forbids
+   (`automatic_tax`, `tax_id_collection`, `payment_method_types`, shipping, Connect).
 8. **There is no usage limit.** A Free tenant is bounded only by rate limits: `tenant_read` is 20
    a second, about 52 million reads a month. The plans need a monthly quota, and the Terms need to
    name it now, because they promise 30 days' notice of any lower limit. *Fix:* put the quotas of
@@ -164,9 +172,10 @@ Cloud, people on their personal tenants (see [Teams on Cloud](#later)).
 | A5 | Agent operations the assistant runs count in the usage meter (part 3) as `origin = dashboard-assistant`, so a busy organization's assistant is bounded by its plan's quota as an agent is. The assistant itself is on every plan: the model and its cost are the customer's. | T1 |
 
 Worker budget: a message makes at most 8 model calls (30 s each, 90 s a turn) and at most 24 agent
-operations (`SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST`). That is within a Worker's subrequest limit,
-and the time is spent waiting, not on CPU ([Billing facts](#billing-facts-to-verify) has the
-limits).
+operations (`SLOTLOCK_WORKER_AGENT_CALLS_PER_REQUEST`). A paid Worker allows 10,000 subrequests and
+30 s of CPU per request by default, and sets no limit on the duration of an HTTP request while the
+client stays connected; the turn's time is spent waiting on the model, not on CPU. Nothing needs
+raising.
 
 ## 2. What a resource is attached to, and grouping
 
@@ -322,8 +331,8 @@ request ─▶ authenticate (tenant, key, partner) ─▶ Slotlock-Request-Id �
                                                         │
           ┌────────────────────┬────────────────────────┼───────────────────────┬──────────────────┐
           ▼                    ▼                        ▼                       ▼                  ▼
-   quota cache (30 s)   Plan page and          partner usage API       Stripe meter events   threshold
-   in every server      GET /v1/usage          and period webhook      (partners, daily)     webhooks
+   quota cache (30 s)   Plan page and          partner usage API       partner invoice       threshold
+   in every server      GET /v1/usage          and period webhook      (monthly, once)       webhooks
 ```
 
 - **Tables (owner only, read through definer functions, erased with the tenant):**
@@ -360,8 +369,10 @@ request ─▶ authenticate (tenant, key, partner) ─▶ Slotlock-Request-Id �
   are told at 80% and 100%.
 - Notices: a `usage.threshold_reached` event in the tenant's feed (a tenant-level outbox row, so
   webhooks and live updates carry it), a banner on every dashboard page, and the
-  `RateLimit-Policy` and `RateLimit` response fields of the IETF draft, which also carry the
-  existing per-second limits.
+  `RateLimit-Policy` and `RateLimit` response fields of draft-ietf-httpapi-ratelimit-headers-11
+  (for example `RateLimit-Policy: "month";q=500000;w=2592000` and `RateLimit: "month";r=1200;t=86400`),
+  which also carry the existing per-second limits. It is still a draft: the docs name the
+  revision implemented, and a later revision is a change under VERSIONING.md.
 
 ### Reading it
 
@@ -428,8 +439,10 @@ refuses a `partner:` tenant whose partner is not active.
 
 stackapi stores each user's Slotlock key (encrypted, its side) and forwards the user's calls with
 it. Every existing path then works unchanged, per key, with no new way to act as a tenant. Acting
-on behalf with one partner key and a `Slotlock-Account` field, as Stripe Connect's
-`Stripe-Account`, is possible later (T2), and only if stackapi cannot keep a key per user.
+on behalf with one partner key and a `Slotlock-Account` field, shaped like Stripe Connect's
+`Stripe-Account` header, is possible later (T2), and only if stackapi cannot keep a key per user.
+The likeness is in the API only: Slotlock's billing does not use Connect, which Managed Payments
+does not support.
 
 **P4. Plans for sub-tenants.** `tenant_plans` gains `source` (`stripe` or `partner`) and
 `partner_id`; a partner sets a sub-tenant's plan from its contract's list (for example
@@ -447,13 +460,24 @@ sub-tenants: Pylota bills the partner.
 - Disputes are settled from `usage_daily` (13 months). A request id stackapi sends can be found in
   our log with its operation and outcome; the log still names no tenant.
 
-**P6. Billing the partner.** Pylota invoices the partner monthly through Stripe Billing as an
-ordinary business customer, not through the Managed Payments Checkout that PR #161 uses for
-self-serve plans: a daily job sends the partner's totals as meter events, each with an
-`identifier` of `<partner>:<metric>:<day>`, so a resend is ignored; usage-based prices on the
-partner's subscription turn them into invoice lines; a reconciliation job compares Stripe's event
-summaries with `usage_daily` every day. Pylota is then the merchant: VAT on these invoices is ours
-to handle (B2B reverse charge outside the UK), which the accountant should confirm.
+**P6. Billing the partner.** Pylota invoices the partner monthly through Stripe as an ordinary
+business customer. Managed Payments cannot be used here: it sells "directly to customers, not
+through a platform or marketplace", and a reseller is the second.
+
+- At month close, a job reads the partner's month from `usage_daily`, prices it with the contract
+  (active accounts, usage above each account's quota, the minimum), and adds one invoice item per
+  line to the partner's next invoice.
+- `slotlock.partner_invoices (partner_id, month, line, quantity, amount, stripe_item)` records
+  each line before it is sent and its Stripe id after, so a month is billed once even if the job
+  is retried days later. Stripe's own deduplication cannot be relied on for that: an idempotency
+  key, like a meter event's `identifier`, is kept for about 24 hours.
+- The invoice lines are our totals, so reconciliation is a comparison of the same numbers, and
+  the `usage.period_closed` webhook (P5) sends the partner the same lines and checksum first.
+- Billing Meters are not used: with one partner the volume is a few lines a month, and Stripe now
+  directs new usage-based integrations to Metronome. If a partner later needs usage shown live in
+  Stripe, that is a separate decision.
+- Pylota is then the merchant: VAT on these invoices is ours to handle (B2B reverse charge outside
+  the UK), which the accountant should confirm.
 
 **P7. Contract (owner).** A partner agreement and DPA: Pylota processes stackapi's users' data for
 stackapi; the Acceptable Use Policy flows down; stackapi gives its users first-line support; Pylota
@@ -484,9 +508,12 @@ The owner sets the final numbers before PR #161 merges (finding 8).
   stackapi pays nothing for users who signed up and left.
 - A wholesale price at about 60–70% of retail leaves stackapi a margin on Developer-sized users;
   the owner sets it.
-- Usage above quota stays a hard stop for Free and Developer at launch. Metered overage for
-  Developer (a price per 10,000 operations) can follow once Managed Payments is confirmed to
-  support usage-based prices.
+- Usage above quota stays a hard stop for Free and Developer at launch. Stripe documents
+  subscriptions under Managed Payments but says nothing about metered prices either way, so
+  metered overage for Developer (a price per 10,000 operations) waits until Stripe confirms it.
+- What Stripe keeps of a $10 month: 3.5% for Managed Payments, 0.7% for Billing, plus card
+  processing and its fixed fee. The yearly price pays the fixed fee once instead of twelve times,
+  so the Plan page should offer it first.
 
 ## Launch checklist (owner, outside the code)
 
@@ -528,7 +555,7 @@ before merge (GOVERNANCE.md).
 | 15 | Provider presets and model list (A4); assistant usage (A5) | T1 | 0.7.0 |
 | 16 | Partner accounts, partner keys, sub-tenants and the partner API (P1–P4) | T2 | 0.8.0 |
 | 17 | Partner usage API, `usage.period_closed`, `Slotlock-Client` label (P5) | T1 | 0.8.0 |
-| 18 | Stripe meter events for partners and the daily reconciliation (P6) | T1 | 0.8.0 |
+| 18 | Partner invoices from usage at month close, billed once, and the reconciliation (P6) | T1 | 0.8.0 |
 | 19 | Keys limited by location and group, by RLS (G6) | T2 | 0.8.0 |
 
 ### Later
@@ -539,20 +566,43 @@ before merge (GOVERNANCE.md).
 - **Sign-in without GitHub (T2):** Google (OpenID Connect) for the people who operate a fleet or a
   front desk and use the assistant, who often have no GitHub account.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
-- **Metered overage for Developer**, once Managed Payments is confirmed to support it.
+- **Metered overage for Developer**, once Stripe confirms Managed Payments supports metered prices.
 - RFC 0002 P2: OpenTelemetry export and published SLOs first, as a paid service needs them.
 
-## Billing facts to verify
+## Vendor facts
 
-These come from vendor documentation and decide details above; the owner confirms them in the
-Stripe and Cloudflare dashboards before PRs 3, 9 and 18.
+Read 2026-11-09 from each vendor's documentation (links under [Sources](#sources)).
 
-- Stripe Managed Payments: availability for a UK seller, its fee, the Checkout parameter, and
-  whether it supports usage-based prices and the customer portal.
-- Stripe Billing meter events: the `identifier` deduplication window, how far back a timestamp may
-  be, and the live-mode rate.
-- Cloudflare Workers (paid): subrequests per request, CPU time per request, and whether the rate
-  limiting binding is per location.
+| Fact | Value | Used in |
+| --- | --- | --- |
+| Managed Payments status | Generally available since 22 April 2026, 39 seller countries, the United Kingdom among them, after Stripe's eligibility review | Finding 7 |
+| Managed Payments fee | 3.5% per successful transaction, on top of payment processing | Pricing |
+| Turning it on | `managed_payments[enabled]=true` on the Checkout Session; activated in the Dashboard; API version `2025-03-31.basil` or later | Finding 7 |
+| What it forbids in Checkout | `automatic_tax`, `tax_id_collection`, `payment_method_types`, `customer_update` name and address, shipping, Connect | Finding 7 |
+| Eligible products | Digital only, each with an eligible tax code (SaaS for business `txcd_10103001`), sold directly, not through a platform or marketplace | Finding 7, P6 |
+| Subscriptions and portal | Supported, created through Checkout or Payment Links; the customer portal works | PR #161 |
+| Metered prices under Managed Payments | Not documented either way | Pricing |
+| Stripe Billing fee | 0.7% of Billing volume (pay as you go) | Pricing |
+| Meter event `identifier` | Unique within a rolling period of at least 24 hours; timestamps up to 35 days back; 1,000 calls a second in live mode | P6 |
+| Stripe's advice on meters | New usage-based integrations should use Metronome | P6 |
+| Workers (paid) | 10,000 subrequests a request by default; 30 s CPU by default, up to 5 minutes; no duration limit for an HTTP request while the client is connected; `waitUntil` runs up to 30 s more | Part 1, part 3 (Worker usage writes) |
+| Workers rate limiting binding | Approximate, counted separately in each Cloudflare location | Part 3 (quotas are kept in PostgreSQL, not in the binding) |
+| RateLimit fields | draft-ietf-httpapi-ratelimit-headers-11 (May 2026), a working-group draft, not an RFC | Part 3 |
+
+How others group what they book, which the design in part 2 follows:
+
+| Product | Hierarchy | Flat grouping | Attributes |
+| --- | --- | --- | --- |
+| Google Workspace resources | Building → floor → floor section | Features | Category, type, capacity |
+| Microsoft Graph Places | Building → floor → section → room, workspace or desk (`parentId`) | Room lists | Capacity, tags, custom properties, wheelchair access, booking type |
+| HL7 FHIR R5 | `Location.partOf` | HealthcareService | `Schedule.actor` may name several actors (person, room, device) at once; capacity is repeated slots |
+| Skedda | Venue → spaces | Space tags | Type, capacity; "space sharing" blocks the whole and its parts both ways (G8) |
+| Robin | Location → floor → space | Zones of seats | Type, capacity |
+| Fleetio | Groups and subgroups, permissions rolling down (G6) | | |
+| Booqable | Product group → product → stock items | Bundles with combined availability | Tracking: none, bulk or individual |
+| Cal.com | Organization → teams | Round-robin groups; attributes for routing | Seats per booking |
+| Cronofy, Nylas | | Availability across participants: all, or any *n* (Cronofy); collective and round robin (Nylas) | Nylas rooms carry building, floor and capacity |
+| Car rental | Region → branch | ACRISS class code (category, type, transmission, fuel) | |
 
 ## Open questions
 
@@ -576,3 +626,45 @@ webhook endpoints, API keys, rate buckets), `src/types.ts` (`SlotlockResource`),
 `src/self-host.ts` (`authenticate`, `consumeRateLimit`, `slotlockServeAllowsTenant`),
 `openapi.json`; on PR #161: `src/plans.ts`, `src/billing.ts`, its `src/ddl.ts`, `src/dashboard.ts`,
 `workers/dashboard/worker.ts`, `TERMS.md`, `PRIVACY.md`.
+
+**Not reachable:** `stackapi.app`, `pylota.io` and `slotlock.pylota.io` were refused by this
+environment's network policy, and no search engine had a page for `stackapi.app`.
+
+**Stripe** (read 2026-11-09): Managed Payments
+[overview](https://docs.stripe.com/payments/managed-payments),
+[how it works](https://docs.stripe.com/payments/managed-payments/how-it-works),
+[set up](https://docs.stripe.com/payments/managed-payments/set-up),
+[Checkout changes](https://docs.stripe.com/payments/managed-payments/update-checkout),
+[eligibility](https://docs.stripe.com/payments/managed-payments/eligibility),
+[changelog](https://docs.stripe.com/payments/managed-payments/changelog);
+[pricing](https://stripe.com/pricing);
+[meter event](https://docs.stripe.com/api/billing/meter-event/create),
+[recording usage](https://docs.stripe.com/billing/subscriptions/usage-based/recording-usage-api),
+[usage-based billing](https://docs.stripe.com/billing/subscriptions/usage-based/how-it-works),
+[billing credits](https://docs.stripe.com/billing/subscriptions/usage-based/billing-credits);
+[Connect authentication](https://docs.stripe.com/connect/authentication).
+
+**Cloudflare:** [Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
+[rate limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/).
+
+**IETF:** [draft-ietf-httpapi-ratelimit-headers-11](https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-ratelimit-headers-11).
+
+**Resource models:** Google
+[calendar resources](https://developers.google.com/admin-sdk/directory/reference/rest/v1/resources.calendars);
+Microsoft [place](https://learn.microsoft.com/en-us/graph/api/resources/place?view=graph-rest-1.0);
+FHIR R5 [Schedule](https://hl7.org/fhir/R5/schedule.html), [Slot](https://hl7.org/fhir/R5/slot.html),
+[Location](https://hl7.org/fhir/R5/location.html),
+[HealthcareService](https://hl7.org/fhir/R5/healthcareservice.html); Skedda
+[space sharing](https://support.skedda.com/manage-spaces/space-sharing),
+[space attributes](https://support.skedda.com/en/articles/9969743-space-attributes); Robin
+[space](https://docs.robinpowered.com/reference/space), [zone](https://docs.robinpowered.com/reference/zone);
+Fleetio [groups and subgroups](https://help.fleetio.com/en_US/groups-subgroups); Booqable
+[product groups](https://developers.booqable.com/api/product_groups.md),
+[bundles](https://developers.booqable.com/api/bundles.md); Cal.com
+[round robin](https://cal.com/help/event-types/round-robin), [seats](https://cal.com/help/event-types/offer-seats),
+[routing with attributes](https://cal.com/help/routing/routing-with-attributes); Cronofy
+[availability](https://docs.cronofy.com/api-reference/availability-control/availability/),
+[meeting rooms](https://docs.cronofy.com/developers/scheduling/meeting-rooms/); Nylas
+[room resources](https://developer.nylas.com/docs/cookbook/calendar/book-room-resources/),
+[availability](https://developer.nylas.com/docs/v3/calendar/calendar-availability/);
+[ACRISS car codes](https://www.acriss.org/car-codes/).
