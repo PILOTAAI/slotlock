@@ -292,14 +292,19 @@ STRIPE_SECRET_KEY=sk_live_… slotlock partner close stackapi              # las
 
 - `partner close` reads the month's usage of every account, prices it with the contract (active
   accounts, each account's operations and bookings above its plan's quota, the minimum's
-  shortfall) and records those lines in `slotlock.partner_invoices`. A month is priced once: a
-  later run sends the same lines, whatever changed since.
+  shortfall) and records those lines in `slotlock.partner_invoices`. The first run freezes the month
+  (`slotlock.partner_month_closes`): every later run uses the same totals and lines, whatever
+  arrived or changed since. An account erased before its month is closed is still billed: erasure
+  keeps what it used in unclosed months (`slotlock.partner_erased_usage`, by the partner's account
+  name only).
 - It then sends the partner `usage.period_closed`, signed as any Slotlock webhook (`webhook-id`,
   `webhook-timestamp`, `webhook-signature`): each account's totals by metric, the lines, and a
-  SHA-256 of both, so the two sides can check they hold the same numbers.
+  SHA-256 of both, so the two sides can check they hold the same numbers. Every run sends the same
+  body under the same id until the endpoint answers 2xx; after that, none.
 - With `STRIPE_SECRET_KEY`, each line Stripe has not taken becomes an invoice item on the partner's
-  next invoice, and its id is kept. It exits 1 while a line waits (no key, or Stripe failed): run
-  it again for the same month, and only those lines are sent.
+  next invoice, and its id is kept. An item Stripe made in a run that stopped before recording it
+  is found by its metadata and adopted, never made twice. It exits 1 while a line waits or the
+  webhook was not taken: run it again for the same month.
 - `/metrics` counts authenticated requests by the integrator their `Slotlock-Client` field names
   (`slotlock_requests_by_client_total`): the names in `SLOTLOCK_KNOWN_CLIENTS`, else `other`, or
   `none` without the field.

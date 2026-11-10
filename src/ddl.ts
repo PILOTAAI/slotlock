@@ -389,6 +389,8 @@ export const SLOTLOCK_PARTNER_TABLES = Object.freeze([
   'partner_keys',
   'partner_accounts',
   'partner_invoices',
+  'partner_month_closes',
+  'partner_erased_usage',
 ] as const);
 
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
@@ -1939,7 +1941,30 @@ BEGIN
   DELETE FROM slotlock.tenant_plans WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
-  -- A partner's account: its partner's record of it goes too (RFC 0003 P3 erase).
+  -- A partner's account: what it used in months its partner has not closed is kept for billing
+  -- first (by the partner's account reference only), then its partner's record of it goes too.
+  INSERT INTO slotlock.partner_erased_usage AS kept (partner_id, account, plan, month, metric, count)
+  SELECT owned.partner_id, owned.account, owned.plan, monthly.month, monthly.metric, monthly.count
+    FROM slotlock.partner_accounts owned
+    JOIN (
+      SELECT daily.month, daily.metric,
+             CASE WHEN daily.metric = 'resources' THEN max(daily.count) ELSE sum(daily.count) END::bigint AS count
+        FROM (
+          SELECT date_trunc('month', used.day)::date AS month, used.day, used.metric, sum(used.count) AS count
+            FROM slotlock.usage_daily used
+           WHERE used.tenant_ref = requested_tenant_ref
+             AND used.day >= (date_trunc('month', statement_timestamp()) - interval '1 month')::date
+           GROUP BY 1, used.day, used.metric
+        ) daily
+       GROUP BY daily.month, daily.metric
+    ) monthly ON true
+   WHERE owned.tenant_ref = requested_tenant_ref
+     AND NOT EXISTS (SELECT 1 FROM slotlock.partner_month_closes closed
+                      WHERE closed.partner_id = owned.partner_id AND closed.month = monthly.month)
+  ON CONFLICT (partner_id, account, month, metric) DO UPDATE
+    SET count = CASE WHEN kept.metric = 'resources' THEN GREATEST(kept.count, EXCLUDED.count)
+                     ELSE kept.count + EXCLUDED.count END,
+        plan = EXCLUDED.plan, erased_at = statement_timestamp();
   erased_table := 'partner_accounts';
   DELETE FROM slotlock.partner_accounts WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -3333,6 +3358,43 @@ CREATE TABLE IF NOT EXISTS slotlock.partner_invoices (
 );
 ALTER TABLE slotlock.partner_invoices ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.partner_invoices FROM PUBLIC;
+
+-- A partner's month as it was first closed (P5, P6): each account's totals and the checksum the
+-- usage.period_closed webhook carries. Every later run sends the same body under the same id, and
+-- the month's invoice lines are priced from these totals only, once.
+CREATE TABLE IF NOT EXISTS slotlock.partner_month_closes (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  month date NOT NULL,
+  accounts jsonb NOT NULL,
+  checksum text NOT NULL,
+  closed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  webhook_status integer,
+  webhook_delivered_at timestamptz,
+  CONSTRAINT slotlock_partner_month_closes_pkey PRIMARY KEY (partner_id, month),
+  CONSTRAINT slotlock_partner_month_closes_valid CHECK (
+    extract(day FROM month) = 1 AND checksum ~ '^[0-9a-f]{64}$' AND jsonb_typeof(accounts) = 'array'
+    AND (webhook_status IS NULL OR webhook_status BETWEEN 100 AND 599)
+  )
+);
+ALTER TABLE slotlock.partner_month_closes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_month_closes FROM PUBLIC;
+
+-- What an account of a partner's used in a month not yet closed, kept when the account is erased
+-- (erase_tenant), so its month is still billed. By the partner's own account reference: the tenant
+-- and everything in it are gone.
+CREATE TABLE IF NOT EXISTS slotlock.partner_erased_usage (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  account text NOT NULL,
+  plan text NOT NULL,
+  month date NOT NULL,
+  metric text NOT NULL,
+  count bigint NOT NULL,
+  erased_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partner_erased_usage_pkey PRIMARY KEY (partner_id, account, month, metric),
+  CONSTRAINT slotlock_partner_erased_usage_valid CHECK (extract(day FROM month) = 1 AND count >= 0)
+);
+ALTER TABLE slotlock.partner_erased_usage ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_erased_usage FROM PUBLIC;
 
 -- Whether the tenant is a partner's account whose partner is not active: its keys authenticate as
 -- nothing and it is suspended with its partner (tenant_suspended). Any other tenant reference, one

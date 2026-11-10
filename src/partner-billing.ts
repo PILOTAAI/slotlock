@@ -130,20 +130,119 @@ export function slotlockPreviousMonth(now: number): string {
 export interface SlotlockPartnerMonthClose {
   partner: string;
   month: string;
+  /** Each account's totals as the month was first closed: later runs send the same. */
   accounts: SlotlockPartnerAccountMonth[];
   lines: (SlotlockPartnerInvoiceLine & { stripeItem: string | null })[];
   checksum: string;
-  /** The webhook's HTTP status, or why it was not sent. */
-  webhook: number | 'no_webhook' | 'failed';
+  /** True when this run closed the month; false when an earlier run had. */
+  closedNow: boolean;
+  /**
+   * The webhook: delivered in this run (a 2xx), delivered by an earlier run, not configured, or
+   * failed (no answer, or another status, in `webhookStatus`), to be sent again by the next run.
+   */
+  webhook: 'delivered' | 'already_delivered' | 'no_webhook' | 'failed';
+  webhookStatus?: number;
   /** Lines Stripe took in this run, and those still waiting for it (no Stripe key, or a failure). */
   invoiced: number;
   pending: number;
 }
 
+interface FrozenMonth {
+  accounts: SlotlockPartnerAccountMonth[];
+  checksum: string;
+  webhookDelivered: boolean;
+}
+
+/** Each account's month: what its tenant used, and what an erased one of the same name had used. */
+async function readPartnerMonth(sql: Sql, partnerId: string, range: { from: string; to: string }) {
+  const rows = await sql<{ account: string; plan: string; metric: string | null; count: string | null }[]>`
+    WITH daily AS (
+      SELECT tenant_ref, day, metric, sum(count) AS count
+        FROM slotlock.usage_daily
+       WHERE day BETWEEN ${range.from}::date AND ${range.to}::date
+         AND tenant_ref IN (SELECT tenant_ref FROM slotlock.partner_accounts WHERE partner_id = ${partnerId})
+       GROUP BY tenant_ref, day, metric
+    )
+    SELECT owned.account, owned.plan, used.metric,
+           CASE WHEN used.metric = 'resources' THEN max(used.count) ELSE sum(used.count) END::text AS count
+      FROM slotlock.partner_accounts owned
+      LEFT JOIN daily used ON used.tenant_ref = owned.tenant_ref
+     WHERE owned.partner_id = ${partnerId}
+     GROUP BY owned.account, owned.plan, used.metric
+    UNION ALL
+    SELECT erased.account, erased.plan, erased.metric, erased.count::text
+      FROM slotlock.partner_erased_usage erased
+     WHERE erased.partner_id = ${partnerId} AND erased.month = ${range.from}::date`;
+  const byAccount = new Map<string, SlotlockPartnerAccountMonth>();
+  for (const row of rows) {
+    const month = byAccount.get(row.account) ?? { account: row.account, plan: row.plan, totals: {} };
+    if (row.metric !== null) {
+      const totals = month.totals as Record<string, number>;
+      const count = Number(row.count ?? 0);
+      // An account erased and made again in the month: both counted, resources at their most.
+      totals[row.metric] = row.metric === 'resources' ? Math.max(totals[row.metric] ?? 0, count) : (totals[row.metric] ?? 0) + count;
+    }
+    byAccount.set(row.account, month);
+  }
+  return canonicalAccounts([...byAccount.values()]);
+}
+
+/** Accounts by name, each one's metrics by name: the order the webhook body and its checksum use. */
+function canonicalAccounts(accounts: readonly SlotlockPartnerAccountMonth[]): SlotlockPartnerAccountMonth[] {
+  const byName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...accounts]
+    .sort((a, b) => byName(a.account, b.account))
+    .map((month) => ({
+      account: month.account,
+      plan: month.plan,
+      totals: Object.fromEntries(Object.entries(month.totals).sort(([a], [b]) => byName(a, b))),
+    }));
+}
+
+/** Stripe's invoice items for the customer that this partner's month already made (a run that stopped after Stripe took them). */
+async function existingInvoiceItems(
+  stripe: { secretKey: string; fetch?: typeof fetch; apiBase?: string },
+  customer: string,
+  partnerId: string,
+  month: string,
+): Promise<Map<string, string>> {
+  const send = stripe.fetch ?? fetch;
+  const found = new Map<string, string>();
+  let after: string | undefined;
+  for (let page = 0; page < 10; page += 1) {
+    const query = new URLSearchParams({ customer, limit: '100', ...(after ? { starting_after: after } : {}) });
+    const response = await send(`${stripe.apiBase ?? 'https://api.stripe.com'}/v1/invoiceitems?${query.toString()}`, {
+      headers: { authorization: `Bearer ${stripe.secretKey}`, 'stripe-version': SLOTLOCK_STRIPE_API_VERSION },
+    }).catch(() => null);
+    if (!response?.ok) throw Object.assign(new Error('Stripe did not list the invoice items'), { code: 'stripe_unavailable' });
+    const listed = (await response.json().catch(() => null)) as {
+      data?: { id?: unknown; metadata?: Record<string, string> }[];
+      has_more?: boolean;
+    } | null;
+    for (const item of listed?.data ?? []) {
+      if (
+        typeof item.id === 'string' &&
+        item.metadata?.slotlock_partner === partnerId &&
+        item.metadata.slotlock_month === month &&
+        typeof item.metadata.slotlock_line === 'string'
+      ) {
+        found.set(item.metadata.slotlock_line, item.id);
+      }
+    }
+    const last = listed?.data?.at(-1)?.id;
+    if (!listed?.has_more || typeof last !== 'string') break;
+    after = last;
+  }
+  return found;
+}
+
 /**
- * Close one partner's month, as the schema owner (`slotlock partner close`): read its accounts'
- * usage, record its invoice lines once, send usage.period_closed, and add the lines Stripe has not
- * taken to its next invoice (with `stripe`). Safe to run again: nothing is priced or billed twice.
+ * Close one partner's month, as the schema owner (`slotlock partner close`). The first run freezes
+ * it: each account's totals (erased accounts' included), the invoice lines the contract prices them
+ * at and their checksum, in one transaction. Every run then sends usage.period_closed with that same
+ * body until the partner's endpoint takes it (a 2xx), and adds to the partner's next Stripe invoice
+ * each line Stripe has not taken, adopting one it took in a run that stopped before recording it.
+ * Nothing is priced or billed twice, however often or concurrently it runs.
  */
 export async function closeSlotlockPartnerMonth(
   sql: Sql,
@@ -151,7 +250,7 @@ export async function closeSlotlockPartnerMonth(
     partnerId: string;
     month: string;
     now?: number;
-    /** Stripe: a secret key with write access to invoice items. Without it, lines wait. */
+    /** Stripe: a secret key with read and write access to invoice items. Without it, lines wait. */
     stripe?: { secretKey: string; fetch?: typeof fetch; apiBase?: string };
     /** How the webhook is sent (createSlotlockWebhookSender, which refuses private addresses). */
     send?: SlotlockWebhookSender;
@@ -163,39 +262,31 @@ export async function closeSlotlockPartnerMonth(
     { contract: unknown; stripe_customer: string | null; webhook_url: string | null; webhook_secret: string | null }[]
   >`SELECT contract, stripe_customer, webhook_url, webhook_secret FROM slotlock.partners WHERE id = ${input.partnerId}`;
   if (!partner) throw Object.assign(new Error('Slotlock partner not found'), { code: 'partner_not_found' });
-  const contract = parseSlotlockPartnerContract(partner.contract);
-  // Every account the partner had this month, with its plan now, and what it used.
-  const rows = await sql<{ account: string; plan: string; metric: string | null; count: string | null }[]>`
-    WITH daily AS (
-      SELECT tenant_ref, day, metric, sum(count) AS count
-        FROM slotlock.usage_daily
-       WHERE day BETWEEN ${range.from}::date AND ${range.to}::date
-         AND tenant_ref IN (SELECT tenant_ref FROM slotlock.partner_accounts WHERE partner_id = ${input.partnerId})
-       GROUP BY tenant_ref, day, metric
-    )
-    SELECT owned.account, owned.plan, used.metric,
-           CASE WHEN used.metric = 'resources' THEN max(used.count) ELSE sum(used.count) END::text AS count
-      FROM slotlock.partner_accounts owned
-      LEFT JOIN daily used ON used.tenant_ref = owned.tenant_ref
-     WHERE owned.partner_id = ${input.partnerId}
-     GROUP BY owned.account, owned.plan, used.metric
-     ORDER BY owned.account, used.metric`;
-  const byAccount = new Map<string, SlotlockPartnerAccountMonth>();
-  for (const row of rows) {
-    const month = byAccount.get(row.account) ?? { account: row.account, plan: row.plan, totals: {} };
-    if (row.metric !== null) (month.totals as Record<string, number>)[row.metric] = Number(row.count ?? 0);
-    byAccount.set(row.account, month);
-  }
-  const accounts = [...byAccount.values()];
-  // Priced once: a month's recorded lines stand, however often it is closed.
-  const priced = priceSlotlockPartnerMonth(contract, accounts);
-  for (const line of priced) {
-    await sql`
-      INSERT INTO slotlock.partner_invoices (partner_id, month, line, description, quantity, amount, currency)
-      VALUES (${input.partnerId}, ${range.from}::date, ${line.line}, ${line.description}, ${line.quantity},
-              ${line.amount}, ${line.currency})
-      ON CONFLICT (partner_id, month, line) DO NOTHING`;
-  }
+
+  // Frozen on the first run, under the partner's month lock, so racing runs freeze it once.
+  let closedNow = false;
+  const frozen = await sql.begin(async (tx): Promise<FrozenMonth> => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:partner-month:${input.partnerId}:${input.month}`}, 0))`;
+    const [kept] = await tx<{ accounts: SlotlockPartnerAccountMonth[]; checksum: string; delivered: boolean }[]>`
+      SELECT accounts, checksum, webhook_delivered_at IS NOT NULL AS delivered
+        FROM slotlock.partner_month_closes WHERE partner_id = ${input.partnerId} AND month = ${range.from}::date`;
+    // jsonb keeps no key order: put it back, so every run sends the same bytes.
+    if (kept) return { accounts: canonicalAccounts(kept.accounts), checksum: kept.checksum, webhookDelivered: kept.delivered };
+    const accounts = await readPartnerMonth(tx as unknown as Sql, input.partnerId, range);
+    const priced = priceSlotlockPartnerMonth(parseSlotlockPartnerContract(partner.contract), accounts);
+    for (const line of priced) {
+      await tx`
+        INSERT INTO slotlock.partner_invoices (partner_id, month, line, description, quantity, amount, currency)
+        VALUES (${input.partnerId}, ${range.from}::date, ${line.line}, ${line.description}, ${line.quantity},
+                ${line.amount}, ${line.currency})`;
+    }
+    const checksum = slotlockPartnerMonthChecksum(accounts, priced);
+    await tx`
+      INSERT INTO slotlock.partner_month_closes (partner_id, month, accounts, checksum)
+      VALUES (${input.partnerId}, ${range.from}::date, ${JSON.stringify(accounts)}::text::jsonb, ${checksum})`;
+    closedNow = true;
+    return { accounts, checksum, webhookDelivered: false };
+  });
   const recorded = await sql<
     { line: string; description: string; quantity: string; amount: string; currency: string; stripe_item: string | null }[]
   >`SELECT line, description, quantity::text, amount::text, currency, stripe_item
@@ -210,11 +301,13 @@ export async function closeSlotlockPartnerMonth(
     currency: row.currency,
     stripeItem: row.stripe_item,
   }));
-  const checksum = slotlockPartnerMonthChecksum(accounts, lines);
 
-  // The partner hears the numbers first (P5), signed as any Slotlock webhook.
+  // The partner hears the numbers first (P5), signed as any Slotlock webhook, the same body each time.
   let webhook: SlotlockPartnerMonthClose['webhook'] = 'no_webhook';
-  if (partner.webhook_url && partner.webhook_secret) {
+  let webhookStatus: number | undefined;
+  if (frozen.webhookDelivered) {
+    webhook = 'already_delivered';
+  } else if (partner.webhook_url && partner.webhook_secret) {
     const id = `usage_period_closed_${input.partnerId}_${input.month.replace('-', '_')}`;
     const timestamp = Math.floor(now / 1_000);
     const body = JSON.stringify({
@@ -223,9 +316,9 @@ export async function closeSlotlockPartnerMonth(
       month: input.month,
       from: range.from,
       to: range.to,
-      accounts: accounts.map((month) => ({ account: month.account, plan: month.plan, totals: month.totals })),
+      accounts: frozen.accounts.map((month) => ({ account: month.account, plan: month.plan, totals: month.totals })),
       lines: lines.map(({ stripeItem: _, ...line }) => line),
-      checksum,
+      checksum: frozen.checksum,
     });
     try {
       const answer = await (input.send ?? createSlotlockWebhookSender())({
@@ -238,39 +331,50 @@ export async function closeSlotlockPartnerMonth(
         },
         body,
       });
-      webhook = answer.status;
+      webhookStatus = answer.status;
+      webhook = answer.status >= 200 && answer.status < 300 ? 'delivered' : 'failed';
     } catch {
       webhook = 'failed';
     }
+    await sql`
+      UPDATE slotlock.partner_month_closes
+         SET webhook_status = ${webhookStatus ?? null},
+             webhook_delivered_at = CASE WHEN ${webhook === 'delivered'} THEN statement_timestamp() ELSE webhook_delivered_at END
+       WHERE partner_id = ${input.partnerId} AND month = ${range.from}::date`;
   }
 
   // Then Stripe (P6): each line it has not taken, once, on the partner's next invoice.
   let invoiced = 0;
   const waiting = lines.filter((line) => line.stripeItem === null && line.amount > 0);
-  if (input.stripe && partner.stripe_customer) {
+  if (input.stripe && partner.stripe_customer && waiting.length > 0) {
     const send = input.stripe.fetch ?? fetch;
+    // An item a run made before it stopped is adopted, never made again (idempotency keys last a day).
+    const made = await existingInvoiceItems(input.stripe, partner.stripe_customer, input.partnerId, input.month);
     for (const line of waiting) {
-      const form = new URLSearchParams({
-        customer: partner.stripe_customer,
-        amount: String(line.amount),
-        currency: line.currency,
-        description: `${input.month}: ${line.description}`,
-        'metadata[slotlock_partner]': input.partnerId,
-        'metadata[slotlock_month]': input.month,
-        'metadata[slotlock_line]': line.line,
-      });
-      const response = await send(`${input.stripe.apiBase ?? 'https://api.stripe.com'}/v1/invoiceitems`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${input.stripe.secretKey}`,
-          'content-type': 'application/x-www-form-urlencoded',
-          'stripe-version': SLOTLOCK_STRIPE_API_VERSION,
-          'idempotency-key': `slotlock-partner-${input.partnerId}-${input.month}-${line.line}`,
-        },
-        body: form.toString(),
-      }).catch(() => null);
-      if (!response?.ok) continue;
-      const item = ((await response.json().catch(() => ({}))) as { id?: unknown }).id;
+      let item: unknown = made.get(line.line);
+      if (item === undefined) {
+        const form = new URLSearchParams({
+          customer: partner.stripe_customer,
+          amount: String(line.amount),
+          currency: line.currency,
+          description: `${input.month}: ${line.description}`,
+          'metadata[slotlock_partner]': input.partnerId,
+          'metadata[slotlock_month]': input.month,
+          'metadata[slotlock_line]': line.line,
+        });
+        const response = await send(`${input.stripe.apiBase ?? 'https://api.stripe.com'}/v1/invoiceitems`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${input.stripe.secretKey}`,
+            'content-type': 'application/x-www-form-urlencoded',
+            'stripe-version': SLOTLOCK_STRIPE_API_VERSION,
+            'idempotency-key': `slotlock-partner-${input.partnerId}-${input.month}-${line.line}`,
+          },
+          body: form.toString(),
+        }).catch(() => null);
+        if (!response?.ok) continue;
+        item = ((await response.json().catch(() => ({}))) as { id?: unknown }).id;
+      }
       if (typeof item !== 'string' || !/^ii_[A-Za-z0-9]{1,250}$/.test(item)) continue;
       await sql`
         UPDATE slotlock.partner_invoices SET stripe_item = ${item}, sent_at = now()
@@ -283,10 +387,12 @@ export async function closeSlotlockPartnerMonth(
   return {
     partner: input.partnerId,
     month: input.month,
-    accounts,
+    accounts: frozen.accounts,
     lines,
-    checksum,
+    checksum: frozen.checksum,
+    closedNow,
     webhook,
+    ...(webhookStatus !== undefined ? { webhookStatus } : {}),
     invoiced,
     pending: lines.filter((line) => line.stripeItem === null && line.amount > 0).length,
   };

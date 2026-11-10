@@ -1770,10 +1770,15 @@ async function runPartnerCommand(
             stripe_item: entry.stripeItem,
           })),
           checksum: closed.checksum,
+          closed_now: closed.closedNow,
           webhook: closed.webhook,
+          ...(closed.webhookStatus !== undefined ? { webhook_status: closed.webhookStatus } : {}),
           invoiced: closed.invoiced,
           pending: closed.pending,
         });
+        if (closed.webhook === 'failed') {
+          io.stderr.write('slotlock: the partner\'s endpoint did not take usage.period_closed; run partner close again for the same month\n');
+        }
         if (closed.pending > 0) {
           io.stderr.write(
             close.stripeSecretKey

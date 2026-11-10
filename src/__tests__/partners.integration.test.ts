@@ -61,10 +61,13 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
   afterAll(async () => {
     for (const partner of [stackapi, rival, billed]) {
       await admin`DELETE FROM slotlock.partner_invoices WHERE partner_id = ${partner}`;
+      await admin`DELETE FROM slotlock.partner_month_closes WHERE partner_id = ${partner}`;
       for (const { tenant_ref } of await admin<{ tenant_ref: string }[]>`
         SELECT tenant_ref FROM slotlock.partner_accounts WHERE partner_id = ${partner}`) {
         await admin`SELECT * FROM slotlock.erase_tenant(${tenant_ref}::text)`;
       }
+      // Erasing an account keeps its unclosed month for billing: cleared once the accounts are gone.
+      await admin`DELETE FROM slotlock.partner_erased_usage WHERE partner_id = ${partner}`;
       await admin`DELETE FROM slotlock.partners WHERE id = ${partner}`;
     }
     await application?.end({ timeout: 5 });
@@ -222,10 +225,11 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
       keys: createSlotlockApiKeyStore(admin),
       eraseTenant: async () => ({ erased: true, total: 0 }) as never,
     });
-    for (const account of ['busy', 'quiet', 'idle']) await partners.putAccount(billed, account, 'partner_free');
+    for (const account of ['busy', 'quiet', 'idle', 'gone']) await partners.putAccount(billed, account, 'partner_free');
     const month = slotlockPreviousMonth(Date.now());
     const day = (n: number) => `${month}-0${n}`;
-    // busy: 25,000 operations against a 10,000 quota; quiet: one; idle: a resource and nothing run.
+    // busy: 25,000 operations against a 10,000 quota; quiet: one; idle: a resource and nothing run;
+    // gone: 15,000, then erased before the month is closed.
     await admin`
       INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count) VALUES
         (${`partner:${billed}:busy`}, ${day(1)}::date, 'operations', '', 'rest', 20000),
@@ -234,45 +238,59 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
         (${`partner:${billed}:busy`}, ${day(2)}::date, 'resources', '', 'store', 4),
         (${`partner:${billed}:quiet`}, ${day(3)}::date, 'operations', '', 'rest', 1),
         (${`partner:${billed}:idle`}, ${day(3)}::date, 'resources', '', 'store', 1),
+        (${`partner:${billed}:gone`}, ${day(4)}::date, 'operations', '', 'rest', 15000),
         (${`partner:${billed}:busy`}, current_date, 'operations', '', 'rest', 999999)`;
+    // Erased: the tenant goes, and its unclosed month is kept for billing, by the account's name.
+    await admin`SELECT * FROM slotlock.erase_tenant(${`partner:${billed}:gone`}::text)`;
+    expect(await admin`SELECT plan, metric, count::int FROM slotlock.partner_erased_usage WHERE partner_id = ${billed}`).toEqual([
+      { plan: 'partner_free', metric: 'operations', count: 15000 },
+    ]);
 
-    const sent: { url: string; headers: Record<string, string>; body: string }[] = [];
-    const items: URLSearchParams[] = [];
-    let failNext = 'minimum';
+    // Stripe as it keeps invoice items: one it made can be listed by the run after.
+    const made: { id: string; metadata: Record<string, string> }[] = [];
+    let lostAnswer = 'minimum';
     const stripe = {
       secretKey: 'sk_test_partner',
-      fetch: (async (_url: string, init: RequestInit) => {
-        const form = new URLSearchParams(String(init.body));
-        if (form.get('metadata[slotlock_line]') === failNext) {
-          failNext = '';
-          return new Response('{"error":{}}', { status: 500 });
+      fetch: (async (url: string, init: RequestInit = {}) => {
+        if ((init.method ?? 'GET') === 'GET') {
+          expect(String(url)).toContain('customer=cus_Billed123');
+          return Response.json({ data: [...made].reverse(), has_more: false });
         }
-        items.push(form);
-        return Response.json({ id: `ii_${form.get('metadata[slotlock_line]')?.replaceAll('_', '')}` });
+        const form = new URLSearchParams(String(init.body));
+        const line = form.get('metadata[slotlock_line]') as string;
+        made.push({
+          id: `ii_${line.replaceAll('_', '')}`,
+          metadata: { slotlock_partner: form.get('metadata[slotlock_partner]') ?? '', slotlock_month: month, slotlock_line: line },
+        });
+        // Stripe made it, and the answer was lost on the way back.
+        if (line === lostAnswer) {
+          lostAnswer = '';
+          return new Response('{"error":{}}', { status: 502 });
+        }
+        return Response.json({ id: `ii_${line.replaceAll('_', '')}` });
       }) as typeof fetch,
     };
-    const first = await closeSlotlockPartnerMonth(admin, {
-      partnerId: billed,
-      month,
-      stripe,
-      send: async (request) => {
-        sent.push(request);
-        return { status: 204 };
-      },
-    });
-    expect(first.accounts).toEqual(
-      expect.arrayContaining([
-        { account: 'busy', plan: 'partner_free', totals: { operations: 25000, resources: 4 } },
-        { account: 'quiet', plan: 'partner_free', totals: { operations: 1 } },
-        { account: 'idle', plan: 'partner_free', totals: { resources: 1 } },
-      ]),
-    );
-    expect(first.lines.map(({ line, quantity, amount }) => ({ line, quantity, amount }))).toEqual([
-      { line: 'active_accounts', quantity: 2, amount: 1200 },
-      { line: 'minimum', quantity: 1, amount: 10000 - 1400 },
-      { line: 'operations_over_quota', quantity: 2, amount: 200 },
+    const sent: { url: string; headers: Record<string, string>; body: string }[] = [];
+    let answer = 500;
+    const send = async (request: { url: string; headers: Record<string, string>; body: string }) => {
+      sent.push(request);
+      return { status: answer };
+    };
+    const first = await closeSlotlockPartnerMonth(admin, { partnerId: billed, month, stripe, send });
+    expect(first.accounts).toEqual([
+      { account: 'busy', plan: 'partner_free', totals: { operations: 25000, resources: 4 } },
+      { account: 'gone', plan: 'partner_free', totals: { operations: 15000 } },
+      { account: 'idle', plan: 'partner_free', totals: { resources: 1 } },
+      { account: 'quiet', plan: 'partner_free', totals: { operations: 1 } },
     ]);
-    expect(first).toMatchObject({ webhook: 204, invoiced: 2, pending: 1 });
+    // Three active accounts; busy 2 blocks over and gone 1 (each rounded up on its own).
+    expect(first.lines.map(({ line, quantity, amount }) => ({ line, quantity, amount }))).toEqual([
+      { line: 'active_accounts', quantity: 3, amount: 1800 },
+      { line: 'minimum', quantity: 1, amount: 10000 - 2100 },
+      { line: 'operations_over_quota', quantity: 3, amount: 300 },
+    ]);
+    // The endpoint refused the webhook: not delivered, and said so; Stripe's lost answer waits.
+    expect(first).toMatchObject({ closedNow: true, webhook: 'failed', webhookStatus: 500, invoiced: 2, pending: 1 });
 
     // The webhook: signed as any Slotlock webhook, with the numbers and their checksum.
     const [hook] = sent;
@@ -285,28 +303,33 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
       partner: billed,
       month,
       checksum: first.checksum,
-      lines: expect.arrayContaining([expect.objectContaining({ line: 'minimum', amount: 8600 })]),
+      lines: expect.arrayContaining([expect.objectContaining({ line: 'minimum', amount: 7900 })]),
     });
-    expect(items.map((form) => [form.get('customer'), form.get('amount'), form.get('currency')])).toEqual([
-      ['cus_Billed123', '1200', 'usd'],
-      ['cus_Billed123', '200', 'usd'],
-    ]);
 
-    // Run again, after more use arrived and the contract's prices changed: the lines stand, and only
-    // the one Stripe did not take is sent, with the same webhook id.
+    // Run again after late use arrived and the contract's prices changed: the month stands as it was
+    // frozen, the same body goes again until it is taken, and Stripe's item is adopted, not made twice.
+    await admin`
+      INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)
+      VALUES (${`partner:${billed}:quiet`}, ${day(5)}::date, 'operations', '', 'rest', 50000)`;
     await putSlotlockPartner(admin, {
       id: billed,
       name: 'Billed',
       contract: { ...CONTRACT, pricing: { ...CONTRACT.pricing, active_account: 99999 } },
     });
-    const again = await closeSlotlockPartnerMonth(admin, { partnerId: billed, month, stripe, send: async (request) => {
-      sent.push(request);
-      return { status: 200 };
-    } });
-    expect(again.lines.map((line) => line.amount)).toEqual([1200, 8600, 200]);
-    expect(again).toMatchObject({ invoiced: 1, pending: 0 });
-    expect(items).toHaveLength(3);
+    answer = 204;
+    const again = await closeSlotlockPartnerMonth(admin, { partnerId: billed, month, stripe, send });
+    expect(again).toMatchObject({ closedNow: false, webhook: 'delivered', invoiced: 1, pending: 0, checksum: first.checksum });
+    expect(again.lines.map((line) => line.amount)).toEqual([1800, 7900, 300]);
     expect(sent[1]?.headers['webhook-id']).toBe(id);
+    expect(sent[1]?.body).toBe(hook?.body);
+    expect(made).toHaveLength(3);
+    // Delivered once: a third run sends nothing more.
+    expect(await closeSlotlockPartnerMonth(admin, { partnerId: billed, month, stripe, send })).toMatchObject({
+      webhook: 'already_delivered',
+      invoiced: 0,
+      pending: 0,
+    });
+    expect(sent).toHaveLength(2);
     expect(
       (await admin`SELECT count(*)::int AS n FROM slotlock.partner_invoices WHERE partner_id = ${billed} AND stripe_item IS NOT NULL`)[0],
     ).toEqual({ n: 3 });
@@ -365,6 +388,7 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
     await admin`SELECT * FROM slotlock.erase_tenant(${`partner:${actor}:user-9`}::text)`;
     await admin`DELETE FROM slotlock.partner_accounts WHERE partner_id = ${actor}`;
     await admin`DELETE FROM slotlock.partner_keys WHERE partner_id = ${actor}`;
+    await admin`DELETE FROM slotlock.partner_erased_usage WHERE partner_id = ${actor}`;
     await admin`DELETE FROM slotlock.partners WHERE id = ${actor}`;
   });
 });
