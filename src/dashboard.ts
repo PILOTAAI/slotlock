@@ -64,6 +64,7 @@ import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
 import { SLOTLOCK_PLAN_LIMITS, type SlotlockTenantPlan } from './plans.js';
+import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
 import {
   type CreateWebhookEndpointResult,
   SLOTLOCK_CHANGE_TYPES,
@@ -191,6 +192,8 @@ export interface SlotlockDashboardResources {
   list(tenantRef: string): Promise<SlotlockResource[]>;
   /** How many resources the tenant has, archived ones included, as a resource limit counts them. */
   count?(tenantRef: string): Promise<number>;
+  /** The tenant's metered usage from `from` to `to`, UTC days inclusive (usage.ts). */
+  usage?(tenantRef: string, from: string, to: string): Promise<SlotlockUsageRow[]>;
   /**
    * Create the resource, or re-zone the tenant's resource with that reference. Refuse a new one
    * (an error with `code: 'resource_limit_reached'`) once the tenant has
@@ -428,6 +431,11 @@ export interface SlotlockDashboardOptions {
   assistant?: SlotlockDashboardAssistantOptions;
   /** Plans and billing (hosted Slotlock); off unless set. */
   billing?: SlotlockDashboardBilling;
+  /**
+   * The deployment meters usage (SLOTLOCK_USAGE=on): the Plan page shows this month's, from the
+   * resources adapter's `usage`.
+   */
+  usage?: boolean;
   fetch?: typeof fetch;
   now?: () => number;
   /**
@@ -464,6 +472,8 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       ),
     count: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) => tenant.countResources({ tenantRef })),
+    usage: (tenantRef, from, to) =>
+      store.withTenant(tenantRef, (tenant) => tenant.readUsage({ tenantRef, from, to })),
     add: (tenantRef, externalRef, timezone, actor) =>
       store.withTenant(
         tenantRef,
@@ -2657,6 +2667,12 @@ ${
       options.keys.list({ tenantRef }),
       options.resources.webhooks?.list(tenantRef),
     ]);
+    const month = slotlockUsageMonthToDate(now());
+    const used =
+      options.usage && options.resources.usage
+        ? summarizeSlotlockUsage(await options.resources.usage(tenantRef, month.from, month.to))
+        : null;
+    const keyName = new Map(keys.map((key) => [key.id, key.name]));
     const active = keys.filter(
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
     );
@@ -2694,6 +2710,25 @@ ${
       paying && plan?.currentPeriodEnd
         ? html`<p class="fine">${plan.status === 'past_due' ? 'Payment due since' : 'Renews'} ${formatDate(plan.currentPeriodEnd)}.</p>`
         : html``;
+    const usageSection = used
+      ? html`<section class="panel" id="usage">
+<h2>Usage this month</h2>
+<div class="stats">
+${use('Operations', used.totals.operations, undefined)}
+${use('Bookings', used.totals.bookings, undefined)}
+${use('Holds', used.totals.holds, undefined)}
+</div>
+<p class="fine">Since ${month.from}, in UTC. An operation is a call that reached Slotlock, whatever it answered; it shows here within 15 seconds. A booking is a reservation, a calendar event or a confirmed hold, and with holds shows within the hour.</p>
+${
+  used.keys.length === 0
+    ? html``
+    : html`<div class="table"><table><thead><tr><th>Used by</th><th>Operations</th><th>Bookings</th><th>Holds</th></tr></thead><tbody>${used.keys.map(
+        (row) =>
+          html`<tr><td data-label="Used by">${row.keyId === null ? 'The dashboard and its assistant' : (keyName.get(row.keyId) ?? 'A deleted key')}</td><td data-label="Operations">${String(row.operations)}</td><td data-label="Bookings">${String(row.bookings)}</td><td data-label="Holds">${String(row.holds)}</td></tr>`,
+      )}</tbody></table></div>`
+}
+</section>`
+      : html``;
     const content = html`${thanks ? html`<p class="notice">${notice ?? ''}</p>` : noticeOf(notice)}
 ${warning}
 ${pageHead(`Plan: ${name}`, manage)}
@@ -2703,6 +2738,7 @@ ${use('Active API keys', active.length, plan?.limits.apiKeys)}
 ${webhooks ? use('Webhooks', webhooks.length, plan?.limits.webhookEndpoints) : html``}
 </div>
 ${renews}
+${usageSection}
 ${plan ? html`` : html`<p class="fine">Free allows ${String(free.resources)} resources, ${String(free.apiKeys)} API keys and ${String(free.webhookEndpoints)} webhook endpoints.</p>`}
 ${upgrade}
 <section class="panel" id="custom">

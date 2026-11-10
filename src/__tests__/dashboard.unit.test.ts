@@ -2301,6 +2301,38 @@ describe('the plan page', () => {
     expect(listed).not.toContain('of 100');
   });
 
+  it('shows this month’s usage, by key, when the deployment meters it', async () => {
+    const tenantRef = `github:${GITHUB_USER.id}`;
+    const { apiKey } = await keys.store.create({ tenantRef, name: 'Booking agent', scopes: ['read'] });
+    const gone = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+    const read = vi.fn(async (_tenantRef: string, _from: string, _to: string) => [
+      { day: '2026-10-10', metric: 'operations' as const, keyId: apiKey.id, origin: 'mcp', count: 40 },
+      { day: '2026-10-10', metric: 'bookings' as const, keyId: apiKey.id, origin: 'mcp', count: 3 },
+      { day: '2026-10-09', metric: 'operations' as const, keyId: '', origin: 'dashboard-assistant', count: 5 },
+      { day: '2026-10-08', metric: 'holds' as const, keyId: gone, origin: 'rest', count: 2 },
+    ]);
+    const { billing } = billed(free);
+    const metered = dashboard({ billing, usage: true, resources: { ...resources.store, usage: read } });
+    const { session } = await signIn(metered);
+    const html = await (await get(metered, '/base/dashboard/plan', session)).text();
+    // The month so far, by the server's UTC clock.
+    expect(read).toHaveBeenCalledWith(tenantRef, '2026-10-01', '2026-10-10');
+    expect(html).toContain('<h2>Usage this month</h2>');
+    expect(html).toContain('<span class="stat-label">Operations</span><span class="stat-value">45</span>');
+    expect(html).toContain('<span class="stat-label">Bookings</span><span class="stat-value">3</span>');
+    expect(html).toContain('<span class="stat-label">Holds</span><span class="stat-value">2</span>');
+    expect(html).toContain('Since 2026-10-01, in UTC.');
+    expect(html).toContain('<td data-label="Used by">Booking agent</td><td data-label="Operations">40</td>');
+    expect(html).toContain('<td data-label="Used by">The dashboard and its assistant</td>');
+    expect(html).toContain('<td data-label="Used by">A deleted key</td>');
+    // Not metered: no usage, and the adapter is not asked.
+    read.mockClear();
+    const unmetered = dashboard({ billing, resources: { ...resources.store, usage: read } });
+    const again = await signIn(unmetered);
+    expect(await (await get(unmetered, '/base/dashboard/plan', again.session)).text()).not.toContain('Usage this month');
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("names the plan's limit when an add is refused at it", async () => {
     const capped = {
       ...resources.store,

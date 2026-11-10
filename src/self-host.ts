@@ -1095,6 +1095,7 @@ export async function startSlotlockServer(
             resources: createSlotlockDashboardResources(store),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
+            ...(config.usage ? { usage: true } : {}),
             ...(config.dashboard.assistantSecret !== undefined
               ? {
                   // The assistant's reads and approved writes are agent calls: the same backend,

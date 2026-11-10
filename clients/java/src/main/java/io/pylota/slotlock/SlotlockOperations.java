@@ -73,7 +73,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_list_webhooks", new Operation("GET", "/v1/webhooks", List.of(), List.of())),
           Map.entry("slotlock_create_webhook", new Operation("POST", "/v1/webhooks", List.of(), List.of())),
           Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of())),
-          Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())));
+          Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())),
+          Map.entry("slotlock_get_usage", new Operation("GET", "/v1/usage", List.of(), List.of("from", "to"))));
 
   /**
    * Runs an operation by its name with its arguments, path parameters included.
@@ -1592,6 +1593,45 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("webhook_id", webhookId);
     return call("slotlock_enable_webhook", values);
+  }
+
+  /**
+   * Read usage. How much the tenant used the service from one UTC day to another (inclusive, at
+   * most 400 days apart; by default the first of this month to today): operations its keys and
+   * the dashboard assistant ran (each call that reached its operation, whatever it returned), and
+   * bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by
+   * API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+   * dashboard-assistant). Counts only, never what was asked. Empty unless the server meters usage
+   * (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within the hour.
+   * 400 invalid_usage_range when to is before from, the range is longer than 400 days, or to is
+   * after today.
+   *
+   * @param optional the optional arguments, or null: {@code from} (string), {@code to} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getUsage(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("from", "to"), "slotlock_get_usage");
+    return call("slotlock_get_usage", values);
+  }
+
+  /**
+   * Read usage. How much the tenant used the service from one UTC day to another (inclusive, at
+   * most 400 days apart; by default the first of this month to today): operations its keys and
+   * the dashboard assistant ran (each call that reached its operation, whatever it returned), and
+   * bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by
+   * API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+   * dashboard-assistant). Counts only, never what was asked. Empty unless the server meters usage
+   * (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within the hour.
+   * 400 invalid_usage_range when to is before from, the range is longer than 400 days, or to is
+   * after today.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getUsage() {
+    return getUsage(null);
   }
 
 }

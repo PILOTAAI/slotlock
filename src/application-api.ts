@@ -63,7 +63,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_create_webhook'
   | 'slotlock_list_webhooks'
   | 'slotlock_delete_webhook'
-  | 'slotlock_enable_webhook';
+  | 'slotlock_enable_webhook'
+  | 'slotlock_get_usage';
 
 /** The scope an application operation needs, whichever operation it is. */
 export const SLOTLOCK_APPLICATION_SCOPE = 'admin';
@@ -137,6 +138,7 @@ export interface SlotlockApplicationBackend {
   listWebhooks: Handler;
   deleteWebhook: Handler;
   enableWebhook: Handler;
+  getUsage: Handler;
 }
 
 export interface SlotlockApplicationOperationDefinition {
@@ -155,6 +157,17 @@ export interface SlotlockApplicationOperationDefinition {
 }
 
 const DATE_TIME = z.string().datetime({ offset: true });
+/** A UTC day, `YYYY-MM-DD`, that is a real date. */
+const USAGE_DAY = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((day) => new Date(`${day}T00:00:00Z`).toISOString().startsWith(day), 'not a date');
+const USAGE_COUNT = z.number().int().min(0);
+const USAGE_TOTALS = {
+  operations: USAGE_COUNT,
+  bookings: USAGE_COUNT,
+  holds: USAGE_COUNT,
+};
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const HOLD_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(200);
@@ -1215,6 +1228,30 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'enableWebhook',
       example: { webhook_id: '9b2f4c1e-6d3a-4e8b-a1c7-5f0e2d4b6a8c' },
+    },
+    {
+      name: 'slotlock_get_usage',
+      title: 'Read usage',
+      description:
+        "How much the tenant used the service from one UTC day to another (inclusive, at most 400 days apart; by default the first of this month to today): operations its keys and the dashboard assistant ran (each call that reached its operation, whatever it returned), and bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by API key (key_id null for none) and by surface (mcp, a2a, rest, application, dashboard-assistant). Counts only, never what was asked. Empty unless the server meters usage (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within the hour. 400 invalid_usage_range when to is before from, the range is longer than 400 days, or to is after today.",
+      method: 'GET',
+      path: '/v1/usage',
+      input: z.object({ from: USAGE_DAY.optional(), to: USAGE_DAY.optional() }).strict(),
+      output: z
+        .object({
+          from: USAGE_DAY,
+          to: USAGE_DAY,
+          totals: z.object(USAGE_TOTALS).strict(),
+          days: z.array(z.object({ day: USAGE_DAY, ...USAGE_TOTALS }).strict()).max(401),
+          keys: z
+            .array(z.object({ key_id: z.string().uuid().nullable(), ...USAGE_TOTALS }).strict())
+            .max(1001),
+          surfaces: z.array(z.object({ origin: z.string().min(1).max(40), ...USAGE_TOTALS }).strict()).max(20),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getUsage',
+      example: { from: '2026-11-01', to: '2026-11-30' },
     },
   ]);
 

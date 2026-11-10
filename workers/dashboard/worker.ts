@@ -304,6 +304,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
             },
           }
         : {}),
+      ...(metering ? { usage: true } : {}),
       ...(billing
         ? {
             billing: {

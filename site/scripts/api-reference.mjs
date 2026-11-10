@@ -99,7 +99,7 @@ export const GROUPS = [
   },
   {
     name: 'Tenant',
-    operations: ['slotlock_get_tenant', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
+    operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
   },
 ];
 

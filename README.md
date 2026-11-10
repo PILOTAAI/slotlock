@@ -98,7 +98,9 @@ docker compose exec slotlock slotlock resource add vehicle-42 --timezone Europe/
   (`reservation.created`, `event.created`, `hold.confirmed`) and holds (`hold.created`) its feed
   shows committed, rolled up by maintenance before the feed is pruned, so a write that rolled back
   is never counted and maintenance's own changes never are. Counts only, never what was asked; kept
-  400 days, erased with the tenant; read back with `readSlotlockTenantUsage` (usage.ts). Writes from
+  400 days, erased with the tenant; read back with `GET /v1/usage` (an admin key: totals, by day,
+  by key and by surface), `readSlotlockTenantUsage` (usage.ts), and on the dashboard's Plan page.
+  Writes from
   before the release that created the tables are not counted. The dashboard Worker takes the same
   setting for the assistant's operations.
 - The server also bounds what one tenant may store, whichever key, agent or application writes

@@ -1,4 +1,11 @@
 import type { Sql } from 'postgres';
+import {
+  SLOTLOCK_USAGE_RETENTION_DAYS,
+  slotlockUsageDay,
+  slotlockUsageMonthToDate,
+  slotlockUsageSpanDays,
+  summarizeSlotlockUsage,
+} from './usage.js';
 import type { SlotlockAgentChangeSource } from './change-watch.js';
 import { type SlotlockChangeOrigin, type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
@@ -2090,6 +2097,29 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) =>
         tenant.deleteWebhookEndpoint({ tenantRef: tenantOf(context), id: input.webhook_id as string }),
       WRITE);
+    },
+
+    async getUsage(context, input) {
+      const now = Date.now();
+      const range = slotlockUsageMonthToDate(now);
+      const from = (input.from as string | undefined) ?? range.from;
+      const to = (input.to as string | undefined) ?? range.to;
+      const span = slotlockUsageSpanDays(from, to);
+      if (span < 0 || span > SLOTLOCK_USAGE_RETENTION_DAYS || slotlockUsageSpanDays(to, slotlockUsageDay(now)) < 0) {
+        throw new SlotlockAgentOperationError('invalid_usage_range', 400);
+      }
+      const rows = await withTenant(store, context, (tenant) =>
+        tenant.readUsage({ tenantRef: tenantOf(context), from, to }),
+      );
+      const summary = summarizeSlotlockUsage(rows);
+      return {
+        from,
+        to,
+        totals: summary.totals,
+        days: summary.days,
+        keys: summary.keys.map(({ keyId, ...totals }) => ({ key_id: keyId, ...totals })),
+        surfaces: summary.surfaces,
+      };
     },
 
     async enableWebhook(context, input) {

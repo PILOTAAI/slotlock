@@ -198,3 +198,58 @@ export function totalSlotlockUsage(rows: readonly SlotlockUsageRow[]): Record<Sl
   for (const row of rows) totals[row.metric] += row.count;
   return totals;
 }
+
+/** Operations, bookings and holds together: one line of a usage summary. */
+export type SlotlockUsageTotals = Record<SlotlockUsageMetric, number>;
+
+/** A tenant's usage over a range, as `GET /v1/usage` and the Plan page show it. */
+export interface SlotlockUsageSummary {
+  totals: SlotlockUsageTotals;
+  /** Each UTC day with any use, in order. */
+  days: Array<{ day: string } & SlotlockUsageTotals>;
+  /** Each API key with any use (`keyId` null: no key, such as the assistant), most operations first. */
+  keys: Array<{ keyId: string | null } & SlotlockUsageTotals>;
+  /** Each surface with any use (mcp, a2a, rest, application, dashboard-assistant, …), most first. */
+  surfaces: Array<{ origin: string } & SlotlockUsageTotals>;
+}
+
+/** Totals, by day, by key and by surface, from stored rows: bounded however many rows there are. */
+export function summarizeSlotlockUsage(rows: readonly SlotlockUsageRow[]): SlotlockUsageSummary {
+  const zero = (): SlotlockUsageTotals => totalSlotlockUsage([]);
+  const days = new Map<string, SlotlockUsageTotals>();
+  const keys = new Map<string, SlotlockUsageTotals>();
+  const surfaces = new Map<string, SlotlockUsageTotals>();
+  const add = (map: Map<string, SlotlockUsageTotals>, name: string, row: SlotlockUsageRow) => {
+    const found = map.get(name) ?? zero();
+    found[row.metric] += row.count;
+    map.set(name, found);
+  };
+  for (const row of rows) {
+    add(days, row.day, row);
+    add(keys, row.keyId, row);
+    add(surfaces, row.origin, row);
+  }
+  const byUse = (a: SlotlockUsageTotals, b: SlotlockUsageTotals) =>
+    b.operations - a.operations || b.bookings - a.bookings || b.holds - a.holds;
+  return {
+    totals: totalSlotlockUsage(rows),
+    days: [...days].sort(([a], [b]) => a.localeCompare(b)).map(([day, totals]) => ({ day, ...totals })),
+    keys: [...keys]
+      .sort(([a, x], [b, y]) => byUse(x, y) || a.localeCompare(b))
+      .map(([keyId, totals]) => ({ keyId: keyId === '' ? null : keyId, ...totals })),
+    surfaces: [...surfaces]
+      .sort(([a, x], [b, y]) => byUse(x, y) || a.localeCompare(b))
+      .map(([origin, totals]) => ({ origin, ...totals })),
+  };
+}
+
+/** The range `GET /v1/usage` reads when given none: the first of this UTC month to today. */
+export function slotlockUsageMonthToDate(at: number): { from: string; to: string } {
+  const to = slotlockUsageDay(at);
+  return { from: `${to.slice(0, 8)}01`, to };
+}
+
+/** Days from `from` to `to`, both `YYYY-MM-DD`: 0 for the same day, negative when `to` is earlier. */
+export function slotlockUsageSpanDays(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+}

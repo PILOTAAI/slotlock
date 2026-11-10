@@ -45,6 +45,14 @@ versioning.
   takes the same setting for the assistant's operations, recording each request's when it ends.
   `serve` refuses to start with it on against a schema without the functions. The privacy notice
   lists the counts. Run `slotlock migrate`.
+- `GET /v1/usage` (`slotlock_get_usage`, admin scope): a tenant's usage from one UTC day to another,
+  by default the first of this month to today, at most 400 days: totals, then by day, by API key and
+  by surface, bounded whatever the volume; 400 `invalid_usage_range` for a range that is reversed,
+  too long or ends after today. In the OpenAPI document and the five clients. The store's
+  `readUsage` and usage.ts's `summarizeSlotlockUsage` back it.
+- The dashboard's Plan page shows this month's operations, bookings and holds, and who used them by
+  API key, when the deployment meters (the dashboard's `usage` option, set from `SLOTLOCK_USAGE` by
+  `slotlock serve` and the Worker).
 - `SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS`: up to three earlier values of `SLOTLOCK_ASSISTANT_SECRET`,
   comma-separated, newest first, for `slotlock serve` and the dashboard Worker. A model key sealed
   under one of them still opens, and is sealed again under the current secret the next time its

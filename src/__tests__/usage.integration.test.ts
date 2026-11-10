@@ -6,6 +6,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
+import { createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
+import type { SlotlockApplicationBackend } from '../application-api.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import {
   type SlotlockUsageCount,
@@ -210,6 +212,55 @@ describe.skipIf(!url)('usage metering (real Postgres, application role)', () => 
       expect(await read(before)).toEqual([]);
     } finally {
       await admin`UPDATE slotlock.usage_meter_start SET txid = ${kept?.txid as string}::xid8`;
+    }
+  });
+
+  it('answers GET /v1/usage with totals by day, key and surface, this month by default', async () => {
+    const acme = tenant('api');
+    const key = await keyed(acme);
+    await recordSlotlockUsage(application, randomUUID(), [
+      operations(acme, key, 4, 'mcp'),
+      operations(acme, key, 1, 'application'),
+      operations(acme, '', 2, 'dashboard-assistant'),
+    ]);
+    const backend: SlotlockApplicationBackend = createSlotlockStoreApplicationBackend(store);
+    const context = {
+      principal: { subject: `key:${key}`, tenantRef: acme, keyId: key },
+      operation: 'slotlock_get_usage' as const,
+      signal: new AbortController().signal,
+    };
+    const day = today();
+    expect(await backend.getUsage(context, {})).toEqual({
+      from: `${day.slice(0, 8)}01`,
+      to: day,
+      totals: { operations: 7, bookings: 0, holds: 0 },
+      days: [{ day, operations: 7, bookings: 0, holds: 0 }],
+      keys: [
+        { key_id: key, operations: 5, bookings: 0, holds: 0 },
+        { key_id: null, operations: 2, bookings: 0, holds: 0 },
+      ],
+      surfaces: [
+        { origin: 'mcp', operations: 4, bookings: 0, holds: 0 },
+        { origin: 'dashboard-assistant', operations: 2, bookings: 0, holds: 0 },
+        { origin: 'application', operations: 1, bookings: 0, holds: 0 },
+      ],
+    });
+    // Another tenant's key sees only its own.
+    const other = { ...context, principal: { subject: 'key:other', tenantRef: tenant('other-api') } };
+    expect((await backend.getUsage(other, { from: day, to: day })).totals).toEqual({
+      operations: 0,
+      bookings: 0,
+      holds: 0,
+    });
+    for (const range of [
+      { from: day, to: '2000-01-01' },
+      { from: '2020-01-01', to: day },
+      { from: day, to: '2999-12-31' },
+    ]) {
+      await expect(backend.getUsage(context, range), JSON.stringify(range)).rejects.toMatchObject({
+        code: 'invalid_usage_range',
+        status: 400,
+      });
     }
   });
 

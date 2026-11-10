@@ -1,4 +1,5 @@
 // DB mechanics for the Slotlock core: explicit `postgres` client in, structured results out.
+import { type SlotlockUsageRow, readSlotlockTenantUsage } from './usage.js';
 import { slotlockPlanReadRefusal } from './plans.js';
 import {
   SLOTLOCK_CHANGE_ORIGINS,
@@ -2293,6 +2294,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   rollUpUsage(params: { tenantRef: string; limit?: number }): Promise<number>;
   /**
+   * The tenant's usage from `from` to `to`, UTC days `YYYY-MM-DD` inclusive, at most
+   * SLOTLOCK_USAGE_RETENTION_DAYS apart (usage.ts, `slotlock.tenant_usage`): empty unless the
+   * deployment meters it.
+   */
+  readUsage(params: { tenantRef: string; from: string; to: string }): Promise<SlotlockUsageRow[]>;
+  /**
    * Insert a confirmed reservation with the EXCLUDE constraint as the overlap arbiter; expected
    * outcomes (invalid window, lost race) come back structured. Expired holds overlapping the window
    * are reaped in the same transaction, so they never block. On a tenant's resource the booking
@@ -4056,6 +4063,13 @@ function buildSlotlockStore(
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);
+    },
+
+    async readUsage(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return readSlotlockTenantUsage(sql, params.tenantRef, params.from, params.to);
     },
 
     async rollUpUsage(params) {

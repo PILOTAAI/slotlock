@@ -442,6 +442,13 @@ OPERATIONS: dict[str, Operation] = {
         ("webhook_id",),
         (),
     ),
+    "slotlock_get_usage": Operation(
+        "slotlock_get_usage",
+        "GET",
+        "/v1/usage",
+        (),
+        ("from", "to"),
+    ),
 }
 
 
@@ -1522,3 +1529,23 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"webhook_id": webhook_id}
         return self.call("slotlock_enable_webhook", values)
+
+    def get_usage(self, *, from_: str | None = None, to: str | None = None) -> dict[str, Any]:
+        """Read usage.
+
+        How much the tenant used the service from one UTC day to another (inclusive, at most 400
+        days apart; by default the first of this month to today): operations its keys and the
+        dashboard assistant ran (each call that reached its operation, whatever it returned), and
+        bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by
+        API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+        dashboard-assistant). Counts only, never what was asked. Empty unless the server meters
+        usage (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within
+        the hour. 400 invalid_usage_range when to is before from, the range is longer than 400
+        days, or to is after today.
+        """
+        values: dict[str, Any] = {}
+        if from_ is not None:
+            values["from"] = from_
+        if to is not None:
+            values["to"] = to
+        return self.call("slotlock_get_usage", values)

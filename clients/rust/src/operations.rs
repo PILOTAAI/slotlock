@@ -442,6 +442,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path_params: &["webhook_id"],
         query: &[],
     },
+    Operation {
+        name: "slotlock_get_usage",
+        method: "GET",
+        path: "/v1/usage",
+        path_params: &[],
+        query: &["from", "to"],
+    },
 ];
 
 /// The arguments of [`Client::list_resources`].
@@ -1006,6 +1013,15 @@ pub struct DeleteWebhookInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct EnableWebhookInput {
     pub webhook_id: String,
+}
+
+/// The arguments of [`Client::get_usage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetUsageInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 impl Client {
@@ -1603,6 +1619,21 @@ impl Client {
     /// it, add it again, and read what it missed from slotlock_list_changes.
     pub fn enable_webhook(&self, input: &EnableWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_enable_webhook", serde_json::to_value(input)?)
+    }
+
+    /// Read usage.
+    ///
+    /// How much the tenant used the service from one UTC day to another (inclusive, at most 400
+    /// days apart; by default the first of this month to today): operations its keys and the
+    /// dashboard assistant ran (each call that reached its operation, whatever it returned), and
+    /// bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by
+    /// API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+    /// dashboard-assistant). Counts only, never what was asked. Empty unless the server meters
+    /// usage (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within
+    /// the hour. 400 invalid_usage_range when to is before from, the range is longer than 400
+    /// days, or to is after today.
+    pub fn get_usage(&self, input: &GetUsageInput) -> Result<Value, Error> {
+        self.call("slotlock_get_usage", serde_json::to_value(input)?)
     }
 
 }

@@ -21,6 +21,7 @@ const READS = [
   'getResource',
   'listResources',
   'countResources',
+  'readUsage',
   'getHold',
   'listHolds',
   'listAgenda',

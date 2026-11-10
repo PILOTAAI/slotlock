@@ -137,6 +137,7 @@ const backend = {
   joinWaitlist: vi.fn(),
   listWaitlist: vi.fn(),
   leaveWaitlist: vi.fn(),
+  getUsage: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -358,6 +359,14 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   getTenantEventHistory: HISTORY,
   deleteWebhook: { deleted: true },
   enableWebhook: { webhook: WEBHOOK },
+  getUsage: {
+    from: '2026-11-01',
+    to: '2026-11-10',
+    totals: { operations: 3, bookings: 1, holds: 0 },
+    days: [{ day: '2026-11-10', operations: 3, bookings: 1, holds: 0 }],
+    keys: [{ key_id: null, operations: 3, bookings: 1, holds: 0 }],
+    surfaces: [{ origin: 'rest', operations: 3, bookings: 1, holds: 0 }],
+  },
 };
 
 beforeEach(() => {

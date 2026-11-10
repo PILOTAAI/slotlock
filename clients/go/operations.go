@@ -72,6 +72,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_create_webhook", method: "POST", path: "/v1/webhooks", pathParams: nil, query: nil},
 		{name: "slotlock_delete_webhook", method: "DELETE", path: "/v1/webhooks/{webhook_id}", pathParams: []string{"webhook_id"}, query: nil},
 		{name: "slotlock_enable_webhook", method: "POST", path: "/v1/webhooks/{webhook_id}/enable", pathParams: []string{"webhook_id"}, query: nil},
+		{name: "slotlock_get_usage", method: "GET", path: "/v1/usage", pathParams: nil, query: []string{"from", "to"}},
 	}
 	byName := make(map[string]operation, len(list))
 	for _, op := range list {
@@ -1758,4 +1759,35 @@ func (in EnableWebhookInput) values() map[string]any {
 // delete it, add it again, and read what it missed from slotlock_list_changes.
 func (c *Client) EnableWebhook(ctx context.Context, in EnableWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_enable_webhook", in.values())
+}
+
+// GetUsageInput holds the arguments of [Client.GetUsage].
+type GetUsageInput struct {
+	From *string
+
+	To *string
+}
+
+func (in GetUsageInput) values() map[string]any {
+	values := map[string]any{}
+	if in.From != nil {
+		values["from"] = *in.From
+	}
+	if in.To != nil {
+		values["to"] = *in.To
+	}
+	return values
+}
+
+// GetUsage: Read usage. How much the tenant used the service from one UTC day to another
+// (inclusive, at most 400 days apart; by default the first of this month to today): operations
+// its keys and the dashboard assistant ran (each call that reached its operation, whatever it
+// returned), and bookings (bookings, events and confirmed holds) and holds it made. Totals, then
+// by day, by API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+// dashboard-assistant). Counts only, never what was asked. Empty unless the server meters usage
+// (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within the hour.
+// 400 invalid_usage_range when to is before from, the range is longer than 400 days, or to is
+// after today.
+func (c *Client) GetUsage(ctx context.Context, in GetUsageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_usage", in.values())
 }

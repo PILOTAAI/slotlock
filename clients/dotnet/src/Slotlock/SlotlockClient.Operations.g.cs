@@ -77,6 +77,7 @@ public sealed partial class SlotlockClient
         ["slotlock_create_webhook"] = new("POST", "/v1/webhooks", [], []),
         ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], []),
         ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
+        ["slotlock_get_usage"] = new("GET", "/v1/usage", [], ["from", "to"]),
     };
 
     /// <summary>List calendar resources.</summary>
@@ -1777,6 +1778,34 @@ public sealed partial class SlotlockClient
         var values = new JsonObject();
         values["webhook_id"] = Json.ToNode(webhookId);
         return CallAsync("slotlock_enable_webhook", values, cancellationToken);
+    }
+
+    /// <summary>Read usage.</summary>
+    /// <remarks>
+    /// How much the tenant used the service from one UTC day to another (inclusive, at most 400
+    /// days apart; by default the first of this month to today): operations its keys and the
+    /// dashboard assistant ran (each call that reached its operation, whatever it returned), and
+    /// bookings (bookings, events and confirmed holds) and holds it made. Totals, then by day, by
+    /// API key (key_id null for none) and by surface (mcp, a2a, rest, application,
+    /// dashboard-assistant). Counts only, never what was asked. Empty unless the server meters
+    /// usage (SLOTLOCK_USAGE=on); operations appear within 15 seconds, bookings and holds within
+    /// the hour. 400 invalid_usage_range when to is before from, the range is longer than 400
+    /// days, or to is after today.
+    /// </remarks>
+    /// <param name="from">from</param>
+    /// <param name="to">to</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetUsageAsync(
+        Optional<string> from = default,
+        Optional<string> to = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (from.HasValue) values["from"] = Json.ToNode(from.Value);
+        if (to.HasValue) values["to"] = Json.ToNode(to.Value);
+        return CallAsync("slotlock_get_usage", values, cancellationToken);
     }
 
 }
