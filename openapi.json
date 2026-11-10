@@ -2092,7 +2092,7 @@
       "post": {
         "operationId": "slotlock_book_pool",
         "summary": "Book from a pool",
-        "description": "Book any one member of a pool (a vehicle class, a room type) for a time: members are tried in a fixed order and the first that is free and allows the booking is booked, in one transaction, so a class sells out exactly at its number of members. The event names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member you may book. A retry with the same idempotency_key answers the same event.",
+        "description": "Book any one member of a pool (a vehicle class, a room type) for a time: members are tried in the pool's order (by id, fewest bookings in the last 30 days first, or in turn, as the tenant sets it) and the first that is free and allows the booking is booked, in one transaction, so a class sells out exactly at its number of members. The event names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member you may book. A retry with the same idempotency_key answers the same event.",
         "tags": [
           "Agent tools"
         ],
@@ -9208,7 +9208,7 @@
       "get": {
         "operationId": "slotlock_list_pools",
         "summary": "List pools",
-        "description": "The tenant's pools by name, each with its capacity: how many members it has that are not archived.",
+        "description": "The tenant's pools by name, each with its capacity (how many members it has that are not archived) and the order slotlock_book_pool tries them in.",
         "tags": [
           "Application"
         ],
@@ -9235,11 +9235,20 @@
                             "type": "integer",
                             "minimum": 1,
                             "maximum": 9007199254740991
+                          },
+                          "order": {
+                            "type": "string",
+                            "enum": [
+                              "stable",
+                              "least_booked",
+                              "round_robin"
+                            ]
                           }
                         },
                         "required": [
                           "pool",
-                          "capacity"
+                          "capacity",
+                          "order"
                         ],
                         "additionalProperties": false
                       }
@@ -9263,6 +9272,104 @@
             "$ref": "#/components/responses/Error"
           },
           "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/pools/{pool}/order": {
+      "put": {
+        "operationId": "slotlock_set_pool_order",
+        "summary": "Set a pool's order",
+        "description": "The order slotlock_book_pool tries a pool's members in: stable (by id, the default), least_booked (fewest bookings made on each in the last 30 days first, to share them out) or round_robin (from the member after the one booked last).",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "order": {
+                    "type": "string",
+                    "enum": [
+                      "stable",
+                      "least_booked",
+                      "round_robin"
+                    ]
+                  }
+                },
+                "required": [
+                  "order"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "pool",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pool": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                    },
+                    "order": {
+                      "type": "string",
+                      "enum": [
+                        "stable",
+                        "least_booked",
+                        "round_robin"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "pool",
+                    "order"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
             "$ref": "#/components/responses/Error"
           },
           "429": {

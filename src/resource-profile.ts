@@ -299,3 +299,12 @@ export function parseSlotlockResourceGroup(input: {
 export function slotlockGroupingRef(code: 'invalid_location' | 'invalid_group', value: unknown): string {
   return groupingRef(code, 'ref', value);
 }
+
+/**
+ * The order a pool booking tries a pool's members in (RFC 0003 G7): `stable`, by id (the default);
+ * `least_booked`, fewest bookings made on each in the last 30 days first, to share them out;
+ * `round_robin`, from the member after the one booked last.
+ */
+export const SLOTLOCK_POOL_ORDERS = Object.freeze(['stable', 'least_booked', 'round_robin'] as const);
+
+export type SlotlockPoolOrder = (typeof SLOTLOCK_POOL_ORDERS)[number];

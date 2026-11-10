@@ -1097,7 +1097,11 @@ free, `slotlock_get_pool_availability` splits a window where that number changes
 member busy over its bookings' occupied time, buffers included, but not the buffers a new booking
 would keep, so a member it counts free may still refuse a booking that abuts another); to see which,
 search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names the
-members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity. The older names `calendar.<verb>` and `calendar_<verb>` still work and
+members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity and `order`:
+which member `slotlock_book_pool` tries first, set with `PUT /v1/pools/{pool}/order`
+(`setPoolOrder`). `stable` (the default) tries them by id; `least_booked` the one with the fewest
+confirmed bookings made in the last 30 days; `round_robin` the one after the member it booked last,
+to share bookings across vans, rooms or a team of people. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
 
 ### Errors

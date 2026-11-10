@@ -1271,7 +1271,7 @@
   {
     "name": "slotlock_book_pool",
     "title": "Book from a pool",
-    "description": "Book any one member of a pool (a vehicle class, a room type) for a time: members are tried in a fixed order and the first that is free and allows the booking is booked, in one transaction, so a class sells out exactly at its number of members. The event names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member you may book. A retry with the same idempotency_key answers the same event.",
+    "description": "Book any one member of a pool (a vehicle class, a room type) for a time: members are tried in the pool's order (by id, fewest bookings in the last 30 days first, or in turn, as the tenant sets it) and the first that is free and allows the booking is booked, in one transaction, so a class sells out exactly at its number of members. The event names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member you may book. A retry with the same idempotency_key answers the same event.",
     "inputSchema": {
       "type": "object",
       "properties": {

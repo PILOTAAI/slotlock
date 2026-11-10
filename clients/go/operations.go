@@ -46,6 +46,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
+		{name: "slotlock_set_pool_order", method: "PUT", path: "/v1/pools/{pool}/order", pathParams: []string{"pool"}, query: nil},
 		{name: "slotlock_get_booking_rule_defaults", method: "GET", path: "/v1/booking-rules", pathParams: nil, query: nil},
 		{name: "slotlock_set_tenant_booking_rules", method: "PUT", path: "/v1/booking-rules", pathParams: nil, query: nil},
 		{name: "slotlock_set_pool_booking_rules", method: "PUT", path: "/v1/pools/{pool}/booking-rules", pathParams: []string{"pool"}, query: nil},
@@ -484,10 +485,11 @@ func (in BookPoolInput) values() map[string]any {
 }
 
 // BookPool: Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a
-// time: members are tried in a fixed order and the first that is free and allows the booking is
-// booked, in one transaction, so a class sells out exactly at its number of members. The event
-// names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has
-// no member you may book. A retry with the same idempotency_key answers the same event.
+// time: members are tried in the pool's order (by id, fewest bookings in the last 30 days first,
+// or in turn, as the tenant sets it) and the first that is free and allows the booking is booked,
+// in one transaction, so a class sells out exactly at its number of members. The event names the
+// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no member
+// you may book. A retry with the same idempotency_key answers the same event.
 func (c *Client) BookPool(ctx context.Context, in BookPoolInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_book_pool", in.values())
 }
@@ -1269,10 +1271,31 @@ func (in ListPoolsInput) values() map[string]any {
 	return values
 }
 
-// ListPools: List pools. The tenant's pools by name, each with its capacity: how many members it
-// has that are not archived.
+// ListPools: List pools. The tenant's pools by name, each with its capacity (how many members it
+// has that are not archived) and the order slotlock_book_pool tries them in.
 func (c *Client) ListPools(ctx context.Context, in ListPoolsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_pools", in.values())
+}
+
+// SetPoolOrderInput holds the arguments of [Client.SetPoolOrder].
+type SetPoolOrderInput struct {
+	Pool string
+
+	Order string
+}
+
+func (in SetPoolOrderInput) values() map[string]any {
+	values := map[string]any{}
+	values["pool"] = in.Pool
+	values["order"] = in.Order
+	return values
+}
+
+// SetPoolOrder: Set a pool's order. The order slotlock_book_pool tries a pool's members in:
+// stable (by id, the default), least_booked (fewest bookings made on each in the last 30 days
+// first, to share them out) or round_robin (from the member after the one booked last).
+func (c *Client) SetPoolOrder(ctx context.Context, in SetPoolOrderInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_pool_order", in.values())
 }
 
 // GetBookingRuleDefaultsInput holds the arguments of [Client.GetBookingRuleDefaults].

@@ -137,6 +137,7 @@ const backend = {
   listChanges: vi.fn(),
   setResourcePool: vi.fn(),
   listPools: vi.fn(),
+  setPoolOrder: vi.fn(),
   getBookingRuleDefaults: vi.fn(),
   setTenantBookingRules: vi.fn(),
   setPoolBookingRules: vi.fn(),
@@ -361,7 +362,8 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
   listWebhooks: { webhooks: [WEBHOOK] },
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
-  listPools: { pools: [{ pool: 'van', capacity: 5 }] },
+  listPools: { pools: [{ pool: 'van', capacity: 5, order: 'stable' }] },
+  setPoolOrder: { pool: 'van', order: 'least_booked' },
   getBookingRuleDefaults: {
     tenant: { min_notice_minutes: 120 },
     pools: [{ pool: 'van', rules: { buffer_before_minutes: 15, turnaround_minutes: 15 } }],

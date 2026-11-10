@@ -51,6 +51,7 @@ public sealed partial class SlotlockClient
         ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
         ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
         ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
+        ["slotlock_set_pool_order"] = new("PUT", "/v1/pools/{pool}/order", ["pool"], []),
         ["slotlock_get_booking_rule_defaults"] = new("GET", "/v1/booking-rules", [], []),
         ["slotlock_set_tenant_booking_rules"] = new("PUT", "/v1/booking-rules", [], []),
         ["slotlock_set_pool_booking_rules"] = new("PUT", "/v1/pools/{pool}/booking-rules", ["pool"], []),
@@ -463,7 +464,8 @@ public sealed partial class SlotlockClient
     /// <summary>Book from a pool.</summary>
     /// <remarks>
     /// Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
-    /// in a fixed order and the first that is free and allows the booking is booked, in one
+    /// in the pool's order (by id, fewest bookings in the last 30 days first, or in turn, as the
+    /// tenant sets it) and the first that is free and allows the booking is booked, in one
     /// transaction, so a class sells out exactly at its number of members. The event names the
     /// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
     /// member you may book. A retry with the same idempotency_key answers the same event.
@@ -1276,8 +1278,8 @@ public sealed partial class SlotlockClient
 
     /// <summary>List pools.</summary>
     /// <remarks>
-    /// The tenant's pools by name, each with its capacity: how many members it has that are not
-    /// archived.
+    /// The tenant's pools by name, each with its capacity (how many members it has that are not
+    /// archived) and the order slotlock_book_pool tries them in.
     /// </remarks>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
@@ -1287,6 +1289,28 @@ public sealed partial class SlotlockClient
     {
         var values = new JsonObject();
         return CallAsync("slotlock_list_pools", values, cancellationToken);
+    }
+
+    /// <summary>Set a pool's order.</summary>
+    /// <remarks>
+    /// The order slotlock_book_pool tries a pool's members in: stable (by id, the default),
+    /// least_booked (fewest bookings made on each in the last 30 days first, to share them out)
+    /// or round_robin (from the member after the one booked last).
+    /// </remarks>
+    /// <param name="pool">pool</param>
+    /// <param name="order">order</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetPoolOrderAsync(
+        string pool,
+        string order,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pool"] = Json.ToNode(pool);
+        values["order"] = Json.ToNode(order);
+        return CallAsync("slotlock_set_pool_order", values, cancellationToken);
     }
 
     /// <summary>Get default booking rules.</summary>

@@ -48,6 +48,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_set_resource_booking_rules", new Operation("PUT", "/v1/resources/{resource_id}/booking-rules", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_pool", new Operation("PUT", "/v1/resources/{resource_id}/pool", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_pools", new Operation("GET", "/v1/pools", List.of(), List.of())),
+          Map.entry("slotlock_set_pool_order", new Operation("PUT", "/v1/pools/{pool}/order", List.of("pool"), List.of())),
           Map.entry("slotlock_get_booking_rule_defaults", new Operation("GET", "/v1/booking-rules", List.of(), List.of())),
           Map.entry("slotlock_set_tenant_booking_rules", new Operation("PUT", "/v1/booking-rules", List.of(), List.of())),
           Map.entry("slotlock_set_pool_booking_rules", new Operation("PUT", "/v1/pools/{pool}/booking-rules", List.of("pool"), List.of())),
@@ -499,10 +500,11 @@ public abstract class SlotlockOperations {
 
   /**
    * Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a time:
-   * members are tried in a fixed order and the first that is free and allows the booking is
-   * booked, in one transaction, so a class sells out exactly at its number of members. The event
-   * names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool
-   * has no member you may book. A retry with the same idempotency_key answers the same event.
+   * members are tried in the pool's order (by id, fewest bookings in the last 30 days first, or
+   * in turn, as the tenant sets it) and the first that is free and allows the booking is booked,
+   * in one transaction, so a class sells out exactly at its number of members. The event names
+   * the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+   * member you may book. A retry with the same idempotency_key answers the same event.
    *
    * @param pool {@code pool}, string
    * @param startsAt {@code starts_at}, string
@@ -526,10 +528,11 @@ public abstract class SlotlockOperations {
 
   /**
    * Book from a pool. Book any one member of a pool (a vehicle class, a room type) for a time:
-   * members are tried in a fixed order and the first that is free and allows the booking is
-   * booked, in one transaction, so a class sells out exactly at its number of members. The event
-   * names the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool
-   * has no member you may book. A retry with the same idempotency_key answers the same event.
+   * members are tried in the pool's order (by id, fewest bookings in the last 30 days first, or
+   * in turn, as the tenant sets it) and the first that is free and allows the booking is booked,
+   * in one transaction, so a class sells out exactly at its number of members. The event names
+   * the member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
+   * member you may book. A retry with the same idempotency_key answers the same event.
    *
    * @param pool {@code pool}, string
    * @param startsAt {@code starts_at}, string
@@ -1123,14 +1126,31 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * List pools. The tenant's pools by name, each with its capacity: how many members it has that
-   * are not archived.
+   * List pools. The tenant's pools by name, each with its capacity (how many members it has that
+   * are not archived) and the order slotlock_book_pool tries them in.
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> listPools() {
     Map<String, Object> values = new LinkedHashMap<>();
     return call("slotlock_list_pools", values);
+  }
+
+  /**
+   * Set a pool's order. The order slotlock_book_pool tries a pool's members in: stable (by id,
+   * the default), least_booked (fewest bookings made on each in the last 30 days first, to share
+   * them out) or round_robin (from the member after the one booked last).
+   *
+   * @param pool {@code pool}, string
+   * @param order {@code order}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setPoolOrder(String pool, String order) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pool", pool);
+    values.put("order", order);
+    return call("slotlock_set_pool_order", values);
   }
 
   /**

@@ -54,6 +54,46 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
     await sql.end();
   });
 
+  it("tries a pool's members in its order: stable, round robin, or least booked first", async () => {
+    // Stable, the default: the same first member each time it is free.
+    const desks = await members('desk', 3);
+    expect((await book('desk', 300, 301)).event.resource_id).toBe(desks[0]);
+    expect((await book('desk', 302, 303)).event.resource_id).toBe(desks[0]);
+    // Round robin: from the member after the one booked last, round to the start.
+    const bikes = await members('ebike', 3);
+    expect(await store.setPoolOrder({ tenantRef, pool: 'ebike', order: 'round_robin' })).toBe('round_robin');
+    const taken: string[] = [];
+    for (let n = 0; n < 4; n += 1) taken.push((await book('ebike', 310 + n * 2, 311 + n * 2)).event.resource_id);
+    expect(taken).toEqual([bikes[0], bikes[1], bikes[2], bikes[0]]);
+    // Least booked: the member with the fewest bookings made in the last 30 days first, by id among equals.
+    const rooms = await members('meeting', 3);
+    const reserve = (resourceId: string, start: number) =>
+      store.createExternalReservation({
+        tenantRef,
+        externalRef: `seed-${randomUUID()}`,
+        resourceId,
+        start: new Date(at(start)),
+        end: new Date(at(start + 1)),
+        bufferAfterMs: 0,
+        revision: 1,
+      });
+    await reserve(rooms[0] as string, 400);
+    await reserve(rooms[0] as string, 402);
+    await reserve(rooms[1] as string, 404);
+    await store.setPoolOrder({ tenantRef, pool: 'meeting', order: 'least_booked' });
+    expect((await book('meeting', 410, 411)).event.resource_id).toBe(rooms[2]);
+    // Rooms 1 and 2 now have one each: the lower id goes first.
+    expect((await book('meeting', 412, 413)).event.resource_id).toBe(rooms[1]);
+    expect((await store.listPools({ tenantRef })).filter(({ pool }) => ['desk', 'ebike', 'meeting'].includes(pool))).toEqual([
+      { pool: 'desk', capacity: 3, order: 'stable' },
+      { pool: 'ebike', capacity: 3, order: 'round_robin' },
+      { pool: 'meeting', capacity: 3, order: 'least_booked' },
+    ]);
+    await expect(store.setPoolOrder({ tenantRef, pool: 'desk', order: 'random' as never })).rejects.toMatchObject({
+      code: 'invalid_pool_order',
+    });
+  });
+
   it('sells five vans to six racing bookings exactly five times', async () => {
     const vans = await members('van', 5);
     const outcomes = await Promise.allSettled(
@@ -66,7 +106,7 @@ describe.skipIf(!url)('pools (real Postgres)', () => {
     expect(booked.map(({ value }) => value.event.resource_id).sort()).toEqual(vans);
     const refused = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult;
     expect(refused.reason).toMatchObject({ code: 'pool_full', status: 409 });
-    expect((await store.listPools({ tenantRef })).find(({ pool }) => pool === 'van')).toEqual({ pool: 'van', capacity: 5 });
+    expect((await store.listPools({ tenantRef })).find(({ pool }) => pool === 'van')).toEqual({ pool: 'van', capacity: 5, order: 'stable' });
     // The racers queue on each other by design (each waits for the one ahead to commit); on a
     // shared CI runner, under the other suites' load, that takes longer than vitest's 5 s.
   }, 30_000);

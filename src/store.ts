@@ -7,8 +7,10 @@ import {
   SLOTLOCK_MAX_LOCATION_DEPTH,
   SLOTLOCK_MAX_LOCATIONS,
   SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
   type SlotlockLocation,
+  type SlotlockPoolOrder,
   type SlotlockResourceGroup,
   parseSlotlockLocation,
   parseSlotlockResourceGroup,
@@ -2537,9 +2539,25 @@ export interface SlotlockStore extends SlotlockEventFeed {
     tenantRef: string;
     pool: string;
     visibility?: 'shared';
+    /** In the pool's order (`setPoolOrder`) rather than by id. */
+    ordered?: boolean;
   }): Promise<SlotlockResource[]>;
-  /** The tenant's pools by name, with how many members each has that may be booked (its capacity). */
-  listPools(params: { tenantRef: string; visibility?: 'shared' }): Promise<{ pool: string; capacity: number }[]>;
+  /**
+   * The tenant's pools by name, with how many members each has that may be booked (its capacity)
+   * and the order a pool booking tries them in.
+   */
+  listPools(params: {
+    tenantRef: string;
+    visibility?: 'shared';
+  }): Promise<{ pool: string; capacity: number; order: SlotlockPoolOrder }[]>;
+  /**
+   * Set the order a pool booking tries a pool's members in (RFC 0003 G7): `stable` (by id, the
+   * default), `least_booked` or `round_robin`: `invalid_pool` for a name that is not a pool's,
+   * `invalid_pool_order` for an order that is not one of these.
+   */
+  setPoolOrder(params: { tenantRef: string; pool: string; order: SlotlockPoolOrder }): Promise<SlotlockPoolOrder>;
+  /** Note the member a pool booking took, from which `round_robin` goes on. */
+  notePoolBooking(params: { tenantRef: string; pool: string; resourceId: string }): Promise<void>;
   /** Set (or clear, with `null`) the bookable hours of every resource the tenant has; returns how many. */
   setTenantAvailability(params: {
     tenantRef: string;
@@ -3582,6 +3600,8 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'setResourceBookingRules',
   'setBookingRuleDefaults',
   'setResourcePool',
+  'setPoolOrder',
+  'notePoolBooking',
   'setTenantAvailability',
   'createReservation',
   'createExternalReservation',
@@ -4525,20 +4545,78 @@ function buildSlotlockStore(
            AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
          ORDER BY id
          LIMIT ${SLOTLOCK_MAX_POOL_MEMBERS}`;
-      return rows.map(toResource);
+      const members = rows.map(toResource);
+      if (params.ordered !== true || members.length < 2) return members;
+      const [settings] = await sql<{ member_order: SlotlockPoolOrder; last_member: string | null }[]>`
+        SELECT member_order, last_member::text FROM slotlock.pool_settings
+         WHERE tenant_ref = ${params.tenantRef} AND pool_ref = ${params.pool}`;
+      if (settings?.member_order === 'round_robin') {
+        // From the first member after the one booked last, by id, round to the start.
+        const after = settings.last_member;
+        const next = after === null ? 0 : members.findIndex((member) => member.id > after);
+        const start = next < 0 ? 0 : next;
+        return [...members.slice(start), ...members.slice(0, start)];
+      }
+      if (settings?.member_order === 'least_booked') {
+        // Bookings made on each in the last 30 days, holds and cancelled ones not counted.
+        const counts = await sql<{ resource_id: string; booked: number }[]>`
+          SELECT booked.resource_id::text, count(*)::int AS booked
+            FROM slotlock.reservations booked
+           WHERE booked.tenant_ref = ${params.tenantRef}
+             AND booked.resource_id = ANY (${members.map((member) => member.id)}::uuid[])
+             AND booked.status = 'confirmed'
+             AND booked.created_at > statement_timestamp() - interval '30 days'
+           GROUP BY booked.resource_id`;
+        const booked = new Map(counts.map((row) => [row.resource_id, Number(row.booked)]));
+        // Stable among equals: by id, as the database orders them.
+        return [...members].sort(
+          (a, b) => (booked.get(a.id) ?? 0) - (booked.get(b.id) ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        );
+      }
+      return members;
     },
 
     async listPools(params) {
       if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
-      const rows = await sql<{ pool: string; capacity: number }[]>`
-        SELECT pool_ref AS pool, count(*)::int AS capacity
+      const rows = await sql<{ pool: string; capacity: number; member_order: SlotlockPoolOrder }[]>`
+        SELECT pool_ref AS pool, count(*)::int AS capacity,
+               COALESCE((SELECT settings.member_order FROM slotlock.pool_settings settings
+                          WHERE settings.tenant_ref = ${params.tenantRef}
+                            AND settings.pool_ref = resources.pool_ref), 'stable') AS member_order
           FROM slotlock.resources
          WHERE tenant_ref = ${params.tenantRef} AND pool_ref IS NOT NULL AND archived_at IS NULL
            AND (${params.visibility ?? null}::text IS NULL OR visibility = ${params.visibility ?? null})
          GROUP BY pool_ref
          ORDER BY pool_ref
          LIMIT 1000`;
-      return rows;
+      return rows.map((row) => ({ pool: row.pool, capacity: row.capacity, order: row.member_order }));
+    },
+
+    async setPoolOrder(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      if (!isPoolName(params.pool)) throw invalidPoolError();
+      if (!(SLOTLOCK_POOL_ORDERS as readonly string[]).includes(params.order)) {
+        throw Object.assign(new Error(`Slotlock pool order must be one of ${SLOTLOCK_POOL_ORDERS.join(', ')}`), {
+          code: 'invalid_pool_order' as const,
+        });
+      }
+      await sql`
+        INSERT INTO slotlock.pool_settings (tenant_ref, pool_ref, member_order)
+        VALUES (${params.tenantRef}, ${params.pool}, ${params.order})
+        ON CONFLICT (tenant_ref, pool_ref)
+        DO UPDATE SET member_order = EXCLUDED.member_order, updated_at = statement_timestamp()`;
+      return params.order;
+    },
+
+    async notePoolBooking(params) {
+      if (!isValidIdentity(params.tenantRef)) throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      if (!isPoolName(params.pool) || !isValidResourceId(params.resourceId)) return;
+      // Only a pool that goes round keeps its place; another has nothing to note.
+      await sql`
+        UPDATE slotlock.pool_settings
+           SET last_member = ${params.resourceId}::uuid, updated_at = statement_timestamp()
+         WHERE tenant_ref = ${params.tenantRef} AND pool_ref = ${params.pool}
+           AND member_order = 'round_robin'`;
     },
 
     async setTenantAvailability(params) {

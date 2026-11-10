@@ -356,6 +356,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         });
         const resourceId = resource.id;
         await tenant.addGroupMember({ tenantRef, group: 'fleet', resourceId });
+        // The order its pool is booked in (RFC 0003 G7).
+        await tenant.setPoolOrder({ tenantRef, pool: 'vans', order: 'round_robin' });
         const hold = await tenant.acquireHold({
           tenantRef,
           resourceId,

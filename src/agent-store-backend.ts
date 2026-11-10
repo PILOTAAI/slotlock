@@ -1,6 +1,7 @@
 import {
   SLOTLOCK_RESOURCE_PROFILE_FIELDS,
   type SlotlockLocation,
+  type SlotlockPoolOrder,
   type SlotlockResourceGroup,
   type SlotlockResourceKind,
   type SlotlockResourceProfileInput,
@@ -611,13 +612,22 @@ export function createSlotlockStoreAgentBackend(
           if (!replay.ok) throw operationError(replay);
           return answer(replay);
         }
-        const members = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool, visibility: 'shared' });
+        // In the pool's order (stable, least booked first, or round robin).
+        const members = await tenantStore.listPoolMembers({
+          tenantRef,
+          pool: input.pool,
+          visibility: 'shared',
+          ordered: true,
+        });
         if (members.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
         // Each member in turn, each in its own savepoint: one taken or refused by its rules is
         // passed over; the exclusion constraint still decides.
         for (const member of members) {
           const result = await put(member.id);
-          if (result.ok) return answer(result);
+          if (result.ok) {
+            await tenantStore.notePoolBooking({ tenantRef, pool: input.pool, resourceId: member.id });
+            return answer(result);
+          }
           if (result.code !== 'overlap' && result.code !== 'booking_rule_violated') {
             throw operationError(result);
           }
@@ -1936,6 +1946,21 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) => ({
         pools: await tenant.listPools({ tenantRef: tenantOf(context) }),
       }));
+    },
+
+    async setPoolOrder(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const order = await tenant.setPoolOrder({
+            tenantRef: tenantOf(context),
+            pool: input.pool as string,
+            order: input.order as SlotlockPoolOrder,
+          });
+          return { pool: input.pool as string, order };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
     },
 
     async getBookingRuleDefaults(context) {

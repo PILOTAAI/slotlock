@@ -13,6 +13,7 @@ import {
   SLOTLOCK_MAX_LOCATION_DEPTH,
   SLOTLOCK_MAX_LOCATIONS,
   SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
 } from './resource-profile.js';
@@ -1638,6 +1639,10 @@ BEGIN
   DELETE FROM slotlock.booking_rule_defaults WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'pool_settings';
+  DELETE FROM slotlock.pool_settings WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'tenant_plans';
   DELETE FROM slotlock.tenant_plans WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -2313,6 +2318,23 @@ CREATE TABLE IF NOT EXISTS slotlock.booking_rule_defaults (
   ),
   CONSTRAINT slotlock_booking_rule_defaults_rules_valid CHECK (
     jsonb_typeof(rules) = 'object' AND octet_length(rules::text) <= 4096
+  )
+);
+
+-- The order a pool booking tries a pool's members in (RFC 0003 G7): stable (by id), least_booked
+-- (fewest bookings made on each in the last 30 days first) or round_robin (from the one after the
+-- member booked last). A pool without a row is stable.
+CREATE TABLE IF NOT EXISTS slotlock.pool_settings (
+  tenant_ref text NOT NULL,
+  pool_ref text NOT NULL,
+  member_order text NOT NULL DEFAULT 'stable',
+  last_member uuid,
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_pool_settings_pkey PRIMARY KEY (tenant_ref, pool_ref),
+  CONSTRAINT slotlock_pool_settings_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND pool_ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$'
+    AND member_order IN (${SLOTLOCK_POOL_ORDERS.map((order) => `'${order}'`).join(', ')})
   )
 );
 
@@ -4444,6 +4466,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'locations',
   'resource_groups',
   'resource_group_members',
+  'pool_settings',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -4538,6 +4561,8 @@ ALTER TABLE slotlock.resource_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resource_groups FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resource_group_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resource_group_members FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.pool_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.pool_settings FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -4572,7 +4597,8 @@ BEGIN
          'assistant_conversations',
          'locations',
          'resource_groups',
-         'resource_group_members'
+         'resource_group_members',
+         'pool_settings'
        )
   LOOP
     EXECUTE format(
@@ -4843,6 +4869,16 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'pool_settings'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.pool_settings
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -4892,6 +4928,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_groups
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_group_members
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.pool_settings
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
   table_name, tenant_context_setting, policy_fingerprint, installed_at
@@ -4937,7 +4975,8 @@ WHERE schemaname = 'slotlock'
     'assistant_conversations',
     'locations',
     'resource_groups',
-    'resource_group_members'
+    'resource_group_members',
+    'pool_settings'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

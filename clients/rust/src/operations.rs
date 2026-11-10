@@ -261,6 +261,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_set_pool_order",
+        method: "PUT",
+        path: "/v1/pools/{pool}/order",
+        path_params: &["pool"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_booking_rule_defaults",
         method: "GET",
         path: "/v1/booking-rules",
@@ -949,6 +956,13 @@ pub struct SetResourcePoolInput {
 pub struct ListPoolsInput {
 }
 
+/// The arguments of [`Client::set_pool_order`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetPoolOrderInput {
+    pub pool: String,
+    pub order: String,
+}
+
 /// The arguments of [`Client::get_booking_rule_defaults`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetBookingRuleDefaultsInput {
@@ -1346,7 +1360,8 @@ impl Client {
     /// Book from a pool.
     ///
     /// Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
-    /// in a fixed order and the first that is free and allows the booking is booked, in one
+    /// in the pool's order (by id, fewest bookings in the last 30 days first, or in turn, as the
+    /// tenant sets it) and the first that is free and allows the booking is booked, in one
     /// transaction, so a class sells out exactly at its number of members. The event names the
     /// member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
     /// member you may book. A retry with the same idempotency_key answers the same event.
@@ -1598,10 +1613,19 @@ impl Client {
 
     /// List pools.
     ///
-    /// The tenant's pools by name, each with its capacity: how many members it has that are not
-    /// archived.
+    /// The tenant's pools by name, each with its capacity (how many members it has that are not
+    /// archived) and the order slotlock_book_pool tries them in.
     pub fn list_pools(&self, input: &ListPoolsInput) -> Result<Value, Error> {
         self.call("slotlock_list_pools", serde_json::to_value(input)?)
+    }
+
+    /// Set a pool's order.
+    ///
+    /// The order slotlock_book_pool tries a pool's members in: stable (by id, the default),
+    /// least_booked (fewest bookings made on each in the last 30 days first, to share them out)
+    /// or round_robin (from the member after the one booked last).
+    pub fn set_pool_order(&self, input: &SetPoolOrderInput) -> Result<Value, Error> {
+        self.call("slotlock_set_pool_order", serde_json::to_value(input)?)
     }
 
     /// Get default booking rules.

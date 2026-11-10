@@ -26,6 +26,7 @@ import {
   SLOTLOCK_MAX_LOCATION_DEPTH,
   SLOTLOCK_MAX_LOCATIONS,
   SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_LABEL,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
@@ -55,6 +56,7 @@ export type SlotlockApplicationOperation =
   | 'slotlock_set_resource_booking_rules'
   | 'slotlock_set_resource_pool'
   | 'slotlock_list_pools'
+  | 'slotlock_set_pool_order'
   | 'slotlock_get_booking_rule_defaults'
   | 'slotlock_set_tenant_booking_rules'
   | 'slotlock_set_pool_booking_rules'
@@ -139,6 +141,7 @@ export interface SlotlockApplicationBackend {
   setResourceBookingRules: Handler;
   setResourcePool: Handler;
   listPools: Handler;
+  setPoolOrder: Handler;
   getBookingRuleDefaults: Handler;
   setTenantBookingRules: Handler;
   setPoolBookingRules: Handler;
@@ -296,6 +299,8 @@ const BOOKING_RULES = z
 const DEFAULT_BOOKING_RULES = BOOKING_RULES.omit({ check_in_minutes: true }).strict();
 
 const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+/** The order slotlock_book_pool tries a pool's members in (RFC 0003 G7). */
+const POOL_ORDER = z.enum(SLOTLOCK_POOL_ORDERS);
 
 const PROFILE = SLOTLOCK_RESOURCE_PROFILE_LIMITS;
 /** What a resource is: a hint for filtering and display that changes no booking. */
@@ -854,16 +859,34 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
     {
       name: 'slotlock_list_pools',
       title: 'List pools',
-      description: "The tenant's pools by name, each with its capacity: how many members it has that are not archived.",
+      description:
+        "The tenant's pools by name, each with its capacity (how many members it has that are not archived) and the order slotlock_book_pool tries them in.",
       method: 'GET',
       path: '/v1/pools',
       input: z.object({}).strict(),
       output: z
-        .object({ pools: z.array(z.object({ pool: POOL, capacity: z.number().int().min(1) }).strict()).max(1000) })
+        .object({
+          pools: z
+            .array(z.object({ pool: POOL, capacity: z.number().int().min(1), order: POOL_ORDER }).strict())
+            .max(1000),
+        })
         .strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'listPools',
       example: {},
+    },
+    {
+      name: 'slotlock_set_pool_order',
+      title: "Set a pool's order",
+      description:
+        "The order slotlock_book_pool tries a pool's members in: stable (by id, the default), least_booked (fewest bookings made on each in the last 30 days first, to share them out) or round_robin (from the member after the one booked last).",
+      method: 'PUT',
+      path: '/v1/pools/{pool}/order',
+      input: z.object({ pool: POOL, order: POOL_ORDER }).strict(),
+      output: z.object({ pool: POOL, order: POOL_ORDER }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setPoolOrder',
+      example: { pool: 'van', order: 'least_booked' },
     },
     {
       name: 'slotlock_get_booking_rule_defaults',

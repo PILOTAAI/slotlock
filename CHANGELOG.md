@@ -117,6 +117,13 @@ versioning.
   `createWebhookEndpoint` takes a `filter` (`invalid_webhook_filter` past its bounds), an endpoint
   carries its `filter`, `webhook.created` on the feed records it, and the dashboard's webhooks page
   shows it.
+- Pool order (RFC 0003 G7). `PUT /v1/pools/{pool}/order` (`slotlock_set_pool_order`,
+  `setPoolOrder`) sets the order `slotlock_book_pool` tries a pool's members in: `stable` (by id, as
+  before, and the default), `least_booked` (fewest confirmed bookings made in the last 30 days
+  first) or `round_robin` (starting after the member it booked last). `GET /v1/pools` shows each
+  pool's `order`. New tenant table `slotlock.pool_settings`, under the tenant's forced row-level
+  security and erased with it; an unknown order is refused `invalid_pool_order`. Run `slotlock
+  migrate`.
 - Monthly quotas, off unless `SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`; RFC 0003
   part 3). A tenant on a plan may run so many operations and make so many bookings a UTC calendar
   month (`SLOTLOCK_PLAN_QUOTAS`): Free 25,000 and 1,000, refused at 100%; Developer 500,000 and

@@ -20,6 +20,7 @@ export const GROUPS = [
       'slotlock_set_resource_booking_rules',
       'slotlock_set_resource_pool',
       'slotlock_list_pools',
+      'slotlock_set_pool_order',
       'slotlock_get_booking_rule_defaults',
       'slotlock_set_tenant_booking_rules',
       'slotlock_set_pool_booking_rules',

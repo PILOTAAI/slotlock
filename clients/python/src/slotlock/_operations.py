@@ -260,6 +260,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_set_pool_order": Operation(
+        "slotlock_set_pool_order",
+        "PUT",
+        "/v1/pools/{pool}/order",
+        ("pool",),
+        (),
+    ),
     "slotlock_get_booking_rule_defaults": Operation(
         "slotlock_get_booking_rule_defaults",
         "GET",
@@ -784,7 +791,8 @@ class Operations(Transport):
         """Book from a pool.
 
         Book any one member of a pool (a vehicle class, a room type) for a time: members are tried
-        in a fixed order and the first that is free and allows the booking is booked, in one
+        in the pool's order (by id, fewest bookings in the last 30 days first, or in turn, as the
+        tenant sets it) and the first that is free and allows the booking is booked, in one
         transaction, so a class sells out exactly at its number of members. The event names the
         member booked. 409 pool_full when none is free; 404 pool_not_found when the pool has no
         member you may book. A retry with the same idempotency_key answers the same event.
@@ -1263,11 +1271,21 @@ class Operations(Transport):
     def list_pools(self) -> dict[str, Any]:
         """List pools.
 
-        The tenant's pools by name, each with its capacity: how many members it has that are not
-        archived.
+        The tenant's pools by name, each with its capacity (how many members it has that are not
+        archived) and the order slotlock_book_pool tries them in.
         """
         values: dict[str, Any] = {}
         return self.call("slotlock_list_pools", values)
+
+    def set_pool_order(self, pool: str, *, order: str) -> dict[str, Any]:
+        """Set a pool's order.
+
+        The order slotlock_book_pool tries a pool's members in: stable (by id, the default),
+        least_booked (fewest bookings made on each in the last 30 days first, to share them out)
+        or round_robin (from the member after the one booked last).
+        """
+        values: dict[str, Any] = {"pool": pool, "order": order}
+        return self.call("slotlock_set_pool_order", values)
 
     def get_booking_rule_defaults(self) -> dict[str, Any]:
         """Get default booking rules.

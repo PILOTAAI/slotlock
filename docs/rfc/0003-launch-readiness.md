@@ -297,7 +297,10 @@ sets from the key, so a scoped key cannot read or write outside its scope throug
 resource outside the scope answers `resource_not_found`, never `forbidden`, so a scoped key learns
 nothing about the rest.
 
-**G7. Pool order (T1).** `slotlock_book_pool` tries members in a stable order today. Add a pool
+**G7. Pool order (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, set with
+`PUT /v1/pools/{pool}/order` and read in `GET /v1/pools`; `least_booked` counts confirmed bookings
+made in the last 30 days, and `round_robin` starts after the member it last booked, both by id after
+that. `slotlock_book_pool` tries members in a stable order today. Add a pool
 setting, `order`: `stable` (today), `least_booked` (fewest bookings in the last 30 days first) or
 `round_robin`, to share bookings across a pool's members: vans, rooms or a team of people (RFC 0002
 open question 2).
