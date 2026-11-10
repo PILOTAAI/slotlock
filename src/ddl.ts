@@ -381,6 +381,7 @@ export const SLOTLOCK_PARTNER_FUNCTIONS = Object.freeze([
   'slotlock.get_partner_account(text, text)',
   'slotlock.set_partner_account_suspended(text, text, boolean, text)',
   'slotlock.partner_usage(text, date, date, text)',
+  'slotlock.partner_account_tenant(text, text)',
 ] as const);
 
 /** The partner tables: owner-only, reached through SLOTLOCK_PARTNER_FUNCTIONS. */
@@ -3647,6 +3648,20 @@ BEGIN
 END
 $slotlock_partner_usage$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[7]} FROM PUBLIC;
+
+-- The tenant of a partner's account, for a partner key acting for it (Slotlock-Account, RFC 0003
+-- P3): one indexed read, on every such request.
+CREATE OR REPLACE FUNCTION slotlock.partner_account_tenant(requested_partner_id text, requested_account text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_account_tenant$
+  SELECT owned.tenant_ref FROM slotlock.partner_accounts owned
+   WHERE owned.partner_id = requested_partner_id AND owned.account = requested_account;
+$slotlock_partner_account_tenant$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[8]} FROM PUBLIC;
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.

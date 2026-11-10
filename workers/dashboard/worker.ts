@@ -287,6 +287,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         usage: boolean;
         /** SLOTLOCK_QUOTAS=on: the assistant's operations are held to the tenant's quotas. */
         quotas: boolean;
+        overageStopPercent: number | undefined;
         limits: {
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
@@ -332,6 +333,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     const billing = readBilling(vars);
     const metering = readWorkerUsage(vars);
     const quotaMode = readWorkerQuotas(vars, metering);
+    // Read once, with the rest of the configuration: a bad value stops the build, not a request.
+    const overageStopPercent = readWorkerOverage(vars);
     const dashboard = createSlotlockDashboard({
       publicUrl,
       serviceUrl,
@@ -447,6 +450,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           : null,
       usage: metering,
       quotas: quotaMode,
+      overageStopPercent,
       limits: { client, signIn, signInCeiling },
     };
   }
@@ -470,7 +474,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage, quotas } = built;
+      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage, quotas, overageStopPercent } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
       // Stripe's deliveries: the client connects only once the signature has been checked.
@@ -556,10 +560,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           quotas:
             quotas && meter
               ? createSlotlockQuotas({
-                  plan: (tenantRef) => {
-                    const overage = readWorkerOverage(variables(env));
-                    return readSlotlockTenantQuotas(sql, tenantRef, overage !== undefined ? { overageStopPercent: overage } : {});
-                  },
+                  plan: (tenantRef) =>
+                    readSlotlockTenantQuotas(sql, tenantRef, overageStopPercent !== undefined ? { overageStopPercent } : {}),
                   used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
                   local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
                   notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),

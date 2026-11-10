@@ -327,14 +327,21 @@ export function createSlotlockPartnerStore(
 export function createSlotlockPartnerKeyAuthenticator(
   sql: SlotlockSql,
 ): (request: Request) => Promise<SlotlockAgentPrincipal | null> {
+  const contracts = new Map<string, SlotlockPartnerContract | null>();
   return async (request) => {
     const presented = slotlockBearerCredential(request);
     if (presented === undefined || !isSlotlockPartnerKey(presented)) return null;
     const account = request.headers.get(SLOTLOCK_ACCOUNT_FIELD);
     // A malformed account is refused before the key is looked up, as a malformed key is.
     if (account !== null && !SLOTLOCK_PARTNER_ACCOUNT.test(account)) return null;
-    const [row] = await sql<{ key_id: string; partner_id: string }[]>`
-      SELECT key_id::text, partner_id FROM slotlock.authenticate_partner_key(${slotlockApiKeyDigest(presented)}::bytea)`;
+    // One statement: the key, and with Slotlock-Account its partner's contract and the account's tenant.
+    const [row] = await sql<{ key_id: string; partner_id: string; contract: string | null; tenant_ref: string | null }[]>`
+      SELECT authenticated.key_id::text, authenticated.partner_id,
+             CASE WHEN ${account}::text IS NULL THEN NULL
+                  ELSE slotlock.partner_contract(authenticated.partner_id)::text END AS contract,
+             CASE WHEN ${account}::text IS NULL THEN NULL
+                  ELSE slotlock.partner_account_tenant(authenticated.partner_id, ${account}::text) END AS tenant_ref
+        FROM slotlock.authenticate_partner_key(${slotlockApiKeyDigest(presented)}::bytea) authenticated`;
     if (!row) return null;
     if (account === null) {
       return {
@@ -346,19 +353,31 @@ export function createSlotlockPartnerKeyAuthenticator(
     }
     // Acting for one of its accounts (RFC 0003 P3): only where the contract allows it, only for an
     // account the partner has, and with no more than the contract lets its accounts' keys carry.
-    const [found] = await sql<{ contract: unknown; tenant_ref: string | null }[]>`
-      SELECT slotlock.partner_contract(${row.partner_id}::text) AS contract,
-             (SELECT owned.tenant_ref FROM slotlock.get_partner_account(${row.partner_id}::text, ${account}::text) owned) AS tenant_ref`;
-    if (!found?.contract || !found.tenant_ref) return null;
-    const contract = parseSlotlockPartnerContract(found.contract);
-    if (!contract.actOnBehalf) return null;
+    if (!row.contract || !row.tenant_ref) return null;
+    const contract = parsedContract(row.contract);
+    if (!contract?.actOnBehalf) return null;
     return {
       subject: `partner_key:${row.key_id}`,
-      tenantRef: found.tenant_ref,
+      tenantRef: row.tenant_ref,
       scopes: [...contract.keyScopes],
       onBehalfOf: row.partner_id,
     };
   };
+
+  /** Contracts read, by their JSON text: parsed once while unchanged (at most 1,000 kept). */
+  function parsedContract(text: string): SlotlockPartnerContract | null {
+    const kept = contracts.get(text);
+    if (kept !== undefined) return kept;
+    let contract: SlotlockPartnerContract | null;
+    try {
+      contract = parseSlotlockPartnerContract(JSON.parse(text));
+    } catch {
+      contract = null;
+    }
+    if (contracts.size >= 1_000) contracts.delete(contracts.keys().next().value as string);
+    contracts.set(text, contract);
+    return contract;
+  }
 }
 
 /** The request field a partner key names one of its accounts in, to act for it (RFC 0003 P3). */
