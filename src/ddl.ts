@@ -15,6 +15,7 @@ import {
   SLOTLOCK_MAX_RESOURCE_GROUPS,
   SLOTLOCK_MAX_KEY_SCOPE_REFS,
   SLOTLOCK_MAX_COMPOSITE_PARTS,
+  SLOTLOCK_RECONCILE_TOLERANCE_PERCENT,
   SLOTLOCK_MAX_POOL_SETTINGS,
   SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
@@ -382,6 +383,7 @@ export const SLOTLOCK_PARTNER_FUNCTIONS = Object.freeze([
   'slotlock.set_partner_account_suspended(text, text, boolean, text)',
   'slotlock.partner_usage(text, date, date, text)',
   'slotlock.partner_account_tenant(text, text)',
+  'slotlock.record_partner_reconciliation(text, date, integer, integer, numeric)',
 ] as const);
 
 /** The partner tables: owner-only, reached through SLOTLOCK_PARTNER_FUNCTIONS. */
@@ -392,6 +394,7 @@ export const SLOTLOCK_PARTNER_TABLES = Object.freeze([
   'partner_invoices',
   'partner_month_closes',
   'partner_erased_usage',
+  'partner_reconciliations',
 ] as const);
 
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
@@ -3403,6 +3406,24 @@ CREATE TABLE IF NOT EXISTS slotlock.partner_erased_usage (
 ALTER TABLE slotlock.partner_erased_usage ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.partner_erased_usage FROM PUBLIC;
 
+-- Each day a partner compared its counts with Slotlock's (P5, the partner API's reconcile call):
+-- how many accounts, how many differed by more than ${SLOTLOCK_RECONCILE_TOLERANCE_PERCENT}%, and by
+-- how much at most. A day with any is an incident on our side: \`slotlock billing daily\` lists it.
+CREATE TABLE IF NOT EXISTS slotlock.partner_reconciliations (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE CASCADE,
+  day date NOT NULL,
+  accounts integer NOT NULL,
+  mismatched integer NOT NULL,
+  worst_percent numeric NOT NULL,
+  reconciled_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partner_reconciliations_pkey PRIMARY KEY (partner_id, day),
+  CONSTRAINT slotlock_partner_reconciliations_valid CHECK (
+    accounts BETWEEN 0 AND 100000 AND mismatched BETWEEN 0 AND accounts AND worst_percent >= 0
+  )
+);
+ALTER TABLE slotlock.partner_reconciliations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_reconciliations FROM PUBLIC;
+
 -- Whether the tenant is a partner's account whose partner is not active: its keys authenticate as
 -- nothing and it is suspended with its partner (tenant_suspended). Any other tenant reference, one
 -- that merely starts with partner: included, is never blocked here.
@@ -3662,6 +3683,25 @@ AS $slotlock_partner_account_tenant$
    WHERE owned.partner_id = requested_partner_id AND owned.account = requested_account;
 $slotlock_partner_account_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[8]} FROM PUBLIC;
+
+-- Record a partner's comparison of one day (the latest one stands).
+CREATE OR REPLACE FUNCTION slotlock.record_partner_reconciliation(
+  requested_partner_id text, requested_day date, requested_accounts integer, requested_mismatched integer,
+  requested_worst numeric
+)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_record_partner_reconciliation$
+  INSERT INTO slotlock.partner_reconciliations AS kept (partner_id, day, accounts, mismatched, worst_percent)
+  VALUES (requested_partner_id, requested_day, requested_accounts, requested_mismatched, requested_worst)
+  ON CONFLICT (partner_id, day) DO UPDATE
+    SET accounts = EXCLUDED.accounts, mismatched = EXCLUDED.mismatched,
+        worst_percent = EXCLUDED.worst_percent, reconciled_at = statement_timestamp();
+$slotlock_record_partner_reconciliation$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[9]} FROM PUBLIC;
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.

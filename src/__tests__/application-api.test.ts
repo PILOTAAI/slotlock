@@ -173,6 +173,7 @@ const backend = {
   partnerUnsuspendAccount: vi.fn(),
   partnerEraseAccount: vi.fn(),
   partnerGetUsage: vi.fn(),
+  partnerReconcileUsage: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -446,6 +447,12 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   partnerSuspendAccount: { suspended: true },
   partnerUnsuspendAccount: { unsuspended: true },
   partnerEraseAccount: { erased: true, rows: 12 },
+  partnerReconcileUsage: {
+    day: '2026-11-09',
+    within_tolerance: true,
+    tolerance_percent: 0.5,
+    accounts: [{ account: 'user-4821', metric: 'operations', ours: 1204, theirs: 1204, difference_percent: 0 }],
+  },
   partnerGetUsage: {
     from: '2026-11-01',
     to: '2026-11-30',

@@ -313,6 +313,12 @@ export const SLOTLOCK_MAX_POOL_SETTINGS = 1_000;
 /** The parts a composite resource may have (RFC 0003 G8): a hall of its rooms, a court of its halves. */
 export const SLOTLOCK_MAX_COMPOSITE_PARTS = 50;
 
+/**
+ * How far a partner's count of a day may differ from Slotlock's before it is a mismatch, in percent
+ * (RFC 0003 P5: a difference above 0.5% opens an incident on our side).
+ */
+export const SLOTLOCK_RECONCILE_TOLERANCE_PERCENT = 0.5;
+
 export type SlotlockPoolOrder = (typeof SLOTLOCK_POOL_ORDERS)[number];
 
 /** Locations, and groups, a key limited to part of its tenant may name (RFC 0003 G6), each. */

@@ -610,6 +610,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("from", "to", "account"),
     ),
+    "slotlock_partner_reconcile_usage": Operation(
+        "slotlock_partner_reconcile_usage",
+        "POST",
+        "/v1/partner/usage/reconcile",
+        (),
+        (),
+    ),
 }
 
 
@@ -2161,3 +2168,20 @@ class Operations(Transport):
         if account is not None:
             values["account"] = account
         return self.call("slotlock_partner_get_usage", values)
+
+    def partner_reconcile_usage(
+        self,
+        *,
+        day: str,
+        accounts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Compare your counts with ours.
+
+        Send your count of each account's operations (and, if you keep them, bookings) on one
+        ended UTC day, as your daily cross-check: the answer gives ours beside yours for every
+        account either of us counted, the difference in percent, and whether every one is within
+        0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the
+        same day again replaces its record.
+        """
+        values: dict[str, Any] = {"day": day, "accounts": accounts}
+        return self.call("slotlock_partner_reconcile_usage", values)

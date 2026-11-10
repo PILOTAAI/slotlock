@@ -17317,6 +17317,169 @@
           }
         }
       }
+    },
+    "/v1/partner/usage/reconcile": {
+      "post": {
+        "operationId": "slotlock_partner_reconcile_usage",
+        "summary": "Compare your counts with ours",
+        "description": "Send your count of each account's operations (and, if you keep them, bookings) on one ended UTC day, as your daily cross-check: the answer gives ours beside yours for every account either of us counted, the difference in percent, and whether every one is within 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the same day again replaces its record.",
+        "tags": [
+          "Partner"
+        ],
+        "x-slotlock-scope": "partner",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "day": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  "accounts": {
+                    "maxItems": 10000,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "account": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+                        },
+                        "operations": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "bookings": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "account",
+                        "operations"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "day",
+                  "accounts"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "day": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                    },
+                    "within_tolerance": {
+                      "type": "boolean"
+                    },
+                    "tolerance_percent": {
+                      "type": "number"
+                    },
+                    "accounts": {
+                      "maxItems": 20000,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "account": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9._-]{1,128}$"
+                          },
+                          "metric": {
+                            "type": "string",
+                            "enum": [
+                              "operations",
+                              "bookings"
+                            ]
+                          },
+                          "ours": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "theirs": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "difference_percent": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "account",
+                          "metric",
+                          "ours",
+                          "theirs",
+                          "difference_percent"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "day",
+                    "within_tolerance",
+                    "tolerance_percent",
+                    "accounts"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {

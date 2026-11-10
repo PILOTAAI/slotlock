@@ -132,6 +132,7 @@ export const GROUPS = [
       'slotlock_partner_unsuspend_account',
       'slotlock_partner_erase_account',
       'slotlock_partner_get_usage',
+      'slotlock_partner_reconcile_usage',
     ],
   },
 ];

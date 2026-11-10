@@ -802,6 +802,8 @@ describe('slotlock command line', () => {
     [['partner', 'close'], /wrong number of arguments for "partner close"/],
     [['resource', 'parent', 'room-1'], /wrong number of arguments for "resource parent"/],
     [['overage', 'report', 'now'], /wrong number of arguments for "overage report"/],
+    [['billing', 'daily', 'now'], /wrong number of arguments for "billing daily"/],
+    [['billing', 'monthly'], /unknown command "billing monthly"/],
     [['overage', 'report', '--month', 'May'], /--month must be a month/],
     [['key', 'list', '--event', 'x'], /--event applies only to overage report/],
     [['partner', 'close', 'stackapi', '--month', '2026-13'], /--month must be a month/],

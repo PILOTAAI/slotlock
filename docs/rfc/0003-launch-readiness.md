@@ -543,9 +543,11 @@ records the lines once, sends `usage.period_closed` (webhook id
 adds each line Stripe has not taken as an invoice item, and exits 1 while any line waits, so a
 retry finishes the month. The webhook carries the lines and the checksum covers them too. The
 `Slotlock-Client` field is counted as `slotlock_requests_by_client_total{client}` for the names in
-`SLOTLOCK_KNOWN_CLIENTS`. Known gap: an account erased before its month closes takes its usage
-with it and is not billed for that month. The daily cross-check and the 0.5% incident are the
-owner's runbook, not code.
+`SLOTLOCK_KNOWN_CLIENTS`. The first close freezes the month (`partner_month_closes`); an account
+erased before its month closes is billed from `partner_erased_usage`; the webhook is resent with
+the same body until a 2xx; a Stripe item made by an interrupted run is adopted by its metadata.
+The daily cross-check is `POST /v1/partner/usage/reconcile` (a day off by more than 0.5% is
+recorded), and `slotlock billing daily` (cron) closes months, reports overage and lists mismatches.
 
 **P5. Usage to the partner, end to end.**
 

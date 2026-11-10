@@ -122,6 +122,15 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Partner reconciliation and a daily billing job (RFC 0003 P5, P6): `slotlock_partner_reconcile_usage`
+  (`POST /v1/partner/usage/reconcile`) compares a partner's counts of an ended day with Slotlock's,
+  account by account, and records a day off by more than 0.5% in the new owner-only table
+  `slotlock.partner_reconciliations`. `slotlock billing daily`, for a daily cron job as the schema
+  owner, closes last month for every active partner once it has been over for 6 hours, reports
+  overage when it is on, and lists the week's mismatches, exiting 1 when anything needs attention.
+  Month close freezes the month (`slotlock.partner_month_closes`), bills erased accounts from
+  `slotlock.partner_erased_usage`, resends the webhook until it is taken, and adopts a Stripe item
+  an interrupted run made. The partner key calls take `environment: test`. Run `slotlock migrate`.
 - Metered overage for Developer (RFC 0003 Later), off by default: with `SLOTLOCK_OVERAGE=on` (or a
   stop percent, 111-1000) and `SLOTLOCK_QUOTAS=on`, a paying Developer tenant is refused only past
   that share of its monthly operations (`readSlotlockTenantQuotas`'s `overageStopPercent`); the

@@ -403,4 +403,51 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
     await admin`DELETE FROM slotlock.partner_erased_usage WHERE partner_id = ${actor}`;
     await admin`DELETE FROM slotlock.partners WHERE id = ${actor}`;
   });
+
+  it("compares a partner's daily counts with Slotlock's, and records a mismatch past 0.5%", async () => {
+    const recon = `recon-${suffix}`;
+    await putSlotlockPartner(admin, { id: recon, name: 'Recon', contract: CONTRACT });
+    const store = createSlotlockStore(application);
+    const partners = createSlotlockPartnerStore(application, {
+      keys: createSlotlockApiKeyStore(application),
+      eraseTenant: (tenantRef) => store.eraseTenant({ tenantRef }),
+    });
+    await partners.putAccount(recon, 'a', 'partner_free');
+    await partners.putAccount(recon, 'b', 'partner_free');
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    await admin`
+      INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count) VALUES
+        (${`partner:${recon}:a`}, ${yesterday}::date, 'operations', '', 'rest', 1000),
+        (${`partner:${recon}:b`}, ${yesterday}::date, 'operations', '', 'rest', 200)`;
+    const backend = createSlotlockStoreApplicationBackend(store, { partners });
+    const principal = { subject: 'partner_key:r', tenantRef: `partner:${recon}`, scopes: ['partner'], partnerId: recon };
+    const reconcile = (accounts: unknown[], day = yesterday) =>
+      backend.partnerReconcileUsage(
+        { principal, operation: 'partnerReconcileUsage' as never, signal: new AbortController().signal },
+        { day, accounts },
+      );
+    // Within 0.5% (a: 1,004 against 1,000) and exact (b): nothing recorded as a mismatch.
+    expect(await reconcile([{ account: 'a', operations: 1004 }, { account: 'b', operations: 200 }])).toMatchObject({
+      within_tolerance: true,
+      accounts: [
+        { account: 'a', metric: 'operations', ours: 1000, theirs: 1004, difference_percent: 0.4 },
+        { account: 'b', metric: 'operations', ours: 200, theirs: 200, difference_percent: 0 },
+      ],
+    });
+    // b off by 10%, and an account they count that we do not: a mismatch, recorded.
+    const off = (await reconcile([
+      { account: 'a', operations: 1000 },
+      { account: 'b', operations: 220 },
+      { account: 'ghost', operations: 5 },
+    ])) as { within_tolerance: boolean };
+    expect(off.within_tolerance).toBe(false);
+    expect(await admin`SELECT accounts, mismatched, worst_percent::float AS worst FROM slotlock.partner_reconciliations WHERE partner_id = ${recon}`).toEqual([
+      { accounts: 3, mismatched: 2, worst: 100 },
+    ]);
+    // Today has not ended.
+    await expect(reconcile([], new Date().toISOString().slice(0, 10))).rejects.toMatchObject({ code: 'invalid_usage_range' });
+    for (const account of ['a', 'b']) await admin`SELECT * FROM slotlock.erase_tenant(${`partner:${recon}:${account}`}::text)`;
+    await admin`DELETE FROM slotlock.partner_erased_usage WHERE partner_id = ${recon}`;
+    await admin`DELETE FROM slotlock.partners WHERE id = ${recon}`;
+  });
 });

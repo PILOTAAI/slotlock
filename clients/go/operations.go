@@ -96,6 +96,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_partner_unsuspend_account", method: "POST", path: "/v1/partner/accounts/{account}/unsuspend", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_erase_account", method: "POST", path: "/v1/partner/accounts/{account}/erase", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_get_usage", method: "GET", path: "/v1/partner/usage", pathParams: nil, query: []string{"from", "to", "account"}},
+		{name: "slotlock_partner_reconcile_usage", method: "POST", path: "/v1/partner/usage/reconcile", pathParams: nil, query: nil},
 	}
 	byName := make(map[string]operation, len(list))
 	for _, op := range list {
@@ -2551,4 +2552,27 @@ func (in PartnerGetUsageInput) values() map[string]any {
 // by default this month); one account, or all. 400 invalid_usage_range otherwise.
 func (c *Client) PartnerGetUsage(ctx context.Context, in PartnerGetUsageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_partner_get_usage", in.values())
+}
+
+// PartnerReconcileUsageInput holds the arguments of [Client.PartnerReconcileUsage].
+type PartnerReconcileUsageInput struct {
+	Day string
+
+	Accounts []map[string]any
+}
+
+func (in PartnerReconcileUsageInput) values() map[string]any {
+	values := map[string]any{}
+	values["day"] = in.Day
+	values["accounts"] = in.Accounts
+	return values
+}
+
+// PartnerReconcileUsage: Compare your counts with ours. Send your count of each account's
+// operations (and, if you keep them, bookings) on one ended UTC day, as your daily cross-check:
+// the answer gives ours beside yours for every account either of us counted, the difference in
+// percent, and whether every one is within 0.5%. A day outside that is recorded as a mismatch,
+// which Pylota looks into. Sending the same day again replaces its record.
+func (c *Client) PartnerReconcileUsage(ctx context.Context, in PartnerReconcileUsageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_reconcile_usage", in.values())
 }

@@ -218,6 +218,8 @@ export interface SlotlockPartnerStore {
   /** True when it changed something; null for no such account. */
   setSuspended(partnerId: string, account: string, suspended: boolean, reason?: string): Promise<boolean | null>;
   usage(partnerId: string, from: string, to: string, account?: string): Promise<SlotlockPartnerUsageRow[]>;
+  /** Record a partner's comparison of one day's counts (P5 reconciliation). */
+  recordReconciliation(partnerId: string, day: string, accounts: number, mismatched: number, worstPercent: number): Promise<void>;
   /** The account's keys, made and changed as any tenant's (api-keys.ts). */
   keys: SlotlockApiKeyStore;
   /** Erase the account's tenant, with its partner's record of it. */
@@ -307,6 +309,10 @@ export function createSlotlockPartnerStore(
         SELECT account, day::text, metric, count::text
           FROM slotlock.partner_usage(${partnerId}::text, ${from}::date, ${to}::date, ${account ?? null}::text)`;
       return rows.map((row) => ({ account: row.account, day: row.day, metric: row.metric, count: Number(row.count) }));
+    },
+    async recordReconciliation(partnerId, day, accounts, mismatched, worstPercent) {
+      await sql`SELECT slotlock.record_partner_reconciliation(${partnerId}::text, ${day}::date,
+        ${accounts}::integer, ${mismatched}::integer, ${worstPercent}::numeric)`;
     },
     keys: deps.keys,
     async eraseAccount(partnerId, account) {

@@ -105,7 +105,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_partner_suspend_account'
   | 'slotlock_partner_unsuspend_account'
   | 'slotlock_partner_erase_account'
-  | 'slotlock_partner_get_usage';
+  | 'slotlock_partner_get_usage'
+  | 'slotlock_partner_reconcile_usage';
 
 /** The scope an application operation needs, but the partner API's (`slotlockApplicationScope`). */
 export const SLOTLOCK_APPLICATION_SCOPE = 'admin';
@@ -208,6 +209,7 @@ export interface SlotlockApplicationBackend {
   partnerUnsuspendAccount: Handler;
   partnerEraseAccount: Handler;
   partnerGetUsage: Handler;
+  partnerReconcileUsage: Handler;
 }
 
 export interface SlotlockApplicationOperationDefinition {
@@ -1810,6 +1812,46 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       invoke: 'partnerGetUsage',
       scope: 'partner',
       example: { from: '2026-11-01', to: '2026-11-30' },
+    },
+    {
+      name: 'slotlock_partner_reconcile_usage',
+      title: 'Compare your counts with ours',
+      description:
+        "Send your count of each account's operations (and, if you keep them, bookings) on one ended UTC day, as your daily cross-check: the answer gives ours beside yours for every account either of us counted, the difference in percent, and whether every one is within 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the same day again replaces its record.",
+      method: 'POST',
+      path: '/v1/partner/usage/reconcile',
+      input: z
+        .object({
+          day: USAGE_DAY,
+          accounts: z
+            .array(z.object({ account: PARTNER_ACCOUNT, operations: USAGE_COUNT, bookings: USAGE_COUNT.optional() }).strict())
+            .max(10000),
+        })
+        .strict(),
+      output: z
+        .object({
+          day: USAGE_DAY,
+          within_tolerance: z.boolean(),
+          tolerance_percent: z.number(),
+          accounts: z
+            .array(
+              z
+                .object({
+                  account: PARTNER_ACCOUNT,
+                  metric: z.enum(['operations', 'bookings']),
+                  ours: USAGE_COUNT,
+                  theirs: USAGE_COUNT.nullable(),
+                  difference_percent: z.number().nullable(),
+                })
+                .strict(),
+            )
+            .max(20000),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerReconcileUsage',
+      scope: 'partner',
+      example: { day: '2026-11-09', accounts: [{ account: 'user-4821', operations: 1204 }] },
     },
   ]);
 

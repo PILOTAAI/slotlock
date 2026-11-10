@@ -101,6 +101,7 @@ public sealed partial class SlotlockClient
         ["slotlock_partner_unsuspend_account"] = new("POST", "/v1/partner/accounts/{account}/unsuspend", ["account"], []),
         ["slotlock_partner_erase_account"] = new("POST", "/v1/partner/accounts/{account}/erase", ["account"], []),
         ["slotlock_partner_get_usage"] = new("GET", "/v1/partner/usage", [], ["from", "to", "account"]),
+        ["slotlock_partner_reconcile_usage"] = new("POST", "/v1/partner/usage/reconcile", [], []),
     };
 
     /// <summary>List calendar resources.</summary>
@@ -2519,6 +2520,30 @@ public sealed partial class SlotlockClient
         if (to.HasValue) values["to"] = Json.ToNode(to.Value);
         if (account.HasValue) values["account"] = Json.ToNode(account.Value);
         return CallAsync("slotlock_partner_get_usage", values, cancellationToken);
+    }
+
+    /// <summary>Compare your counts with ours.</summary>
+    /// <remarks>
+    /// Send your count of each account's operations (and, if you keep them, bookings) on one
+    /// ended UTC day, as your daily cross-check: the answer gives ours beside yours for every
+    /// account either of us counted, the difference in percent, and whether every one is within
+    /// 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the
+    /// same day again replaces its record.
+    /// </remarks>
+    /// <param name="day">day</param>
+    /// <param name="accounts">accounts</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerReconcileUsageAsync(
+        string day,
+        JsonArray accounts,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["day"] = Json.ToNode(day);
+        values["accounts"] = Json.ToNode(accounts);
+        return CallAsync("slotlock_partner_reconcile_usage", values, cancellationToken);
     }
 
 }

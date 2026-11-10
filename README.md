@@ -305,6 +305,15 @@ STRIPE_SECRET_KEY=sk_live_… slotlock partner close stackapi              # las
   next invoice, and its id is kept. An item Stripe made in a run that stopped before recording it
   is found by its metadata and adopted, never made twice. It exits 1 while a line waits or the
   webhook was not taken: run it again for the same month.
+- A partner checks its counts against Slotlock's each day with `POST /v1/partner/usage/reconcile`
+  (one ended UTC day, each account's operations and, if it keeps them, bookings): the answer gives
+  both counts and the difference, and a day off by more than 0.5% for any account is recorded
+  (`slotlock.partner_reconciliations`) as an incident on our side.
+- `slotlock billing daily`, run once a day by the schema owner (cron), does the rest: it closes
+  last month for every active partner once the month has been over for 6 hours, reports overage
+  when `SLOTLOCK_OVERAGE` is on, and lists the last week's reconciliation mismatches, exiting 1
+  when anything waits or differs. For example, `15 7 * * * slotlock billing daily` with
+  `SLOTLOCK_MIGRATE_DATABASE_URL` and `STRIPE_SECRET_KEY` set.
 - `/metrics` counts authenticated requests by the integrator their `Slotlock-Client` field names
   (`slotlock_requests_by_client_total`): the names in `SLOTLOCK_KNOWN_CLIENTS`, else `other`, or
   `none` without the field.

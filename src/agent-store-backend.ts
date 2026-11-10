@@ -5,6 +5,7 @@ import {
   type SlotlockResourceGroup,
   type SlotlockResourceKind,
   type SlotlockResourceProfileInput,
+  SLOTLOCK_RECONCILE_TOLERANCE_PERCENT,
   slotlockResourceHasLabels,
 } from './resource-profile.js';
 import type { Sql } from 'postgres';
@@ -2613,6 +2614,58 @@ export function createSlotlockStoreApplicationBackend(
       }
       const rows = await partners.usage(partner, from, to, input.account as string | undefined);
       return { from, to, usage: rows };
+    },
+
+    async partnerReconcileUsage(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const day = input.day as string;
+      // An ended day: today's counts are still arriving.
+      if (slotlockUsageSpanDays(day, slotlockUsageDay(Date.now())) < 1) {
+        throw new SlotlockAgentOperationError('invalid_usage_range', 400);
+      }
+      const theirs = new Map<string, { operations: number; bookings?: number }>();
+      for (const row of input.accounts as { account: string; operations: number; bookings?: number }[]) {
+        theirs.set(row.account, { operations: row.operations, ...(row.bookings !== undefined ? { bookings: row.bookings } : {}) });
+      }
+      const ours = new Map<string, { operations: number; bookings: number }>();
+      for (const row of await partners.usage(partner, day, day)) {
+        if (row.metric !== 'operations' && row.metric !== 'bookings') continue;
+        const counted = ours.get(row.account) ?? { operations: 0, bookings: 0 };
+        counted[row.metric] += row.count;
+        ours.set(row.account, counted);
+      }
+      const accounts = [...new Set([...ours.keys(), ...theirs.keys()])].sort();
+      const lines: { account: string; metric: 'operations' | 'bookings'; ours: number; theirs: number | null; difference_percent: number | null }[] = [];
+      const mismatched = new Set<string>();
+      let worst = 0;
+      for (const account of accounts) {
+        for (const metric of ['operations', 'bookings'] as const) {
+          const mine = ours.get(account)?.[metric] ?? 0;
+          const told = theirs.get(account)?.[metric];
+          if (told === undefined && (metric === 'bookings' || !theirs.has(account)) && mine === 0) continue;
+          // Not sent by them, where we counted some: a difference of all of it.
+          const theirCount = told ?? null;
+          const difference =
+            theirCount === null
+              ? mine === 0 ? 0 : 100
+              : Math.max(mine, theirCount) === 0 ? 0 : (Math.abs(mine - theirCount) * 100) / Math.max(mine, theirCount);
+          if (theirCount === null && metric === 'bookings') {
+            lines.push({ account, metric, ours: mine, theirs: null, difference_percent: null });
+            continue;
+          }
+          const rounded = Math.round(difference * 100) / 100;
+          if (difference > SLOTLOCK_RECONCILE_TOLERANCE_PERCENT) mismatched.add(account);
+          worst = Math.max(worst, rounded);
+          lines.push({ account, metric, ours: mine, theirs: theirCount, difference_percent: rounded });
+        }
+      }
+      await partners.recordReconciliation(partner, day, accounts.length, mismatched.size, worst);
+      return {
+        day,
+        within_tolerance: mismatched.size === 0,
+        tolerance_percent: SLOTLOCK_RECONCILE_TOLERANCE_PERCENT,
+        accounts: lines,
+      };
     },
 
     async getUsage(context, input) {

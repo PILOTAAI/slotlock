@@ -610,6 +610,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path_params: &[],
         query: &["from", "to", "account"],
     },
+    Operation {
+        name: "slotlock_partner_reconcile_usage",
+        method: "POST",
+        path: "/v1/partner/usage/reconcile",
+        path_params: &[],
+        query: &[],
+    },
 ];
 
 /// The arguments of [`Client::list_resources`].
@@ -1454,6 +1461,13 @@ pub struct PartnerGetUsageInput {
     pub account: Option<String>,
 }
 
+/// The arguments of [`Client::partner_reconcile_usage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerReconcileUsageInput {
+    pub day: String,
+    pub accounts: Vec<Value>,
+}
+
 impl Client {
     /// List calendar resources.
     ///
@@ -2292,6 +2306,17 @@ impl Client {
     /// one account, or all. 400 invalid_usage_range otherwise.
     pub fn partner_get_usage(&self, input: &PartnerGetUsageInput) -> Result<Value, Error> {
         self.call("slotlock_partner_get_usage", serde_json::to_value(input)?)
+    }
+
+    /// Compare your counts with ours.
+    ///
+    /// Send your count of each account's operations (and, if you keep them, bookings) on one
+    /// ended UTC day, as your daily cross-check: the answer gives ours beside yours for every
+    /// account either of us counted, the difference in percent, and whether every one is within
+    /// 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into. Sending the
+    /// same day again replaces its record.
+    pub fn partner_reconcile_usage(&self, input: &PartnerReconcileUsageInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_reconcile_usage", serde_json::to_value(input)?)
     }
 
 }

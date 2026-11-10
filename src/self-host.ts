@@ -1626,6 +1626,71 @@ async function changeResource(
 }
 
 /**
+ * `billing daily`: everything billing needs once a day, idempotent, for a cron job. Last month is
+ * closed for each active partner only once it has been over for BILLING_GRACE_MS, as late counts
+ * (bookings roll up hourly) settle first; overage goes for last month and this one; and each
+ * partner's reconciliation mismatches of the last week are listed. Exit 1 when anything waits or
+ * differs, so the cron job's failure is the incident.
+ */
+async function runBillingDaily(
+  owner: postgres.Sql,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  options: { now: number; stripeSecretKey: string | undefined; overage: boolean },
+): Promise<number> {
+  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  let attention = false;
+  const month = slotlockPreviousMonth(options.now);
+  const today = new Date(options.now);
+  const monthBegan = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1);
+  if (options.now - monthBegan < BILLING_GRACE_MS) {
+    line({ job: 'partner_close', month, waiting_until: new Date(monthBegan + BILLING_GRACE_MS).toISOString() });
+  } else {
+    for (const partner of await listSlotlockPartners(owner)) {
+      if (partner.status !== 'active') continue;
+      const closed = await closeSlotlockPartnerMonth(owner, {
+        partnerId: partner.id,
+        month,
+        now: options.now,
+        ...(options.stripeSecretKey ? { stripe: { secretKey: options.stripeSecretKey } } : {}),
+      });
+      line({ job: 'partner_close', partner: partner.id, month, webhook: closed.webhook, invoiced: closed.invoiced, pending: closed.pending });
+      if (closed.webhook === 'failed' || closed.pending > 0) attention = true;
+    }
+  }
+  if (options.overage) {
+    if (!options.stripeSecretKey) {
+      line({ job: 'overage', skipped: 'no STRIPE_SECRET_KEY' });
+      attention = true;
+    } else {
+      for (const reported of [month, slotlockMonthOf(options.now)]) {
+        const report = await reportSlotlockOverage(owner, {
+          month: reported,
+          now: options.now,
+          stripe: { secretKey: options.stripeSecretKey, eventName: 'slotlock_operations' },
+        });
+        line({ job: 'overage', month: reported, sent: report.sent, failed: report.failed });
+        if (report.failed > 0) attention = true;
+      }
+    }
+  }
+  const mismatches = await owner<{ partner_id: string; day: string; mismatched: number; worst: number }[]>`
+    SELECT partner_id, day::text, mismatched, worst_percent::float AS worst
+      FROM slotlock.partner_reconciliations
+     WHERE mismatched > 0 AND day >= current_date - 7
+     ORDER BY day, partner_id`;
+  for (const mismatch of mismatches) {
+    line({ job: 'reconciliation', partner: mismatch.partner_id, day: mismatch.day, mismatched: mismatch.mismatched, worst_percent: mismatch.worst });
+    attention = true;
+  }
+  line({ job: 'done', month, attention });
+  if (attention) io.stderr.write('slotlock: billing needs attention: see the lines above; run billing daily again once it is resolved\n');
+  return attention ? 1 : 0;
+}
+
+/** How long after a month ends billing daily waits to close it: late counts settle first. */
+const BILLING_GRACE_MS = 6 * 3_600_000;
+
+/**
  * `resource parent <ref> <parent-ref | none>` (RFC 0003 G8): make a resource a part of a composite,
  * or no part. The refusal's code when the database refuses it, false for no such resource.
  */
@@ -2088,6 +2153,11 @@ Commands:
                            The Stripe customer its monthly invoice goes to
   partner webhook <id> <https-url>
                            Where usage.period_closed goes; prints its signing secret once
+  billing daily            Once a day (cron), as the schema owner: close last month for every
+                           active partner once it has been over for 6 hours, report overage
+                           when SLOTLOCK_OVERAGE is on (with STRIPE_SECRET_KEY), and list the
+                           partners' reconciliation mismatches of the last 7 days; exits 1 when
+                           anything waits or differs. Safe to run again
   overage report [--month <YYYY-MM>] [--event <name>]
                            With SLOTLOCK_OVERAGE: send Stripe each paying Developer tenant's
                            operations above its quota this month (or --month) not yet sent, as
@@ -2255,7 +2325,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'tenant' ||
     command === 'plan' ||
     command === 'partner' ||
-    command === 'overage'
+    command === 'overage' ||
+    command === 'billing'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -2294,6 +2365,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'partner webhook': 3,
     'partner close': 2,
     'overage report': 1,
+    'billing daily': 1,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -2444,6 +2516,25 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'billing daily': {
+        const database = readSlotlockDatabaseConfig(io.env);
+        const owner = connect(database.migrateDatabaseUrl ?? database.databaseUrl, 1);
+        try {
+          return await runBillingDaily(owner, io, {
+            now: Date.now(),
+            stripeSecretKey: io.env.STRIPE_SECRET_KEY?.trim() || undefined,
+            overage: (io.env.SLOTLOCK_OVERAGE?.trim() || 'off') !== 'off',
+          });
+        } catch (error) {
+          if ((error as { code?: unknown } | null)?.code === '42501') {
+            io.stderr.write('slotlock: only the schema owner runs billing; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n');
+            return 1;
+          }
+          throw error;
+        } finally {
+          await owner.end({ timeout: 5 });
+        }
+      }
       case 'overage report': {
         const secretKey = io.env.STRIPE_SECRET_KEY?.trim();
         if (!secretKey) {

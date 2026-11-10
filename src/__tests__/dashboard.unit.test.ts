@@ -2484,8 +2484,8 @@ describe('the plan page', () => {
     expect(plan).toContain('never billed');
     expect(plan).not.toContain('Test usage this month'); // this dashboard does not meter
     // With metering, the test environment's own use, read from its own tenant.
-    const usage = vi.fn(async () => [{ day: '2026-10-10', metric: 'operations' as const, keyId: null, origin: 'rest', count: 7 }]);
-    const metered = dashboard({ usage: true, resources: { ...resources.store, usage }, billing: { ...(target as unknown as { billing?: never }).billing, plan: async () => null, checkout: vi.fn(), portal: vi.fn(), prices: { month: '$10', year: '$100' }, contact: 'mailto:founder@example.com', formOrigins: ['https://checkout.stripe.com'] } as never });
+    const usage = vi.fn(async () => [{ day: '2026-10-10', metric: 'operations' as const, keyId: '', origin: 'rest', count: 7 }]);
+    const metered = dashboard({ usage: true, resources: { ...resources.store, usage }, billing: { plan: async () => null, checkout: vi.fn(), portal: vi.fn(), prices: { month: '$10', year: '$100' }, contact: 'mailto:founder@example.com', formOrigins: ['https://checkout.stripe.com'] } as never });
     const testPage = await (await get(metered, '/base/dashboard/plan', test)).text();
     expect(testPage).toContain('Test usage this month');
     expect(usage).toHaveBeenCalledWith('github:4242~test', expect.any(String), expect.any(String));

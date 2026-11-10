@@ -97,7 +97,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_partner_suspend_account", new Operation("POST", "/v1/partner/accounts/{account}/suspend", List.of("account"), List.of())),
           Map.entry("slotlock_partner_unsuspend_account", new Operation("POST", "/v1/partner/accounts/{account}/unsuspend", List.of("account"), List.of())),
           Map.entry("slotlock_partner_erase_account", new Operation("POST", "/v1/partner/accounts/{account}/erase", List.of("account"), List.of())),
-          Map.entry("slotlock_partner_get_usage", new Operation("GET", "/v1/partner/usage", List.of(), List.of("from", "to", "account"))));
+          Map.entry("slotlock_partner_get_usage", new Operation("GET", "/v1/partner/usage", List.of(), List.of("from", "to", "account"))),
+          Map.entry("slotlock_partner_reconcile_usage", new Operation("POST", "/v1/partner/usage/reconcile", List.of(), List.of())));
 
   /**
    * Runs an operation by its name with its arguments, path parameters included.
@@ -2360,6 +2361,25 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> partnerGetUsage() {
     return partnerGetUsage(null);
+  }
+
+  /**
+   * Compare your counts with ours. Send your count of each account's operations (and, if you keep
+   * them, bookings) on one ended UTC day, as your daily cross-check: the answer gives ours beside
+   * yours for every account either of us counted, the difference in percent, and whether every
+   * one is within 0.5%. A day outside that is recorded as a mismatch, which Pylota looks into.
+   * Sending the same day again replaces its record.
+   *
+   * @param day {@code day}, string
+   * @param accounts {@code accounts}, list of object
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerReconcileUsage(String day, List<?> accounts) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("day", day);
+    values.put("accounts", accounts);
+    return call("slotlock_partner_reconcile_usage", values);
   }
 
 }
