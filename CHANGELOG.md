@@ -122,6 +122,9 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- The five clients take an account for a partner key to act for (`Slotlock-Account`): `account=`
+  (Python), `WithAccount` (Go), `Options.account` (Rust), `.account(…)` (Java),
+  `SlotlockClientOptions.Account` (.NET), checked before any request.
 - Partner reconciliation and a daily billing job (RFC 0003 P5, P6): `slotlock_partner_reconcile_usage`
   (`POST /v1/partner/usage/reconcile`) compares a partner's counts of an ended day with Slotlock's,
   account by account, and records a day off by more than 0.5% in the new owner-only table

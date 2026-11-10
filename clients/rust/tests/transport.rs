@@ -14,6 +14,7 @@ use slotlock::*;
 struct Seen {
     target: String,
     authorization: String,
+    account: Option<String>,
     body: Vec<u8>,
 }
 
@@ -41,9 +42,11 @@ fn stub(respond: Respond) -> (u16, Arc<Mutex<Vec<Seen>>>) {
                 let mut lines = head.split("\r\n");
                 let target = lines.next().unwrap_or("").split(' ').nth(1).unwrap_or("");
                 let (mut authorization, mut length) = (String::new(), 0usize);
+                let mut account = None;
                 for (name, value) in lines.filter_map(|line| line.split_once(':')) {
                     match name.trim().to_ascii_lowercase().as_str() {
                         "authorization" => authorization = value.trim().to_string(),
+                        "slotlock-account" => account = Some(value.trim().to_string()),
                         "content-length" => length = value.trim().parse().unwrap_or(0),
                         _ => {}
                     }
@@ -53,6 +56,7 @@ fn stub(respond: Respond) -> (u16, Arc<Mutex<Vec<Seen>>>) {
                 log.lock().unwrap().push(Seen {
                     target: target.to_string(),
                     authorization,
+                    account,
                     body,
                 });
                 respond(&mut stream);
@@ -287,4 +291,30 @@ fn the_timeout_covers_the_body() {
         .unwrap()
         .list_resources(&ListResourcesInput::default())
         .is_err());
+}
+
+#[test]
+fn a_partner_key_acts_for_an_account_only_when_asked() {
+    let (port, seen) = stub(ok());
+    let url = format!("http://127.0.0.1:{port}");
+    Client::new(&url, "slk_secret")
+        .unwrap()
+        .list_resources(&ListResourcesInput::default())
+        .unwrap();
+    let options = Options {
+        account: Some("user-4821".into()),
+        ..Options::default()
+    };
+    Client::with_options(&url, "slk_secret", options)
+        .unwrap()
+        .list_resources(&ListResourcesInput::default())
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].account, None);
+    assert_eq!(seen[1].account.as_deref(), Some("user-4821"));
+    let bad = Options {
+        account: Some("not ok".into()),
+        ..Options::default()
+    };
+    assert!(Client::with_options(&url, "slk_secret", bad).is_err());
 }

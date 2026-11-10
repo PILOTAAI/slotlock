@@ -23,6 +23,11 @@ maintainer has approved each registry: `slotlock` on PyPI and crates.io, `Slotlo
 - **A key.** Pass the server's URL (its `SLOTLOCK_PUBLIC_URL`) and an API key. The agent tools need
   `read` or `write`; the application API needs `admin`
   (`slotlock key create "Booking site" --scope read,write,admin`).
+- **Acting for a partner's account.** With a partner key (`slk_partner_…`), an account option
+  sends `Slotlock-Account` so each call acts as that account, where the partner's contract allows
+  it: `account=` in Python, `WithAccount` in Go, `Options { account, .. }` in Rust, `.account(…)` on
+  the Java builder, `SlotlockClientOptions.Account` in .NET. It must be 1-128 letters, digits,
+  dots, dashes or underscores; a client refuses anything else before any request.
 - **Errors.** A refusal carries the HTTP status and the server's code: `409 overlap` for a taken
   window, `428 confirmation_required` for a write that waits for a person, `404 resource_not_found`,
   `403 forbidden` for a key without the scope, `http_<status>` when the answer has no code (a

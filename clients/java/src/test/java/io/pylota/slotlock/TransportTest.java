@@ -33,7 +33,7 @@ class TransportTest {
   private final List<HttpServer> servers = new ArrayList<>();
 
   /** What a stub saw of one request. */
-  record Seen(String rawPath, String rawQuery, String authorization, String body) {}
+  record Seen(String rawPath, String rawQuery, String authorization, String account, String body) {}
 
   /** A local server that records each request and answers with {@code respond}. */
   private final class Stub {
@@ -51,6 +51,7 @@ class TransportTest {
                     exchange.getRequestURI().getRawPath(),
                     exchange.getRequestURI().getRawQuery(),
                     exchange.getRequestHeaders().getFirst("Authorization"),
+                    exchange.getRequestHeaders().getFirst("Slotlock-Account"),
                     body));
             respond.accept(exchange);
             exchange.close();
@@ -154,6 +155,18 @@ class TransportTest {
             + "&end=2027-03-29T10%3A00%3A00%2B01%3A00&limit=5",
         stub.seen.get(1).rawQuery());
     assertEquals("Bearer slk_secret", stub.seen.get(1).authorization());
+  }
+
+  @Test
+  void aPartnerKeyActsForAnAccountOnlyWhenAsked() throws IOException {
+    Stub stub = new Stub();
+    stub.client().getEvent("e1");
+    SlotlockClient.builder("http://127.0.0.1:" + stub.port, "slk_secret").account("user-4821").build().getEvent("e1");
+    assertEquals(null, stub.seen.get(0).account());
+    assertEquals("user-4821", stub.seen.get(1).account());
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> SlotlockClient.builder("http://127.0.0.1:" + stub.port, "slk_secret").account("not ok"));
   }
 
   @Test
