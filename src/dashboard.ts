@@ -1138,6 +1138,9 @@ const RULE_NAMES = Object.freeze({
   bufferBeforeMinutes: 'Buffer before',
   turnaroundMinutes: 'Turnaround',
   checkInMinutes: 'Check-in release',
+  minDurationMinutes: 'Shortest booking',
+  maxDurationMinutes: 'Longest booking',
+  defaultDurationMinutes: 'Usual length',
 } as const);
 /** The booking rules form's fields, by rule. */
 const RULE_FIELDS = Object.freeze({
@@ -1148,6 +1151,9 @@ const RULE_FIELDS = Object.freeze({
   bufferBeforeMinutes: 'buffer_before_minutes',
   turnaroundMinutes: 'turnaround_minutes',
   checkInMinutes: 'check_in_minutes',
+  minDurationMinutes: 'min_duration_minutes',
+  maxDurationMinutes: 'max_duration_minutes',
+  defaultDurationMinutes: 'default_duration_minutes',
 } as const);
 
 /** How the inherited-rules note names each rule, with its unit. */
@@ -1156,9 +1162,22 @@ const INHERITED_NAMES: Readonly<Record<keyof SlotlockBookingRules, string>> = Ob
   maxAdvanceDays: 'Book up to (days ahead)',
   enforceHours: 'Only inside bookable hours',
   requireCertain: 'Only in time its calendar syncs have read today',
+  allowedDurations: 'Lengths (min)',
+  pickupTimes: 'Pick-up times',
+  returnTimes: 'Return times',
 });
 
-type InheritedRules = Map<keyof SlotlockBookingRules, { value: number | boolean; from: string }>;
+type RuleValue = number | boolean | readonly number[] | readonly { startMinutes: number; durationMinutes: number }[];
+type InheritedRules = Map<keyof SlotlockBookingRules, { value: RuleValue; from: string }>;
+
+/** A rule's value as the dashboard shows it. */
+function ruleValueText(value: RuleValue): string {
+  if (typeof value === 'number') return value.toLocaleString('en');
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  return value
+    .map((item) => (typeof item === 'number' ? item.toLocaleString('en') : hoursOf(item.startMinutes, item.durationMinutes)))
+    .join(', ');
+}
 
 /**
  * The rules a resource takes from defaults, each with where it comes from: a rule its pool's
@@ -1175,7 +1194,7 @@ function inheritedRules(resource: SlotlockResource, defaults: SlotlockBookingRul
     : [['defaults', resource.effectiveBookingRules]];
   const inherited: InheritedRules = new Map();
   for (const [from, rules] of levels) {
-    for (const [name, value] of Object.entries(rules ?? {}) as [keyof SlotlockBookingRules, number | boolean][]) {
+    for (const [name, value] of Object.entries(rules ?? {}) as [keyof SlotlockBookingRules, RuleValue][]) {
       if (own[name] === undefined) inherited.set(name, { value, from });
     }
   }
@@ -1187,7 +1206,7 @@ function inheritedNote(inherited: InheritedRules): Html {
   const parts = [...inherited].map(([name, { value, from }]) =>
     typeof value === 'boolean'
       ? `${INHERITED_NAMES[name]}${value ? '' : ': off'} (${from})`
-      : `${INHERITED_NAMES[name]} ${value.toLocaleString('en')} (${from})`,
+      : `${INHERITED_NAMES[name]} ${ruleValueText(value)} (${from})`,
   );
   return html`<p class="fine">Inherited: ${parts.join('; ')}.</p>`;
 }
@@ -2524,7 +2543,15 @@ ${field('stepOffsetMinutes', 'Steps start past each step by', 'min')}
 ${field('bufferBeforeMinutes', 'Kept free before each booking', 'min')}
 ${field('turnaroundMinutes', 'Turnaround after each booking', 'min')}
 ${field('checkInMinutes', 'Release if not checked in after', 'min')}
+${field('minDurationMinutes', 'Shortest booking', 'min')}
+${field('maxDurationMinutes', 'Longest booking', 'min')}
+${field('defaultDurationMinutes', 'Usual length, offered when none is asked', 'min')}
 </div>
+${resource.bookingRules?.allowedDurations || resource.bookingRules?.pickupTimes || resource.bookingRules?.returnTimes ? html`<p class="fine">Set through the API, and kept when you save: ${[
+      resource.bookingRules.allowedDurations ? `lengths ${ruleValueText(resource.bookingRules.allowedDurations)} min` : '',
+      resource.bookingRules.pickupTimes ? `pick-up ${ruleValueText(resource.bookingRules.pickupTimes)}` : '',
+      resource.bookingRules.returnTimes ? `return ${ruleValueText(resource.bookingRules.returnTimes)}` : '',
+    ].filter(Boolean).join('; ')}.</p>` : html``}
 ${toggle('enforceHours', 'enforce_hours', 'Only inside bookable hours')}
 ${toggle('requireCertain', 'require_certain', 'Only in time its calendar syncs have read today')}
 ${inheritedNote(inherited)}
@@ -2662,6 +2689,11 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     if (enforceHours !== undefined) rules.enforceHours = enforceHours;
     const requireCertain = choice('require_certain');
     if (requireCertain !== undefined) rules.requireCertain = requireCertain;
+    // Rules the form does not edit (set through the API) are kept.
+    for (const name of ['allowedDurations', 'pickupTimes', 'returnTimes'] as const) {
+      const kept = resource.bookingRules?.[name];
+      if (kept !== undefined) (rules as Record<string, unknown>)[name] = kept;
+    }
     try {
       await options.resources.setRules(
         tenantOf(session),

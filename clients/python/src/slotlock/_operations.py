@@ -43,6 +43,13 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"),
     ),
+    "slotlock_find_available_ranges": Operation(
+        "slotlock_find_available_ranges",
+        "GET",
+        "/v1/available-ranges",
+        (),
+        ("resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"),
+    ),
     "slotlock_hold_slots": Operation(
         "slotlock_hold_slots",
         "POST",
@@ -891,13 +898,13 @@ class Operations(Transport):
         *,
         start: str,
         end: str,
-        duration_minutes: int,
         resource_ids: list[str] | None = None,
         location: str | None = None,
         group: str | None = None,
         labels: list[str] | None = None,
         kind: str | None = None,
         pool: str | None = None,
+        duration_minutes: int | None = None,
     ) -> dict[str, Any]:
         """Find next available interval.
 
@@ -905,7 +912,7 @@ class Operations(Transport):
         367-day search window, so a multi-month rental slot can be found). Name the resources with
         resource_ids, or select them as slotlock_get_free_busy does: at most 100.
         """
-        values: dict[str, Any] = {"start": start, "end": end, "duration_minutes": duration_minutes}
+        values: dict[str, Any] = {"start": start, "end": end}
         if resource_ids is not None:
             values["resource_ids"] = resource_ids
         if location is not None:
@@ -918,6 +925,8 @@ class Operations(Transport):
             values["kind"] = kind
         if pool is not None:
             values["pool"] = pool
+        if duration_minutes is not None:
+            values["duration_minutes"] = duration_minutes
         return self.call("slotlock_find_next_available", values)
 
     def find_available_slots(
@@ -925,13 +934,13 @@ class Operations(Transport):
         *,
         start: str,
         end: str,
-        duration_minutes: int,
         resource_ids: list[str] | None = None,
         location: str | None = None,
         group: str | None = None,
         labels: list[str] | None = None,
         kind: str | None = None,
         pool: str | None = None,
+        duration_minutes: int | None = None,
         limit: int | None = None,
         require_free: int | None = None,
     ) -> dict[str, Any]:
@@ -945,7 +954,7 @@ class Operations(Transport):
         every resource's coverage is certain. Name the resources with resource_ids, or select them
         as slotlock_get_free_busy does: at most 20.
         """
-        values: dict[str, Any] = {"start": start, "end": end, "duration_minutes": duration_minutes}
+        values: dict[str, Any] = {"start": start, "end": end}
         if resource_ids is not None:
             values["resource_ids"] = resource_ids
         if location is not None:
@@ -958,11 +967,51 @@ class Operations(Transport):
             values["kind"] = kind
         if pool is not None:
             values["pool"] = pool
+        if duration_minutes is not None:
+            values["duration_minutes"] = duration_minutes
         if limit is not None:
             values["limit"] = limit
         if require_free is not None:
             values["require_free"] = require_free
         return self.call("slotlock_find_available_slots", values)
+
+    def find_available_ranges(
+        self,
+        *,
+        pickup_start: str,
+        pickup_end: str,
+        resource_ids: list[str] | None = None,
+        pool: str | None = None,
+        days: int | None = None,
+        return_start: str | None = None,
+        return_end: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Find available ranges.
+
+        Find hires across days, such as a car from Friday to Monday: for each resource named, or
+        each member of a pool, the earliest range that starts between pickup_start and pickup_end
+        and either lasts `days` days (ending at the same local time) or ends between return_start
+        and return_end. Each range is free throughout with its buffers, allowed by the resource's
+        booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside
+        its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless
+        every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+        with slotlock_book_pool, at its start and end.
+        """
+        values: dict[str, Any] = {"pickup_start": pickup_start, "pickup_end": pickup_end}
+        if resource_ids is not None:
+            values["resource_ids"] = resource_ids
+        if pool is not None:
+            values["pool"] = pool
+        if days is not None:
+            values["days"] = days
+        if return_start is not None:
+            values["return_start"] = return_start
+        if return_end is not None:
+            values["return_end"] = return_end
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_find_available_ranges", values)
 
     def hold_slots(
         self,
@@ -1790,11 +1839,15 @@ class Operations(Transport):
 
         Set what a booking on one resource must satisfy from now on: minimum notice, how far
         ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
-        step_offset_minutes), the time kept free before and after each booking, and whether
-        bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
-        its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-        slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
-        refused with the rule they break; searches offer only what they allow.
+        step_offset_minutes), the time kept free before and after each booking (turnaround up to a
+        week), whether bookings must lie inside its hours, how long a booking may be
+        (min_duration_minutes, max_duration_minutes, allowed_durations, and
+        default_duration_minutes for a search that names no length), and for a booking from one
+        local day to another, the pickup_times it starts in and the return_times it ends in.
+        `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults
+        (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+        moves and agents' events are refused with the rule they break; searches offer only what
+        they allow.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's

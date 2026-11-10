@@ -509,7 +509,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -521,6 +521,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -563,7 +638,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -575,6 +650,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -1199,7 +1349,7 @@
           {
             "name": "duration_minutes",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1435,7 +1585,7 @@
           {
             "name": "duration_minutes",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1577,6 +1727,215 @@
             "$ref": "#/components/responses/Error"
           },
           "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/available-ranges": {
+      "get": {
+        "operationId": "slotlock_find_available_ranges",
+        "summary": "Find available ranges",
+        "description": "Find hires across days, such as a car from Friday to Monday: for each resource named, or each member of a pool, the earliest range that starts between pickup_start and pickup_end and either lasts `days` days (ending at the same local time) or ends between return_start and return_end. Each range is free throughout with its buffers, allowed by the resource's booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless every resource's coverage is certain. Book one with slotlock_create_event, or a pool's with slotlock_book_pool, at its start and end.",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "read",
+        "parameters": [
+          {
+            "name": "resource_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          },
+          {
+            "name": "pool",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "pickup_start",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "pickup_end",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 366
+            }
+          },
+          {
+            "name": "return_start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "return_end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ranges": {
+                      "maxItems": 50,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "resource_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "start": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "end": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "resource_id",
+                          "start",
+                          "end"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "coverage": {
+                      "type": "object",
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "end": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "certainty": {
+                          "type": "string",
+                          "enum": [
+                            "certain",
+                            "uncertain"
+                          ]
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end",
+                        "certainty",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "selected_resource_ids": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    }
+                  },
+                  "required": [
+                    "ranges",
+                    "coverage"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -6176,7 +6535,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -6188,6 +6547,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -6230,7 +6664,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -6242,6 +6676,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -6650,7 +7159,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -6662,6 +7171,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -6704,7 +7288,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -6716,6 +7300,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -8184,7 +8843,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -8196,6 +8855,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -8238,7 +8972,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -8250,6 +8984,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -8678,7 +9487,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -8690,6 +9499,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -8732,7 +9616,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -8744,6 +9628,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -9310,7 +10269,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -9322,6 +10281,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -9364,7 +10398,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -9376,6 +10410,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -9879,7 +10988,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -9891,6 +11000,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -9933,7 +11117,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -9945,6 +11129,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -10236,7 +11495,7 @@
       "put": {
         "operationId": "slotlock_set_resource_booking_rules",
         "summary": "Set a resource's booking rules",
-        "description": "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking, and whether bookings must lie inside its hours. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+        "description": "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking (turnaround up to a week), whether bookings must lie inside its hours, how long a booking may be (min_duration_minutes, max_duration_minutes, allowed_durations, and default_duration_minutes for a search that names no length), and for a booking from one local day to another, the pickup_times it starts in and the return_times it ends in. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
         "tags": [
           "Application"
         ],
@@ -10281,7 +11540,7 @@
                           "turnaround_minutes": {
                             "type": "integer",
                             "minimum": 0,
-                            "maximum": 1440
+                            "maximum": 10080
                           },
                           "enforce_hours": {
                             "type": "boolean"
@@ -10293,6 +11552,81 @@
                           },
                           "require_certain": {
                             "type": "boolean"
+                          },
+                          "min_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "max_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "allowed_durations": {
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            }
+                          },
+                          "default_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "pickup_times": {
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "start_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                }
+                              },
+                              "required": [
+                                "start_minutes",
+                                "duration_minutes"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "return_times": {
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "start_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                }
+                              },
+                              "required": [
+                                "start_minutes",
+                                "duration_minutes"
+                              ],
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "additionalProperties": false
@@ -10429,7 +11763,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -10441,6 +11775,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -10483,7 +11892,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -10495,6 +11904,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -10936,7 +12420,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -10948,6 +12432,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -10990,7 +12549,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -11002,6 +12561,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -11444,7 +13078,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -11456,6 +13090,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -11498,7 +13207,7 @@
                                 "turnaround_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
-                                  "maximum": 1440
+                                  "maximum": 10080
                                 },
                                 "enforce_hours": {
                                   "type": "boolean"
@@ -11510,6 +13219,81 @@
                                 },
                                 "require_certain": {
                                   "type": "boolean"
+                                },
+                                "min_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "max_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "allowed_durations": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "default_duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                },
+                                "pickup_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "return_times": {
+                                  "minItems": 1,
+                                  "maxItems": 4,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 1439
+                                      },
+                                      "duration_minutes": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 1440
+                                      }
+                                    },
+                                    "required": [
+                                      "start_minutes",
+                                      "duration_minutes"
+                                    ],
+                                    "additionalProperties": false
+                                  }
                                 }
                               },
                               "additionalProperties": false
@@ -12033,13 +13817,88 @@
                             "turnaround_minutes": {
                               "type": "integer",
                               "minimum": 0,
-                              "maximum": 1440
+                              "maximum": 10080
                             },
                             "enforce_hours": {
                               "type": "boolean"
                             },
                             "require_certain": {
                               "type": "boolean"
+                            },
+                            "min_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "max_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "allowed_durations": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 525600
+                              }
+                            },
+                            "default_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "pickup_times": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1440
+                                  }
+                                },
+                                "required": [
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "return_times": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1440
+                                  }
+                                },
+                                "required": [
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
                             }
                           },
                           "additionalProperties": false
@@ -12090,13 +13949,88 @@
                               "turnaround_minutes": {
                                 "type": "integer",
                                 "minimum": 0,
-                                "maximum": 1440
+                                "maximum": 10080
                               },
                               "enforce_hours": {
                                 "type": "boolean"
                               },
                               "require_certain": {
                                 "type": "boolean"
+                              },
+                              "min_duration_minutes": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 525600
+                              },
+                              "max_duration_minutes": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 525600
+                              },
+                              "allowed_durations": {
+                                "minItems": 1,
+                                "maxItems": 20,
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 525600
+                                }
+                              },
+                              "default_duration_minutes": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 525600
+                              },
+                              "pickup_times": {
+                                "minItems": 1,
+                                "maxItems": 4,
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "start_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1439
+                                    },
+                                    "duration_minutes": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1440
+                                    }
+                                  },
+                                  "required": [
+                                    "start_minutes",
+                                    "duration_minutes"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "return_times": {
+                                "minItems": 1,
+                                "maxItems": 4,
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "start_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1439
+                                    },
+                                    "duration_minutes": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1440
+                                    }
+                                  },
+                                  "required": [
+                                    "start_minutes",
+                                    "duration_minutes"
+                                  ],
+                                  "additionalProperties": false
+                                }
                               }
                             },
                             "additionalProperties": false
@@ -12187,13 +14121,88 @@
                           "turnaround_minutes": {
                             "type": "integer",
                             "minimum": 0,
-                            "maximum": 1440
+                            "maximum": 10080
                           },
                           "enforce_hours": {
                             "type": "boolean"
                           },
                           "require_certain": {
                             "type": "boolean"
+                          },
+                          "min_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "max_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "allowed_durations": {
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            }
+                          },
+                          "default_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "pickup_times": {
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "start_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                }
+                              },
+                              "required": [
+                                "start_minutes",
+                                "duration_minutes"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "return_times": {
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "start_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                }
+                              },
+                              "required": [
+                                "start_minutes",
+                                "duration_minutes"
+                              ],
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "additionalProperties": false
@@ -12257,13 +14266,88 @@
                             "turnaround_minutes": {
                               "type": "integer",
                               "minimum": 0,
-                              "maximum": 1440
+                              "maximum": 10080
                             },
                             "enforce_hours": {
                               "type": "boolean"
                             },
                             "require_certain": {
                               "type": "boolean"
+                            },
+                            "min_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "max_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "allowed_durations": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 525600
+                              }
+                            },
+                            "default_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "pickup_times": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1440
+                                  }
+                                },
+                                "required": [
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "return_times": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1440
+                                  }
+                                },
+                                "required": [
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
                             }
                           },
                           "additionalProperties": false
@@ -12360,13 +14444,88 @@
                           "turnaround_minutes": {
                             "type": "integer",
                             "minimum": 0,
-                            "maximum": 1440
+                            "maximum": 10080
                           },
                           "enforce_hours": {
                             "type": "boolean"
                           },
                           "require_certain": {
                             "type": "boolean"
+                          },
+                          "min_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "max_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "allowed_durations": {
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            }
+                          },
+                          "default_duration_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 525600
+                          },
+                          "pickup_times": {
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "start_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                }
+                              },
+                              "required": [
+                                "start_minutes",
+                                "duration_minutes"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "return_times": {
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "start_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "duration_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                }
+                              },
+                              "required": [
+                                "start_minutes",
+                                "duration_minutes"
+                              ],
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "additionalProperties": false
@@ -12445,13 +14604,88 @@
                             "turnaround_minutes": {
                               "type": "integer",
                               "minimum": 0,
-                              "maximum": 1440
+                              "maximum": 10080
                             },
                             "enforce_hours": {
                               "type": "boolean"
                             },
                             "require_certain": {
                               "type": "boolean"
+                            },
+                            "min_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "max_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "allowed_durations": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 525600
+                              }
+                            },
+                            "default_duration_minutes": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 525600
+                            },
+                            "pickup_times": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1440
+                                  }
+                                },
+                                "required": [
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "return_times": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1440
+                                  }
+                                },
+                                "required": [
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
                             }
                           },
                           "additionalProperties": false

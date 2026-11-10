@@ -4212,6 +4212,9 @@ function buildSlotlockStore(
     retentionDays,
     maxHoldsPerHolder,
     ...(maxHeldHoursPerHolder !== undefined ? { maxHeldHoursPerHolder } : {}),
+    // The server's hours judge a tenant's writes too: without them, enforced hours would refuse
+    // every booking on a resource that inherits nothing.
+    ...(options.defaultAvailabilityRules !== undefined ? { defaultAvailabilityRules: options.defaultAvailabilityRules } : {}),
   };
 
   /**
@@ -4917,7 +4920,7 @@ function buildSlotlockStore(
       }
       const rows = await sql<ResourceRow[]>`
         UPDATE slotlock.resources
-           SET booking_rules = ${rules === null ? null : sql.json({ ...rules })}::jsonb,
+           SET booking_rules = ${rules === null ? null : sql.json({ ...rules } as never)}::jsonb,
                -- Kept while check-in stays asked for, from the moment it first was; cleared without.
                check_in_since = CASE
                  WHEN ${rules?.checkInMinutes ?? null}::int IS NULL THEN NULL
@@ -4970,7 +4973,7 @@ function buildSlotlockStore(
         }
         await tx`
           INSERT INTO slotlock.booking_rule_defaults (tenant_ref, pool_ref, rules)
-          VALUES (${tenantRef}, ${pool}, ${tx.json({ ...rules })}::jsonb)
+          VALUES (${tenantRef}, ${pool}, ${tx.json({ ...rules } as never)}::jsonb)
           ON CONFLICT (tenant_ref, pool_ref)
           DO UPDATE SET rules = EXCLUDED.rules, updated_at = statement_timestamp()`;
         return rules;

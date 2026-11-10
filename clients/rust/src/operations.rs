@@ -44,6 +44,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"],
     },
     Operation {
+        name: "slotlock_find_available_ranges",
+        method: "GET",
+        path: "/v1/available-ranges",
+        path_params: &[],
+        query: &["resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"],
+    },
+    Operation {
         name: "slotlock_hold_slots",
         method: "POST",
         path: "/v1/slot-holds",
@@ -829,7 +836,6 @@ pub struct GetFreeBusyInput {
 pub struct FindNextAvailableInput {
     pub start: String,
     pub end: String,
-    pub duration_minutes: i64,
     /// Left out when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resource_ids: Vec<String>,
@@ -843,6 +849,8 @@ pub struct FindNextAvailableInput {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
 }
 
 /// The arguments of [`Client::find_available_slots`].
@@ -850,7 +858,6 @@ pub struct FindNextAvailableInput {
 pub struct FindAvailableSlotsInput {
     pub start: String,
     pub end: String,
-    pub duration_minutes: i64,
     /// Left out when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resource_ids: Vec<String>,
@@ -865,9 +872,30 @@ pub struct FindAvailableSlotsInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub require_free: Option<i64>,
+}
+
+/// The arguments of [`Client::find_available_ranges`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FindAvailableRangesInput {
+    pub pickup_start: String,
+    pub pickup_end: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 /// The arguments of [`Client::hold_slots`].
@@ -2178,6 +2206,20 @@ impl Client {
         self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
     }
 
+    /// Find available ranges.
+    ///
+    /// Find hires across days, such as a car from Friday to Monday: for each resource named, or
+    /// each member of a pool, the earliest range that starts between pickup_start and pickup_end
+    /// and either lasts `days` days (ending at the same local time) or ends between return_start
+    /// and return_end. Each range is free throughout with its buffers, allowed by the resource's
+    /// booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside
+    /// its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless
+    /// every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+    /// with slotlock_book_pool, at its start and end.
+    pub fn find_available_ranges(&self, input: &FindAvailableRangesInput) -> Result<Value, Error> {
+        self.call("slotlock_find_available_ranges", serde_json::to_value(input)?)
+    }
+
     /// Hold candidate slots.
     ///
     /// Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
@@ -2477,11 +2519,15 @@ impl Client {
     ///
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
     /// ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
-    /// step_offset_minutes), the time kept free before and after each booking, and whether
-    /// bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
-    /// its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-    /// slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
-    /// refused with the rule they break; searches offer only what they allow.
+    /// step_offset_minutes), the time kept free before and after each booking (turnaround up to a
+    /// week), whether bookings must lie inside its hours, how long a booking may be
+    /// (min_duration_minutes, max_duration_minutes, allowed_durations, and
+    /// default_duration_minutes for a search that names no length), and for a booking from one
+    /// local day to another, the pickup_times it starts in and the return_times it ends in.
+    /// `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults
+    /// (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+    /// moves and agents' events are refused with the rule they break; searches offer only what
+    /// they allow.
     pub fn set_resource_booking_rules(&self, input: &SetResourceBookingRulesInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_booking_rules", serde_json::to_value(input)?)
     }

@@ -17,6 +17,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"))),
           Map.entry("slotlock_find_available_slots", new Operation("GET", "/v1/available-slots", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"))),
+          Map.entry("slotlock_find_available_ranges", new Operation("GET", "/v1/available-ranges", List.of(), List.of("resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"))),
           Map.entry("slotlock_hold_slots", new Operation("POST", "/v1/slot-holds", List.of(), List.of())),
           Map.entry("slotlock_book_together", new Operation("POST", "/v1/bundles", List.of(), List.of())),
           Map.entry("slotlock_book_pool", new Operation("POST", "/v1/pool-bookings", List.of(), List.of())),
@@ -306,19 +307,17 @@ public abstract class SlotlockOperations {
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
-   * @param durationMinutes {@code duration_minutes}, integer
    * @param optional the optional arguments, or null: {@code resource_ids} (list of string),
    * {@code location} (string), {@code group} (string), {@code labels} (list of string), {@code
-   * kind} (string), {@code pool} (string)
+   * kind} (string), {@code pool} (string), {@code duration_minutes} (integer)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findNextAvailable(String start, String end, long durationMinutes, Map<String, ?> optional) {
+  public Map<String, Object> findNextAvailable(String start, String end, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("start", start);
     values.put("end", end);
-    values.put("duration_minutes", durationMinutes);
-    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool"), "slotlock_find_next_available");
+    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool", "duration_minutes"), "slotlock_find_next_available");
     return call("slotlock_find_next_available", values);
   }
 
@@ -329,12 +328,11 @@ public abstract class SlotlockOperations {
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
-   * @param durationMinutes {@code duration_minutes}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findNextAvailable(String start, String end, long durationMinutes) {
-    return findNextAvailable(start, end, durationMinutes, null);
+  public Map<String, Object> findNextAvailable(String start, String end) {
+    return findNextAvailable(start, end, null);
   }
 
   /**
@@ -344,16 +342,15 @@ public abstract class SlotlockOperations {
    * @param resourceIds {@code resource_ids}
    * @param start {@code start}
    * @param end {@code end}
-   * @param durationMinutes {@code duration_minutes}
    * @param optional the other optional arguments, or null
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findNextAvailable(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+  public Map<String, Object> findNextAvailable(List<?> resourceIds, String start, String end, Map<String, ?> optional) {
     Map<String, Object> merged = new LinkedHashMap<>();
     if (optional != null) merged.putAll(optional);
     merged.put("resource_ids", resourceIds);
-    return findNextAvailable(start, end, durationMinutes, merged);
+    return findNextAvailable(start, end, merged);
   }
 
   /**
@@ -363,12 +360,11 @@ public abstract class SlotlockOperations {
    * @param resourceIds {@code resource_ids}
    * @param start {@code start}
    * @param end {@code end}
-   * @param durationMinutes {@code duration_minutes}
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findNextAvailable(List<?> resourceIds, String start, String end, long durationMinutes) {
-    return findNextAvailable(resourceIds, start, end, durationMinutes, null);
+  public Map<String, Object> findNextAvailable(List<?> resourceIds, String start, String end) {
+    return findNextAvailable(resourceIds, start, end, null);
   }
 
   /**
@@ -382,20 +378,18 @@ public abstract class SlotlockOperations {
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
-   * @param durationMinutes {@code duration_minutes}, integer
    * @param optional the optional arguments, or null: {@code resource_ids} (list of string),
    * {@code location} (string), {@code group} (string), {@code labels} (list of string), {@code
-   * kind} (string), {@code pool} (string), {@code limit} (integer), {@code require_free}
-   * (integer)
+   * kind} (string), {@code pool} (string), {@code duration_minutes} (integer), {@code limit}
+   * (integer), {@code require_free} (integer)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findAvailableSlots(String start, String end, long durationMinutes, Map<String, ?> optional) {
+  public Map<String, Object> findAvailableSlots(String start, String end, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("start", start);
     values.put("end", end);
-    values.put("duration_minutes", durationMinutes);
-    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool", "limit", "require_free"), "slotlock_find_available_slots");
+    putOptional(values, optional, Set.of("resource_ids", "location", "group", "labels", "kind", "pool", "duration_minutes", "limit", "require_free"), "slotlock_find_available_slots");
     return call("slotlock_find_available_slots", values);
   }
 
@@ -410,12 +404,11 @@ public abstract class SlotlockOperations {
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
-   * @param durationMinutes {@code duration_minutes}, integer
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findAvailableSlots(String start, String end, long durationMinutes) {
-    return findAvailableSlots(start, end, durationMinutes, null);
+  public Map<String, Object> findAvailableSlots(String start, String end) {
+    return findAvailableSlots(start, end, null);
   }
 
   /**
@@ -425,16 +418,15 @@ public abstract class SlotlockOperations {
    * @param resourceIds {@code resource_ids}
    * @param start {@code start}
    * @param end {@code end}
-   * @param durationMinutes {@code duration_minutes}
    * @param optional the other optional arguments, or null
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes, Map<String, ?> optional) {
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, Map<String, ?> optional) {
     Map<String, Object> merged = new LinkedHashMap<>();
     if (optional != null) merged.putAll(optional);
     merged.put("resource_ids", resourceIds);
-    return findAvailableSlots(start, end, durationMinutes, merged);
+    return findAvailableSlots(start, end, merged);
   }
 
   /**
@@ -444,12 +436,56 @@ public abstract class SlotlockOperations {
    * @param resourceIds {@code resource_ids}
    * @param start {@code start}
    * @param end {@code end}
-   * @param durationMinutes {@code duration_minutes}
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
-  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end, long durationMinutes) {
-    return findAvailableSlots(resourceIds, start, end, durationMinutes, null);
+  public Map<String, Object> findAvailableSlots(List<?> resourceIds, String start, String end) {
+    return findAvailableSlots(resourceIds, start, end, null);
+  }
+
+  /**
+   * Find available ranges. Find hires across days, such as a car from Friday to Monday: for each
+   * resource named, or each member of a pool, the earliest range that starts between pickup_start
+   * and pickup_end and either lasts `days` days (ending at the same local time) or ends between
+   * return_start and return_end. Each range is free throughout with its buffers, allowed by the
+   * resource's booking rules (pick-up and return times, lengths, notice, step) and starts and
+   * ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none
+   * unless every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+   * with slotlock_book_pool, at its start and end.
+   *
+   * @param pickupStart {@code pickup_start}, string
+   * @param pickupEnd {@code pickup_end}, string
+   * @param optional the optional arguments, or null: {@code resource_ids} (list of string),
+   * {@code pool} (string), {@code days} (integer), {@code return_start} (string), {@code
+   * return_end} (string), {@code limit} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableRanges(String pickupStart, String pickupEnd, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("pickup_start", pickupStart);
+    values.put("pickup_end", pickupEnd);
+    putOptional(values, optional, Set.of("resource_ids", "pool", "days", "return_start", "return_end", "limit"), "slotlock_find_available_ranges");
+    return call("slotlock_find_available_ranges", values);
+  }
+
+  /**
+   * Find available ranges. Find hires across days, such as a car from Friday to Monday: for each
+   * resource named, or each member of a pool, the earliest range that starts between pickup_start
+   * and pickup_end and either lasts `days` days (ending at the same local time) or ends between
+   * return_start and return_end. Each range is free throughout with its buffers, allowed by the
+   * resource's booking rules (pick-up and return times, lengths, notice, step) and starts and
+   * ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none
+   * unless every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+   * with slotlock_book_pool, at its start and end.
+   *
+   * @param pickupStart {@code pickup_start}, string
+   * @param pickupEnd {@code pickup_end}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> findAvailableRanges(String pickupStart, String pickupEnd) {
+    return findAvailableRanges(pickupStart, pickupEnd, null);
   }
 
   /**
@@ -1436,11 +1472,15 @@ public abstract class SlotlockOperations {
   /**
    * Set a resource's booking rules. Set what a booking on one resource must satisfy from now on:
    * minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's
-   * time zone, offset by step_offset_minutes), the time kept free before and after each booking,
-   * and whether bookings must lie inside its hours. `null` clears them. A rule it does not set
-   * comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-   * slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused
-   * with the rule they break; searches offer only what they allow.
+   * time zone, offset by step_offset_minutes), the time kept free before and after each booking
+   * (turnaround up to a week), whether bookings must lie inside its hours, how long a booking may
+   * be (min_duration_minutes, max_duration_minutes, allowed_durations, and
+   * default_duration_minutes for a search that names no length), and for a booking from one local
+   * day to another, the pickup_times it starts in and the return_times it ends in. `null` clears
+   * them. A rule it does not set comes from its pool's or the tenant's defaults
+   * (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+   * moves and agents' events are refused with the rule they break; searches offer only what they
+   * allow.
    *
    * @param resourceId {@code resource_id}, string
    * @param rules {@code rules}, object (may be null)
@@ -1459,11 +1499,15 @@ public abstract class SlotlockOperations {
   /**
    * Set a resource's booking rules. Set what a booking on one resource must satisfy from now on:
    * minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's
-   * time zone, offset by step_offset_minutes), the time kept free before and after each booking,
-   * and whether bookings must lie inside its hours. `null` clears them. A rule it does not set
-   * comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-   * slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused
-   * with the rule they break; searches offer only what they allow.
+   * time zone, offset by step_offset_minutes), the time kept free before and after each booking
+   * (turnaround up to a week), whether bookings must lie inside its hours, how long a booking may
+   * be (min_duration_minutes, max_duration_minutes, allowed_durations, and
+   * default_duration_minutes for a search that names no length), and for a booking from one local
+   * day to another, the pickup_times it starts in and the return_times it ends in. `null` clears
+   * them. A rule it does not set comes from its pool's or the tenant's defaults
+   * (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+   * moves and agents' events are refused with the rule they break; searches offer only what they
+   * allow.
    *
    * @param resourceId {@code resource_id}, string
    * @param rules {@code rules}, object (may be null)

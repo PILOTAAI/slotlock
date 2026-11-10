@@ -193,6 +193,16 @@ function bookPool(
   return backend.bookPool(context, input);
 }
 
+/** `slotlock_find_available_ranges`, from a backend that searches hires (RFC 0004 B3). */
+function findAvailableRanges(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.findAvailableRanges) throw new SlotlockAgentOperationError('ranges_unavailable', 409);
+  return backend.findAvailableRanges(context, input);
+}
+
 /** `slotlock_get_pool_availability`, from a backend that knows pools, as `holdSlots`. */
 function getPoolAvailability(
   backend: SlotlockAgentCalendarBackend,
@@ -667,6 +677,7 @@ export type SlotlockAgentOperation =
   | 'slotlock_get_free_busy'
   | 'slotlock_find_next_available'
   | 'slotlock_find_available_slots'
+  | 'slotlock_find_available_ranges'
   | 'slotlock_hold_slots'
   | 'slotlock_release_slots'
   | 'slotlock_confirm_slot'
@@ -719,6 +730,7 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_get_free_busy: 'read',
   slotlock_find_next_available: 'read',
   slotlock_find_available_slots: 'read',
+  slotlock_find_available_ranges: 'read',
   slotlock_hold_slots: 'write',
   slotlock_book_together: 'write',
   slotlock_book_pool: 'write',
@@ -952,6 +964,21 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: { resource_id: string; start: string; end: string; duration_minutes: number; limit: number },
   ): Promise<{ slots: { start: string; end: string }[]; certain: boolean }>;
+  /**
+   * Optional. Hires across days (`slotlock_find_available_ranges`, RFC 0004 B3): each resource's, or
+   * each pool member's, earliest range from a pick-up window to a return window, else
+   * `ranges_unavailable`.
+   */
+  findAvailableRanges?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. The length a search for these resources offers when it is asked for none: their
+   * booking rules' `defaultDurationMinutes` when they all give the same one, else null. Without it,
+   * a search names its length.
+   */
+  defaultDuration?(context: SlotlockAgentInvocationContext, resourceIds: readonly string[]): Promise<number | null>;
 }
 
 /**
@@ -1272,6 +1299,14 @@ const SELECTING_OPERATIONS: ReadonlyMap<SlotlockAgentOperation, number> = new Ma
   ['slotlock_find_available_slots', 20],
 ]);
 const SELECTION_FIELDS = ['location', 'group', 'labels', 'kind', 'pool'] as const;
+/** Searches that take the resources' usual length when they name none. */
+const DEFAULT_LENGTH_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
+  'slotlock_find_next_available',
+  'slotlock_find_available_slots',
+]);
+/** The most ranges one search answers. */
+const MAX_LISTED_RANGES = 50;
+const MAX_RANGE_RESOURCES = 100;
 
 /** Whether a search's input names its resources, or selects them, and not both or neither. */
 function selectsOrNames(input: { resource_ids?: unknown }): boolean {
@@ -1481,7 +1516,8 @@ const OPERATION_DEFINITIONS = [
         pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
-        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
+        /** Left out: the resources' usual length (their booking rules' default_duration_minutes). */
+        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES).optional(),
       })
       .strict()
       .refine(selectsOrNames, 'Give resource_ids, or select resources by location, group, labels, kind or pool: one or the other')
@@ -1515,7 +1551,8 @@ const OPERATION_DEFINITIONS = [
         pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
-        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
+        /** Left out: the resources' usual length (their booking rules' default_duration_minutes). */
+        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES).optional(),
         limit: z.number().int().min(1).max(MAX_LISTED_SLOTS).default(10),
         require_free: z.number().int().min(1).max(MAX_SLOT_RESOURCES).optional(),
       })
@@ -1544,6 +1581,60 @@ const OPERATION_DEFINITIONS = [
     risk: { readOnly: true, destructive: false, idempotent: true },
     invoke: findAvailableSlots,
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 60, limit: 10 },
+  },
+  {
+    name: 'slotlock_find_available_ranges',
+    title: 'Find available ranges',
+    description:
+      'Find hires across days, such as a car from Friday to Monday: for each resource named, or each member of a pool, the earliest range that starts between pickup_start and pickup_end and either lasts `days` days (ending at the same local time) or ends between return_start and return_end. Each range is free throughout with its buffers, allowed by the resource\'s booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless every resource\'s coverage is certain. Book one with slotlock_create_event, or a pool\'s with slotlock_book_pool, at its start and end.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES).optional(),
+        pool: POOL.optional(),
+        pickup_start: DATE_TIME,
+        pickup_end: DATE_TIME,
+        days: z.number().int().min(1).max(366).optional(),
+        return_start: DATE_TIME.optional(),
+        return_end: DATE_TIME.optional(),
+        limit: z.number().int().min(1).max(MAX_LISTED_RANGES).default(10),
+      })
+      .strict()
+      .refine((value) => (value.resource_ids !== undefined) !== (value.pool !== undefined), 'Give resource_ids or pool, one of them')
+      .refine(
+        (value) =>
+          value.days !== undefined
+            ? value.return_start === undefined && value.return_end === undefined
+            : value.return_start !== undefined && value.return_end !== undefined,
+        'Give days, or return_start and return_end',
+      )
+      .refine((value) => {
+        const pickupStart = Date.parse(value.pickup_start);
+        const pickupEnd = Date.parse(value.pickup_end);
+        const last =
+          value.days !== undefined ? pickupEnd + (value.days + 1) * 86_400_000 : Date.parse(value.return_end ?? '');
+        const returnStart = value.return_start === undefined ? pickupStart : Date.parse(value.return_start);
+        return pickupEnd >= pickupStart && last >= returnStart && last - pickupStart <= MAX_AGENT_WINDOW_MS;
+      }, 'The windows must run forward, within the longest window a search reads'),
+    output: z
+      .object({
+        ranges: z
+          .array(z.object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME }).strict())
+          .max(MAX_LISTED_RANGES),
+        coverage: COVERAGE,
+        /** The pool's members searched, when the call named a pool. */
+        selected_resource_ids: z.array(RESOURCE_ID).max(MAX_RANGE_RESOURCES).optional(),
+      })
+      .strict(),
+    risk: { readOnly: true, destructive: false, idempotent: true },
+    invoke: findAvailableRanges,
+    example: {
+      pool: 'compact-car',
+      pickup_start: '2027-03-05T09:00:00Z',
+      pickup_end: '2027-03-05T12:00:00Z',
+      return_start: '2027-03-08T09:00:00Z',
+      return_end: '2027-03-08T12:00:00Z',
+      limit: 5,
+    },
   },
   {
     name: 'slotlock_create_event',
@@ -2480,6 +2571,14 @@ export async function invokeSlotlockAgentOperation(args: {
         Object.entries(input).filter(([key]) => !(SELECTION_FIELDS as readonly string[]).includes(key)),
       );
       input.resource_ids = selected;
+    }
+    // A search that names no length takes the resources' usual one (RFC 0004 B3).
+    if (DEFAULT_LENGTH_OPERATIONS.has(operation.name) && input.duration_minutes === undefined) {
+      const usual = backend.defaultDuration
+        ? await backend.defaultDuration(context, (input.resource_ids ?? []) as string[])
+        : null;
+      if (usual === null) return { ok: false, status: 400, code: 'duration_required' };
+      input = { ...input, duration_minutes: usual };
     }
     const asked = input;
     recover = (code) => alternativesForRefusal(backend, context, operation.name, asked, code);

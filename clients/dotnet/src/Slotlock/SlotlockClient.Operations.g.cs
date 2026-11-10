@@ -20,6 +20,7 @@ public sealed partial class SlotlockClient
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"]),
         ["slotlock_find_available_slots"] = new("GET", "/v1/available-slots", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"]),
+        ["slotlock_find_available_ranges"] = new("GET", "/v1/available-ranges", [], ["resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"]),
         ["slotlock_hold_slots"] = new("POST", "/v1/slot-holds", [], []),
         ["slotlock_book_together"] = new("POST", "/v1/bundles", [], []),
         ["slotlock_book_pool"] = new("POST", "/v1/pool-bookings", [], []),
@@ -330,38 +331,38 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
-    /// <param name="durationMinutes">duration_minutes</param>
     /// <param name="resourceIds">resource_ids</param>
     /// <param name="location">location</param>
     /// <param name="group">group</param>
     /// <param name="labels">labels</param>
     /// <param name="kind">kind</param>
     /// <param name="pool">pool</param>
+    /// <param name="durationMinutes">duration_minutes</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> FindNextAvailableAsync(
         string start,
         string end,
-        long durationMinutes,
         Optional<IEnumerable<string>> resourceIds = default,
         Optional<string> location = default,
         Optional<string> group = default,
         Optional<IEnumerable<string>> labels = default,
         Optional<string> kind = default,
         Optional<string> pool = default,
+        Optional<long> durationMinutes = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["start"] = Json.ToNode(start);
         values["end"] = Json.ToNode(end);
-        values["duration_minutes"] = Json.ToNode(durationMinutes);
         if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         if (group.HasValue) values["group"] = Json.ToNode(group.Value);
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (durationMinutes.HasValue) values["duration_minutes"] = Json.ToNode(durationMinutes.Value);
         return CallAsync("slotlock_find_next_available", values, cancellationToken);
     }
 
@@ -378,7 +379,7 @@ public sealed partial class SlotlockClient
             resourceIds: new Optional<IEnumerable<string>>(resourceIds),
             start: start,
             end: end,
-            durationMinutes: durationMinutes,
+            durationMinutes: new Optional<long>(durationMinutes),
             cancellationToken: cancellationToken,
             location: default,
             group: default,
@@ -398,13 +399,13 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
-    /// <param name="durationMinutes">duration_minutes</param>
     /// <param name="resourceIds">resource_ids</param>
     /// <param name="location">location</param>
     /// <param name="group">group</param>
     /// <param name="labels">labels</param>
     /// <param name="kind">kind</param>
     /// <param name="pool">pool</param>
+    /// <param name="durationMinutes">duration_minutes</param>
     /// <param name="limit">limit</param>
     /// <param name="requireFree">require_free</param>
     /// <param name="cancellationToken">Cancels the request.</param>
@@ -413,13 +414,13 @@ public sealed partial class SlotlockClient
     public Task<JsonObject> FindAvailableSlotsAsync(
         string start,
         string end,
-        long durationMinutes,
         Optional<IEnumerable<string>> resourceIds = default,
         Optional<string> location = default,
         Optional<string> group = default,
         Optional<IEnumerable<string>> labels = default,
         Optional<string> kind = default,
         Optional<string> pool = default,
+        Optional<long> durationMinutes = default,
         Optional<long> limit = default,
         Optional<long> requireFree = default,
         CancellationToken cancellationToken = default)
@@ -427,16 +428,61 @@ public sealed partial class SlotlockClient
         var values = new JsonObject();
         values["start"] = Json.ToNode(start);
         values["end"] = Json.ToNode(end);
-        values["duration_minutes"] = Json.ToNode(durationMinutes);
         if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         if (group.HasValue) values["group"] = Json.ToNode(group.Value);
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (durationMinutes.HasValue) values["duration_minutes"] = Json.ToNode(durationMinutes.Value);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
         if (requireFree.HasValue) values["require_free"] = Json.ToNode(requireFree.Value);
         return CallAsync("slotlock_find_available_slots", values, cancellationToken);
+    }
+
+    /// <summary>Find available ranges.</summary>
+    /// <remarks>
+    /// Find hires across days, such as a car from Friday to Monday: for each resource named, or
+    /// each member of a pool, the earliest range that starts between pickup_start and pickup_end
+    /// and either lasts `days` days (ending at the same local time) or ends between return_start
+    /// and return_end. Each range is free throughout with its buffers, allowed by the resource's
+    /// booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside
+    /// its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless
+    /// every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+    /// with slotlock_book_pool, at its start and end.
+    /// </remarks>
+    /// <param name="pickupStart">pickup_start</param>
+    /// <param name="pickupEnd">pickup_end</param>
+    /// <param name="resourceIds">resource_ids</param>
+    /// <param name="pool">pool</param>
+    /// <param name="days">days</param>
+    /// <param name="returnStart">return_start</param>
+    /// <param name="returnEnd">return_end</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> FindAvailableRangesAsync(
+        string pickupStart,
+        string pickupEnd,
+        Optional<IEnumerable<string>> resourceIds = default,
+        Optional<string> pool = default,
+        Optional<long> days = default,
+        Optional<string> returnStart = default,
+        Optional<string> returnEnd = default,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["pickup_start"] = Json.ToNode(pickupStart);
+        values["pickup_end"] = Json.ToNode(pickupEnd);
+        if (resourceIds.HasValue) values["resource_ids"] = Json.ToNode(resourceIds.Value);
+        if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
+        if (days.HasValue) values["days"] = Json.ToNode(days.Value);
+        if (returnStart.HasValue) values["return_start"] = Json.ToNode(returnStart.Value);
+        if (returnEnd.HasValue) values["return_end"] = Json.ToNode(returnEnd.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_find_available_ranges", values, cancellationToken);
     }
 
     /// <summary>Hold candidate slots.</summary>
@@ -1548,11 +1594,15 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
     /// ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
-    /// step_offset_minutes), the time kept free before and after each booking, and whether
-    /// bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
-    /// its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-    /// slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
-    /// refused with the rule they break; searches offer only what they allow.
+    /// step_offset_minutes), the time kept free before and after each booking (turnaround up to a
+    /// week), whether bookings must lie inside its hours, how long a booking may be
+    /// (min_duration_minutes, max_duration_minutes, allowed_durations, and
+    /// default_duration_minutes for a search that names no length), and for a booking from one
+    /// local day to another, the pickup_times it starts in and the return_times it ends in.
+    /// `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults
+    /// (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+    /// moves and agents' events are refused with the rule they break; searches offer only what
+    /// they allow.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="rules">rules</param>

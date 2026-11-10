@@ -447,8 +447,7 @@
       },
       "required": [
         "start",
-        "end",
-        "duration_minutes"
+        "end"
       ],
       "additionalProperties": false
     },
@@ -641,8 +640,7 @@
       },
       "required": [
         "start",
-        "end",
-        "duration_minutes"
+        "end"
       ],
       "additionalProperties": false
     },
@@ -743,6 +741,163 @@
     },
     "annotations": {
       "title": "Find available slots",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_find_available_ranges",
+    "title": "Find available ranges",
+    "description": "Find hires across days, such as a car from Friday to Monday: for each resource named, or each member of a pool, the earliest range that starts between pickup_start and pickup_end and either lasts `days` days (ending at the same local time) or ends between return_start and return_end. Each range is free throughout with its buffers, allowed by the resource's booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless every resource's coverage is certain. Book one with slotlock_create_event, or a pool's with slotlock_book_pool, at its start and end.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "pickup_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "pickup_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 366
+        },
+        "return_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "return_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "pickup_start",
+        "pickup_end"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "ranges": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "resource_id",
+              "start",
+              "end"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "certainty": {
+              "type": "string",
+              "enum": [
+                "certain",
+                "uncertain"
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "certainty",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "selected_resource_ids": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "required": [
+        "ranges",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Find available ranges",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,

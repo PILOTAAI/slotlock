@@ -231,12 +231,12 @@ describe('Slotlock with the official MCP TypeScript SDK v2 (MCP 2026-07-28)', ()
     fixture = await startSlotlockFixture();
     const pinned = await connect(fixture, { pin: SLOTLOCK_MCP_PROTOCOL_VERSION });
     expect(pinned.getNegotiatedProtocolVersion()).toBe(SLOTLOCK_MCP_PROTOCOL_VERSION);
-    expect((await pinned.listTools()).tools).toHaveLength(17);
+    expect((await pinned.listTools()).tools).toHaveLength(18);
     await pinned.close();
 
     const legacy = await connect(fixture, 'legacy');
     expect(legacy.getProtocolEra()).toBe('legacy');
     expect(legacy.getNegotiatedProtocolVersion()).toBe(SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION);
-    expect((await legacy.listTools()).tools).toHaveLength(17);
+    expect((await legacy.listTools()).tools).toHaveLength(18);
   });
 });

@@ -40,6 +40,7 @@ export const SLOTLOCK_ASSISTANT_TOOL_USE: Readonly<Record<SlotlockAgentOperation
     slotlock_get_free_busy: 'read',
     slotlock_find_next_available: 'read',
     slotlock_find_available_slots: 'read',
+    slotlock_find_available_ranges: 'read',
     slotlock_get_pool_availability: 'read',
     slotlock_get_event: 'read',
     slotlock_list_events: 'read',

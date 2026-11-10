@@ -426,6 +426,11 @@ const AVAILABILITY_RULE = z
   .strict();
 const AVAILABILITY_RULES = z.array(AVAILABILITY_RULE).max(50);
 
+/** A window of a day: minutes after local midnight and how long (it may run past midnight). */
+const DAY_WINDOW = z
+  .object({ start_minutes: z.number().int().min(0).max(1_439), duration_minutes: z.number().int().min(1).max(1_440) })
+  .strict();
+
 /** What a booking on a resource must satisfy; each rule optional (`SlotlockBookingRules`). */
 const BOOKING_RULES = z
   .object({
@@ -434,10 +439,21 @@ const BOOKING_RULES = z
     slot_step_minutes: z.number().int().min(1).max(1_440).optional(),
     step_offset_minutes: z.number().int().min(0).max(1_439).optional(),
     buffer_before_minutes: z.number().int().min(0).max(1_440).optional(),
-    turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
+    turnaround_minutes: z.number().int().min(0).max(10_080).optional(),
     enforce_hours: z.boolean().optional(),
     check_in_minutes: z.number().int().min(1).max(1_440).optional(),
     require_certain: z.boolean().optional(),
+    /** A booking lasts at least, and at most, this many minutes (RFC 0004 B3). */
+    min_duration_minutes: z.number().int().min(1).max(525_600).optional(),
+    max_duration_minutes: z.number().int().min(1).max(525_600).optional(),
+    /** A booking lasts exactly one of these many minutes. */
+    allowed_durations: z.array(z.number().int().min(1).max(525_600)).min(1).max(20).optional(),
+    /** The length a search offers when it names none. */
+    default_duration_minutes: z.number().int().min(1).max(525_600).optional(),
+    /** A booking from one local day to another starts in one of these windows of the day. */
+    pickup_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
+    /** And ends in one of these. */
+    return_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
   })
   .strict();
 
@@ -1074,7 +1090,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_resource_booking_rules',
       title: "Set a resource's booking rules",
       description:
-        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking, and whether bookings must lie inside its hours. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking (turnaround up to a week), whether bookings must lie inside its hours, how long a booking may be (min_duration_minutes, max_duration_minutes, allowed_durations, and default_duration_minutes for a search that names no length), and for a booking from one local day to another, the pickup_times it starts in and the return_times it ends in. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/booking-rules',
       input: z.object({ resource_id: RESOURCE_ID, rules: BOOKING_RULES.nullable() }).strict(),

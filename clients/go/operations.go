@@ -15,6 +15,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"}},
 		{name: "slotlock_find_available_slots", method: "GET", path: "/v1/available-slots", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"}},
+		{name: "slotlock_find_available_ranges", method: "GET", path: "/v1/available-ranges", pathParams: nil, query: []string{"resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"}},
 		{name: "slotlock_hold_slots", method: "POST", path: "/v1/slot-holds", pathParams: nil, query: nil},
 		{name: "slotlock_book_together", method: "POST", path: "/v1/bundles", pathParams: nil, query: nil},
 		{name: "slotlock_book_pool", method: "POST", path: "/v1/pool-bookings", pathParams: nil, query: nil},
@@ -317,8 +318,6 @@ type FindNextAvailableInput struct {
 
 	End string
 
-	DurationMinutes int64
-
 	ResourceIDs []string
 
 	Location *string
@@ -330,13 +329,14 @@ type FindNextAvailableInput struct {
 	Kind *string
 
 	Pool *string
+
+	DurationMinutes *int64
 }
 
 func (in FindNextAvailableInput) values() map[string]any {
 	values := map[string]any{}
 	values["start"] = in.Start
 	values["end"] = in.End
-	values["duration_minutes"] = in.DurationMinutes
 	if in.ResourceIDs != nil {
 		values["resource_ids"] = in.ResourceIDs
 	}
@@ -354,6 +354,9 @@ func (in FindNextAvailableInput) values() map[string]any {
 	}
 	if in.Pool != nil {
 		values["pool"] = *in.Pool
+	}
+	if in.DurationMinutes != nil {
+		values["duration_minutes"] = *in.DurationMinutes
 	}
 	return values
 }
@@ -372,8 +375,6 @@ type FindAvailableSlotsInput struct {
 
 	End string
 
-	DurationMinutes int64
-
 	ResourceIDs []string
 
 	Location *string
@@ -386,6 +387,8 @@ type FindAvailableSlotsInput struct {
 
 	Pool *string
 
+	DurationMinutes *int64
+
 	Limit *int64
 
 	RequireFree *int64
@@ -395,7 +398,6 @@ func (in FindAvailableSlotsInput) values() map[string]any {
 	values := map[string]any{}
 	values["start"] = in.Start
 	values["end"] = in.End
-	values["duration_minutes"] = in.DurationMinutes
 	if in.ResourceIDs != nil {
 		values["resource_ids"] = in.ResourceIDs
 	}
@@ -413,6 +415,9 @@ func (in FindAvailableSlotsInput) values() map[string]any {
 	}
 	if in.Pool != nil {
 		values["pool"] = *in.Pool
+	}
+	if in.DurationMinutes != nil {
+		values["duration_minutes"] = *in.DurationMinutes
 	}
 	if in.Limit != nil {
 		values["limit"] = *in.Limit
@@ -432,6 +437,62 @@ func (in FindAvailableSlotsInput) values() map[string]any {
 // resource_ids, or select them as slotlock_get_free_busy does: at most 20.
 func (c *Client) FindAvailableSlots(ctx context.Context, in FindAvailableSlotsInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_find_available_slots", in.values())
+}
+
+// FindAvailableRangesInput holds the arguments of [Client.FindAvailableRanges].
+type FindAvailableRangesInput struct {
+	PickupStart string
+
+	PickupEnd string
+
+	ResourceIDs []string
+
+	Pool *string
+
+	Days *int64
+
+	ReturnStart *string
+
+	ReturnEnd *string
+
+	Limit *int64
+}
+
+func (in FindAvailableRangesInput) values() map[string]any {
+	values := map[string]any{}
+	values["pickup_start"] = in.PickupStart
+	values["pickup_end"] = in.PickupEnd
+	if in.ResourceIDs != nil {
+		values["resource_ids"] = in.ResourceIDs
+	}
+	if in.Pool != nil {
+		values["pool"] = *in.Pool
+	}
+	if in.Days != nil {
+		values["days"] = *in.Days
+	}
+	if in.ReturnStart != nil {
+		values["return_start"] = *in.ReturnStart
+	}
+	if in.ReturnEnd != nil {
+		values["return_end"] = *in.ReturnEnd
+	}
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// FindAvailableRanges: Find available ranges. Find hires across days, such as a car from Friday
+// to Monday: for each resource named, or each member of a pool, the earliest range that starts
+// between pickup_start and pickup_end and either lasts `days` days (ending at the same local
+// time) or ends between return_start and return_end. Each range is free throughout with its
+// buffers, allowed by the resource's booking rules (pick-up and return times, lengths, notice,
+// step) and starts and ends inside its bookable hours. Up to `limit` ranges, earliest first, one
+// per resource; none unless every resource's coverage is certain. Book one with
+// slotlock_create_event, or a pool's with slotlock_book_pool, at its start and end.
+func (c *Client) FindAvailableRanges(ctx context.Context, in FindAvailableRangesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_find_available_ranges", in.values())
 }
 
 // HoldSlotsInput holds the arguments of [Client.HoldSlots].
@@ -1609,8 +1670,11 @@ func (in SetResourceBookingRulesInput) values() map[string]any {
 // SetResourceBookingRules: Set a resource's booking rules. Set what a booking on one resource
 // must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local
 // midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before
-// and after each booking, and whether bookings must lie inside its hours. `null` clears them. A
-// rule it does not set comes from its pool's or the tenant's defaults
+// and after each booking (turnaround up to a week), whether bookings must lie inside its hours,
+// how long a booking may be (min_duration_minutes, max_duration_minutes, allowed_durations, and
+// default_duration_minutes for a search that names no length), and for a booking from one local
+// day to another, the pickup_times it starts in and the return_times it ends in. `null` clears
+// them. A rule it does not set comes from its pool's or the tenant's defaults
 // (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
 // moves and agents' events are refused with the rule they break; searches offer only what they
 // allow.

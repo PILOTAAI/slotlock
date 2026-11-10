@@ -27,10 +27,26 @@ export interface SlotlockBookingRules {
    */
   bufferBeforeMinutes?: number;
   /**
-   * Minutes kept free after each booking made under the rule, as its trailing buffer: 0-1,440.
-   * Bookings made before the rule, or imported, keep what they have.
+   * Minutes kept free after each booking made under the rule, as its trailing buffer: 0-10,080 (a
+   * week, for a vehicle's service after a long hire). Bookings made before the rule, or imported,
+   * keep what they have.
    */
   turnaroundMinutes?: number;
+  /** A booking lasts at least this many minutes: 1-525,600 (a year). */
+  minDurationMinutes?: number;
+  /** A booking lasts at most this many minutes: 1-525,600. */
+  maxDurationMinutes?: number;
+  /** A booking lasts exactly one of these many minutes: 1-20 lengths, each 1-525,600. */
+  allowedDurations?: number[];
+  /** The length a search offers when it is asked for none: 1-525,600, and allowed by the others. */
+  defaultDurationMinutes?: number;
+  /**
+   * A booking from one local day to another (a hire) starts inside one of these windows of the day,
+   * in the resource's time zone: 1-4 windows. A booking within one day is not held to them.
+   */
+  pickupTimes?: SlotlockDayWindow[];
+  /** Such a booking ends inside one of these windows of the day, alike. */
+  returnTimes?: SlotlockDayWindow[];
   /** A booking lies inside the resource's bookable hours. */
   enforceHours?: boolean;
   /**
@@ -47,13 +63,24 @@ export interface SlotlockBookingRules {
   requireCertain?: boolean;
 }
 
+/** A window of a day: minutes after local midnight, and how long (it may run past midnight). */
+export interface SlotlockDayWindow {
+  startMinutes: number;
+  durationMinutes: number;
+}
+
 /** Which rule a write broke, as its refusal names it. */
 export type SlotlockBookingRule =
   | 'min_notice'
   | 'max_advance'
   | 'slot_step'
   | 'outside_hours'
-  | 'uncertain';
+  | 'uncertain'
+  | 'min_duration'
+  | 'max_duration'
+  | 'duration_not_allowed'
+  | 'pickup_time'
+  | 'return_time';
 
 const MINUTE_MS = 60_000;
 const DAY_MINUTES = 24 * 60;
@@ -65,10 +92,89 @@ export const SLOTLOCK_BOOKING_RULE_LIMITS = Object.freeze({
   slotStepMinutes: [1, DAY_MINUTES],
   stepOffsetMinutes: [0, DAY_MINUTES - 1],
   bufferBeforeMinutes: [0, DAY_MINUTES],
-  turnaroundMinutes: [0, DAY_MINUTES],
+  turnaroundMinutes: [0, 7 * DAY_MINUTES],
   checkInMinutes: [1, DAY_MINUTES],
+  minDurationMinutes: [1, 525_600],
+  maxDurationMinutes: [1, 525_600],
+  defaultDurationMinutes: [1, 525_600],
 } as const);
 const LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
+/** Lengths `allowedDurations` may list. */
+export const SLOTLOCK_MAX_ALLOWED_DURATIONS = 20;
+/** Windows `pickupTimes` and `returnTimes` may each hold. */
+export const SLOTLOCK_MAX_DAY_WINDOWS = 4;
+const LIST_RULES = new Set(['allowedDurations', 'pickupTimes', 'returnTimes']);
+
+/** `allowedDurations` from untrusted input, or a TypeError. */
+function parseAllowedDurations(value: unknown): number[] {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > SLOTLOCK_MAX_ALLOWED_DURATIONS ||
+    !value.every((length) => Number.isSafeInteger(length) && length >= 1 && length <= 525_600) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new TypeError(
+      `Slotlock booking rule allowedDurations must be 1-${SLOTLOCK_MAX_ALLOWED_DURATIONS} different whole minutes, each 1-525600`,
+    );
+  }
+  return [...(value as number[])].sort((a, b) => a - b);
+}
+
+/** `pickupTimes` or `returnTimes` from untrusted input, or a TypeError. */
+function parseDayWindows(key: string, value: unknown): SlotlockDayWindow[] {
+  const valid =
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= SLOTLOCK_MAX_DAY_WINDOWS &&
+    value.every(
+      (window) =>
+        typeof window === 'object' &&
+        window !== null &&
+        !Array.isArray(window) &&
+        Object.keys(window).every((name) => name === 'startMinutes' || name === 'durationMinutes') &&
+        Number.isSafeInteger(window.startMinutes) &&
+        window.startMinutes >= 0 &&
+        window.startMinutes < DAY_MINUTES &&
+        Number.isSafeInteger(window.durationMinutes) &&
+        window.durationMinutes >= 1 &&
+        window.durationMinutes <= DAY_MINUTES,
+    );
+  if (!valid) {
+    throw new TypeError(
+      `Slotlock booking rule ${key} must be 1-${SLOTLOCK_MAX_DAY_WINDOWS} windows of startMinutes (0-1439) and durationMinutes (1-1440)`,
+    );
+  }
+  return (value as SlotlockDayWindow[]).map((window) => ({
+    startMinutes: window.startMinutes,
+    durationMinutes: window.durationMinutes,
+  }));
+}
+
+/** Refuse durations that leave no length a booking may have (a TypeError naming them). */
+function checkDurations(rules: SlotlockBookingRules): void {
+  const min = rules.minDurationMinutes ?? 1;
+  const max = rules.maxDurationMinutes ?? 525_600;
+  if (min > max) throw new TypeError('Slotlock booking rule minDurationMinutes must not exceed maxDurationMinutes');
+  if (rules.allowedDurations && !rules.allowedDurations.some((length) => length >= min && length <= max)) {
+    throw new TypeError('Slotlock booking rule allowedDurations has no length within the minimum and maximum');
+  }
+  if (rules.defaultDurationMinutes !== undefined && durationRuleBroken(rules, rules.defaultDurationMinutes) !== null) {
+    throw new TypeError('Slotlock booking rule defaultDurationMinutes must be a length the other rules allow');
+  }
+}
+
+/** The duration rule a booking of `minutes` breaks, or null. */
+export function durationRuleBroken(
+  rules: SlotlockBookingRules | undefined,
+  minutes: number,
+): 'min_duration' | 'max_duration' | 'duration_not_allowed' | null {
+  if (!rules) return null;
+  if (rules.minDurationMinutes !== undefined && minutes < rules.minDurationMinutes) return 'min_duration';
+  if (rules.maxDurationMinutes !== undefined && minutes > rules.maxDurationMinutes) return 'max_duration';
+  if (rules.allowedDurations !== undefined && !rules.allowedDurations.includes(minutes)) return 'duration_not_allowed';
+  return null;
+}
 
 /** Booking rules from untrusted input, or a TypeError naming the field that is wrong. */
 export function parseBookingRules(value: unknown): SlotlockBookingRules {
@@ -78,10 +184,13 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
   const input = value as Record<string, unknown>;
   const rules: SlotlockBookingRules = {};
   for (const key of Object.keys(input)) {
-    if (!(key in LIMITS) && key !== 'enforceHours' && key !== 'requireCertain') {
+    if (!(key in LIMITS) && key !== 'enforceHours' && key !== 'requireCertain' && !LIST_RULES.has(key)) {
       throw new TypeError(`Slotlock booking rules have no ${key}`);
     }
   }
+  if (input.allowedDurations !== undefined) rules.allowedDurations = parseAllowedDurations(input.allowedDurations);
+  if (input.pickupTimes !== undefined) rules.pickupTimes = parseDayWindows('pickupTimes', input.pickupTimes);
+  if (input.returnTimes !== undefined) rules.returnTimes = parseDayWindows('returnTimes', input.returnTimes);
   for (const [key, [min, max]] of Object.entries(LIMITS) as [keyof typeof LIMITS, readonly [number, number]][]) {
     const field = input[key];
     if (field === undefined) continue;
@@ -109,6 +218,7 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
   ) {
     throw new TypeError('Slotlock booking rule stepOffsetMinutes must be less than slotStepMinutes');
   }
+  checkDurations(rules);
   return rules;
 }
 
@@ -130,6 +240,15 @@ export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBoo
       else dropped.push(key);
       continue;
     }
+    if (LIST_RULES.has(key)) {
+      try {
+        if (key === 'allowedDurations') rules.allowedDurations = parseAllowedDurations(field);
+        else rules[key as 'pickupTimes' | 'returnTimes'] = parseDayWindows(key, field);
+      } catch {
+        dropped.push(key);
+      }
+      continue;
+    }
     const limits = (LIMITS as Record<string, readonly [number, number]>)[key];
     if (
       limits === undefined ||
@@ -142,6 +261,12 @@ export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBoo
       continue;
     }
     rules[key as keyof typeof LIMITS] = field;
+  }
+  // Levels are validated alone: a combination that leaves no length refuses every booking.
+  try {
+    checkDurations(rules);
+  } catch {
+    dropped.push('durations');
   }
   return { rules, dropped };
 }
@@ -207,9 +332,42 @@ export function nextStepStart(from: Date, stepMinutes: number, timezone: string,
   return candidate;
 }
 
+/** The local day an instant falls on in `timezone`, as days since 1970-01-01. */
+function localDay(instant: Date, timezone: string): number {
+  const local = instant.getTime() + zonedOffsetMinutes(instant, timezone) * MINUTE_MS;
+  return Math.floor(local / (DAY_MINUTES * MINUTE_MS));
+}
+
+/**
+ * Whether a booking runs from one local day into another (a hire): its last moment falls on a later
+ * local day than its start. One that ends at midnight stays on its day.
+ */
+export function isMultiDay(interval: Interval, timezone: string): boolean {
+  return localDay(new Date(interval.end.getTime() - 1), timezone) > localDay(interval.start, timezone);
+}
+
+/**
+ * Whether `instant` lies in one of the windows of its local day: `[start, start + length)`, or with
+ * `closed` (a return) up to and including the window's end.
+ */
+export function withinDayWindows(
+  instant: Date,
+  windows: readonly SlotlockDayWindow[],
+  timezone: string,
+  closed = false,
+): boolean {
+  const minutes = localMinutes(instant, timezone);
+  return windows.some((window) => {
+    const into = (((minutes - window.startMinutes) % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
+    return closed ? into <= window.durationMinutes : into < window.durationMinutes;
+  });
+}
+
 /**
  * The rule a booking of `interval` made at `now` breaks, or null. `hours` (the resource's own, else
- * inherited, else the default) and `exceptions` are read only when enforced.
+ * inherited, else the default) and `exceptions` are read only when enforced. A hire (a booking from
+ * one local day to another) under `pickupTimes` or `returnTimes` starts and ends in them, and under
+ * `enforceHours` only its start and end must lie inside the hours: the resource is out between.
  */
 export function bookingRuleBroken(params: {
   rules: SlotlockBookingRules | undefined;
@@ -237,14 +395,35 @@ export function bookingRuleBroken(params: {
   ) {
     return 'slot_step';
   }
+  const duration = durationRuleBroken(rules, (interval.end.getTime() - start) / MINUTE_MS);
+  if (duration) return duration;
+  const hire =
+    (rules.pickupTimes !== undefined || rules.returnTimes !== undefined) && isMultiDay(interval, params.timezone);
+  if (hire && rules.pickupTimes && !withinDayWindows(interval.start, rules.pickupTimes, params.timezone)) {
+    return 'pickup_time';
+  }
+  if (hire && rules.returnTimes && !withinDayWindows(interval.end, rules.returnTimes, params.timezone, true)) {
+    return 'return_time';
+  }
   if (rules.enforceHours === true) {
-    const open = openWindows({
-      hours: params.hours,
-      ...(params.exceptions !== undefined ? { exceptions: params.exceptions } : {}),
-      timezone: params.timezone,
-      window: interval,
-    });
-    if (!coveredByOpenWindows(open, interval)) return 'outside_hours';
+    const open = (window: Interval) =>
+      openWindows({
+        hours: params.hours,
+        ...(params.exceptions !== undefined ? { exceptions: params.exceptions } : {}),
+        timezone: params.timezone,
+        window,
+      });
+    if (hire) {
+      // Open at the start, and open up to the end: the hours a hire is collected and returned in.
+      const minute = MINUTE_MS;
+      const atStart = { start: interval.start, end: new Date(start + minute) };
+      const atEnd = { start: new Date(interval.end.getTime() - minute), end: interval.end };
+      if (!coveredByOpenWindows(open(atStart), atStart) || !coveredByOpenWindows(open(atEnd), atEnd)) {
+        return 'outside_hours';
+      }
+    } else if (!coveredByOpenWindows(open(interval), interval)) {
+      return 'outside_hours';
+    }
   }
   return null;
 }
@@ -271,8 +450,13 @@ export function bookingSearch(params: {
   window: Interval;
   now: Date;
   bufferAfterMs?: number;
+  /** The length searched for: a length the duration rules refuse finds nothing. */
+  durationMs?: number;
 }): SlotlockBookingSearch | null {
   const { rules, window, now } = params;
+  if (params.durationMs !== undefined && durationRuleBroken(rules, params.durationMs / MINUTE_MS) !== null) {
+    return null;
+  }
   let start = window.start.getTime();
   const end = window.end.getTime();
   if (rules?.minNoticeMinutes !== undefined) {
@@ -282,8 +466,31 @@ export function bookingSearch(params: {
   const bufferBeforeMs = bookingBufferBeforeMs(rules);
   const step = rules?.slotStepMinutes;
   const offset = stepOffset(rules);
-  const toStep =
+  const stepped =
     step === undefined ? undefined : (from: Date) => nextStepStart(from, step, params.timezone, offset);
+  // A slot that runs from one local day into another starts and ends in the pick-up and return
+  // times: candidates move on a minute (or a step) at a time, for at most two days.
+  const durationMs = params.durationMs;
+  const hireRules = rules && (rules.pickupTimes !== undefined || rules.returnTimes !== undefined) ? rules : undefined;
+  const toStep =
+    hireRules === undefined || durationMs === undefined
+      ? stepped
+      : (from: Date) => {
+          let candidate = stepped ? stepped(from) : new Date(Math.ceil(from.getTime() / MINUTE_MS) * MINUTE_MS);
+          for (let tries = 0; tries <= 2 * DAY_MINUTES; tries++) {
+            const slot = { start: candidate, end: new Date(candidate.getTime() + durationMs) };
+            if (
+              !isMultiDay(slot, params.timezone) ||
+              ((!hireRules.pickupTimes || withinDayWindows(slot.start, hireRules.pickupTimes, params.timezone)) &&
+                (!hireRules.returnTimes || withinDayWindows(slot.end, hireRules.returnTimes, params.timezone, true)))
+            ) {
+              return candidate;
+            }
+            const next = new Date(Math.floor(candidate.getTime() / MINUTE_MS) * MINUTE_MS + MINUTE_MS);
+            candidate = stepped ? stepped(next) : next;
+          }
+          return new Date(end + 1);
+        };
   const searched = { start: new Date(start), end: new Date(end) };
   if (rules?.maxAdvanceDays !== undefined) {
     const latestStart = now.getTime() + rules.maxAdvanceDays * DAY_MINUTES * MINUTE_MS;

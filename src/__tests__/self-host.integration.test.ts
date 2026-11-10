@@ -608,6 +608,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         'slotlock_confirm_slot',
         'slotlock_create_event',
         'slotlock_delete_event',
+        'slotlock_find_available_ranges',
         'slotlock_find_available_slots',
         'slotlock_find_next_available',
         'slotlock_get_event',

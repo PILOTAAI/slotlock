@@ -54,6 +54,7 @@ import {
   openWindows,
 } from './hours.js';
 import { fetchHolidayCalendar, parseHolidayCalendar } from './holidays.js';
+import { findEarliestRange } from './ranges.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
   type SlotlockStore,
@@ -500,7 +501,7 @@ export function projectSlotlockCalendarEvent(event: SlotlockCalendarEvent): Reco
  */
 export function slotlockAgentErrorStatus(code: string): 400 | 404 | 409 | 429 {
   if (code === 'resource_tenant_mismatch' || code.endsWith('_not_found')) return 404;
-  if (code.startsWith('invalid_')) return 400;
+  if (code.startsWith('invalid_') || code === 'duration_required') return 400;
   if (code === 'owner_event_quota_exceeded' || code === 'owner_command_quota_exceeded') return 429;
   return 409;
 }
@@ -512,6 +513,11 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
   slot_step: 'booking_rule_slot_step',
   outside_hours: 'booking_rule_outside_hours',
   uncertain: 'booking_rule_uncertain',
+  min_duration: 'booking_rule_min_duration',
+  max_duration: 'booking_rule_max_duration',
+  duration_not_allowed: 'booking_rule_duration_not_allowed',
+  pickup_time: 'booking_rule_pickup_time',
+  return_time: 'booking_rule_return_time',
 });
 
 function operationError(
@@ -1235,6 +1241,7 @@ export function createSlotlockStoreAgentBackend(
           timezone: resource.timezone,
           window,
           now: new Date(),
+          durationMs,
         });
         const sources = await requiredSources(options, context, resource);
         const freeBusy = await readFreeBusy(tenantStore, {
@@ -1268,6 +1275,97 @@ export function createSlotlockStoreAgentBackend(
       });
     },
 
+    async defaultDuration(context, resourceIds) {
+      return withTenant(store, context, async (tenantStore) => {
+        const lengths = new Set<number | undefined>();
+        for (const resourceId of resourceIds) {
+          const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+          lengths.add(resource.effectiveBookingRules?.defaultDurationMinutes);
+        }
+        const [only] = [...lengths];
+        return lengths.size === 1 && only !== undefined ? only : null;
+      });
+    },
+
+    async findAvailableRanges(context, input) {
+      const tenantRef = context.principal.tenantRef;
+      const pickup = { start: new Date(input.pickup_start as string), end: new Date(input.pickup_end as string) };
+      const days = input.days as number | undefined;
+      const back =
+        input.return_start !== undefined
+          ? { start: new Date(input.return_start as string), end: new Date(input.return_end as string) }
+          : undefined;
+      const limit = input.limit as number;
+      const charge = busyBudget();
+      const now = new Date();
+      return withTenant(store, context, async (tenantStore) => {
+        let resources: SlotlockResource[];
+        if (typeof input.pool === 'string') {
+          resources = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool, visibility: 'shared', ordered: true });
+          if (resources.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
+          resources = resources.slice(0, 100);
+        } else {
+          resources = [];
+          for (const resourceId of distinctResourceIds(input)) {
+            resources.push(await requireAgentResource(tenantStore, tenantRef, resourceId));
+          }
+        }
+        // What a range may reach: the pick-up window, the longest it may run, and its buffers.
+        const lastEnd = back ? back.end.getTime() : pickup.end.getTime() + ((days ?? 1) + 1) * 86_400_000;
+        const reach = { start: new Date(pickup.start.getTime() - 86_400_000), end: new Date(lastEnd + 8 * 86_400_000) };
+        const exceptions = await tenantStore.availabilityExceptionsFor({
+          tenantRef,
+          resourceIds: resources.map((resource) => resource.id),
+          window: reach,
+        });
+        const ranges: { resource_id: string; start: string; end: string }[] = [];
+        let complete = true;
+        for (const resource of resources) {
+          const sources = await requiredSources(options, context, resource);
+          const freeBusy = await readFreeBusy(tenantStore, {
+            tenantRef,
+            resourceId: resource.id,
+            window: reach,
+            requiredSources: [...sources],
+            ...(options.coverageMaxAgeMs !== undefined ? { coverageMaxAgeMs: options.coverageMaxAgeMs } : {}),
+          });
+          charge(freeBusy.busy.length);
+          if (freeBusy.coverage.state !== 'complete') {
+            complete = false;
+            continue;
+          }
+          const fallback =
+            resource.availabilityRules === undefined && resource.inheritedAvailability === undefined
+              ? await options.availabilityRules(context, resource)
+              : [];
+          const found = findEarliestRange({
+            busy: freeBusy.busy,
+            rules: resource.effectiveBookingRules,
+            timezone: resource.timezone,
+            hours: applicableHours(resource, fallback).rules,
+            exceptions: exceptions.get(resource.id) ?? [],
+            now,
+            pickup,
+            ...(back ? { return: back } : {}),
+            ...(days !== undefined ? { days } : {}),
+          });
+          if (found) ranges.push({ resource_id: resource.id, start: found.start.toISOString(), end: found.end.toISOString() });
+        }
+        const window = { start: pickup.start, end: new Date(lastEnd) };
+        const answer = {
+          ranges: complete
+            ? ranges
+                .sort((a, b) => Date.parse(a.start) - Date.parse(b.start) || a.resource_id.localeCompare(b.resource_id))
+                .slice(0, limit)
+            : [],
+          coverage: coverageProjection(window, complete),
+        };
+        return typeof input.pool === 'string'
+          ? { ...answer, selected_resource_ids: resources.map((resource) => resource.id) }
+          : answer;
+      });
+    },
+
     async findNextAvailable(context, input) {
       const window = interval(input as { start: string; end: string });
       const resourceIds = distinctResourceIds(input);
@@ -1289,6 +1387,7 @@ export function createSlotlockStoreAgentBackend(
             timezone: resource.timezone,
             window,
             now: new Date(),
+            durationMs,
           });
           const sources = await requiredSources(options, context, resource);
           const freeBusy = await readFreeBusy(tenantStore, {
@@ -2309,8 +2408,22 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
     ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
     ...(rules.requireCertain !== undefined ? { require_certain: rules.requireCertain } : {}),
+    ...(rules.minDurationMinutes !== undefined ? { min_duration_minutes: rules.minDurationMinutes } : {}),
+    ...(rules.maxDurationMinutes !== undefined ? { max_duration_minutes: rules.maxDurationMinutes } : {}),
+    ...(rules.allowedDurations !== undefined ? { allowed_durations: [...rules.allowedDurations] } : {}),
+    ...(rules.defaultDurationMinutes !== undefined ? { default_duration_minutes: rules.defaultDurationMinutes } : {}),
+    ...(rules.pickupTimes !== undefined ? { pickup_times: dayWindowsOutput(rules.pickupTimes) } : {}),
+    ...(rules.returnTimes !== undefined ? { return_times: dayWindowsOutput(rules.returnTimes) } : {}),
   };
 }
+
+const dayWindowsOutput = (windows: readonly { startMinutes: number; durationMinutes: number }[]) =>
+  windows.map((window) => ({ start_minutes: window.startMinutes, duration_minutes: window.durationMinutes }));
+const dayWindowsInput = (value: unknown) =>
+  (value as { start_minutes: number; duration_minutes: number }[]).map((window) => ({
+    startMinutes: window.start_minutes,
+    durationMinutes: window.duration_minutes,
+  }));
 
 function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (value === null || value === undefined) return null;
@@ -2327,6 +2440,14 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
   if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
   if (input.require_certain !== undefined) rules.requireCertain = input.require_certain as boolean;
+  if (input.min_duration_minutes !== undefined) rules.minDurationMinutes = input.min_duration_minutes as number;
+  if (input.max_duration_minutes !== undefined) rules.maxDurationMinutes = input.max_duration_minutes as number;
+  if (input.allowed_durations !== undefined) rules.allowedDurations = [...(input.allowed_durations as number[])];
+  if (input.default_duration_minutes !== undefined) {
+    rules.defaultDurationMinutes = input.default_duration_minutes as number;
+  }
+  if (input.pickup_times !== undefined) rules.pickupTimes = dayWindowsInput(input.pickup_times);
+  if (input.return_times !== undefined) rules.returnTimes = dayWindowsInput(input.return_times);
   return rules;
 }
 

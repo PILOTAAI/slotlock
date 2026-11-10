@@ -366,13 +366,30 @@ function `slotlock.inherited_availability` finds the nearest, and every resource
 a resource's own until `overrideResources` clears them. Clearing them silently would have changed
 hours an owner may have set on purpose.
 
-**B3. Durations and multi-day (T1).**
+**B3. Durations and multi-day (T1).** Status: built.
 - Booking rules gain:
   - `minDurationMinutes`, `maxDurationMinutes`, `allowedDurations` and `defaultDuration`;
   - `pickupTimes` and `returnTimes`: daily windows a multi-day booking must start and end in;
   - turnaround over a day.
 - `find_available_ranges` finds N-day ranges for a resource or a pool, from a pick-up window to
   a return window. This is the car-rental search.
+
+As built:
+- The default is `defaultDurationMinutes`. A search that names no length takes it when its
+  resources agree on one, else answers `400 duration_required`.
+- A hire is a booking whose last moment falls on a later local day than its start. One ending at
+  midnight stays on its day. Pick-up times are half-open, and a return may end exactly at its
+  window's end.
+- Under `enforceHours`, a hire needs only its start and end inside the hours. The resource is out
+  between them.
+- Turnaround goes to a week. The calendar event's buffer check was widened to match, added
+  `NOT VALID` first.
+- `slotlock_find_available_ranges` answers one range per resource, the earliest. It takes a
+  number of days (the same local time N days on, across clock changes) or a return window (the
+  earliest return it allows). The search judges each candidate with the write's own rules, so an
+  offered range is one the write accepts. Searches always honour hours, as slot searches do.
+- Building B3 found a bug: a tenant's store judged enforced hours against no hours for resources
+  on the server's default, and refused every such write. Fixed.
 
 **B4. A written lifecycle (T2).**
 - Each status and transition is documented, with a table test of every allowed move and a

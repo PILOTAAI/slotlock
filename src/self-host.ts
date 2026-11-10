@@ -228,6 +228,7 @@ const SERVED_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
   'slotlock_get_free_busy',
   'slotlock_find_next_available',
   'slotlock_find_available_slots',
+  'slotlock_find_available_ranges',
   'slotlock_hold_slots',
   'slotlock_release_slots',
   'slotlock_book_together',

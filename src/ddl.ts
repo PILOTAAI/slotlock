@@ -5235,6 +5235,22 @@ ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS recurrence_ends_by
 ALTER TABLE slotlock.calendar_events
   ADD COLUMN IF NOT EXISTS buffer_after_ms integer NOT NULL DEFAULT 0
   CONSTRAINT slotlock_calendar_events_buffer_valid CHECK (buffer_after_ms BETWEEN 0 AND 86400000);
+-- A turnaround may run to a week (RFC 0004 B3): the wider check admits every row the old one did,
+-- so it is added NOT VALID (no scan under the lock), and the old one dropped.
+DO $slotlock_calendar_event_week_turnaround$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.calendar_events'::regclass
+       AND conname = 'slotlock_calendar_events_buffer_week_valid'
+  ) THEN
+    ALTER TABLE slotlock.calendar_events
+      ADD CONSTRAINT slotlock_calendar_events_buffer_week_valid
+      CHECK (buffer_after_ms BETWEEN 0 AND 604800000) NOT VALID;
+  END IF;
+  ALTER TABLE slotlock.calendar_events DROP CONSTRAINT IF EXISTS slotlock_calendar_events_buffer_valid;
+END
+$slotlock_calendar_event_week_turnaround$;
 -- The leading buffer a booked event keeps before each occurrence, kept for a later roll alike.
 ALTER TABLE slotlock.calendar_events
   ADD COLUMN IF NOT EXISTS buffer_before_ms integer NOT NULL DEFAULT 0
