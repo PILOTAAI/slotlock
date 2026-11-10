@@ -91,7 +91,8 @@ import { parseAvailabilityRules } from './weekly-hours.js';
 
 export { SlotlockConfigError, type SlotlockEnv, type SlotlockServeDashboardConfig };
 
-/** Every variable the commands read. The README, `.env.example` and `server.json` document these. */
+/** Every variable the commands read. `slotlock --help`, `.env.example`, `server.json` and the docs
+ * (site/docs-src/self-host.md) document these. */
 export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'DATABASE_URL',
   'SLOTLOCK_MIGRATE_DATABASE_URL',
@@ -134,7 +135,7 @@ const DAY_MS = 86_400_000;
  * every GitHub user gives each a tenant, so the cap keeps one from filling the database.
  */
 const SERVE_MAX_TENANT_RESOURCES = 10_000;
-/** How often `serve` maintains each tenant with data (README, Operations: at least daily). */
+/** How often `serve` maintains each tenant with data (docs, Operations: at least daily). */
 const SERVE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 /** Passes `slotlock maintain` runs at most, each as big as `serve`'s, until nothing is left. */
 const MAINTAIN_MAX_PASSES = 100;

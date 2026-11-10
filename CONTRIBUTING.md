@@ -57,7 +57,12 @@ Every TypeScript example the docs show is a region of `examples/*.ts`
 `<!-- code examples/<file>#<name> -->`, and the site build puts the code in. Edit the example, not
 a copy: `docs-examples.test.ts` fails when a README copy differs, a marker names no region, or a
 region is shown nowhere, and `examples.integration.test.ts` runs the examples against PostgreSQL.
-The website and docs live in `site/`.
+
+The website and docs live in `site/`. Document a topic on its page in `site/docs-src/`, the one
+place it is written down. The README is the front door: it says what Slotlock is, how to run it,
+and links to those pages; `readme.test.ts` keeps it short and its links working. Its intro, "Why
+it is built for agents", "Project status and boundaries" and "Supported versions" also appear on
+the site, which includes them.
 
 ## Pull requests
 
