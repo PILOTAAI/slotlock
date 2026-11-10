@@ -226,6 +226,10 @@
                               "type": "string",
                               "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                             }
+                          },
+                          "part_of": {
+                            "type": "string",
+                            "format": "uuid"
                           }
                         },
                         "required": [
@@ -701,6 +705,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -720,7 +747,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -5185,6 +5214,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -5204,7 +5256,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -5562,6 +5616,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -5581,7 +5658,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -6906,6 +6985,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -6925,7 +7027,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -7298,6 +7402,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -7317,7 +7444,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -7829,6 +7958,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -7848,7 +8000,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -8297,6 +8451,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -8316,7 +8493,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -8746,6 +8925,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -8765,7 +8967,9 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }
@@ -9152,6 +9356,29 @@
                             "type": "string",
                             "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                           }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -9171,7 +9398,441 @@
                         "labels",
                         "attributes",
                         "location",
-                        "groups"
+                        "groups",
+                        "parent_id",
+                        "part_index"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resource_id}/parent": {
+      "put": {
+        "operationId": "slotlock_set_resource_parent",
+        "summary": "Make a resource part of another",
+        "description": "Make a resource a part of a composite (a room of a hall, a half of a court), or no part (`null`). A booking of the composite as a whole then conflicts with a booking of any of its parts, and two parts never conflict with each other; each part's free/busy shows the whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts; refused while either side has a booking or live hold still to come (`composite_busy`).",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "parent_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "parent_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "external_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timezone": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "availability": {
+                          "anyOf": [
+                            {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "rrule": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  },
+                                  "start_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1439
+                                  },
+                                  "duration_minutes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 10080
+                                  }
+                                },
+                                "required": [
+                                  "rrule",
+                                  "start_minutes",
+                                  "duration_minutes"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "step_offset_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "buffer_before_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "effective_booking_rules": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "min_notice_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "max_advance_days": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 3660
+                                },
+                                "slot_step_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "step_offset_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1439
+                                },
+                                "buffer_before_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "turnaround_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1440
+                                },
+                                "enforce_hours": {
+                                  "type": "boolean"
+                                },
+                                "check_in_minutes": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1440
+                                },
+                                "require_certain": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "visibility": {
+                          "type": "string",
+                          "enum": [
+                            "shared",
+                            "private"
+                          ]
+                        },
+                        "archived_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "pool": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "room",
+                            "desk",
+                            "space",
+                            "vehicle",
+                            "machine",
+                            "equipment",
+                            "service",
+                            "other"
+                          ]
+                        },
+                        "capacity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "labels": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          }
+                        },
+                        "attributes": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              }
+                            ]
+                          }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
+                        },
+                        "parent_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "part_index": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "external_ref",
+                        "timezone",
+                        "availability",
+                        "booking_rules",
+                        "effective_booking_rules",
+                        "visibility",
+                        "archived_at",
+                        "pool",
+                        "name",
+                        "description",
+                        "kind",
+                        "capacity",
+                        "labels",
+                        "attributes",
+                        "location",
+                        "groups",
+                        "parent_id",
+                        "part_index"
                       ],
                       "additionalProperties": false
                     }

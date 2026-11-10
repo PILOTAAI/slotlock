@@ -313,7 +313,11 @@ setting, `order`: `stable` (today), `least_booked` (fewest bookings in the last 
 `round_robin`, to share bookings across a pool's members: vans, rooms or a team of people (RFC 0002
 open question 2).
 
-**G8. Composite resources (T2, later).** A parent made of children (a hall of three rooms), one
+**G8. Composite resources (T2, later).** Status: built on `claude/inspiring-dijkstra-bfvqif`, with
+the spans in a table of their own, `composite_claims`, filled by a trigger on `reservations`, so
+reservations and every query on them are unchanged and a resource that is neither a part nor a whole
+has no claims; a composite changes only while neither side has a booking or live hold to come, so
+claims are never backfilled. A parent made of children (a hall of three rooms), one
 level deep. Each occupancy row gains a span, an `int4range` over the parent's children: a booking of
 the whole parent writes one row on the parent spanning all of them; a booking of child *i* writes its
 own row and a row on the parent spanning `[i, i+1)`. The exclusion constraint becomes

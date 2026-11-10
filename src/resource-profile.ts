@@ -310,6 +310,9 @@ export const SLOTLOCK_POOL_ORDERS = Object.freeze(['stable', 'least_booked', 'ro
 /** Pools a tenant may set an order for (`pool_order_limit_reached` for one more). */
 export const SLOTLOCK_MAX_POOL_SETTINGS = 1_000;
 
+/** The parts a composite resource may have (RFC 0003 G8): a hall of its rooms, a court of its halves. */
+export const SLOTLOCK_MAX_COMPOSITE_PARTS = 50;
+
 export type SlotlockPoolOrder = (typeof SLOTLOCK_POOL_ORDERS)[number];
 
 /** Locations, and groups, a key limited to part of its tenant may name (RFC 0003 G6), each. */

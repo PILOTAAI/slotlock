@@ -788,6 +788,7 @@ describe('slotlock command line', () => {
     [['key', 'create', 'agent', '--scope', ''], /--scope must be a comma-separated list of read, write and admin/],
     [['maintain', 'now'], /wrong number of arguments for "maintain"/],
     [['partner', 'close'], /wrong number of arguments for "partner close"/],
+    [['resource', 'parent', 'room-1'], /wrong number of arguments for "resource parent"/],
     [['partner', 'close', 'stackapi', '--month', '2026-13'], /--month must be a month/],
     [['partner', 'list', '--month', '2026-10'], /--month applies only to partner close/],
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],

@@ -45,6 +45,12 @@ export interface SlotlockResource {
    * (`slotlock_book_pool`).
    */
   pool?: string;
+  /**
+   * The composite it is a part of (RFC 0003 G8), and its place there: a booking of the whole
+   * conflicts with every part. Absent when it is no part.
+   */
+  parentId?: string;
+  partIndex?: number;
   /** Its name, shown instead of `externalRef` (resource-profile.ts). Absent when it has none. */
   name?: string;
   /** What it is, in a sentence or a paragraph. Absent when it has none. */

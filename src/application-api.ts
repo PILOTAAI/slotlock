@@ -56,6 +56,7 @@ export type SlotlockApplicationOperation =
   | 'slotlock_import_resource_availability'
   | 'slotlock_set_resource_booking_rules'
   | 'slotlock_set_resource_pool'
+  | 'slotlock_set_resource_parent'
   | 'slotlock_list_pools'
   | 'slotlock_set_pool_order'
   | 'slotlock_get_booking_rule_defaults'
@@ -157,6 +158,7 @@ export interface SlotlockApplicationBackend {
   importResourceAvailability: Handler;
   setResourceBookingRules: Handler;
   setResourcePool: Handler;
+  setResourceParent: Handler;
   listPools: Handler;
   setPoolOrder: Handler;
   getBookingRuleDefaults: Handler;
@@ -446,6 +448,10 @@ const RESOURCE = z
     location: GROUPING_REF.nullable(),
     /** The groups it is in, by reference. */
     groups: z.array(GROUPING_REF).max(SLOTLOCK_MAX_GROUPS_PER_RESOURCE),
+    /** The composite it is a part of (a room of a hall), by id; `null` when it is no part. */
+    parent_id: z.string().uuid().nullable(),
+    /** Its place among its parent's parts, from 0; `null` when it is no part. */
+    part_index: z.number().int().min(0).nullable(),
   })
   .strict();
 
@@ -913,6 +919,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'setResourcePool',
       example: { resource_id: EXAMPLE_RESOURCE_ID, pool: 'van' },
+    },
+    {
+      name: 'slotlock_set_resource_parent',
+      title: "Make a resource part of another",
+      description:
+        "Make a resource a part of a composite (a room of a hall, a half of a court), or no part (`null`). A booking of the composite as a whole then conflicts with a booking of any of its parts, and two parts never conflict with each other; each part's free/busy shows the whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts; refused while either side has a booking or live hold still to come (`composite_busy`).",
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/parent',
+      input: z.object({ resource_id: RESOURCE_ID, parent_id: RESOURCE_ID.nullable() }).strict(),
+      output: z.object({ resource: RESOURCE }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setResourceParent',
+      example: { resource_id: EXAMPLE_RESOURCE_ID, parent_id: '0e7c1f9a-3b5d-4c2e-9f81-6a4b2d8c7e10' },
     },
     {
       name: 'slotlock_list_pools',

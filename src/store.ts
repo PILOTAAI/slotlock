@@ -1798,6 +1798,8 @@ type ResourceRow = {
   location_ref?: string | null;
   location_name?: string | null;
   group_refs?: string[];
+  parent_id?: string | null;
+  part_index?: number | null;
   /** The rules that apply (EFFECTIVE_BOOKING_RULES); absent when the query did not read them. */
   effective_booking_rules?: unknown;
 };
@@ -1805,6 +1807,7 @@ type ResourceRow = {
 /** A resource's own columns, as toResource reads them. */
 const RESOURCE_COLUMNS = `id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
   visibility, archived_at, name, description, kind, capacity, labels, attributes, location_ref,
+  parent_id, part_index,
   (SELECT place.name FROM slotlock.locations place
     WHERE place.tenant_ref = resources.tenant_ref AND place.ref = resources.location_ref) AS location_name,
   ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
@@ -1868,6 +1871,10 @@ function toResource(row: ResourceRow): SlotlockResource {
     if (typeof row.location_name === 'string') resource.locationName = row.location_name;
   }
   if (Array.isArray(row.group_refs) && row.group_refs.length > 0) resource.groups = [...row.group_refs];
+  if (typeof row.parent_id === 'string' && typeof row.part_index === 'number') {
+    resource.parentId = row.parent_id;
+    resource.partIndex = row.part_index;
+  }
   if (row.availability_rules !== null && row.availability_rules !== undefined) {
     // Written validated; anything else reads as closed.
     try {
@@ -1911,6 +1918,9 @@ function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailability
 /** What the location and group guards (ddl.ts) refuse with, by their HINT. */
 const GROUPING_REFUSALS: ReadonlySet<string> = new Set([
   'pool_order_limit_reached',
+  'composite_too_deep',
+  'composite_parts_limit',
+  'composite_busy',
   'location_too_deep',
   'location_cycle',
   'location_limit_reached',
@@ -2578,6 +2588,14 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * SLOTLOCK_MAX_POOL_SETTINGS pools a tenant.
    */
   setPoolOrder(params: { tenantRef: string; pool: string; order: SlotlockPoolOrder }): Promise<SlotlockPoolOrder>;
+  /**
+   * Make a resource a part of another (RFC 0003 G8), or no part (`null`): a booking of the whole
+   * then conflicts with every part, two parts never with each other. Null for no such resource;
+   * `parent_not_found`, `composite_too_deep` (one level only), `composite_parts_limit`
+   * (SLOTLOCK_MAX_COMPOSITE_PARTS) and `composite_busy` (either side has a booking or live hold to
+   * come) refuse it.
+   */
+  setResourceParent(params: { tenantRef: string; id: string; parentId: string | null }): Promise<SlotlockResource | null>;
   /** Note the member a pool booking took, from which `round_robin` goes on. */
   notePoolBooking(params: { tenantRef: string; pool: string; resourceId: string }): Promise<void>;
   /** Set (or clear, with `null`) the bookable hours of every resource the tenant has; returns how many. */
@@ -3475,11 +3493,16 @@ async function reapExpiredHolds(
   start: Date,
   end: Date,
 ): Promise<void> {
+  // A composite's parent and parts too (RFC 0003 G8): their expired holds' claims are in the way.
   await tx`
     DELETE FROM slotlock.reservations
      WHERE id IN (
        SELECT id FROM slotlock.reservations
-        WHERE resource_id = ${resourceId}
+        WHERE resource_id IN (
+                SELECT ${resourceId}::uuid
+                UNION ALL SELECT family.parent_id FROM slotlock.resources family
+                           WHERE family.id = ${resourceId} AND family.parent_id IS NOT NULL
+                UNION ALL SELECT family.id FROM slotlock.resources family WHERE family.parent_id = ${resourceId})
           AND status = 'held'
           AND expires_at <= statement_timestamp()
           AND ${occupiedStartsBefore(tx, end)}
@@ -3487,6 +3510,25 @@ async function reapExpiredHolds(
         ORDER BY id
         FOR UPDATE
      )`;
+}
+
+/**
+ * What else keeps a resource busy as part of a composite (RFC 0003 G8), as rows of
+ * (occupied_starts_at, occupied_ends_at): a part, the bookings of its parent as a whole; a parent,
+ * the bookings of any of its parts. Its own bookings are read with its own rows. Nothing for a
+ * resource that is neither.
+ */
+function compositeBusy(executor: StoreSql, resourceId: string, window: Interval) {
+  return executor`
+    SELECT lower(claim.during) AS occupied_starts_at, upper(claim.during) AS occupied_ends_at
+      FROM slotlock.resources me
+      JOIN slotlock.composite_claims claim
+        ON claim.resource_id = COALESCE(me.parent_id, me.id)
+       AND claim.booked_resource_id <> me.id
+       AND (me.parent_id IS NULL OR claim.span @> me.part_index)
+     WHERE me.id = ${resourceId}
+       AND claim.during && tstzrange(${window.start}, ${window.end}, '[)')
+       AND (claim.status <> 'held' OR claim.expires_at > statement_timestamp())`;
 }
 
 /**
@@ -3622,6 +3664,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'setResourceBookingRules',
   'setBookingRuleDefaults',
   'setResourcePool',
+  'setResourceParent',
   'setPoolOrder',
   'notePoolBooking',
   'setTenantAvailability',
@@ -4577,6 +4620,31 @@ function buildSlotlockStore(
         UPDATE slotlock.resources SET pool_ref = ${params.pool}
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
         RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+      const row = rows[0];
+      return row ? toResource(row) : null;
+    },
+
+    async setResourceParent(params) {
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidResourceId(params.id) ||
+        (params.parentId !== null && !isValidResourceId(params.parentId))
+      ) {
+        throw Object.assign(new Error('Slotlock resource identity is invalid'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      if (params.parentId === params.id) {
+        throw Object.assign(new Error('Slotlock resource cannot be a part of itself'), { code: 'composite_too_deep' as const });
+      }
+      const rows = await guardedWrite(
+        sql,
+        (tx) => tx<ResourceRow[]>`
+          UPDATE slotlock.resources SET parent_id = ${params.parentId}::uuid
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
+          RETURNING ${tx.unsafe(RESOURCE_COLUMNS)}, ${tx.unsafe(EFFECTIVE_BOOKING_RULES)}`,
+        { slotlock_resources_parent_fkey: 'parent_not_found' },
+      );
       const row = rows[0];
       return row ? toResource(row) : null;
     },
@@ -5619,14 +5687,18 @@ function buildSlotlockStore(
       // Expired holds are excluded so findNextAvailable can offer their space; the acquiring
       // transaction reaps the row itself.
       const rows = await sql<{ occupied_starts_at: Date; occupied_ends_at: Date }[]>`
-        SELECT COALESCE(occupied_starts_at, starts_at) AS occupied_starts_at,
-               COALESCE(occupied_ends_at, ends_at) AS occupied_ends_at
-          FROM slotlock.reservations
-         WHERE resource_id = ${resourceId}
-           AND ${occupiedStartsBefore(sql, window.end)}
-           AND COALESCE(occupied_ends_at, ends_at) > ${window.start}
-           AND (status <> 'held' OR expires_at > statement_timestamp())
-         ORDER BY COALESCE(occupied_starts_at, starts_at)
+        SELECT occupied_starts_at, occupied_ends_at FROM (
+          SELECT COALESCE(occupied_starts_at, starts_at) AS occupied_starts_at,
+                 COALESCE(occupied_ends_at, ends_at) AS occupied_ends_at
+            FROM slotlock.reservations
+           WHERE resource_id = ${resourceId}
+             AND ${occupiedStartsBefore(sql, window.end)}
+             AND COALESCE(occupied_ends_at, ends_at) > ${window.start}
+             AND (status <> 'held' OR expires_at > statement_timestamp())
+          UNION ALL
+          ${compositeBusy(sql, resourceId, window)}
+        ) busy
+         ORDER BY occupied_starts_at
          LIMIT ${options.limit ?? null}`;
       return rows.map((r) => ({ start: r.occupied_starts_at, end: r.occupied_ends_at }));
     },
@@ -7365,6 +7437,8 @@ function buildSlotlockStore(
            AND ${occupiedStartsBefore(sql, window.end, 'reservation')}
            AND COALESCE(reservation.occupied_ends_at, reservation.ends_at) > ${window.start}
            AND (reservation.status <> 'held' OR reservation.expires_at > statement_timestamp())
+        UNION ALL
+        ${compositeBusy(sql, params.resourceId, window)}
          ORDER BY 1
          LIMIT ${MAX_FREE_BUSY_INTERVALS + 1}`;
       if (busyRows.length > MAX_FREE_BUSY_INTERVALS) {

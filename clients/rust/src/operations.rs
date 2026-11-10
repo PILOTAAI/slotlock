@@ -254,6 +254,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_set_resource_parent",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/parent",
+        path_params: &["resource_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_pools",
         method: "GET",
         path: "/v1/pools",
@@ -1028,6 +1035,13 @@ pub struct SetResourcePoolInput {
     pub pool: Option<String>,
 }
 
+/// The arguments of [`Client::set_resource_parent`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetResourceParentInput {
+    pub resource_id: String,
+    pub parent_id: Option<String>,
+}
+
 /// The arguments of [`Client::list_pools`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListPoolsInput {
@@ -1767,6 +1781,17 @@ impl Client {
     /// and '-'.
     pub fn set_resource_pool(&self, input: &SetResourcePoolInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_pool", serde_json::to_value(input)?)
+    }
+
+    /// Make a resource part of another.
+    ///
+    /// Make a resource a part of a composite (a room of a hall, a half of a court), or no part
+    /// (`null`). A booking of the composite as a whole then conflicts with a booking of any of
+    /// its parts, and two parts never conflict with each other; each part's free/busy shows the
+    /// whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts;
+    /// refused while either side has a booking or live hold still to come (`composite_busy`).
+    pub fn set_resource_parent(&self, input: &SetResourceParentInput) -> Result<Value, Error> {
+        self.call("slotlock_set_resource_parent", serde_json::to_value(input)?)
     }
 
     /// List pools.

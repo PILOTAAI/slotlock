@@ -45,6 +45,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_import_resource_availability", method: "PUT", path: "/v1/resources/{resource_id}/availability/ical", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_booking_rules", method: "PUT", path: "/v1/resources/{resource_id}/booking-rules", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_set_resource_pool", method: "PUT", path: "/v1/resources/{resource_id}/pool", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_set_resource_parent", method: "PUT", path: "/v1/resources/{resource_id}/parent", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_pools", method: "GET", path: "/v1/pools", pathParams: nil, query: nil},
 		{name: "slotlock_set_pool_order", method: "PUT", path: "/v1/pools/{pool}/order", pathParams: []string{"pool"}, query: nil},
 		{name: "slotlock_get_booking_rule_defaults", method: "GET", path: "/v1/booking-rules", pathParams: nil, query: nil},
@@ -1271,6 +1272,32 @@ func (in SetResourcePoolInput) values() map[string]any {
 // a-z, 0-9, '.', '_' and '-'.
 func (c *Client) SetResourcePool(ctx context.Context, in SetResourcePoolInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_resource_pool", in.values())
+}
+
+// SetResourceParentInput holds the arguments of [Client.SetResourceParent].
+type SetResourceParentInput struct {
+	ResourceID string
+
+	ParentID Nullable[string]
+}
+
+func (in SetResourceParentInput) values() map[string]any {
+	values := map[string]any{}
+	values["resource_id"] = in.ResourceID
+	if value, ok := in.ParentID.get(); ok {
+		values["parent_id"] = value
+	}
+	return values
+}
+
+// SetResourceParent: Make a resource part of another. Make a resource a part of a composite (a
+// room of a hall, a half of a court), or no part (`null`). A booking of the composite as a whole
+// then conflicts with a booking of any of its parts, and two parts never conflict with each
+// other; each part's free/busy shows the whole's bookings, and the whole's shows its parts'. One
+// level deep, at most 50 parts; refused while either side has a booking or live hold still to
+// come (`composite_busy`).
+func (c *Client) SetResourceParent(ctx context.Context, in SetResourceParentInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_set_resource_parent", in.values())
 }
 
 // ListPoolsInput holds the arguments of [Client.ListPools].

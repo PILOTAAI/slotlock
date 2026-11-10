@@ -1193,6 +1193,18 @@ Where a resource is, and the sets it is in, are kept apart from its pool, which 
   selection_too_large`, none `404 selection_empty`, so a search is never partial; the answer names
   them in `selected_resource_ids`. "A room for ten with video on floor 3" is one call.
 
+A hall that is also its rooms, or a court that is also its halves, is a **composite**: make each
+part a part of the whole (`PUT /v1/resources/{id}/parent` with `parent_id`, `setResourceParent`, or
+`slotlock resource parent <room> <hall>`). Booking the whole then conflicts with a booking of any
+of its parts, and two parts never with each other, held by PostgreSQL itself: each booking or hold
+on a part also claims its place on the whole, `[i, i+1)`, and one on the whole claims every place,
+in `slotlock.composite_claims` under `EXCLUDE (resource_id WITH =, during WITH &&, span WITH &&)`.
+A part's free/busy (and next-free search) shows the whole's bookings, and the whole's shows its
+parts'; agents see a part's `part_of`. One level deep, at most 50 parts. A composite changes only
+while neither side has a booking or live hold still to come (`409 composite_busy`); one level only
+(`composite_too_deep`). A resource that is neither a part nor a whole has no claims, and nothing
+about it changes.
+
 Rentals sell a class, not a plate. Put interchangeable resources in a pool
 (`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
 members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,

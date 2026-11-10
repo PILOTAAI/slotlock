@@ -1583,6 +1583,46 @@ async function changeResource(
 }
 
 /**
+ * `resource parent <ref> <parent-ref | none>` (RFC 0003 G8): make a resource a part of a composite,
+ * or no part. The refusal's code when the database refuses it, false for no such resource.
+ */
+async function setResourceParent(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  name: string,
+  parentName: string,
+): Promise<boolean | string> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const resources = await tenantResources(store, tenantRef, true);
+    const find = (wanted: string) =>
+      resources.find((resource) => resource.id === wanted) ?? resources.find((resource) => resource.externalRef === wanted);
+    const named = find(name);
+    if (!named) return false;
+    const parent = parentName === 'none' ? null : find(parentName);
+    if (parent === undefined) return 'parent_not_found';
+    try {
+      const changed = await store.withTenant(tenantRef, (tenant) =>
+        tenant.setResourceParent({ tenantRef, id: named.id, parentId: parent?.id ?? null }),
+      );
+      if (!changed) return false;
+      out.write(
+        `${JSON.stringify({ id: changed.id, external_ref: changed.externalRef, parent_id: changed.parentId ?? null, part_index: changed.partIndex ?? null })}\n`,
+      );
+      return true;
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (typeof code === 'string' && (code.startsWith('composite_') || code === 'parent_not_found')) return code;
+      throw error;
+    }
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
  * `partner …` (RFC 0003 part 4), as the schema owner (SLOTLOCK_MIGRATE_DATABASE_URL when set): make
  * a partner with its contract, list them, suspend one (every account with it) or make it active,
  * make or revoke its keys (shown once), and set its Stripe customer and its webhook (whose secret
@@ -1958,6 +1998,10 @@ Commands:
   resource archive <ref>   Take a resource out of use: no new bookings, holds or events, and
                            no longer listed; what is on it stays
   resource restore <ref>   Put an archived resource back in use
+  resource parent <ref> (<parent-ref> | none)
+                           Make a resource a part of a composite (a room of a hall): booking
+                           the whole then takes every part, and a part's booking keeps the
+                           whole from being booked; none makes it no part
   resource delete <ref>    Delete a resource and its history; refused while a booking, hold
                            or event on it has not ended
   hours show [--resource <ref>]
@@ -2159,6 +2203,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'resource add': 2,
     'resource list': 1,
     'resource archive': 2,
+    'resource parent': 3,
     'resource restore': 2,
     'resource delete': 2,
     'tenant status': 1,
@@ -2332,6 +2377,29 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'resource list':
         await listResources(readSlotlockDatabaseConfig(io.env), io.stdout);
         return 0;
+      case 'resource parent': {
+        const changed = await setResourceParent(
+          readSlotlockDatabaseConfig(io.env),
+          io.stdout,
+          operands[1] as string,
+          operands[2] as string,
+        );
+        if (changed === true) return 0;
+        io.stderr.write(
+          `slotlock: ${
+            changed === false
+              ? 'no resource with that reference or id in this tenant'
+              : changed === 'parent_not_found'
+                ? 'no parent resource with that reference or id in this tenant'
+                : changed === 'composite_busy'
+                  ? 'one side has a booking or live hold still to come; a composite changes only while neither does'
+                  : changed === 'composite_too_deep'
+                    ? 'composites are one level deep: a part has no parts, and a parent is no part'
+                    : 'a composite has at most 50 parts'
+          }\n`,
+        );
+        return 1;
+      }
       case 'resource archive':
       case 'resource restore':
       case 'resource delete': {

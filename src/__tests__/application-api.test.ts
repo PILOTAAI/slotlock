@@ -43,6 +43,8 @@ const RESOURCE = {
   attributes: {},
   location: null,
   groups: [],
+  parent_id: null,
+  part_index: null,
 };
 const LOCATION = { ref: 'leeds', name: 'Leeds clinic', parent_ref: null, timezone: 'Europe/London', resources: 2 };
 const GROUP = { ref: 'physio', name: 'Physiotherapy team', description: null, members: 3 };
@@ -136,6 +138,7 @@ const backend = {
   setResourceBookingRules: vi.fn(),
   listChanges: vi.fn(),
   setResourcePool: vi.fn(),
+  setResourceParent: vi.fn(),
   listPools: vi.fn(),
   setPoolOrder: vi.fn(),
   getBookingRuleDefaults: vi.fn(),
@@ -392,6 +395,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
   listWebhooks: { webhooks: [WEBHOOK] },
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
+  setResourceParent: { resource: { ...RESOURCE, parent_id: '0e7c1f9a-3b5d-4c2e-9f81-6a4b2d8c7e10', part_index: 0 } },
   listPools: { pools: [{ pool: 'van', capacity: 5, order: 'stable' }] },
   setPoolOrder: { pool: 'van', order: 'least_booked' },
   getBookingRuleDefaults: {

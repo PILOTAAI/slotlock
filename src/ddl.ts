@@ -14,6 +14,7 @@ import {
   SLOTLOCK_MAX_LOCATIONS,
   SLOTLOCK_MAX_RESOURCE_GROUPS,
   SLOTLOCK_MAX_KEY_SCOPE_REFS,
+  SLOTLOCK_MAX_COMPOSITE_PARTS,
   SLOTLOCK_MAX_POOL_SETTINGS,
   SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
@@ -1864,6 +1865,10 @@ BEGIN
   RETURN NEXT;
   erased_table := 'calendar_event_occurrences';
   DELETE FROM slotlock.calendar_event_occurrences WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'composite_claims';
+  DELETE FROM slotlock.composite_claims WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'reservations';
@@ -4262,6 +4267,158 @@ CREATE OR REPLACE TRIGGER slotlock_resource_group_members_guard
   BEFORE INSERT ON slotlock.resource_group_members
   FOR EACH ROW EXECUTE FUNCTION slotlock.resource_groups_guard();
 
+-- Composite resources (RFC 0003 G8): a parent made of parts (a hall of three rooms), one level
+-- deep. A part has its parent and its place among the parent's parts. A booking of a part also
+-- claims its place on the parent ([i, i+1)); a booking of the parent claims every place ([0, ∞)).
+-- composite_claims keeps those apart by PostgreSQL's own exclusion constraint: the whole conflicts
+-- with every part, and two parts never with each other. A resource that is neither has no claims.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS parent_id uuid;
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS part_index integer;
+DO $slotlock_resources_parent$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.resources'::regclass AND conname = 'slotlock_resources_parent_fkey'
+  ) THEN
+    -- Deleting a parent sets its parts free (the store refuses it while anything on it is live).
+    ALTER TABLE slotlock.resources ADD CONSTRAINT slotlock_resources_parent_fkey
+      FOREIGN KEY (parent_id, tenant_ref) REFERENCES slotlock.resources (id, tenant_ref)
+      ON DELETE SET NULL (parent_id) NOT VALID;
+    ALTER TABLE slotlock.resources ADD CONSTRAINT slotlock_resources_part_valid CHECK (
+      (parent_id IS NULL OR part_index IS NOT NULL)
+      AND (part_index IS NULL OR part_index BETWEEN 0 AND ${SLOTLOCK_MAX_COMPOSITE_PARTS - 1})
+      AND parent_id IS DISTINCT FROM id
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_resources_parent$;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_resources_part_idx
+  ON slotlock.resources (parent_id, part_index) WHERE parent_id IS NOT NULL;
+
+-- One level, ${SLOTLOCK_MAX_COMPOSITE_PARTS} parts at most, and never while either side holds a
+-- booking or live hold that has not ended: claims are made as bookings are, never backfilled.
+CREATE OR REPLACE FUNCTION slotlock.resources_parent_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_resources_parent_guard$
+BEGIN
+  IF NEW.parent_id IS NOT DISTINCT FROM OLD.parent_id THEN
+    RETURN NEW;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:composite:' || COALESCE(NEW.parent_id, OLD.parent_id)::text, 0));
+  IF NEW.parent_id IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM slotlock.resources parent WHERE parent.id = NEW.parent_id AND parent.parent_id IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM slotlock.resources part WHERE part.parent_id = NEW.id) THEN
+      RAISE EXCEPTION 'Slotlock composites are one level deep: a part has no parts, and a parent is no part'
+        USING ERRCODE = 'check_violation', HINT = 'composite_too_deep';
+    END IF;
+    IF (SELECT count(*) FROM slotlock.resources part WHERE part.parent_id = NEW.parent_id)
+       >= ${SLOTLOCK_MAX_COMPOSITE_PARTS} THEN
+      RAISE EXCEPTION 'Slotlock composites have at most ${SLOTLOCK_MAX_COMPOSITE_PARTS} parts'
+        USING ERRCODE = 'check_violation', HINT = 'composite_parts_limit';
+    END IF;
+    NEW.part_index := COALESCE(
+      (SELECT min(free.slot) FROM pg_catalog.generate_series(0, ${SLOTLOCK_MAX_COMPOSITE_PARTS - 1}) AS free(slot)
+        WHERE NOT EXISTS (SELECT 1 FROM slotlock.resources part
+                           WHERE part.parent_id = NEW.parent_id AND part.part_index = free.slot)),
+      0);
+  ELSE
+    NEW.part_index := NULL;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM slotlock.reservations booked
+     WHERE booked.resource_id IN (NEW.id, NEW.parent_id, OLD.parent_id)
+       AND COALESCE(booked.occupied_ends_at, booked.ends_at) > statement_timestamp()
+       AND (booked.status <> 'held' OR booked.expires_at > statement_timestamp())
+  ) THEN
+    RAISE EXCEPTION 'Slotlock changes a composite only while neither side has a booking or live hold to come'
+      USING ERRCODE = 'check_violation', HINT = 'composite_busy';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_resources_parent_guard$;
+CREATE OR REPLACE TRIGGER slotlock_resources_parent_guard
+  BEFORE UPDATE OF parent_id ON slotlock.resources
+  FOR EACH ROW EXECUTE FUNCTION slotlock.resources_parent_guard();
+
+CREATE TABLE IF NOT EXISTS slotlock.composite_claims (
+  reservation_id uuid PRIMARY KEY REFERENCES slotlock.reservations (id) ON DELETE CASCADE,
+  tenant_ref text NOT NULL,
+  -- The composite: the parent, whichever of its resources the booking is on.
+  resource_id uuid NOT NULL REFERENCES slotlock.resources (id) ON DELETE CASCADE,
+  booked_resource_id uuid NOT NULL,
+  span int4range NOT NULL,
+  during tstzrange NOT NULL,
+  status text NOT NULL,
+  expires_at timestamptz,
+  CONSTRAINT slotlock_composite_claims_valid CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500 AND NOT isempty(span)),
+  CONSTRAINT slotlock_composite_claims_no_overlap EXCLUDE USING gist (
+    resource_id WITH =,
+    during WITH &&,
+    span WITH &&
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_composite_claims_booked_idx
+  ON slotlock.composite_claims (booked_resource_id);
+
+-- Each booking or hold on a part or a parent claims its place on the composite, in the same
+-- statement: a claim that overlaps another fails it with 23P01, as a booking that overlaps one on
+-- its own resource does.
+CREATE OR REPLACE FUNCTION slotlock.composite_claim()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_composite_claim$
+DECLARE
+  booked record;
+  composite uuid;
+  claimed int4range;
+BEGIN
+  -- An update that moves nothing the claim holds leaves it (no column list on the trigger, so an
+  -- upgrade that adds a column later in the DDL never finds one here first).
+  IF TG_OP = 'UPDATE'
+     AND NEW.resource_id = OLD.resource_id
+     AND NEW.starts_at = OLD.starts_at AND NEW.ends_at = OLD.ends_at
+     AND NEW.occupied_starts_at IS NOT DISTINCT FROM OLD.occupied_starts_at
+     AND NEW.occupied_ends_at IS NOT DISTINCT FROM OLD.occupied_ends_at
+     AND NEW.status = OLD.status
+     AND NEW.expires_at IS NOT DISTINCT FROM OLD.expires_at THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP <> 'INSERT' THEN
+    DELETE FROM slotlock.composite_claims claim WHERE claim.reservation_id = OLD.id;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN NULL;
+  END IF;
+  SELECT resource.parent_id, resource.part_index, resource.tenant_ref,
+         EXISTS (SELECT 1 FROM slotlock.resources part WHERE part.parent_id = resource.id) AS whole
+    INTO booked
+    FROM slotlock.resources resource WHERE resource.id = NEW.resource_id;
+  IF booked.parent_id IS NOT NULL THEN
+    composite := booked.parent_id;
+    claimed := int4range(booked.part_index, booked.part_index + 1);
+  ELSIF booked.whole THEN
+    composite := NEW.resource_id;
+    claimed := int4range(0, NULL);
+  ELSE
+    RETURN NULL;
+  END IF;
+  INSERT INTO slotlock.composite_claims (
+    reservation_id, tenant_ref, resource_id, booked_resource_id, span, during, status, expires_at
+  ) VALUES (
+    NEW.id, booked.tenant_ref, composite, NEW.resource_id, claimed,
+    tstzrange(COALESCE(NEW.occupied_starts_at, NEW.starts_at), COALESCE(NEW.occupied_ends_at, NEW.ends_at), '[)'),
+    NEW.status, NEW.expires_at
+  );
+  RETURN NULL;
+END
+$slotlock_composite_claim$;
+CREATE OR REPLACE TRIGGER slotlock_reservations_composite_claim
+  AFTER INSERT OR UPDATE OR DELETE ON slotlock.reservations
+  FOR EACH ROW EXECUTE FUNCTION slotlock.composite_claim();
+
 -- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
 -- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
 -- so a hold could take a booking's buffer and a buffered booking could cover a hold. The upgrade
@@ -5218,6 +5375,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'resource_groups',
   'resource_group_members',
   'pool_settings',
+  'composite_claims',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -5364,6 +5522,8 @@ ALTER TABLE slotlock.resource_group_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resource_group_members FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.pool_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.pool_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.composite_claims ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.composite_claims FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -5399,7 +5559,8 @@ BEGIN
          'locations',
          'resource_groups',
          'resource_group_members',
-         'pool_settings'
+         'pool_settings',
+         'composite_claims'
        )
   LOOP
     EXECUTE format(
@@ -5680,6 +5841,16 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'composite_claims'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.composite_claims
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -5731,6 +5902,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_group_members
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.pool_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.composite_claims
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -5778,7 +5951,8 @@ WHERE schemaname = 'slotlock'
     'locations',
     'resource_groups',
     'resource_group_members',
-    'pool_settings'
+    'pool_settings',
+    'composite_claims'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

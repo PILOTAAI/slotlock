@@ -895,6 +895,7 @@ export function createSlotlockStoreAgentBackend(
           ? { location: { ref: resource.location, name: resource.locationName ?? resource.location } }
           : {}),
         ...(resource.groups !== undefined ? { groups: resource.groups } : {}),
+        ...(resource.parentId !== undefined ? { part_of: resource.parentId } : {}),
       });
       if (typeof input.pool === 'string') {
         return withTenant(store, context, async (tenantStore) => {
@@ -1319,7 +1320,7 @@ function storeRefusal(error: unknown): unknown {
     const field = (error as { field?: unknown }).field;
     return new SlotlockAgentOperationError(code, 400, typeof field === 'string' ? { field } : undefined);
   }
-  if (code === 'location_not_found' || code === 'group_not_found' || code === 'resource_not_found') {
+  if (code === 'location_not_found' || code === 'group_not_found' || code === 'resource_not_found' || code === 'parent_not_found') {
     return new SlotlockAgentOperationError(code, 404);
   }
   if (
@@ -1336,7 +1337,10 @@ function storeRefusal(error: unknown): unknown {
     code === 'resource_limit_reached' ||
     code === 'resource_visibility_conflict' ||
     code === 'pool_rules_limit_reached' ||
-    code === 'pool_order_limit_reached'
+    code === 'pool_order_limit_reached' ||
+    code === 'composite_too_deep' ||
+    code === 'composite_parts_limit' ||
+    code === 'composite_busy'
   ) {
     return new SlotlockAgentOperationError(code, 409);
   }
@@ -1486,6 +1490,8 @@ function resourceOutput(resource: SlotlockResource) {
     attributes: resource.attributes ?? {},
     location: resource.location ?? null,
     groups: resource.groups ?? [],
+    parent_id: resource.parentId ?? null,
+    part_index: resource.partIndex ?? null,
   };
 }
 
@@ -1971,6 +1977,23 @@ export function createSlotlockStoreApplicationBackend(
         let resource: SlotlockResource | null;
         try {
           resource = await tenant.setResourcePool({ tenantRef: tenantOf(context), id, pool: input.pool as string | null });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
+        return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
+    async setResourceParent(context, input) {
+      const id = input.resource_id as string;
+      const parentId = input.parent_id as string | null;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      if (parentId !== null && !STORE_ID_PATTERN.test(parentId)) throw new SlotlockAgentOperationError('parent_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        let resource: SlotlockResource | null;
+        try {
+          resource = await tenant.setResourceParent({ tenantRef: tenantOf(context), id, parentId });
         } catch (error) {
           throw storeRefusal(error);
         }

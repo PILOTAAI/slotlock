@@ -50,6 +50,7 @@ public sealed partial class SlotlockClient
         ["slotlock_import_resource_availability"] = new("PUT", "/v1/resources/{resource_id}/availability/ical", ["resource_id"], []),
         ["slotlock_set_resource_booking_rules"] = new("PUT", "/v1/resources/{resource_id}/booking-rules", ["resource_id"], []),
         ["slotlock_set_resource_pool"] = new("PUT", "/v1/resources/{resource_id}/pool", ["resource_id"], []),
+        ["slotlock_set_resource_parent"] = new("PUT", "/v1/resources/{resource_id}/parent", ["resource_id"], []),
         ["slotlock_list_pools"] = new("GET", "/v1/pools", [], []),
         ["slotlock_set_pool_order"] = new("PUT", "/v1/pools/{pool}/order", ["pool"], []),
         ["slotlock_get_booking_rule_defaults"] = new("GET", "/v1/booking-rules", [], []),
@@ -1285,6 +1286,30 @@ public sealed partial class SlotlockClient
         values["resource_id"] = Json.ToNode(resourceId);
         values["pool"] = Json.ToNode(pool);
         return CallAsync("slotlock_set_resource_pool", values, cancellationToken);
+    }
+
+    /// <summary>Make a resource part of another.</summary>
+    /// <remarks>
+    /// Make a resource a part of a composite (a room of a hall, a half of a court), or no part
+    /// (`null`). A booking of the composite as a whole then conflicts with a booking of any of
+    /// its parts, and two parts never conflict with each other; each part's free/busy shows the
+    /// whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts;
+    /// refused while either side has a booking or live hold still to come (`composite_busy`).
+    /// </remarks>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="parentId">parent_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> SetResourceParentAsync(
+        string resourceId,
+        string? parentId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["resource_id"] = Json.ToNode(resourceId);
+        values["parent_id"] = Json.ToNode(parentId);
+        return CallAsync("slotlock_set_resource_parent", values, cancellationToken);
     }
 
     /// <summary>List pools.</summary>

@@ -253,6 +253,13 @@ OPERATIONS: dict[str, Operation] = {
         ("resource_id",),
         (),
     ),
+    "slotlock_set_resource_parent": Operation(
+        "slotlock_set_resource_parent",
+        "PUT",
+        "/v1/resources/{resource_id}/parent",
+        ("resource_id",),
+        (),
+    ),
     "slotlock_list_pools": Operation(
         "slotlock_list_pools",
         "GET",
@@ -1344,6 +1351,18 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"resource_id": resource_id, "pool": pool}
         return self.call("slotlock_set_resource_pool", values)
+
+    def set_resource_parent(self, resource_id: str, *, parent_id: str | None) -> dict[str, Any]:
+        """Make a resource part of another.
+
+        Make a resource a part of a composite (a room of a hall, a half of a court), or no part
+        (`null`). A booking of the composite as a whole then conflicts with a booking of any of
+        its parts, and two parts never conflict with each other; each part's free/busy shows the
+        whole's bookings, and the whole's shows its parts'. One level deep, at most 50 parts;
+        refused while either side has a booking or live hold still to come (`composite_busy`).
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "parent_id": parent_id}
+        return self.call("slotlock_set_resource_parent", values)
 
     def list_pools(self) -> dict[str, Any]:
         """List pools.

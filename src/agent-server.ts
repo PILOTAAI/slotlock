@@ -1130,6 +1130,11 @@ const OPERATION_DEFINITIONS = [
                 labels: z.array(RESOURCE_LABEL).max(MAX_RESOURCE_LABELS).optional(),
                 location: z.object({ ref: GROUPING_REF, name: z.string().max(MAX_RESOURCE_NAME) }).strict().optional(),
                 groups: z.array(GROUPING_REF).max(MAX_RESOURCE_GROUPS).optional(),
+                /**
+                 * The composite it is a part of (RFC 0003 G8), by id: booking the whole takes every
+                 * part, and a part's booking keeps the whole from being booked.
+                 */
+                part_of: z.string().uuid().optional(),
               })
               .strict(),
           )

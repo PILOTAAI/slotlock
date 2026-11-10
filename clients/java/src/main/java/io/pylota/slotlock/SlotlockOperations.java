@@ -47,6 +47,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_import_resource_availability", new Operation("PUT", "/v1/resources/{resource_id}/availability/ical", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_booking_rules", new Operation("PUT", "/v1/resources/{resource_id}/booking-rules", List.of("resource_id"), List.of())),
           Map.entry("slotlock_set_resource_pool", new Operation("PUT", "/v1/resources/{resource_id}/pool", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_set_resource_parent", new Operation("PUT", "/v1/resources/{resource_id}/parent", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_pools", new Operation("GET", "/v1/pools", List.of(), List.of())),
           Map.entry("slotlock_set_pool_order", new Operation("PUT", "/v1/pools/{pool}/order", List.of("pool"), List.of())),
           Map.entry("slotlock_get_booking_rule_defaults", new Operation("GET", "/v1/booking-rules", List.of(), List.of())),
@@ -1134,6 +1135,26 @@ public abstract class SlotlockOperations {
     values.put("resource_id", resourceId);
     values.put("pool", pool);
     return call("slotlock_set_resource_pool", values);
+  }
+
+  /**
+   * Make a resource part of another. Make a resource a part of a composite (a room of a hall, a
+   * half of a court), or no part (`null`). A booking of the composite as a whole then conflicts
+   * with a booking of any of its parts, and two parts never conflict with each other; each part's
+   * free/busy shows the whole's bookings, and the whole's shows its parts'. One level deep, at
+   * most 50 parts; refused while either side has a booking or live hold still to come
+   * (`composite_busy`).
+   *
+   * @param resourceId {@code resource_id}, string
+   * @param parentId {@code parent_id}, string (may be null)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> setResourceParent(String resourceId, String parentId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("resource_id", resourceId);
+    values.put("parent_id", parentId);
+    return call("slotlock_set_resource_parent", values);
   }
 
   /**

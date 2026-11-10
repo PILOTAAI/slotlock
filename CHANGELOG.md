@@ -122,6 +122,18 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Composite resources (RFC 0003 G8, T2): a resource can be a part of another
+  (`slotlock_set_resource_parent`, `PUT /v1/resources/{resource_id}/parent`, `setResourceParent`,
+  `slotlock resource parent <ref> <parent-ref | none>`), one level deep, at most 50 parts. Each
+  booking or hold on a part or a whole claims its place in the new tenant table
+  `slotlock.composite_claims` (forced RLS), kept apart by `EXCLUDE (resource_id WITH =, during
+  WITH &&, span WITH &&)`: the whole conflicts with every part, two parts never. A trigger on
+  reservations keeps the claims; reaping an expired hold covers the composite's other resources;
+  free/busy and the next-free search read the composite's other bookings. `resources` gains
+  `parent_id` and `part_index` (the foreign key and check added NOT VALID); the application API's
+  resource gains `parent_id` and `part_index`, and `slotlock_list_resources` shows `part_of`. A
+  composite changes only while neither side has a booking or live hold to come
+  (`composite_busy`). Run `slotlock migrate`.
 - Sign-in with Google (OpenID Connect, RFC 0003 Later, T2), with `SLOTLOCK_GOOGLE_CLIENT_ID` and
   `SLOTLOCK_GOOGLE_CLIENT_SECRET`: Continue with Google on the sign-in page (`/sign-in?with=google`,
   back to the same callback), `openid email` with `state`, PKCE and a nonce; the ID token from

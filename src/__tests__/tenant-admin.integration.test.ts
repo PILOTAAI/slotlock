@@ -358,6 +358,12 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         await tenant.addGroupMember({ tenantRef, group: 'fleet', resourceId });
         // The order its pool is booked in (RFC 0003 G7).
         await tenant.setPoolOrder({ tenantRef, pool: 'vans', order: 'round_robin' });
+        // A composite with a part booked (RFC 0003 G8): its claim on the whole.
+        const hall = await tenant.createResource({ tenantRef, externalRef: 'hall', timezone: 'UTC' });
+        const room = await tenant.createResource({ tenantRef, externalRef: 'hall-room-1', timezone: 'UTC' });
+        await tenant.setResourceParent({ tenantRef, id: room.id, parentId: hall.id });
+        const roomHold = await tenant.acquireHold({ tenantRef, resourceId: room.id, ...slot(0), ttlMs: 600_000 });
+        if (!roomHold.ok) throw new Error(roomHold.code);
         const hold = await tenant.acquireHold({
           tenantRef,
           resourceId,
