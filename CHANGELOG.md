@@ -161,7 +161,9 @@ versioning.
   person is their own tenant, `google:<subject>`; `SLOTLOCK_DASHBOARD_USERS` takes
   `google:<subject>` entries, and `serve` refuses a Google tenant's keys unless the list names it
   (or is `*`). Not with a list of `SLOTLOCK_DASHBOARD_ORGS`. Erasing a Google person's tenant
-  removes their dashboard form records. The dashboard's `google` option.
+  removes their dashboard form records. The ID token's RS256 signature is checked against Google's
+  published keys (`google.jwksUrl`, kept for the answer's max-age), through WebCrypto. The
+  dashboard's `google` option.
 - The Team plan, an organization's (Teams on Cloud): Developer's limits with 2,000,000 operations
   and 100,000 bookings a month, stopping at 110%. The Worker offers it to an organization's owner
   once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY`, `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY`,
@@ -173,7 +175,7 @@ versioning.
 - Teams on Cloud (RFC 0003, T2): `SLOTLOCK_DASHBOARD_ORGS=enabled` gives every person their own
   tenant and the GitHub organizations they belong to that an owner turned on, from the dashboard's
   new Teams page (`POST /teams/enable`, `/teams/disable`, the latter confirmed with the
-  organization's name). The workspace menu switches between them; a session in an organization
+  organization's name), by an owner who signed in within the last 15 minutes. The workspace menu switches between them; a session in an organization
   turned off is back in its own tenant at its next request, and `serve` refuses the
   organization's keys (checked in the database, kept 30 seconds: `createSlotlockOrganizationCheck`).
   New owner-only table `slotlock.dashboard_organizations` with `enabled_organizations`,

@@ -113,6 +113,13 @@ import {
 export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
+/**
+ * How recent a sign-in must be to turn an organization on or off: who owns it is read from GitHub
+ * as one signs in, so a change of owners reaches the dashboard by signing in again.
+ */
+const FRESH_SIGN_IN_MS = 15 * 60_000;
+/** How long Google's signing keys are kept when its answer does not say (Cache-Control max-age). */
+const GOOGLE_KEYS_DEFAULT_TTL_MS = 3_600_000;
 const MAX_FORM_BYTES = 8_192;
 /** A message to the assistant: 2,000 characters, each up to 9 bytes as a form encodes it. */
 const MAX_ASSISTANT_FORM_BYTES = 24_576;
@@ -510,6 +517,8 @@ export interface SlotlockDashboardOptions {
     clientSecret: string;
     authorizeUrl?: string;
     tokenUrl?: string;
+    /** Google's signing keys (JWKS); https://www.googleapis.com/oauth2/v3/certs by default. */
+    jwksUrl?: string;
   };
   /** Seals sessions and sign-in state and derives CSRF tokens: 32+ random characters. */
   sessionSecret: string;
@@ -3871,6 +3880,14 @@ ${
     const org = session.orgs?.find((candidate) => candidate.id === form.get('organization'));
     if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
     if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    // Who owns it was read as the person signed in: only a recent sign-in is trusted to say so.
+    if (now() - (session.exp - SESSION_TTL_MS) > FRESH_SIGN_IN_MS) {
+      return teamsPage(
+        session,
+        403,
+        `To turn Slotlock ${on ? 'on' : 'off'} for ${org.login}, sign out and in again: who owns it is read from GitHub as you sign in.`,
+      );
+    }
     if (on) {
       await teams.enable({ id: org.id, login: org.login }, personOf(session));
       return teamsPage(session, 200, `Slotlock is on for ${org.login}. Its members pick it from the workspace menu.`);
@@ -4072,10 +4089,55 @@ ${
     return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
   }
 
+  /** Google's signing keys by key id, kept for as long as its answer says (an hour by default). */
+  let googleKeys: { keys: Map<string, CryptoKey>; until: number } | null = null;
+
+  async function readGoogleKeys(provider: NonNullable<typeof google>, refresh: boolean): Promise<Map<string, CryptoKey>> {
+    if (googleKeys && !refresh && googleKeys.until > now()) return googleKeys.keys;
+    const response = await fetchImpl(provider.jwksUrl ?? 'https://www.googleapis.com/oauth2/v3/certs', {
+      headers: { Accept: 'application/json' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`Google keys answered HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    const keys = new Map<string, CryptoKey>();
+    for (const jwk of isRecord(body) && Array.isArray(body.keys) ? body.keys : []) {
+      if (!isRecord(jwk) || jwk.kty !== 'RSA' || typeof jwk.kid !== 'string' || (jwk.alg !== undefined && jwk.alg !== 'RS256')) continue;
+      const key = await globalThis.crypto.subtle
+        .importKey('jwk', { kty: 'RSA', n: jwk.n as string, e: jwk.e as string, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'])
+        .catch(() => null);
+      if (key) keys.set(jwk.kid, key);
+    }
+    const maxAge = Number(/max-age=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1]);
+    googleKeys = { keys, until: now() + (Number.isFinite(maxAge) && maxAge > 0 ? Math.min(maxAge * 1000, 86_400_000) : GOOGLE_KEYS_DEFAULT_TTL_MS) };
+    return keys;
+  }
+
+  /** Whether an ID token's signature is Google's: RS256, by a key id Google publishes (read again once when unknown, as Google rotates them). */
+  async function googleSigned(provider: NonNullable<typeof google>, header: string, payload: string, signature: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'));
+    } catch {
+      return false;
+    }
+    if (!isRecord(parsed) || parsed.alg !== 'RS256' || typeof parsed.kid !== 'string') return false;
+    let key = (await readGoogleKeys(provider, false)).get(parsed.kid);
+    if (!key) key = (await readGoogleKeys(provider, true)).get(parsed.kid);
+    if (!key) return false;
+    return globalThis.crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      Buffer.from(signature, 'base64url'),
+      Buffer.from(`${header}.${payload}`, 'ascii'),
+    );
+  }
+
   /**
    * The person Google signed in, from the ID token its token endpoint returned for this code. The
-   * token comes straight from Google over TLS, which OpenID Connect lets stand for its signature
-   * (Core 1.0, 3.1.3.7); its issuer, audience, expiry and nonce are still checked.
+   * token's signature is checked against Google's published keys, and its issuer, audience (and
+   * azp), expiry and nonce (OpenID Connect Core 1.0, 3.1.3.7).
    */
   async function askGoogle(
     provider: NonNullable<typeof google>,
@@ -4104,8 +4166,15 @@ ${
       }
       const body: unknown = await response.json().catch(() => null);
       const token = isRecord(body) && typeof body.id_token === 'string' ? body.id_token : null;
-      const [, payload] = token?.split('.') ?? [];
-      if (!payload || !BASE64URL.test(payload)) return null;
+      const [header, payload, signature, ...extra] = token?.split('.') ?? [];
+      if (!header || !payload || !signature || extra.length > 0 || ![header, payload, signature].every((part) => BASE64URL.test(part))) {
+        return null;
+      }
+      // Signed by Google, with one of the keys it publishes (RS256), whichever way the token came.
+      if (!(await googleSigned(provider, header, payload, signature))) {
+        report('Google sign-in refused: the ID token is not signed by Google');
+        return null;
+      }
       const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
       if (!isRecord(claims)) return null;
       const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];

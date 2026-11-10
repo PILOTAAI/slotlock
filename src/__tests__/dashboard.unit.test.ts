@@ -2,7 +2,7 @@
 // checks, the key shown once, escaping, and the allowlist. GitHub is a fake `fetch`; keys and
 // resources are in-memory stores with the same contracts as the real ones.
 import { type SlotlockResourceProfileInput, parseSlotlockResourceProfile } from '../resource-profile.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1548,6 +1548,13 @@ describe('organizations', () => {
     expect((await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(GLOBEX.id) }, session)).status).toBe(403);
     expect(teams.enable).not.toHaveBeenCalled();
     // The owner turns it on; then anyone in it can switch to it, and its keys are the organization's.
+    // Who owns it was read at sign-in: 16 minutes on, that is too old to turn it on.
+    now += 16 * 60_000;
+    const stale = await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    expect(stale.status).toBe(403);
+    expect(await stale.text()).toContain('sign out and in again');
+    expect(teams.enable).not.toHaveBeenCalled();
+    now -= 16 * 60_000;
     const enabled = await post(target, '/base/dashboard/teams/enable', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
     expect(await enabled.text()).toContain('Slotlock is on for acme-fleet');
     expect(teams.enable).toHaveBeenCalledWith({ id: String(ACME.id), login: 'acme-fleet' }, 'github:4242');
@@ -2650,15 +2657,22 @@ describe('the plan page', () => {
 describe('Google sign-in', () => {
   const GOOGLE = { clientId: '1234-abc.apps.googleusercontent.com', clientSecret: 'GOCSPX-' + 'g'.repeat(20) + '0123456789' };
   const SUBJECT = '109876543210987654321';
-  /** Google's token endpoint, answering with an ID token whose claims a test chooses. */
-  function fakeGoogle(claims: (nonce: string) => Record<string, unknown>) {
+  // Google's signing key, and one that is not Google's.
+  const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const forger = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const JWKS = { keys: [{ ...signing.publicKey.export({ format: 'jwk' }), kid: 'google-key-1', alg: 'RS256', use: 'sig' }] };
+  /** Google's token endpoint, answering with an ID token whose claims (and signer) a test chooses. */
+  function fakeGoogle(claims: (nonce: string) => Record<string, unknown>, signer = signing.privateKey, kid = 'google-key-1') {
     let asked: URLSearchParams | null = null;
     let nonce = '';
     const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      if (String(input) === 'https://www.googleapis.com/oauth2/v3/certs') return Response.json(JWKS);
       if (String(input) === 'https://oauth2.googleapis.com/token') {
         asked = new URLSearchParams(String(init.body));
         const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-        return Response.json({ id_token: `${part({ alg: 'RS256' })}.${part(claims(nonce))}.c2lnbmF0dXJl`, access_token: 'ya29.fake' });
+        const signed = `${part({ alg: 'RS256', kid, typ: 'JWT' })}.${part(claims(nonce))}`;
+        const signature = createSign('RSA-SHA256').update(signed).sign(signer).toString('base64url');
+        return Response.json({ id_token: `${signed}.${signature}`, access_token: 'ya29.fake' });
       }
       return github.fetch(input, init);
     });
@@ -2716,6 +2730,13 @@ describe('Google sign-in', () => {
       const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
       const { callback, session } = await signInWithGoogle(target, fake);
       expect(callback.status, JSON.stringify(change)).toBe(502);
+      expect(session).toBeUndefined();
+    }
+    // Signed by someone else, or by a key Google does not publish: refused, whatever it claims.
+    for (const fake of [fakeGoogle(valid, forger.privateKey), fakeGoogle(valid, signing.privateKey, 'unknown-key')]) {
+      const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
+      const { callback, session } = await signInWithGoogle(target, fake);
+      expect(callback.status).toBe(502);
       expect(session).toBeUndefined();
     }
   });

@@ -370,7 +370,8 @@ resources, so you can give each person API keys without running `slotlock key cr
 - **People and their organizations (Teams on Cloud)**: set `SLOTLOCK_DASHBOARD_ORGS=enabled`.
   Every person signs in to their own tenant, `github:<user id>`, and the dashboard reads which
   GitHub organizations they belong to (`read:org`, up to 20, kept in the session). On its Teams
-  page an owner of one turns Slotlock on for it; then each owner and member picks it from the
+  page an owner of one turns Slotlock on for it (within 15 minutes of signing in, since who owns
+  it is read from GitHub as one signs in); then each owner and member picks it from the
   workspace menu and shares its tenant, `github-org:<id>`, as above. Turning it off (the owner types
   its name) ends every session's use of it at once and stops its keys within 30 seconds on every
   server; what it holds stays, for an owner to turn it on again and erase it. The organizations
@@ -387,8 +388,9 @@ resources, so you can give each person API keys without running `slotlock key cr
   page then offers Continue with Google. Each such person is their own tenant,
   `google:<subject>` (Google's stable account id); `SLOTLOCK_DASHBOARD_USERS` names them as
   `google:<subject>` beside GitHub ids, or `*` lets every account in. Sign-in asks for `openid
-  email`, uses `state`, PKCE and a nonce, and checks the ID token Google's token endpoint returns
-  (issuer, audience, expiry, nonce); it keeps the subject, and the email only once Google has
+  email`, uses `state`, PKCE and a nonce, and checks the ID token Google's token endpoint returns:
+  its RS256 signature against Google's published keys (kept as long as Google's answer says, and
+  read again for a key id it does not know), then its issuer, audience, expiry and nonce. It keeps the subject, and the email only once Google has
   verified it, to show who is signed in. Google sign-in does not go with a list of
   `SLOTLOCK_DASHBOARD_ORGS` (GitHub's organizations); with `enabled`, a Google person has their own
   tenant only.

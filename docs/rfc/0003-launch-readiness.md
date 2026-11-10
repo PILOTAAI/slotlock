@@ -675,7 +675,8 @@ before merge (GOVERNANCE.md).
   clinic's rota or a depot and use the assistant, who often have no GitHub account. Status: built
   on `claude/inspiring-dijkstra-bfvqif` with `SLOTLOCK_GOOGLE_CLIENT_ID` and
   `SLOTLOCK_GOOGLE_CLIENT_SECRET`: `google:<subject>` tenants, the ID token taken from Google's token
-  endpoint over TLS and checked for issuer, audience, expiry and nonce (no JWKS fetch), and the
+  endpoint, its signature checked against Google's published keys (JWKS, through WebCrypto, so the
+Worker and `serve` check alike), then its issuer, audience, expiry and nonce, and the
   allowlist's `google:<subject>` entries, read by `serve` too.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
 - **Metered overage for Developer**, once Stripe confirms Managed Payments supports metered prices.
