@@ -410,6 +410,19 @@ versioning.
 
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.
+- README: about 160 lines that say what Slotlock is, how to run it and where each topic is
+  documented, down from 1,659. Everything it explained is on
+  [slotlock.pylota.io/docs](https://slotlock.pylota.io/docs/), which gains pages for hours and
+  booking rules, limits, the dashboard on Cloudflare Workers, recurring events and external
+  calendars, and now holds the store guide, organizations, the assistant's limits and the protocol
+  reference in full. A link to a README section from an earlier release lands on the README, whose
+  Documentation table names each topic's page.
+
+### Fixed
+
+- Docs: the self-hosting page said `SLOTLOCK_TRUSTED_PROXY_HEADER` is ignored without
+  `SLOTLOCK_TRUSTED_PROXY_SECRET`. The header is believed whenever no secret is set; the secret
+  limits it to requests that carry the proof.
 
 ### Fixed
 

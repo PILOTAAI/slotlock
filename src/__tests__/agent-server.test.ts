@@ -2121,8 +2121,8 @@ describe('parseSlotlockA2ATimestamp', () => {
   });
 });
 
-// An integrator may authorize by operation alone (the README's allow-list pattern); a principal that
-// carries scopes must still never reach an operation they do not cover.
+// An integrator may authorize by operation alone (the protocol reference's allow-list pattern); a
+// principal that carries scopes must still never reach an operation they do not cover.
 describe('principal scopes', () => {
   const asPrincipal = (scopes: unknown) => ({
     authenticate: async () =>

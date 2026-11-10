@@ -5,7 +5,7 @@
 #   docker compose up --build
 # MCP: http://localhost:8080/mcp   A2A: http://localhost:8080/a2a   REST: /v1   health: /healthz
 #
-# Two database roles, as the README recommends. `db-roles` creates slotlock_app, a role that owns
+# Two database roles, as the docs recommend. `db-roles` creates slotlock_app, a role that owns
 # nothing and cannot bypass row-level security; `migrate` applies the schema as the database owner
 # and grants slotlock_app what it needs; the long-running server connects only as slotlock_app and
 # never sees the owner's password. Both one-off services are idempotent and rerun on every `up`.

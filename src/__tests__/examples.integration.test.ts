@@ -1,5 +1,5 @@
-// The README's examples, executed as written; the README quotes these files verbatim
-// (readme-examples.test.ts).
+// The docs' examples, executed as written; the README and the docs site show these files
+// verbatim (docs-examples.test.ts).
 import { createServer } from 'node:net';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -34,7 +34,7 @@ function freePort(): Promise<number> {
   });
 }
 
-describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
+describe.skipIf(!url)('Slotlock docs examples (real Postgres)', () => {
   const role = `slotlock_example_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const password = crypto.randomUUID();
   const tenantRef = `example-tenant-${crypto.randomUUID()}`;

@@ -68,7 +68,17 @@ behind.
   `slotlock serve` writes each call as a JSON line with `trace_id`.
 - **Metrics:** with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers Prometheus at `/metrics`:
   `slotlock_calls_total` and `slotlock_call_duration_seconds` by protocol, operation and outcome,
-  refusals, maintenance and webhook deliveries. Labels never name a tenant.
+  confirmations, subscriptions, refusals, maintenance and webhook deliveries. No label names a
+  tenant, key or client. `createSlotlockMetrics` builds them for a server of your own, from its
+  hooks.
+- **OpenTelemetry:** with `OTEL_EXPORTER_OTLP_ENDPOINT` (a collector, such as
+  `http://collector:4318`), each call is also a span sent over OTLP/HTTP as JSON, a child of the
+  caller's span when it sent a `traceparent`, and the metrics go there too each minute (cumulative
+  sums, the call-duration histogram, the open subscriptions), with or without
+  `SLOTLOCK_METRICS_TOKEN`; `OTEL_EXPORTER_OTLP_HEADERS` carries a collector's API key. A span says
+  what the metrics say, and a collector that is down costs spans, never calls.
+  [slo-rules.yml](https://github.com/PILOTAAI/slotlock/blob/main/docs/hosted/slo-rules.yml) has
+  Prometheus rules for the objectives on the [status page](/docs/status/).
 - **SLOs worth publishing:** availability of `/healthz`; p99 latency of `slotlock_create_event`
   and free/busy; the share of webhook deliveries within a minute; maintenance passes that finish.
 - **Signals to alert on:** `server_busy` (503) rising, `coverage.stale` on the change feed,

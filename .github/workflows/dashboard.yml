@@ -1,6 +1,6 @@
 # Bundles the dashboard Worker (workers/dashboard) to check it builds. It never deploys and holds no
 # Cloudflare credentials: whoever runs the dashboard deploys it from their own pipeline, with their own
-# wrangler configuration and token (README "Dashboard on Cloudflare Workers"). A Workers deploy token
+# wrangler configuration and token (docs: "Dashboard on Cloudflare Workers"). A Workers deploy token
 # can replace the Worker and so read its session secret, which signs in as any tenant, so it belongs
 # with the deployment, not in this repository.
 #

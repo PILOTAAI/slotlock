@@ -134,7 +134,9 @@ export function visibleProse(html) {
   return html
     .replace(/<head[\s\S]*?<\/head>/i, ' ')
     .replace(/<(script|style|pre|code|svg|template)\b[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+    // Quote-aware: a code block's copy button carries its code in data-code, where a placeholder
+    // such as <owner> leaves a raw `>` that would otherwise end the tag early.
+    .replace(/<(?:[^>"']|"[^"]*"|'[^']*')*>/g, ' ')
     .replace(/&(#?\w+);/g, (_, name) => entities[name] ?? ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -159,11 +161,20 @@ const PAGES = [
   'docs/index.html',
   'docs/quickstart/index.html',
   'docs/connect/index.html',
+  'docs/self-host/index.html',
+  'docs/keys/index.html',
+  'docs/booking-rules/index.html',
+  'docs/dashboard/index.html',
+  'docs/dashboard-workers/index.html',
   'docs/library/index.html',
+  'docs/recurring-events/index.html',
+  'docs/external-calendars/index.html',
+  'docs/limits/index.html',
   'docs/concepts/index.html',
   'docs/security/index.html',
   'docs/tools/index.html',
   'docs/reference/index.html',
+  'docs/operations/index.html',
   'docs/hosted/index.html',
   'docs/status/index.html',
   'docs/versioning/index.html',
