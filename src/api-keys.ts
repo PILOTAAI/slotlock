@@ -12,6 +12,7 @@ import type { Sql } from 'postgres';
 import { SlotlockAgentOperationError, type SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from './ddl.js';
 import { type SlotlockChangeOrigin, isSlotlockChangeOrigin } from './event-feed.js';
+import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
 import type { SlotlockSql } from './store.js';
 
 export { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT };
@@ -70,6 +71,8 @@ export interface SlotlockApiKey {
   /** When the key last authenticated, to the minute. */
   lastUsedAt: Date | null;
   revokedAt: Date | null;
+  /** For a key limited to part of its tenant (RFC 0003 G6), the locations and groups it reaches. */
+  resourceScope?: SlotlockResourceScope;
 }
 
 /** What an active key authenticates as. */
@@ -77,6 +80,8 @@ export interface SlotlockApiKeyIdentity {
   id: string;
   tenantRef: string;
   scopes: SlotlockApiKeyScope[];
+  /** Set for a key limited to part of its tenant: withTenant holds it to these resources. */
+  resourceScope?: SlotlockResourceScope;
 }
 
 export interface CreateSlotlockApiKeyInput {
@@ -91,6 +96,12 @@ export interface CreateSlotlockApiKeyInput {
   actor?: string;
   /** Where from, for the feed (`dashboard`, say); else the enclosing withTenant's, or `library`. */
   origin?: SlotlockChangeOrigin;
+  /**
+   * Limit the key to the resources at these locations (each with every location in it) or in these
+   * groups (RFC 0003 G6), for good: up to 20 of each. Read and write keys only: a limited key with
+   * `admin` is refused (`invalid_api_key_scopes`), since admin operations are the whole tenant's.
+   */
+  resourceScope?: SlotlockResourceScope;
 }
 
 /** Who rotates or revokes a key and from where, recorded on the feed as `create`'s are. */
@@ -235,6 +246,11 @@ interface ApiKeyRow {
   key_revoked_at: Date | null;
 }
 
+const canonicalResourceScope = (locations: readonly string[], groups: readonly string[]): SlotlockResourceScope => ({
+  locations: [...new Set(locations)].sort(),
+  groups: [...new Set(groups)].sort(),
+});
+
 const knownScopes = (scopes: readonly string[]): SlotlockApiKeyScope[] =>
   SLOTLOCK_API_KEY_SCOPES.filter((scope) => scopes.includes(scope));
 
@@ -318,6 +334,21 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
         );
       }
       const scopes = canonicalScopes(input.scopes);
+      const resourceScope = input.resourceScope;
+      if (resourceScope !== undefined) {
+        if (!isSlotlockResourceScope(resourceScope)) {
+          throw invalid(
+            'invalid_api_key_resource_scope',
+            'Slotlock key scope must name up to 20 locations and 20 groups by reference, at least one',
+          );
+        }
+        if (scopes.includes('admin')) {
+          throw invalid(
+            'invalid_api_key_scopes',
+            'Slotlock keys limited to locations or groups read and write only: admin is the whole tenant',
+          );
+        }
+      }
       const expiresAt = input.expiresAt;
       if (
         expiresAt !== undefined &&
@@ -350,16 +381,27 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
       const [row] = await asChange(
         sql,
         { ...(input.actor !== undefined ? { actor: input.actor } : {}), ...(input.origin ? { origin: input.origin } : {}) },
-        (tx) => tx<ApiKeyRow[]>`
-          SELECT * FROM slotlock.create_api_key(
-            ${input.tenantRef}::text,
-            ${name}::text,
-            ${prefix}::text,
-            ${digest}::bytea,
-            pg_catalog.string_to_array(${scopes.join(',')}::text, ','),
-            ${expiresAt ?? null}::timestamptz,
-            ${createdBy ?? null}::text
-          )`,
+        async (tx) => {
+          const created = await tx<ApiKeyRow[]>`
+            SELECT * FROM slotlock.create_api_key(
+              ${input.tenantRef}::text,
+              ${name}::text,
+              ${prefix}::text,
+              ${digest}::bytea,
+              pg_catalog.string_to_array(${scopes.join(',')}::text, ','),
+              ${expiresAt ?? null}::timestamptz,
+              ${createdBy ?? null}::text
+            )`;
+          // In the same transaction: a limited key never exists without its limit.
+          if (created[0] && resourceScope) {
+            await tx`
+              SELECT slotlock.set_api_key_resource_scope(
+                ${input.tenantRef}::text, ${created[0].key_id}::uuid,
+                pg_catalog.string_to_array(${resourceScope.locations.join(',')}::text, ','),
+                pg_catalog.string_to_array(${resourceScope.groups.join(',')}::text, ','))`;
+          }
+          return created;
+        },
       );
       if (!row) {
         throw invalid(
@@ -367,14 +409,25 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
           `Slotlock allows ${SLOTLOCK_API_KEY_ACTIVE_LIMIT} active and ${SLOTLOCK_API_KEY_RETAINED_LIMIT} kept API keys per tenant, or fewer active ones on a hosted plan; revoke one first`,
         );
       }
-      return { key, apiKey: apiKeyFrom(row) };
+      const apiKey = apiKeyFrom(row);
+      if (resourceScope) apiKey.resourceScope = canonicalResourceScope(resourceScope.locations, resourceScope.groups);
+      return { key, apiKey };
     },
 
     async list({ tenantRef }) {
       assertTenantRef(tenantRef);
-      const rows = await sql<ApiKeyRow[]>`
-        SELECT * FROM slotlock.list_api_keys(${tenantRef}::text)`;
-      return rows.map(apiKeyFrom);
+      const [rows, limited] = await Promise.all([
+        sql<ApiKeyRow[]>`SELECT * FROM slotlock.list_api_keys(${tenantRef}::text)`,
+        sql<{ key_id: string; locations: string[]; groups: string[] }[]>`
+          SELECT key_id::text, locations, groups FROM slotlock.list_api_key_resource_scopes(${tenantRef}::text)`,
+      ]);
+      const scopes = new Map(limited.map((row) => [row.key_id, canonicalResourceScope(row.locations, row.groups)]));
+      return rows.map((row) => {
+        const apiKey = apiKeyFrom(row);
+        const scope = scopes.get(row.key_id);
+        if (scope) apiKey.resourceScope = scope;
+        return apiKey;
+      });
     },
 
     async rotate({ tenantRef, id, ...change }) {
@@ -398,10 +451,25 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
 
     async authenticate(key) {
       if (!isSlotlockApiKey(key)) return null;
-      const [row] = await sql<{ key_id: string; key_tenant_ref: string; key_scopes: string[] }[]>`
-        SELECT * FROM slotlock.authenticate_api_key(${slotlockApiKeyDigest(key)}::bytea)`;
+      const [row] = await sql<
+        {
+          key_id: string;
+          key_tenant_ref: string;
+          key_scopes: string[];
+          scope_locations: string[] | null;
+          scope_groups: string[] | null;
+        }[]
+      >`SELECT * FROM slotlock.authenticate_scoped_api_key(${slotlockApiKeyDigest(key)}::bytea)`;
       if (!row) return null;
-      return { id: row.key_id, tenantRef: row.key_tenant_ref, scopes: knownScopes(row.key_scopes) };
+      const identity: SlotlockApiKeyIdentity = {
+        id: row.key_id,
+        tenantRef: row.key_tenant_ref,
+        scopes: knownScopes(row.key_scopes),
+      };
+      if (row.scope_locations !== null || row.scope_groups !== null) {
+        identity.resourceScope = canonicalResourceScope(row.scope_locations ?? [], row.scope_groups ?? []);
+      }
+      return identity;
     },
 
     async erase({ tenantRef }) {
@@ -485,6 +553,7 @@ export function createSlotlockApiKeyAuthenticator(
         tenantRef: identity.tenantRef,
         scopes: identity.scopes,
         keyId: identity.id,
+        ...(identity.resourceScope ? { resourceScope: identity.resourceScope } : {}),
       };
     } finally {
       const next = waitingKnown.shift() ?? waiting.shift();

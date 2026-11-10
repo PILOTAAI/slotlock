@@ -527,6 +527,11 @@ export interface SlotlockAgentPrincipal {
    * each change the principal makes (`createSlotlockApiKeyAuthenticator` sets it).
    */
   keyId?: string;
+  /**
+   * For a key limited to part of its tenant (RFC 0003 G6), the locations and groups it reaches: a
+   * backend runs its operations with the store's `resourceScope`, so nothing outside is found.
+   */
+  resourceScope?: { readonly locations: readonly string[]; readonly groups: readonly string[] };
 }
 
 /** Whether a principal's scopes, if it carries any, cover an operation. */

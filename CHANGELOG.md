@@ -102,6 +102,20 @@ versioning.
   resource's location (with its name) and groups, and narrows by `location` and `group`, with or
   without a pool. `resource.created` and `resource.updated` carry the location. Run `slotlock
   migrate`.
+- Keys limited to part of their tenant (RFC 0003 G6). `slotlock key create --locations <refs>
+  --groups <refs>`, the dashboard's "Limit to locations or groups" (Developer plan and up when the
+  dashboard has plans) or the key store's `resourceScope` makes a key that reaches only the
+  resources at those locations (each with every location in it) or in those groups, up to 20 of
+  each, read and write only, for good (kept through rotation). The database enforces it: withTenant's
+  new `resourceScope` sets `slotlock.resource_scope` to the key's resources for the transaction, and
+  a restrictive `resource_scope_v1` policy on every table keyed by resource or by event narrows each
+  read and write to them, so a resource outside is not found (`resource_not_found`, never
+  `forbidden`) and the feed carries only its resources' changes. New owner-only
+  `slotlock.api_key_resource_scopes` (erased with the key) and definer functions
+  `set_api_key_resource_scope`, `authenticate_scoped_api_key` and `list_api_key_resource_scopes`;
+  a principal carries `resourceScope`, which the store backends pass on; key lists show it. The
+  deployment's RLS check accepts the restrictive policy beside the tenant one, and nothing else. Run
+  `slotlock migrate`, then grant the application role again (`slotlock migrate` does).
 - Group membership changes are on the feed. A resource joining or leaving a group, a group's
   deletion included, appends `resource.updated` with the groups it was in `before` and is in
   `after`, by reference, sorted: one change for each resource a statement touched (a statement

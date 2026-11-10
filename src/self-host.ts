@@ -89,6 +89,7 @@ import {
   readSlotlockTenantPlan,
   setSlotlockPlanDefault,
 } from './plans.js';
+import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
 import { createSlotlockQuotas, noteSlotlockQuotaThreshold, readSlotlockQuotaUse } from './quotas.js';
 import { createSlotlockRequestLimits } from './rate-limit.js';
 import { createSlotlockUsageMeter, recordSlotlockUsage } from './usage.js';
@@ -1603,8 +1604,27 @@ function apiKeyLine(apiKey: SlotlockApiKey, key?: string): string {
     expires_at: apiKey.expiresAt?.toISOString() ?? null,
     last_used_at: apiKey.lastUsedAt?.toISOString() ?? null,
     revoked_at: apiKey.revokedAt?.toISOString() ?? null,
+    ...(apiKey.resourceScope ? { resource_scope: apiKey.resourceScope } : {}),
     ...(key !== undefined ? { key } : {}),
   })}\n`;
+}
+
+/** `--locations` and `--groups`: references, comma-separated; neither for a key of the whole tenant. */
+function parseKeyResourceScope(
+  locations: string | undefined,
+  groups: string | undefined,
+): SlotlockResourceScope | undefined {
+  if (locations === undefined && groups === undefined) return undefined;
+  const list = (value: string | undefined) =>
+    (value ?? '')
+      .split(',')
+      .map((ref) => ref.trim())
+      .filter((ref) => ref !== '');
+  const scope = { locations: list(locations), groups: list(groups) };
+  if (!isSlotlockResourceScope(scope)) {
+    throw new Error('--locations and --groups take up to 20 location or group references each, at least one in all');
+  }
+  return scope;
 }
 
 /** `--scope`: read, write and admin, comma-separated; read,write unless given. */
@@ -1746,9 +1766,12 @@ Commands:
   rules clear --resource <ref>
                            Remove the resource's booking rules
   key create <name> [--scope read,write,admin] [--expires-in-days <n>]
+             [--locations <ref,...>] [--groups <ref,...>]
                            Create an API key for the tenant (default scope read,write, no
                            expiry; admin adds the application API) and print it once; only its
-                           SHA-256 is stored
+                           SHA-256 is stored. With --locations or --groups, the key reaches
+                           only the resources there (each location with those in it), read and
+                           write only
   key list                 Print the tenant's API keys, one JSON object per line
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
@@ -2007,13 +2030,17 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   }
   let keyScopes: SlotlockApiKeyScope[] = [];
   let keyLifetimeDays: number | undefined;
+  let keyResourceScope: SlotlockResourceScope | undefined;
   if (subcommand === 'key create') {
     try {
       keyScopes = parseKeyScopes(values.scope);
       keyLifetimeDays = parseKeyLifetime(values['expires-in-days']);
+      keyResourceScope = parseKeyResourceScope(values.locations, values.groups);
     } catch (error) {
       return usage((error as Error).message);
     }
+  } else if (values.locations !== undefined || values.groups !== undefined) {
+    return usage('--locations and --groups are for key create');
   }
 
   const log = createLogger(io);
@@ -2167,6 +2194,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
             name: operands[1] as string,
             scopes: keyScopes,
             createdBy: CLI_KEY_CREATOR,
+            ...(keyResourceScope ? { resourceScope: keyResourceScope } : {}),
             ...(keyLifetimeDays !== undefined
               ? { expiresAt: new Date(Date.now() + keyLifetimeDays * DAY_MS) }
               : {}),
@@ -2236,6 +2264,8 @@ function parseCliArguments(argv: readonly string[]) {
       timezone: { type: 'string' },
       scope: { type: 'string' },
       'expires-in-days': { type: 'string' },
+      locations: { type: 'string' },
+      groups: { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
       reason: { type: 'string' },

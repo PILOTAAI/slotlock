@@ -1648,7 +1648,11 @@ ${noticeOf(notice)}
       return html`<tr>
 <td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${served ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
-<td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
+<td data-label="Access">${
+        key.resourceScope
+          ? html`<span class="cell"><span>${accessOf(key)}</span><span class="meta wrap">Only ${[...key.resourceScope.locations, ...key.resourceScope.groups.map((group) => `group ${group}`)].join(', ')}</span></span>`
+          : accessOf(key)
+      }</td>
 <td data-label="Created">${dateCell(key.createdAt)}</td>
 <td data-label="Last used">${key.lastUsedAt ? dateCell(key.lastUsedAt) : html`<span class="muted">Never</span>`}</td>
 <td data-label="Expires">${key.expiresAt ? dateCell(key.expiresAt) : html`<span class="muted">Never</span>`}</td>
@@ -1795,9 +1799,30 @@ ${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(c
     return html`<dl class="endpoints"><dt>MCP</dt><dd><code id="mcp-url">${mcpUrl}</code><button class="quiet" type="button" data-copy="mcp-url">Copy</button></dd><dt>A2A</dt><dd><code id="a2a-url">${a2aUrl}</code><button class="quiet" type="button" data-copy="a2a-url">Copy</button></dd></dl>`;
   }
 
+  const accessOf = (key: SlotlockApiKey) =>
+    key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only';
+
   async function keysPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const keys = await options.keys.list({ tenantRef: tenantOf(session) });
+    const tenantRef = tenantOf(session);
+    const grouping = options.resources.grouping;
+    const [keys, locations, groups] = await Promise.all([
+      options.keys.list({ tenantRef }),
+      grouping?.locations(tenantRef),
+      grouping?.groups(tenantRef),
+    ]);
     const token = csrfToken(session);
+    const paths = locationPaths(locations ?? []);
+    // A key limited to locations or groups (RFC 0003 G6), when the tenant has any to choose.
+    const limitChoices =
+      (locations?.length ?? 0) + (groups?.length ?? 0) > 0
+        ? html`<details class="types"><summary>Limit to locations or groups (optional)</summary><div class="checks">${(locations ?? []).map(
+            (location) =>
+              html`<label class="choice"><input type="checkbox" name="limit_location" value="${location.ref}"> ${paths.get(location.ref) ?? location.name}</label>`,
+          )}${(groups ?? []).map(
+            (group) =>
+              html`<label class="choice"><input type="checkbox" name="limit_group" value="${group.ref}"> Group: ${group.name}</label>`,
+          )}</div><p class="fine">The key then reaches only the resources there (a location with every location in it), read and write only. Developer plan and up.</p></details>`
+        : html``;
     const content = html`${noticeOf(notice)}
 ${pageHead('API keys')}
 <section class="panel">
@@ -1814,6 +1839,7 @@ ${endpoints()}
 <label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option><option value="full">Full, with the application API</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
+${limitChoices}
 </form>
 </section>
 ${
@@ -3937,6 +3963,22 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       return keysPage(session, 400, 'Choose an access level and an expiry from the lists.');
     }
     const days = KEY_EXPIRY_DAYS[expiry];
+    const limited = {
+      locations: [...new Set(form.getAll('limit_location'))],
+      groups: [...new Set(form.getAll('limit_group'))],
+    };
+    const resourceScope = limited.locations.length + limited.groups.length > 0 ? limited : undefined;
+    if (resourceScope) {
+      if (scopes.includes('admin')) {
+        return keysPage(session, 400, 'A key limited to locations or groups reads and writes only: choose that access.');
+      }
+      // Keys limited to part of the tenant come with Developer (RFC 0003 pricing); a server without
+      // plans allows them.
+      const plan = options.billing ? await options.billing.plan(tenantOf(session)) : null;
+      if (plan?.plan === 'free') {
+        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer plan. See Plan.');
+      }
+    }
     try {
       const created = await options.keys.create({
         tenantRef: tenantOf(session),
@@ -3944,6 +3986,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         scopes,
         createdBy: personOf(session),
         origin: 'dashboard',
+        ...(resourceScope ? { resourceScope } : {}),
         ...(typeof days === 'number' ? { expiresAt: new Date(now() + days * DAY_MS) } : {}),
       });
       return shownOncePage(session, created.key, created.apiKey, false);
@@ -3951,6 +3994,9 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       const code = (error as { code?: unknown }).code;
       if (code === 'invalid_api_key_name') {
         return keysPage(session, 400, 'Give the key a name of 1 to 100 characters.');
+      }
+      if (code === 'invalid_api_key_resource_scope') {
+        return keysPage(session, 400, 'Choose up to 20 locations and 20 groups from the lists.');
       }
       if (code === 'api_key_limit_reached') {
         return keysPage(

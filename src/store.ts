@@ -12,6 +12,8 @@ import {
   type SlotlockLocation,
   type SlotlockPoolOrder,
   type SlotlockResourceGroup,
+  type SlotlockResourceScope,
+  isSlotlockResourceScope,
   parseSlotlockLocation,
   parseSlotlockResourceGroup,
   parseSlotlockResourceProfile,
@@ -52,6 +54,8 @@ import {
   SLOTLOCK_SCHEMA_VERSION,
   SLOTLOCK_STRUCTURE_DDL,
   SLOTLOCK_TENANT_CONTEXT_SETTING,
+  SLOTLOCK_RESOURCE_SCOPED_TABLES,
+  SLOTLOCK_RESOURCE_SCOPE_SETTING,
   SLOTLOCK_TENANT_TABLES,
   SLOTLOCK_VALIDATION_DDL,
   createSlotlockApplicationRoleGrantsDdl,
@@ -738,8 +742,17 @@ async function tenantRlsUpToDate(tx: TransactionSql, setting: string): Promise<b
   const [state] = await tx<{ current: boolean | null; matched: number }[]>`
     SELECT pg_catalog.bool_and(
              rel.relrowsecurity AND rel.relforcerowsecurity
+             -- The tenant policy, and on a table a limited key is held to, the restrictive scope
+             -- policy, which can only narrow it; no other.
              AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy every
-                   WHERE every.polrelid = rel.oid) = 1
+                   WHERE every.polrelid = rel.oid
+                     AND (every.polname = 'tenant_isolation_v1'
+                          OR NOT (every.polname = 'resource_scope_v1' AND NOT every.polpermissive
+                                  AND wanted.name = ANY (${Object.keys(SLOTLOCK_RESOURCE_SCOPED_TABLES)}::text[])))) = 1
+             AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy scoped
+                   WHERE scoped.polrelid = rel.oid AND scoped.polname = 'resource_scope_v1'
+                     AND NOT scoped.polpermissive)
+                 = CASE WHEN wanted.name = ANY (${Object.keys(SLOTLOCK_RESOURCE_SCOPED_TABLES)}::text[]) THEN 1 ELSE 0 END
              AND pg_catalog.obj_description(pol.oid, 'pg_policy') = ${`slotlock:tenant-context:${setting}`}
              AND contract.tenant_context_setting = ${setting}
              AND contract.policy_fingerprint = pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
@@ -2359,6 +2372,13 @@ export interface SlotlockStore extends SlotlockEventFeed {
       origin?: SlotlockChangeOrigin;
       /** The id (a UUID) of the API key making these changes, recorded with each. */
       keyId?: string;
+      /**
+       * A key limited to part of its tenant (RFC 0003 G6): the transaction reaches only the
+       * resources at these locations (each with every location in it) or in these groups, as they
+       * are when it starts, by the database's resource_scope_v1 policies, on every table keyed by
+       * resource, for reads and writes. A resource outside it is not found.
+       */
+      resourceScope?: SlotlockResourceScope;
     },
   ): Promise<T>;
   /**
@@ -4020,6 +4040,12 @@ function buildSlotlockStore(
       if (keyId !== undefined && !isValidResourceId(keyId)) {
         throw Object.assign(new Error('Slotlock key id must be a UUID'), { code: 'invalid_identity' as const });
       }
+      const scope = options?.resourceScope;
+      if (scope !== undefined && !isSlotlockResourceScope(scope)) {
+        throw Object.assign(new Error('Slotlock resource scope must name locations or groups by reference'), {
+          code: 'invalid_identity' as const,
+        });
+      }
       const release = await tenantSlots?.(tenantRef, options?.signal);
       // A lock timeout leaves the transaction unusable, so the reset below would fail with another
       // error: noted here.
@@ -4044,15 +4070,33 @@ function buildSlotlockStore(
                    pg_advisory_xact_lock_shared(
                      hashtextextended(${slotlockTenantLockKey(tenantRef)}, 0)
                    ) AS locked`;
-          const [context] = await tx<{ suspended: boolean }[]>`
+          const [context] = await tx<{ suspended: boolean; scope: string | null }[]>`
             SELECT set_config(${configuredTenantSetting}, ${tenantRef}, true) AS tenant,
                    set_config('slotlock.actor', ${actor ?? ''}, true) AS actor,
                    set_config('slotlock.origin', COALESCE(${origin ?? null}::text,
                      NULLIF(current_setting('slotlock.origin', true), ''), 'library'), true) AS origin,
                    set_config('slotlock.key_id', ${keyId ?? ''}, true) AS key,
+                   current_setting(${SLOTLOCK_RESOURCE_SCOPE_SETTING}, true) AS scope,
                    slotlock.tenant_suspended(${tenantRef}) AS suspended`.catch((error: unknown) => {
             throw suspensionCheckRefusal(error);
           });
+          // A limited key's resources, read in the tenant's context (and within an enclosing
+          // scope, if one is set), then held for the rest of the transaction.
+          if (scope !== undefined) {
+            await tx`
+              SELECT set_config(${SLOTLOCK_RESOURCE_SCOPE_SETTING}, '{' || COALESCE((
+                       SELECT string_agg(held.id::text, ',' ORDER BY held.id)
+                         FROM slotlock.resources held
+                        WHERE held.tenant_ref = ${tenantRef}
+                          AND ((held.location_ref IS NOT NULL
+                                AND slotlock.location_path(held.tenant_ref, held.location_ref)
+                                    && pg_catalog.string_to_array(${scope.locations.join(',')}::text, ','))
+                               OR EXISTS (
+                                 SELECT 1 FROM slotlock.resource_group_members member
+                                  WHERE member.tenant_ref = held.tenant_ref AND member.resource_id = held.id
+                                    AND member.group_ref = ANY (pg_catalog.string_to_array(${scope.groups.join(',')}::text, ','))))
+                     ), '') || '}', true)`;
+          }
           // A caller's REPEATABLE READ or SERIALIZABLE snapshot predates the lock, so it may miss a
           // suspension: its writes are refused, reads allowed.
           const refusal =
@@ -4072,7 +4116,8 @@ function buildSlotlockStore(
             await tx`SELECT set_config(${configuredTenantSetting}, ${previous[0]?.value ?? ''}, true),
                             set_config('slotlock.actor', ${previous[0]?.actor ?? ''}, true),
                             set_config('slotlock.origin', ${previous[0]?.origin ?? ''}, true),
-                            set_config('slotlock.key_id', ${previous[0]?.key ?? ''}, true)`;
+                            set_config('slotlock.key_id', ${previous[0]?.key ?? ''}, true),
+                            set_config(${SLOTLOCK_RESOURCE_SCOPE_SETTING}, ${context?.scope ?? ''}, true)`;
           }
         },
         'read committed',

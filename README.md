@@ -213,6 +213,7 @@ Give each agent its own key instead of sharing the server token:
 slotlock key create "Booking agent"
 slotlock key create "Availability bot" --scope read --expires-in-days 90
 slotlock key create "Booking site" --scope read,write,admin
+slotlock key create "North desk" --locations north --groups night-shift
 slotlock key list
 slotlock key rotate <id>
 slotlock key revoke <id>
@@ -223,6 +224,14 @@ slotlock key revoke <id>
 - `read` covers the seven tools that only look; `write` covers create, update and delete; `admin`
   covers the [application API](#application-api), which no agent needs. Default: read and write.
 - `rotate` keeps the key's id, scopes and bookings; `revoke` stops it on its next request.
+- A key can be limited to part of its tenant: `--locations` (each with every location in it) and
+  `--groups`, up to 20 of each, or the dashboard's "Limit to locations or groups" (Developer plan and
+  up on a hosted server). It then reaches only those resources, as they are when each call starts,
+  and nothing else is there for it: another resource is `resource_not_found`, never `forbidden`, and
+  the feed shows it only changes about its resources. The database holds it to that, not the
+  server: `withTenant` sets the key's resources for the transaction and a restrictive row-level
+  security policy (`resource_scope_v1`) on every table keyed by resource narrows each read and
+  write to them. A limited key reads and writes only (no `admin`), and keeps its limit for good.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
 

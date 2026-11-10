@@ -56,6 +56,7 @@ function memoryKeys() {
         expiresAt: input.expiresAt ?? null,
         lastUsedAt: null,
         revokedAt: null,
+        ...(input.resourceScope ? { resourceScope: input.resourceScope } : {}),
       });
     }),
     list: vi.fn(async ({ tenantRef }: { tenantRef: string }) =>
@@ -2294,6 +2295,29 @@ describe('the plan page', () => {
     const html = await (await get(dashboard(), '/base/dashboard', session)).text();
     expect(html).not.toContain('/base/dashboard/plan');
     expect((await get(dashboard(), '/base/dashboard/plan', session)).status).toBe(404);
+  });
+
+  it('limits a key to locations or groups on Developer, never on Free, and never with full access', async () => {
+    const free: SlotlockTenantPlan = { ...developer, plan: 'free', stripeCustomer: null, stripeSubscription: null, currentPeriodEnd: null };
+    const limited = { name: 'North desk', access: 'read_write', expires: '90', limit_location: 'north', limit_group: 'team' };
+    const onFree = billed(free);
+    const { session } = await signIn(onFree.target);
+    const refused = await post(onFree.target, '/base/dashboard/keys', { csrf: await csrf(onFree.target, session), ...limited }, session);
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain('Keys limited to locations or groups come with the Developer plan.');
+    expect(keys.store.create).not.toHaveBeenCalled();
+    const onDeveloper = billed(developer);
+    const signed = await signIn(onDeveloper.target);
+    const token = await csrf(onDeveloper.target, signed.session);
+    const full = await post(onDeveloper.target, '/base/dashboard/keys', { csrf: token, ...limited, access: 'full' }, signed.session);
+    expect(full.status).toBe(400);
+    expect((await post(onDeveloper.target, '/base/dashboard/keys', { csrf: token, ...limited }, signed.session)).status).toBe(200);
+    expect(keys.store.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scopes: ['read', 'write'], resourceScope: { locations: ['north'], groups: ['team'] } }),
+    );
+    expect(await (await get(onDeveloper.target, '/base/dashboard/keys', signed.session)).text()).toContain(
+      '<span class="meta wrap">Only north, group team</span>',
+    );
   });
 
   it('shows a Free tenant its use against the limits, an upgrade and the founder', async () => {

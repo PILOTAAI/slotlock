@@ -13,6 +13,7 @@ import {
   SLOTLOCK_MAX_LOCATION_DEPTH,
   SLOTLOCK_MAX_LOCATIONS,
   SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_MAX_KEY_SCOPE_REFS,
   SLOTLOCK_MAX_POOL_SETTINGS,
   SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
@@ -219,6 +220,7 @@ export const SLOTLOCK_API_KEY_RETAINED_LIMIT = 1_000;
 export const SLOTLOCK_API_KEY_TABLES = Object.freeze([
   'api_keys',
   'api_key_retired_digests',
+  'api_key_resource_scopes',
 ] as const);
 
 /**
@@ -232,7 +234,11 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
   'slotlock.revoke_api_key(text, uuid)',
   'slotlock.authenticate_api_key(bytea)',
   'slotlock.erase_api_keys(text)',
+  'slotlock.set_api_key_resource_scope(text, uuid, text[], text[])',
+  'slotlock.authenticate_scoped_api_key(bytea)',
+  'slotlock.list_api_key_resource_scopes(text)',
 ] as const);
+
 
 /**
  * The table behind the dashboard's shared records (dashboard.ts). No role but its owner holds a
@@ -647,6 +653,88 @@ AS $slotlock_erase_api_keys$
   SELECT count(*) FROM erased;
 $slotlock_erase_api_keys$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[5]} FROM PUBLIC;
+
+-- Keys limited to part of their tenant (RFC 0003 G6): the locations (each with every location in
+-- it) and groups whose resources the key reaches, and no other. Set when the key is made and kept
+-- through rotation; gone with the key. Owner-only, reached through the functions below; the
+-- database enforces it (withTenant's slotlock.resource_scope and the resource_scope_v1 policies).
+CREATE TABLE IF NOT EXISTS slotlock.api_key_resource_scopes (
+  key_id uuid PRIMARY KEY REFERENCES slotlock.api_keys (id) ON DELETE CASCADE,
+  tenant_ref text NOT NULL,
+  locations text[] NOT NULL DEFAULT '{}',
+  groups text[] NOT NULL DEFAULT '{}',
+  CONSTRAINT slotlock_api_key_resource_scopes_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND cardinality(locations) + cardinality(groups) >= 1
+    AND cardinality(locations) <= ${SLOTLOCK_MAX_KEY_SCOPE_REFS}
+    AND cardinality(groups) <= ${SLOTLOCK_MAX_KEY_SCOPE_REFS}
+    AND array_position(locations, NULL) IS NULL AND array_position(groups, NULL) IS NULL
+  )
+);
+ALTER TABLE slotlock.api_key_resource_scopes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.api_key_resource_scopes FROM PUBLIC;
+
+-- Limit one of the tenant's active keys, once: true when set, false when the tenant has no such
+-- active key or it is limited already. Each reference as locations and groups take them.
+CREATE OR REPLACE FUNCTION slotlock.set_api_key_resource_scope(
+  requested_tenant_ref text, requested_id uuid, requested_locations text[], requested_groups text[]
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_api_key_resource_scope$
+BEGIN
+  IF requested_locations IS NULL OR requested_groups IS NULL
+     OR EXISTS (SELECT 1 FROM unnest(requested_locations || requested_groups) named(ref)
+                 WHERE named.ref IS NULL OR named.ref !~ '^[a-z0-9][a-z0-9._-]{0,99}$') THEN
+    RAISE EXCEPTION 'Slotlock key scope references must be location and group references'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM slotlock.api_keys limited
+                  WHERE limited.tenant_ref = requested_tenant_ref AND limited.id = requested_id
+                    AND limited.revoked_at IS NULL) THEN
+    RETURN false;
+  END IF;
+  INSERT INTO slotlock.api_key_resource_scopes (key_id, tenant_ref, locations, groups)
+  VALUES (
+    requested_id, requested_tenant_ref,
+    ARRAY(SELECT DISTINCT ref FROM unnest(requested_locations) ref ORDER BY ref),
+    ARRAY(SELECT DISTINCT ref FROM unnest(requested_groups) ref ORDER BY ref))
+  ON CONFLICT (key_id) DO NOTHING;
+  RETURN FOUND;
+END
+$slotlock_set_api_key_resource_scope$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[6]} FROM PUBLIC;
+
+-- As authenticate_api_key, with the key's scope: null locations and groups for a key with none.
+CREATE OR REPLACE FUNCTION slotlock.authenticate_scoped_api_key(presented_secret_hash bytea)
+RETURNS TABLE (key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[])
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_scoped_api_key$
+  SELECT found.key_id, found.key_tenant_ref, found.key_scopes, scope.locations, scope.groups
+    FROM slotlock.authenticate_api_key(presented_secret_hash) found
+    LEFT JOIN slotlock.api_key_resource_scopes scope ON scope.key_id = found.key_id;
+$slotlock_authenticate_scoped_api_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[7]} FROM PUBLIC;
+
+-- The scopes of the tenant's limited keys, for its key list.
+CREATE OR REPLACE FUNCTION slotlock.list_api_key_resource_scopes(requested_tenant_ref text)
+RETURNS TABLE (key_id uuid, locations text[], groups text[])
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_api_key_resource_scopes$
+  SELECT scope.key_id, scope.locations, scope.groups
+    FROM slotlock.api_key_resource_scopes scope
+   WHERE scope.tenant_ref = requested_tenant_ref;
+$slotlock_list_api_key_resource_scopes$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[8]} FROM PUBLIC;
 
 -- A key created, given a new secret or revoked appends to its tenant's feed (key.created,
 -- key.rotated, key.revoked): its id, scopes and expiry, never its digest, prefix or name. Only the
@@ -1709,6 +1797,11 @@ BEGIN
   RETURN NEXT;
   erased_table := 'usage_notices';
   DELETE FROM slotlock.usage_notices WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- Before the keys, so their count is reported (the key's deletion would take them too).
+  erased_table := 'api_key_resource_scopes';
+  DELETE FROM slotlock.api_key_resource_scopes WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'api_keys';
@@ -4603,6 +4696,56 @@ GRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "${role}";
  * `slotlock.tenant_ref`; adapters may supply an established transaction-local setting name.
  * Every policy fails closed when the setting is absent or empty, and FORCE binds the table owner.
  */
+/**
+ * The transaction-local setting withTenant sets for a key limited to part of its tenant (RFC 0003
+ * G6): the ids of the resources it reaches, as a uuid[] literal; empty for every other caller.
+ */
+export const SLOTLOCK_RESOURCE_SCOPE_SETTING = 'slotlock.resource_scope';
+
+const RESOURCE_SCOPE_OPEN = `NULLIF(current_setting('${SLOTLOCK_RESOURCE_SCOPE_SETTING}', true), '') IS NULL`;
+const resourceScopeAllows = (column: string) =>
+  `(${RESOURCE_SCOPE_OPEN} OR ${column} = ANY (NULLIF(current_setting('${SLOTLOCK_RESOURCE_SCOPE_SETTING}', true), '')::uuid[]))`;
+
+/**
+ * The tables a key limited to part of its tenant is held to, and how each row names its resource:
+ * the resource itself, or the event it belongs to. Tombstones and archives name none and stay as the
+ * tenant policy leaves them.
+ */
+export const SLOTLOCK_RESOURCE_SCOPED_TABLES: Readonly<Record<string, string>> = Object.freeze({
+  resources: resourceScopeAllows('id'),
+  reservations: resourceScopeAllows('resource_id'),
+  calendar_events: resourceScopeAllows('resource_id'),
+  calendar_coverage: resourceScopeAllows('resource_id'),
+  hold_commands: resourceScopeAllows('resource_id'),
+  resource_group_members: resourceScopeAllows('resource_id'),
+  // A change or a waitlist entry about no one resource (a key, a pool) is not the key's.
+  outbox: resourceScopeAllows('resource_id'),
+  waitlist_entries: resourceScopeAllows('resource_id'),
+  ...Object.fromEntries(
+    [
+      'calendar_event_attendees',
+      'calendar_event_reminders',
+      'calendar_event_exceptions',
+      'calendar_event_occurrences',
+      'calendar_event_commands',
+    ].map((table) => [
+      table,
+      `(${RESOURCE_SCOPE_OPEN} OR EXISTS (SELECT 1 FROM slotlock.calendar_events scoped_event WHERE scoped_event.id = event_id))`,
+    ]),
+  ),
+});
+
+/**
+ * One restrictive policy on each table SLOTLOCK_RESOURCE_SCOPED_TABLES names: it only narrows what
+ * the tenant policy allows, for reads and writes alike, and is open when no scope is set.
+ */
+const SLOTLOCK_RESOURCE_SCOPE_POLICIES = Object.entries(SLOTLOCK_RESOURCE_SCOPED_TABLES)
+  .map(
+    ([table, allows]) =>
+      `CREATE POLICY resource_scope_v1 ON slotlock.${table} AS RESTRICTIVE USING ${allows} WITH CHECK ${allows};`,
+  )
+  .join('\n');
+
 export function createSlotlockTenantRlsDdl(
   tenantContextSetting = SLOTLOCK_TENANT_CONTEXT_SETTING,
 ): string {
@@ -5034,6 +5177,7 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_group_members
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.pool_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
   table_name, tenant_context_setting, policy_fingerprint, installed_at

@@ -123,7 +123,12 @@ interface AgentEventInput {
 const WRITE = { isolation: 'read committed' } as const;
 
 interface TenantCallContext {
-  principal: { tenantRef: string; subject?: string; keyId?: string };
+  principal: {
+    tenantRef: string;
+    subject?: string;
+    keyId?: string;
+    resourceScope?: { readonly locations: readonly string[]; readonly groups: readonly string[] };
+  };
   signal: AbortSignal;
   /** The surface the call came through, recorded with its changes. */
   origin?: SlotlockChangeOrigin;
@@ -162,6 +167,8 @@ async function withTenant<T>(
       ...(actor !== undefined ? { actor } : {}),
       ...(context.origin !== undefined ? { origin: context.origin } : {}),
       ...(typeof keyId === 'string' && KEY_ID.test(keyId) ? { keyId } : {}),
+      // A key limited to part of the tenant reaches only its resources, by the database's policies.
+      ...(context.principal.resourceScope ? { resourceScope: context.principal.resourceScope } : {}),
     });
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;

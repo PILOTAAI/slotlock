@@ -294,7 +294,11 @@ when the endpoint is created (there is no route to change an endpoint) and shown
 with any filter, changes about no resource are not sent. An endpoint may also filter by `resource_ids`, `pools`, `locations`
 or `groups`, matched when the change is delivered (the outbox row has the resource id).
 
-**G6. Keys limited to part of a tenant (T2, 0.8.0).** An API key may carry a scope of locations
+**G6. Keys limited to part of a tenant (T2, 0.8.0).** Status: built on
+`claude/inspiring-dijkstra-bfvqif`, as below, with the key's resources worked out when each
+transaction starts (`slotlock.resource_scope`, a uuid[]), a restrictive `resource_scope_v1` policy on
+each table keyed by resource or by event, limited keys read and write only, set when the key is made
+(`slotlock key create --locations --groups`, or the dashboard on Developer). An API key may carry a scope of locations
 and groups. It is enforced in the database: a restrictive RLS policy on resources and on every table
 keyed by resource compares the row's resource with a transaction-local setting that `withTenant`
 sets from the key, so a scoped key cannot read or write outside its scope through any code path. A

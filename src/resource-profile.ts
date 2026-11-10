@@ -311,3 +311,28 @@ export const SLOTLOCK_POOL_ORDERS = Object.freeze(['stable', 'least_booked', 'ro
 export const SLOTLOCK_MAX_POOL_SETTINGS = 1_000;
 
 export type SlotlockPoolOrder = (typeof SLOTLOCK_POOL_ORDERS)[number];
+
+/** Locations, and groups, a key limited to part of its tenant may name (RFC 0003 G6), each. */
+export const SLOTLOCK_MAX_KEY_SCOPE_REFS = 20;
+
+/** A key limited to part of its tenant (RFC 0003 G6): the locations and groups it reaches. */
+export interface SlotlockResourceScope {
+  locations: readonly string[];
+  groups: readonly string[];
+}
+
+/** Whether `value` is a resource scope: location and group references, at least one, each list bounded. */
+export function isSlotlockResourceScope(value: unknown): value is SlotlockResourceScope {
+  const scope = value as SlotlockResourceScope | null;
+  const refs = (list: unknown) =>
+    Array.isArray(list) &&
+    list.length <= SLOTLOCK_MAX_KEY_SCOPE_REFS &&
+    list.every((ref) => typeof ref === 'string' && SLOTLOCK_GROUPING_REF.test(ref));
+  return (
+    typeof scope === 'object' &&
+    scope !== null &&
+    refs(scope.locations) &&
+    refs(scope.groups) &&
+    scope.locations.length + scope.groups.length > 0
+  );
+}

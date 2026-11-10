@@ -493,6 +493,13 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         )`;
       const keys = createSlotlockApiKeyStore(application);
       const key = await keys.create({ tenantRef, name: 'Agent key', scopes: ['read', 'write'] });
+      // A key limited to part of the tenant (RFC 0003 G6), whose limit is the tenant's too.
+      await keys.create({
+        tenantRef,
+        name: 'Depot key',
+        scopes: ['read'],
+        resourceScope: { locations: ['depot'], groups: [] },
+      });
       await keys.revoke({
         tenantRef,
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
