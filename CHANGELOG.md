@@ -3,7 +3,7 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
-## 0.7.0 - 2026-11-10
+## Unreleased
 
 ### Added
 
@@ -62,9 +62,72 @@ versioning.
   expanded over a bounded span; importing again updates them. `serve` fetches an `https` URL
   through the guarded fetch (no private addresses, 1 MB, 10 seconds); the store-backed application
   backend fetches none unless given `holidayFetch`.
+- Durations and hires (RFC 0004 B3). Booking rules gain `minDurationMinutes`, `maxDurationMinutes`,
+  `allowedDurations` and `defaultDurationMinutes`, and for a booking from one local day to another
+  `pickupTimes` and `returnTimes` (it starts and ends in them, and under `enforceHours` needs only
+  its start and end inside the hours). `turnaroundMinutes` goes up to a week. Refusals:
+  `booking_rule_min_duration`, `booking_rule_max_duration`, `booking_rule_duration_not_allowed`,
+  `booking_rule_pickup_time`, `booking_rule_return_time`. Searches offer only allowed lengths, and
+  take `defaultDurationMinutes` when they name none (`400 duration_required` otherwise).
+- Zone rule changes reach everything (RFC 0004 B9): `followZoneRules` also re-checks a recurring
+  series' occurrences to come (each kept with its wall time, reported once as
+  `event.timezone_shifted` with its `recurrence_id`), and reservations written with the new
+  optional `local_start` (`localStart`), reported as `reservation.timezone_shifted` or, with
+  `move`, moved at the next revision (`reservation.timezone_conflict` when something is in the
+  way). A `local_start` that does not name the reservation's start is `400 invalid_local_start`.
+- Holds across resources (RFC 0004 B7, T2): `slotlock_hold_together` (`POST /v1/slot-holds/together`),
+  the 19th agent tool, holds one time on 2-20 resources all or nothing, as one group whose holds
+  expire together. `slotlock_book_together` takes its `hold_group_id` and books the set from those
+  holds in one transaction. The application API gains `slotlock_tenant_book_together`
+  (`POST /v1/tenant/bundles`) and `slotlock_tenant_book_pool` (`POST /v1/tenant/pool-bookings`), the
+  agents' bundle and pool bookings for the tenant's own systems.
+- Waitlists that match (RFC 0004 B6): an entry may wait for any slot of a length within its
+  window (`duration_minutes`, `durationMs`), on a resource or a pool, and is offered the earliest
+  free one. Offers end `accepted`, `declined` (new `slotlock_decline_waitlist_offer`,
+  `POST /v1/waitlist/{entry_id}/decline`) or `lapsed`, decided by what becomes of their hold, by a
+  database trigger whatever path takes it. New feed types `waitlist.joined`, `.accepted`,
+  `.declined`, `.lapsed` and `.left`. Entries answer `duration_minutes` and `decided_at`.
+- A written booking lifecycle (RFC 0004 B4, T2): `src/lifecycle.ts` names each status, the move
+  each action makes and the refusal every other gets, and a test holds the store to it. A
+  tombstone keeps why the booking ended (`end_reason`: `cancelled` or `no_show`). New feed types:
+  `reservation.rescheduled` (a move, as well as `reservation.updated`) and `reservation.completed`,
+  which maintenance writes once for each booking whose end passed in the last week
+  (`bookings_completed` in its answer).
+- Cancellation and reschedule policies (RFC 0004 B5, T2): rules `cancelCutoffMinutes` and
+  `rescheduleCutoffMinutes` (`booking_rule_cancel_cutoff`, `booking_rule_reschedule_cutoff`), which
+  an admin may go past with `override_reason`, kept on the tombstone and the feed; and
+  `cancellationFee`, recorded on a late cancellation for the integrator to charge.
+- `slotlock_find_available_ranges` (`GET /v1/available-ranges`), the 18th agent tool: hires across
+  days for named resources or a pool's members, the earliest range on each from a pick-up window,
+  lasting N days or ending in a return window.
 - VAVAILABILITY carries RDATE and EXDATE (B1): the export adds the next year's closures as EXDATEs
   and special hours as AVAILABLEs with RDATEs. The import reads them, and single AVAILABLEs, as
   the resource's own exceptions, replacing those an earlier import made.
+
+### Changed
+
+- `setTenantAvailability` no longer copies hours onto every resource (RFC 0004 B2). It stores the
+  tenant's hours, which resources without their own inherit, and answers
+  `{ inheriting, ownHours }` instead of a count. A resource whose hours an earlier call copied keeps
+  them: pass `overrideResources: true` (`override_resources`, `hours set --all --override`, or the
+  dashboard's checkbox) once to clear them. `PUT /v1/availability` answers `resources_updated`
+  (resources the hours now apply to) and `resources_with_own_hours`.
+- `slotlock_run_maintenance` answers `bookings_completed`; the five clients' checks of its keys
+  include it. `slotlock_cancel_reservation` and `slotlock_cancel_tenant_event` answer
+  `cancellation_fee` (null when none).
+- `parseVAvailability` answers `days` as well as `rules`, and no longer refuses RDATE, EXDATE or an
+  AVAILABLE without RRULE.
+
+### Fixed
+
+- Enforced hours (`enforceHours`) judged a write inside `withTenant` against no hours when its
+  resource used the server's default (`defaultAvailabilityRules`, `SLOTLOCK_AVAILABILITY` under
+  `serve`): every such booking was refused `booking_rule_outside_hours`. The tenant's store now
+  carries the server's hours.
+
+## 0.7.0 - 2026-11-10
+
+### Added
 
 - The sandbox (RFC 0004 A6), in a test environment only: seed a scenario (car rental, clinic,
   desks) into an empty one, race agents for one slot and report who booked, who was refused and
@@ -436,14 +499,6 @@ versioning.
 
 ### Changed
 
-- `setTenantAvailability` no longer copies hours onto every resource (RFC 0004 B2). It stores the
-  tenant's hours, which resources without their own inherit, and answers
-  `{ inheriting, ownHours }` instead of a count. A resource whose hours an earlier call copied keeps
-  them: pass `overrideResources: true` (`override_resources`, `hours set --all --override`, or the
-  dashboard's checkbox) once to clear them. `PUT /v1/availability` answers `resources_updated`
-  (resources the hours now apply to) and `resources_with_own_hours`.
-- `parseVAvailability` answers `days` as well as `rules`, and no longer refuses RDATE, EXDATE or an
-  AVAILABLE without RRULE.
 - Rust client: every write's input struct has a `dry_run: Option<bool>` field (RFC 0004 A3), and
   `PartnerCreateKeyInput` a `limits` field (A5). A struct literal that lists every field must now
   end with `..Default::default()`, as the README's examples do; the other clients take them as

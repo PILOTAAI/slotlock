@@ -83,3 +83,32 @@ starts in about 40 ms and is reused; idle workers do not keep the process alive.
 the built package (the worker is `ical-worker-thread.js`), not from Slotlock's TypeScript sources.
 
 <!-- code examples/feeds.ts#feeds -->
+
+## What integrations build on
+
+Sending messages, syncing calendars and taking payments are left to packages outside the core,
+each its own process with its own credentials (RFC 0004 P3). The core gives them:
+
+- **Busy time without events.** A calendar that reports only busy time (Google freeBusy, Microsoft
+  getSchedule) records it with `replaceSourceBusy` (`PUT
+  /v1/resources/{resource_id}/coverage/{source}/busy`): the source's coverage of a window, and the
+  busy intervals in it, which replace what it said of that window before. Free/busy counts them and
+  every booking Slotlock makes is refused over them. A booking already confirmed that the source
+  newly reports busy time over is left as it is and put on the feed once as `coverage.conflict`, for
+  someone to decide: a change at the provider is never applied silently.
+- **Whom to tell, and whether.** A booking may name a contact (`contact_ref`), kept with
+  `putContact` (`PUT /v1/contacts/{contact_ref}`): email, phone and WhatsApp numbers, locale, and
+  consent per channel. `notify: false` on a booking or event says to tell no one. Deleting a contact
+  takes its reference off every booking too. The feed carries the reference, never the person.
+- **Reminders.** Maintenance puts each event reminder on the feed as `reminder.due` once, when it
+  comes due. A sender keys each message by the change's `id` (with its channel and recipient) and
+  records the key before sending, so a retry never sends twice.
+- **Payments.** A hold made with `paymentRequired` (at most 30 minutes) is confirmed only after
+  `markHoldPaid` (`POST /v1/holds/{hold_id}/paid`) records the payment's reference at your
+  processor, once you or an adapter verified it. The feed says `hold.paid`. Slotlock records payment
+  state and never moves money.
+
+Three packages in `packages/` build on these: `@slotlock/sync` (Google, Microsoft and iCalendar
+busy time in, bookings written back), `@slotlock/notify` (email, SMS and WhatsApp, each message
+sent once) and `@slotlock/payments-stripe` (a verified PaymentIntent marks its hold paid). Each
+has its own README in the repository.

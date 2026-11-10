@@ -37,7 +37,7 @@ claude mcp add --transport http slotlock http://localhost:8080/mcp \
 | `write` | Creating, changing and cancelling events | An agent that books |
 | `admin` | The [application API](/docs/api/): resources, hours, holds, reservations, the tenant | Your own backend, never an agent |
 
-`read` covers the seven tools that only look; `write` covers create, update and delete; `admin`
+`read` covers the eight tools that only look; `write` covers create, update and delete; `admin`
 covers the application API, which no agent needs. A key gets `read` and `write` unless you say
 otherwise:
 

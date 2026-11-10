@@ -14,13 +14,33 @@ Commands here are written `slotlock …`. With Compose, run them as
 
 ## Bookable hours
 
-`SLOTLOCK_AVAILABILITY` sets the default bookable hours. A resource can have its own
-(`slotlock hours set`, or the [dashboard](/docs/dashboard/)); with neither, no slot is offered.
+`SLOTLOCK_AVAILABILITY` sets the default bookable hours. The tenant, each location and each
+resource can store their own (`slotlock hours set`, or the [dashboard](/docs/dashboard/)): a
+resource without its own uses its location's, then the tenant's, then this. With none, no slot is
+offered. Closures and special days (`slotlock closures`) change single days.
 
 ```sh
-slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --resource vehicle-42
-slotlock hours clear --all    # back to SLOTLOCK_AVAILABILITY
+slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR","startMinutes":540,"durationMinutes":480}]' --all
+slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=SA","startMinutes":600,"durationMinutes":240}]' --location london-depot
+slotlock hours set '[]' --resource vehicle-42      # this one is never bookable
+slotlock hours clear --all    # the tenant's hours go: back to SLOTLOCK_AVAILABILITY
+slotlock closures add 2026-12-25 2026-12-26 --label Christmas
+slotlock closures add 2026-12-24 --label "Christmas Eve" --open 09:00-13:00 --location london-depot
+slotlock closures import holidays.ics --location london-depot
 ```
+
+Hours inherit (RFC 0004 B2): a resource without its own uses its location's, the nearest up the
+chain, then the tenant's, then `SLOTLOCK_AVAILABILITY`. Resources added later inherit too.
+Nothing is copied, so `hours set --all` leaves a resource's own hours alone unless `--override`
+clears them.
+
+Closures and special days (RFC 0004 B1) replace whole days, read in each resource's time zone: a
+closure empties them, `--open` gives them hours of their own. Each is the tenant's, one location's
+(and every location inside it) or one resource's. Where several fall on a day, the nearest wins.
+Search leaves those days as they say. Writes are refused `booking_rule_outside_hours` only under
+the `enforceHours` rule, as for weekly hours. `closures import` reads an iCalendar file of days
+off: each all-day event closes its days for the next two years, and importing it again updates
+them.
 
 A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`. The
 REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and
@@ -42,7 +62,13 @@ slotlock rules clear --resource vehicle-42
 | `slotStepMinutes` | starts on a step from local midnight in the resource's time zone |
 | `stepOffsetMinutes` | starts this far past each step (0 to the step less one): with a 30-minute step, 15 starts bookings on :15 and :45 |
 | `bufferBeforeMinutes` | keeps this long free before it: its leading buffer, which the database enforces |
-| `turnaroundMinutes` | keeps this long free after it: its trailing buffer, which the database enforces |
+| `turnaroundMinutes` | keeps this long free after it (up to a week): its trailing buffer, which the database enforces |
+| `minDurationMinutes`, `maxDurationMinutes` | lasts at least, and at most, this long |
+| `allowedDurations` | lasts exactly one of these lengths, in minutes |
+| `defaultDurationMinutes` | (a search) is this long when the search names no length |
+| `cancelCutoffMinutes`, `rescheduleCutoffMinutes` | (a cancel or move of it) comes at least this long before its start, unless an admin gives a reason |
+| `cancellationFee` | (a cancellation of it) records this fee, within `withinMinutes` of its start when given |
+| `pickupTimes`, `returnTimes` | from one local day to another (a hire), starts in one of these windows of the day and ends in one of those; it then needs only its start and end inside the hours under `enforceHours` |
 | `enforceHours` | lies inside the resource's bookable hours |
 | `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
 | `requireCertain` | lies in time every calendar sync recording coverage for the resource has read within a day |
@@ -55,7 +81,12 @@ slotlock rules clear --resource vehicle-42
 - A series is judged on its first occurrence for notice and advance, and on every occurrence for
   step and hours. Imported calendar events are not checked: they happened elsewhere.
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
-  offer only slots the rules allow, so an offered slot is one the write accepts.
+  offer only slots the rules allow, so an offered slot is one the write accepts. A length the
+  duration rules refuse finds nothing; a search that names no length takes
+  `defaultDurationMinutes` (`400 duration_required` when the resources give none, or differ).
+- Hires across days (a car from Friday to Monday) are found with `slotlock_find_available_ranges`:
+  each resource's or pool member's earliest range that starts in a pick-up window and lasts N days,
+  or ends in a return window, inside its pick-up and return times and its hours at both ends.
 - Two bookings stay at least the earlier one's trailing buffer plus the later one's leading buffer
   apart: each occupies from its start less its leading buffer to its end plus its trailing one, and
   the exclusion constraint keeps those apart. Free/busy reports that time as busy.
