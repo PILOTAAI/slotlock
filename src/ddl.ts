@@ -2816,7 +2816,9 @@ BEGIN
      SELECT ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
                    WHERE member.tenant_ref = touched.tenant_ref AND member.resource_id = touched.resource_id
                    ORDER BY member.group_ref) AS refs) now_in
-   WHERE NOT slotlock.outbox_erasing(touched.tenant_ref)
+   -- IS NOT TRUE, not NOT: outbox_erasing is null for the schema owner outside erasure, and a
+   -- cascade's trigger runs as the owner on PostgreSQL 18.
+   WHERE slotlock.outbox_erasing(touched.tenant_ref) IS NOT TRUE
    ORDER BY resource.id;
   RETURN NULL;
 END

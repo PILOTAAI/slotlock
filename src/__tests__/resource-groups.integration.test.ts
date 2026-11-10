@@ -566,6 +566,16 @@ describe.skipIf(!url)('locations and groups (real Postgres, application role)', 
     // none about the deleted resource, which is in no group.
     expect(delivered.every((change) => change.resourceId === room.id)).toBe(true);
     expect(delivered.at(-1)?.data).toMatchObject({ before: { groups: [] }, after: { groups: ['quiet'] } });
+
+    // Made as the schema owner too, as a cascade's trigger runs on PostgreSQL 18, outside erasure.
+    const owner = createSlotlockStore(admin);
+    const recorded = (await changes()).length;
+    await owner.withTenant(acme, (scoped) => scoped.addGroupMember({ tenantRef: acme, group: 'team', resourceId: room.id }));
+    await owner.withTenant(acme, (scoped) => scoped.deleteGroup({ tenantRef: acme, ref: 'team' }));
+    expect((await changes()).slice(recorded).map(({ before, after }) => ({ before, after }))).toEqual([
+      { before: { groups: ['quiet'] }, after: { groups: ['quiet', 'team'] } },
+      { before: { groups: ['quiet', 'team'] }, after: { groups: ['quiet'] } },
+    ]);
   });
 
   it("erases a tenant's locations, groups and memberships with it, and keeps them from other tenants", async () => {
