@@ -514,6 +514,17 @@ export function slotlockOpenApiDocument(args: {
               type: 'string',
               description: 'An overlap with an event of your own: its id, to move or cancel it.',
             },
+            approval_id: {
+              type: 'string',
+              description:
+                'approval_pending, approval_declined or approval_expired: the approval a policy made of the booking. Retry with the same idempotency_key to learn how it was decided.',
+            },
+            policy_ref: { type: 'string', description: 'An approval refusal: the policy that applies.' },
+            expires_at: {
+              type: 'string',
+              description: 'approval_pending or approval_required: until when a person may decide (the time is held until then).',
+            },
+            reason: { type: 'string', description: 'approval_declined: what the person who declined it said, if anything.' },
             alternatives: {
               type: 'array',
               maxItems: 3,

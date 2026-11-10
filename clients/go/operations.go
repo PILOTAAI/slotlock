@@ -88,6 +88,12 @@ var operations = func() map[string]operation {
 		{name: "slotlock_delete_webhook", method: "DELETE", path: "/v1/webhooks/{webhook_id}", pathParams: []string{"webhook_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_enable_webhook", method: "POST", path: "/v1/webhooks/{webhook_id}/enable", pathParams: []string{"webhook_id"}, query: nil},
 		{name: "slotlock_get_usage", method: "GET", path: "/v1/usage", pathParams: nil, query: []string{"from", "to"}},
+		{name: "slotlock_list_approval_policies", method: "GET", path: "/v1/approval-policies", pathParams: nil, query: nil},
+		{name: "slotlock_put_approval_policy", method: "PUT", path: "/v1/approval-policies/{policy_ref}", pathParams: []string{"policy_ref"}, query: nil},
+		{name: "slotlock_delete_approval_policy", method: "DELETE", path: "/v1/approval-policies/{policy_ref}", pathParams: []string{"policy_ref"}, query: []string{"dry_run"}},
+		{name: "slotlock_list_approvals", method: "GET", path: "/v1/approvals", pathParams: nil, query: []string{"status", "limit"}},
+		{name: "slotlock_get_approval", method: "GET", path: "/v1/approvals/{approval_id}", pathParams: []string{"approval_id"}, query: nil},
+		{name: "slotlock_decide_approval", method: "POST", path: "/v1/approvals/{approval_id}/decision", pathParams: []string{"approval_id"}, query: nil},
 		{name: "slotlock_partner_get_account", method: "GET", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_put_account", method: "PUT", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_list_accounts", method: "GET", path: "/v1/partner/accounts", pathParams: nil, query: nil},
@@ -2849,6 +2855,190 @@ func (in GetUsageInput) values() map[string]any {
 // today.
 func (c *Client) GetUsage(ctx context.Context, in GetUsageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_usage", in.values())
+}
+
+// ListApprovalPoliciesInput holds the arguments of [Client.ListApprovalPolicies].
+type ListApprovalPoliciesInput struct {
+}
+
+func (in ListApprovalPoliciesInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListApprovalPolicies: List approval policies. The tenant's approval policies, by reference:
+// which agent bookings wait for a person (require_approval) or are refused (refuse).
+func (c *Client) ListApprovalPolicies(ctx context.Context, in ListApprovalPoliciesInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_approval_policies", in.values())
+}
+
+// PutApprovalPolicyInput holds the arguments of [Client.PutApprovalPolicy].
+type PutApprovalPolicyInput struct {
+	PolicyRef string
+
+	Name string
+
+	Outcome string
+
+	AppliesTo map[string]any
+
+	Conditions map[string]any
+
+	ApprovalTTLMinutes *int64
+
+	LeadMinutes *int64
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in PutApprovalPolicyInput) values() map[string]any {
+	values := map[string]any{}
+	values["policy_ref"] = in.PolicyRef
+	values["name"] = in.Name
+	values["outcome"] = in.Outcome
+	if in.AppliesTo != nil {
+		values["applies_to"] = in.AppliesTo
+	}
+	if in.Conditions != nil {
+		values["conditions"] = in.Conditions
+	}
+	if in.ApprovalTTLMinutes != nil {
+		values["approval_ttl_minutes"] = *in.ApprovalTTLMinutes
+	}
+	if in.LeadMinutes != nil {
+		values["lead_minutes"] = *in.LeadMinutes
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// PutApprovalPolicy: Create or replace an approval policy. Which agent bookings
+// (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and
+// moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused.
+// applies_to names resources, pools, locations (with the locations in them) and groups; empty,
+// every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the
+// resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when
+// it meets every condition given. outcome require_approval holds the exact time the booking would
+// take, under the approval, and answers the agent 409 approval_pending; refuse answers 403
+// approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most
+// 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the
+// wait is the earlier of the two. Where several apply, refuse wins, then the one that must be
+// decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.
+func (c *Client) PutApprovalPolicy(ctx context.Context, in PutApprovalPolicyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_put_approval_policy", in.values())
+}
+
+// DeleteApprovalPolicyInput holds the arguments of [Client.DeleteApprovalPolicy].
+type DeleteApprovalPolicyInput struct {
+	PolicyRef string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteApprovalPolicyInput) values() map[string]any {
+	values := map[string]any{}
+	values["policy_ref"] = in.PolicyRef
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteApprovalPolicy: Delete an approval policy. Stop applying a policy to new bookings.
+// Approvals it already asked for stay as they are, to be decided.
+func (c *Client) DeleteApprovalPolicy(ctx context.Context, in DeleteApprovalPolicyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_approval_policy", in.values())
+}
+
+// ListApprovalsInput holds the arguments of [Client.ListApprovals].
+type ListApprovalsInput struct {
+	Status *string
+
+	Limit *int64
+}
+
+func (in ListApprovalsInput) values() map[string]any {
+	values := map[string]any{}
+	if in.Status != nil {
+		values["status"] = *in.Status
+	}
+	if in.Limit != nil {
+		values["limit"] = *in.Limit
+	}
+	return values
+}
+
+// ListApprovals: List approvals. The tenant's approvals, newest first: bookings an agent asked
+// for that a policy holds for a person (pending, holding their time until expires_at), and those
+// decided (granted, declined, expired). Filter by status.
+func (c *Client) ListApprovals(ctx context.Context, in ListApprovalsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_approvals", in.values())
+}
+
+// GetApprovalInput holds the arguments of [Client.GetApproval].
+type GetApprovalInput struct {
+	ApprovalID string
+}
+
+func (in GetApprovalInput) values() map[string]any {
+	values := map[string]any{}
+	values["approval_id"] = in.ApprovalID
+	return values
+}
+
+// GetApproval: Get an approval. One approval by id, with the booking it would make. 404
+// approval_not_found.
+func (c *Client) GetApproval(ctx context.Context, in GetApprovalInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_approval", in.values())
+}
+
+// DecideApprovalInput holds the arguments of [Client.DecideApproval].
+type DecideApprovalInput struct {
+	ApprovalID string
+
+	Decision string
+
+	Reason *string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DecideApprovalInput) values() map[string]any {
+	values := map[string]any{}
+	values["approval_id"] = in.ApprovalID
+	values["decision"] = in.Decision
+	if in.Reason != nil {
+		values["reason"] = *in.Reason
+	}
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DecideApproval: Grant or decline an approval. Decide a pending approval. grant makes the
+// booking as the agent asked for it, as that agent, in one transaction with letting the
+// approval's hold go, and answers it under booking; the agent's retry with its idempotency key
+// then answers the same booking. A write refused now (a booking rule changed, say) is refused
+// with its own code and the approval stays pending. decline frees the time; the agent's retry
+// answers 403 approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending
+// when already decided; 409 approval_expired after its wait.
+func (c *Client) DecideApproval(ctx context.Context, in DecideApprovalInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_decide_approval", in.values())
 }
 
 // PartnerGetAccountInput holds the arguments of [Client.PartnerGetAccount].

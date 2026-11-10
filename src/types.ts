@@ -71,6 +71,47 @@ export interface SlotlockResource {
   groups?: string[];
 }
 
+/** Which writes an approval policy covers (RFC 0004 A4); none named is every write it applies to. */
+export type SlotlockApprovalKind = 'single' | 'pool' | 'bundle' | 'move';
+
+/** A tenant's approval policy (RFC 0004 A4). */
+export interface SlotlockApprovalPolicy {
+  ref: string;
+  name: string;
+  /** The resources it applies to; every one when all are empty. */
+  appliesTo: { resourceIds?: string[]; pools?: string[]; locations?: string[]; groups?: string[] };
+  /** What makes a write need it; a write meets it when it meets every condition given. */
+  conditions: { longerThanMinutes?: number; outsideHours?: boolean; kinds?: SlotlockApprovalKind[] };
+  outcome: 'require_approval' | 'refuse';
+  /** How long a person has to decide, before the booking's start less `leadMinutes`. */
+  approvalTtlMinutes: number;
+  leadMinutes: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** A write waiting for a person, or decided (RFC 0004 A4). */
+export interface SlotlockApproval {
+  id: string;
+  policyRef: string;
+  status: 'pending' | 'granted' | 'declined' | 'expired';
+  /** The agent operation it runs when granted, and its arguments. */
+  operation: 'slotlock_create_event' | 'slotlock_book_together' | 'slotlock_update_event';
+  request: Record<string, unknown>;
+  /** Who asked, as the history names an actor (the principal's subject, at most 200 characters). */
+  requestedBy: string | null;
+  /** The resources and time it holds while it waits. */
+  holdIds: string[];
+  resourceIds: string[];
+  start: Date;
+  end: Date;
+  expiresAt: Date;
+  decidedBy: string | null;
+  decidedAt: Date | null;
+  reason: string | null;
+  createdAt: Date;
+}
+
 /**
  * A booking, hold or event occurrence as a refusal can name it (`describeBooking`): the time it
  * occupies, buffers included, and whose it is, so a caller is told only what it may see.

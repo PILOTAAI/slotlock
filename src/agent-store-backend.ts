@@ -20,6 +20,7 @@ import type { SlotlockAgentChangeSource } from './change-watch.js';
 import { type SlotlockChangeOrigin, type SlotlockWebhookEndpoint, slotlockChangeFeedHead } from './event-feed.js';
 import { slotlockCloudEvent } from './webhooks.js';
 import { createHash } from 'node:crypto';
+import { SLOTLOCK_MAX_APPROVAL_MINUTES, SlotlockApprovalPolicyError } from './approvals.js';
 import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentInvocationContext,
@@ -52,6 +53,9 @@ import type {
   CalendarRecurrenceException,
   CalendarReminder,
   Interval,
+  SlotlockApproval,
+  SlotlockApprovalKind,
+  SlotlockApprovalPolicy,
   SlotlockCalendarEvent,
   SlotlockHold,
   SlotlockReservation,
@@ -96,6 +100,12 @@ export interface SlotlockStoreAgentBackendOptions {
     resource: SlotlockResource,
   ): Promise<readonly string[]>;
   coverageMaxAgeMs?: number;
+  /**
+   * The longest an approval policy may hold a write for a person (RFC 0004 A4), in minutes: each
+   * policy sets its own wait, bounded by the booking's start less its lead time and by this. 1 to
+   * 43,200 (30 days, the default).
+   */
+  maxApprovalMinutes?: number;
 }
 
 interface AgentAttendeeInput {
@@ -143,6 +153,21 @@ interface AgentEventInput {
  */
 const WRITE = { isolation: 'read committed' } as const;
 
+/**
+ * Keys a context carries only from inside this module: a request cannot set a symbol, and spreading
+ * a context (`{ ...context, operation }`) keeps them.
+ */
+const APPROVAL_GRANT = Symbol('slotlock.approvalGrant');
+const OCCUPANCY_PROBE = Symbol('slotlock.occupancyProbe');
+
+/** The approval a granted write runs for: its holds give way, and it is marked, in the write's transaction. */
+interface ApprovalGrant {
+  id: string;
+  decidedBy: string;
+  /** A pool booking's pool, whose round-robin place moves on as a direct booking's would. */
+  pool?: string;
+}
+
 interface TenantCallContext {
   principal: {
     tenantRef: string;
@@ -155,6 +180,10 @@ interface TenantCallContext {
   origin?: SlotlockChangeOrigin;
   /** A dry run (RFC 0004 A3): every transaction this call opens is rolled back. */
   dryRun?: boolean;
+  /** A grant running its approval's write (RFC 0004 A4); internal, never from a request. */
+  [APPROVAL_GRANT]?: ApprovalGrant;
+  /** Read what a dry run's write would occupy, in its transaction, before it is undone. */
+  [OCCUPANCY_PROBE]?: (tenantStore: SlotlockTenantStore) => Promise<void>;
 }
 
 /** Thrown out of a dry run's transaction, with its answer, so the transaction rolls back. */
@@ -189,13 +218,35 @@ async function withTenant<T>(
   try {
     const actor = actorOf(context);
     const keyId = context.principal.keyId;
-    // A dry run's transaction does everything, constraints included, then is undone: its answer
-    // is carried out of it by the rollback.
-    const run: typeof callback = context.dryRun
+    // A granted approval's write: its holds give way and it is marked granted in the same
+    // transaction, so the time passes from the approval to the booking with no gap between.
+    const grant = context[APPROVAL_GRANT];
+    const write: typeof callback = grant
       ? async (tenantStore) => {
-          throw new DryRunRollback(await callback(tenantStore));
+          const tenantRef = context.principal.tenantRef;
+          const begun = await tenantStore.beginApprovalGrant({ tenantRef, id: grant.id });
+          if (!begun.ok) {
+            throw new SlotlockAgentOperationError(begun.code, begun.code === 'approval_not_found' ? 404 : 409);
+          }
+          const value = await callback(tenantStore);
+          const booked = (value as { event?: { resource_id?: unknown } }).event?.resource_id;
+          if (grant.pool !== undefined && typeof booked === 'string') {
+            await tenantStore.notePoolBooking({ tenantRef, pool: grant.pool, resourceId: booked });
+          }
+          await tenantStore.finishApprovalGrant({ tenantRef, id: grant.id, decidedBy: grant.decidedBy });
+          return value;
         }
       : callback;
+    // A dry run's transaction does everything, constraints included, then is undone: its answer
+    // is carried out of it by the rollback.
+    const probe = context[OCCUPANCY_PROBE];
+    const run: typeof callback = context.dryRun
+      ? async (tenantStore) => {
+          const value = await write(tenantStore);
+          if (probe) await probe(tenantStore);
+          throw new DryRunRollback(value);
+        }
+      : write;
     value = await store.withTenant(context.principal.tenantRef, run, {
       ...options,
       signal: context.signal,
@@ -592,7 +643,11 @@ export function createSlotlockStoreAgentBackend(
   store: SlotlockStore,
   options: SlotlockStoreAgentBackendOptions,
 ): SlotlockAgentCalendarBackend {
-  return {
+  const maxApprovalMinutes = options.maxApprovalMinutes ?? SLOTLOCK_MAX_APPROVAL_MINUTES;
+  if (!(Number.isSafeInteger(maxApprovalMinutes) && maxApprovalMinutes >= 1 && maxApprovalMinutes <= SLOTLOCK_MAX_APPROVAL_MINUTES)) {
+    throw new RangeError(`maxApprovalMinutes must be a whole number from 1 to ${SLOTLOCK_MAX_APPROVAL_MINUTES}`);
+  }
+  const backend: SlotlockAgentCalendarBackend = {
     async holdSlots(context, input) {
       const slots = input.slots as { resource_id: string; start: string; end: string }[];
       const key = input.idempotency_key as string;
@@ -1409,6 +1464,7 @@ export function createSlotlockStoreAgentBackend(
       return deleted;
     },
   };
+  return withApprovalPolicies(store, options, maxApprovalMinutes, backend);
 }
 
 export interface SlotlockStoreApplicationBackendOptions {
@@ -1430,6 +1486,12 @@ export interface SlotlockStoreApplicationBackendOptions {
    * the partner a partner key names. Unset: they answer 404 partner_api_not_served.
    */
   partners?: SlotlockPartnerStore;
+  /**
+   * The agent backend (`createSlotlockStoreAgentBackend`) a granted approval's booking is made
+   * through (RFC 0004 A4), as the agent that asked. Unset: a grant answers 409
+   * approvals_unavailable; declining still works.
+   */
+  agentBackend?: SlotlockAgentCalendarBackend;
 }
 
 function storeRefusal(error: unknown): unknown {
@@ -1470,6 +1532,74 @@ function storeRefusal(error: unknown): unknown {
   return error;
 }
 
+/** An approval decision refused: 404 for none, 409 for one decided or past its wait. */
+function approvalRefusal(code: 'approval_not_found' | 'approval_not_pending' | 'approval_expired'): SlotlockAgentOperationError {
+  return new SlotlockAgentOperationError(code, code === 'approval_not_found' ? 404 : 409);
+}
+
+function approvalPolicyOutput(policy: SlotlockApprovalPolicy) {
+  const applies = policy.appliesTo;
+  const conditions = policy.conditions;
+  return {
+    policy_ref: policy.ref,
+    name: policy.name,
+    applies_to: {
+      ...(applies.resourceIds ? { resource_ids: applies.resourceIds } : {}),
+      ...(applies.pools ? { pools: applies.pools } : {}),
+      ...(applies.locations ? { locations: applies.locations } : {}),
+      ...(applies.groups ? { groups: applies.groups } : {}),
+    },
+    conditions: {
+      ...(conditions.longerThanMinutes !== undefined ? { longer_than_minutes: conditions.longerThanMinutes } : {}),
+      ...(conditions.outsideHours !== undefined ? { outside_hours: conditions.outsideHours } : {}),
+      ...(conditions.kinds ? { kinds: conditions.kinds } : {}),
+    },
+    outcome: policy.outcome,
+    approval_ttl_minutes: policy.approvalTtlMinutes,
+    lead_minutes: policy.leadMinutes,
+    created_at: policy.createdAt.toISOString(),
+    updated_at: policy.updatedAt.toISOString(),
+  };
+}
+
+function approvalAppliesTo(value: unknown): SlotlockApprovalPolicy['appliesTo'] {
+  const given = value as { resource_ids?: string[]; pools?: string[]; locations?: string[]; groups?: string[] };
+  return {
+    ...(given.resource_ids ? { resourceIds: given.resource_ids } : {}),
+    ...(given.pools ? { pools: given.pools } : {}),
+    ...(given.locations ? { locations: given.locations } : {}),
+    ...(given.groups ? { groups: given.groups } : {}),
+  };
+}
+
+function approvalConditions(value: unknown): SlotlockApprovalPolicy['conditions'] {
+  const given = value as { longer_than_minutes?: number; outside_hours?: boolean; kinds?: SlotlockApprovalKind[] };
+  return {
+    ...(given.longer_than_minutes !== undefined ? { longerThanMinutes: given.longer_than_minutes } : {}),
+    ...(given.outside_hours !== undefined ? { outsideHours: given.outside_hours } : {}),
+    ...(given.kinds ? { kinds: given.kinds } : {}),
+  };
+}
+
+function approvalOutput(approval: SlotlockApproval) {
+  return {
+    approval_id: approval.id,
+    policy_ref: approval.policyRef,
+    status: approval.status,
+    operation: approval.operation,
+    request: approval.request,
+    requested_by: approval.requestedBy,
+    resource_ids: approval.resourceIds,
+    starts_at: approval.start.toISOString(),
+    ends_at: approval.end.toISOString(),
+    expires_at: approval.expiresAt.toISOString(),
+    decided_by: approval.decidedBy,
+    decided_at: approval.decidedAt?.toISOString() ?? null,
+    reason: approval.reason,
+    created_at: approval.createdAt.toISOString(),
+  };
+}
+
 function applicationRefusal(code: string): SlotlockAgentOperationError {
   if (code === 'resource_tenant_mismatch') {
     return new SlotlockAgentOperationError('resource_not_found', 404);
@@ -1494,6 +1624,424 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
     offered_at: entry.offeredAt?.toISOString() ?? null,
     created_at: entry.createdAt.toISOString(),
   };
+}
+
+/** Occupied time as eventOccupancy reads it. */
+interface Occupation {
+  resourceId: string;
+  start: Date;
+  end: Date;
+  recurring: boolean;
+}
+
+/** The writes a policy can hold for a person, and the operation each is kept as. */
+type GatedOperation = 'slotlock_create_event' | 'slotlock_book_pool' | 'slotlock_book_together' | 'slotlock_update_event';
+
+/** What one write asks, for its policies: found before it is tried. */
+interface ApprovalPlan {
+  kind: SlotlockApprovalKind;
+  stored: SlotlockApproval['operation'];
+  /** The resources it may take: a pool's members, before one is chosen. */
+  resourceIds: string[];
+  /** The events it writes, by external reference, to read what they occupy. */
+  externalRefs: string[];
+  start: Date;
+  end: Date;
+  series: boolean;
+  /** A move's event as it is: its own time is not held again. */
+  before: Occupation[];
+  consumeHold?: { holdId: string; holderRef: string };
+  pool?: string;
+  policies: SlotlockApprovalPolicy[];
+}
+
+/** A JSON value with its object keys sorted, so two requests compare by content. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((key) => [key, canonical((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
+}
+
+/** Each interval of `wanted` less the parts `kept` already covers on the same resource. */
+function uncovered(wanted: readonly Occupation[], kept: readonly Occupation[]): (Interval & { resourceId: string })[] {
+  const pieces: (Interval & { resourceId: string })[] = [];
+  for (const want of wanted) {
+    let open: Interval[] = [{ start: want.start, end: want.end }];
+    for (const own of kept) {
+      if (own.resourceId !== want.resourceId) continue;
+      open = open.flatMap((piece) => {
+        if (own.end <= piece.start || own.start >= piece.end) return [piece];
+        return [
+          ...(own.start > piece.start ? [{ start: piece.start, end: own.start }] : []),
+          ...(own.end < piece.end ? [{ start: own.end, end: piece.end }] : []),
+        ];
+      });
+    }
+    pieces.push(...open.map((piece) => ({ ...piece, resourceId: want.resourceId })));
+  }
+  return pieces;
+}
+
+/** How a request already put to a person answers its retry: waiting, declined or expired. */
+function approvalAnswer(approval: SlotlockApproval): SlotlockAgentOperationError {
+  const id = { approval_id: approval.id, policy_ref: approval.policyRef };
+  if (approval.status === 'declined') {
+    return new SlotlockAgentOperationError('approval_declined', 403, {
+      ...id,
+      ...(approval.reason ? { reason: approval.reason.slice(0, 200) } : {}),
+    });
+  }
+  if (approval.status === 'expired' || approval.expiresAt.getTime() <= Date.now()) {
+    return new SlotlockAgentOperationError('approval_expired', 409, id);
+  }
+  return new SlotlockAgentOperationError('approval_pending', 409, {
+    ...id,
+    expires_at: approval.expiresAt.toISOString(),
+  });
+}
+
+/**
+ * Approval policies (RFC 0004 A4) in front of the backend's writes. A write a policy covers is
+ * tried first as a dry run, so it meets every check and the database's constraints as it would;
+ * a `refuse` policy then refuses it, and a `require_approval` one holds the exact time it would
+ * occupy for the approval and answers `approval_pending`. A retry with the same idempotency key
+ * answers as the request stands, and once granted, with the booking itself. Tenants with no policy
+ * pay one indexed read per write.
+ */
+function withApprovalPolicies(
+  store: SlotlockStore,
+  options: SlotlockStoreAgentBackendOptions,
+  maxApprovalMinutes: number,
+  backend: SlotlockAgentCalendarBackend,
+): SlotlockAgentCalendarBackend {
+  type Method = (
+    this: SlotlockAgentCalendarBackend,
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
+
+  const requestKeyOf = (context: SlotlockAgentInvocationContext, stored: string, key: string) =>
+    createHash('sha256')
+      .update(JSON.stringify(['slotlock-approval', context.principal.tenantRef, agentOwnerRef(context), stored, key]))
+      .digest('hex');
+
+  /** Whether [start, end) on the resource falls outside its bookable hours. */
+  async function outsideHours(
+    tenantStore: SlotlockTenantStore,
+    context: SlotlockAgentInvocationContext,
+    resourceId: string,
+    start: Date,
+    end: Date,
+  ): Promise<boolean> {
+    const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+    const hours = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
+    const windows = mergeIntervals(
+      expandRules(hours, { start: new Date(start.getTime() - 86_400_000), end: new Date(end.getTime() + 86_400_000) }, resource.timezone),
+    );
+    return !windows.some((window) => window.start <= start && window.end >= end);
+  }
+
+  /** The write's ask and the policies that may cover it, or null when none can. */
+  async function plan(
+    tenantStore: SlotlockTenantStore,
+    context: SlotlockAgentInvocationContext,
+    operation: GatedOperation,
+    input: Record<string, unknown>,
+  ): Promise<ApprovalPlan | null> {
+    const tenantRef = context.principal.tenantRef;
+    const ownerRef = agentOwnerRef(context);
+    const key = input.idempotency_key as string;
+    // Most tenants have none: one small indexed read, and nothing else looked up.
+    if ((await tenantStore.listApprovalPolicies({ tenantRef })).length === 0) return null;
+    let asked: Omit<ApprovalPlan, 'policies'>;
+    if (operation === 'slotlock_create_event') {
+      asked = {
+        kind: 'single',
+        stored: 'slotlock_create_event',
+        resourceIds: [input.resource_id as string],
+        externalRefs: [agentExternalRef(context, key)],
+        start: new Date(input.starts_at as string),
+        end: new Date(input.ends_at as string),
+        series: typeof input.recurrence_rule === 'string',
+        before: [],
+        ...(typeof input.hold_id === 'string' ? { consumeHold: { holdId: input.hold_id, holderRef: ownerRef } } : {}),
+      };
+    } else if (operation === 'slotlock_book_pool') {
+      const members = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool as string, visibility: 'shared' });
+      if (members.length === 0) return null;
+      asked = {
+        kind: 'pool',
+        stored: 'slotlock_create_event',
+        resourceIds: members.map((member) => member.id),
+        externalRefs: [agentExternalRef(context, key)],
+        start: new Date(input.starts_at as string),
+        end: new Date(input.ends_at as string),
+        series: false,
+        before: [],
+        pool: input.pool as string,
+      };
+    } else if (operation === 'slotlock_book_together') {
+      const resourceIds = [...new Set(input.resource_ids as string[])].sort();
+      asked = {
+        kind: 'bundle',
+        stored: 'slotlock_book_together',
+        resourceIds,
+        externalRefs: resourceIds.map((resourceId) => agentExternalRef(context, `${key}\0${resourceId}`)),
+        start: new Date(input.starts_at as string),
+        end: new Date(input.ends_at as string),
+        series: false,
+        before: [],
+      };
+    } else {
+      const current = await tenantStore.getCalendarEvent({ tenantRef, ownerRef, externalRef: input.event_id as string });
+      if (!current) return null;
+      const resourceId = (input.resource_id as string | undefined) ?? current.resourceId;
+      const start = input.starts_at ? new Date(input.starts_at as string) : current.start;
+      const end = input.ends_at ? new Date(input.ends_at as string) : current.end;
+      // Only a move to another time or resource is a booking a policy can be about.
+      if (resourceId === current.resourceId && start.getTime() === current.start.getTime() && end.getTime() === current.end.getTime()) {
+        return null;
+      }
+      asked = {
+        kind: 'move',
+        stored: 'slotlock_update_event',
+        resourceIds: [resourceId],
+        externalRefs: [current.externalRef],
+        start,
+        end,
+        series:
+          input.recurrence_rule !== undefined ? typeof input.recurrence_rule === 'string' : current.recurrence !== undefined,
+        before: await tenantStore.eventOccupancy({ tenantRef, ownerRef, externalRefs: [current.externalRef] }),
+      };
+    }
+    const minutes = (asked.end.getTime() - asked.start.getTime()) / 60_000;
+    // What the ask alone decides; hours wait for the resource the write takes.
+    const policies = (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: asked.resourceIds })).filter(
+      (policy) =>
+        (policy.conditions.kinds === undefined || policy.conditions.kinds.includes(asked.kind)) &&
+        (policy.conditions.longerThanMinutes === undefined || minutes > policy.conditions.longerThanMinutes),
+    );
+    return policies.length === 0 ? null : { ...asked, policies };
+  }
+
+  function gated(operation: GatedOperation, method: Method): Method {
+    return async function (this: SlotlockAgentCalendarBackend, context, input) {
+      // The grant itself, or a write a person already approved and its retries.
+      if ((context as TenantCallContext)[APPROVAL_GRANT]) return method.call(this, context, input);
+      const tenantRef = context.principal.tenantRef;
+      const stored = operation === 'slotlock_book_together' || operation === 'slotlock_update_event' ? operation : 'slotlock_create_event';
+      const requestKey = requestKeyOf(context, stored, input.idempotency_key as string);
+      const asked = await withTenant(store, { ...context, dryRun: false }, async (tenantStore) => {
+        const prior = await tenantStore.findApproval({ tenantRef, requestKey });
+        if (prior) return { prior };
+        return { plan: await plan(tenantStore, context, operation, input) };
+      });
+      if (asked.prior) {
+        const { hold_id: _held, ...request } = input;
+        // Granted: the booking was made with this key, so the write answers it as a replay (and
+        // the store refuses another request with it). Without the hold the approval took over,
+        // as the grant made it.
+        if (asked.prior.status === 'granted') return method.call(this, context, request);
+        const kept: Record<string, unknown> = { ...asked.prior.request };
+        // A pool booking is kept as the member it would take.
+        if (operation === 'slotlock_book_pool') delete kept.resource_id;
+        if (JSON.stringify(canonical(kept)) !== JSON.stringify(canonical(request))) {
+          throw new SlotlockAgentOperationError('idempotency_conflict', 409);
+        }
+        throw approvalAnswer(asked.prior);
+      }
+      const ask = asked.plan;
+      if (!ask) return method.call(this, context, input);
+      // Tried as a dry run, reading what it would occupy before it is undone: a write that would be
+      // refused is refused as it would be.
+      let occupied: Occupation[] = [];
+      const probed = await method.call(
+        this,
+        {
+          ...context,
+          dryRun: true,
+          [OCCUPANCY_PROBE]: async (tenantStore: SlotlockTenantStore) => {
+            occupied = await tenantStore.eventOccupancy({
+              tenantRef,
+              ownerRef: agentOwnerRef(context),
+              externalRefs: ask.externalRefs,
+            });
+          },
+        } as SlotlockAgentInvocationContext,
+        input,
+      );
+      // Made already (before the policy, say), or takes no time (a transparent event): nothing to hold.
+      if (probed.replayed === true || occupied.length === 0) {
+        return context.dryRun ? probed : method.call(this, context, input);
+      }
+      const written = [...new Set(occupied.map((occupation) => occupation.resourceId))];
+      const decided = await withTenant(store, { ...context, dryRun: false }, async (tenantStore) => {
+        // A pool's policies are those of the member the write would take, and its pool.
+        const candidates = ask.pool
+          ? (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: written })).filter((policy) =>
+              ask.policies.some((known) => known.ref === policy.ref),
+            )
+          : ask.policies;
+        const applying: SlotlockApprovalPolicy[] = [];
+        for (const policy of candidates) {
+          if (policy.conditions.outsideHours === true) {
+            let outside = false;
+            for (const resourceId of written) {
+              if (await outsideHours(tenantStore, context, resourceId, ask.start, ask.end)) outside = true;
+            }
+            if (!outside) continue;
+          }
+          applying.push(policy);
+        }
+        return applying;
+      });
+      if (decided.length === 0) return context.dryRun ? probed : method.call(this, context, input);
+      const refusing = decided.find((policy) => policy.outcome === 'refuse');
+      if (refusing) throw new SlotlockAgentOperationError('approval_policy_refused', 403, { policy_ref: refusing.ref });
+      // The strictest wait: the earliest a person must decide by, under each policy's own wait, its
+      // lead before the start, and the server's ceiling.
+      const now = Date.now();
+      const deadline = (policy: SlotlockApprovalPolicy) =>
+        Math.min(
+          now + Math.min(policy.approvalTtlMinutes, maxApprovalMinutes) * 60_000,
+          ask.start.getTime() - policy.leadMinutes * 60_000,
+        );
+      const policy = [...decided].sort((left, right) => deadline(left) - deadline(right) || left.ref.localeCompare(right.ref))[0] as SlotlockApprovalPolicy;
+      const expiresAt = new Date(deadline(policy));
+      if (ask.series || occupied.some((occupation) => occupation.recurring)) {
+        throw new SlotlockAgentOperationError('approval_series_unsupported', 409, { policy_ref: policy.ref });
+      }
+      if (expiresAt.getTime() < now + 60_000) {
+        throw new SlotlockAgentOperationError('approval_too_late', 409, { policy_ref: policy.ref });
+      }
+      if (context.dryRun) {
+        throw new SlotlockAgentOperationError('approval_required', 409, {
+          policy_ref: policy.ref,
+          expires_at: expiresAt.toISOString(),
+        });
+      }
+      const holds = uncovered(occupied, ask.before);
+      if (holds.length === 0) return method.call(this, context, input);
+      const chosen = ask.pool ? written[0] : undefined;
+      const { hold_id: _hold, ...request } = input;
+      const principal = context.principal;
+      const result = await withTenant(store, context, (tenantStore) =>
+        tenantStore.requestApproval({
+          tenantRef,
+          policyRef: policy.ref,
+          operation: ask.stored,
+          request: canonical(chosen ? { ...request, resource_id: chosen } : request) as Record<string, unknown>,
+          requester: {
+            subject: principal.subject,
+            ...(principal.scopes ? { scopes: [...principal.scopes] } : {}),
+            ...(principal.keyId !== undefined ? { key_id: principal.keyId } : {}),
+            ...(principal.resourceScope
+              ? { resource_scope: { locations: [...principal.resourceScope.locations], groups: [...principal.resourceScope.groups] } }
+              : {}),
+            ...(context.origin !== undefined ? { origin: context.origin } : {}),
+            ...(ask.pool !== undefined ? { pool: ask.pool } : {}),
+          },
+          requesterRef: principal.subject,
+          requestKey,
+          holds,
+          start: ask.start,
+          end: ask.end,
+          expiresAt,
+          ...(ask.consumeHold ? { consumeHold: ask.consumeHold } : {}),
+        }),
+      WRITE);
+      if (!result.ok) {
+        if (result.code === 'approval_limit_reached') {
+          throw new SlotlockAgentOperationError('approval_limit_reached', 429, { limit: String(result.limit ?? '') });
+        }
+        throw new SlotlockAgentOperationError(result.code, 409);
+      }
+      throw approvalAnswer(result.approval);
+    };
+  }
+
+  const wrapped: SlotlockAgentCalendarBackend = { ...backend };
+  wrapped.createEvent = gated('slotlock_create_event', backend.createEvent as Method);
+  wrapped.updateEvent = gated('slotlock_update_event', backend.updateEvent as Method);
+  if (backend.bookPool) wrapped.bookPool = gated('slotlock_book_pool', backend.bookPool as Method);
+  if (backend.bookTogether) wrapped.bookTogether = gated('slotlock_book_together', backend.bookTogether as Method);
+  if (backend.confirmHold) {
+    const confirm = backend.confirmHold as Method;
+    // A confirm already put to a person answers as it stands, before its hold (now the
+    // approval's) is looked for; otherwise it books through createEvent, policies and all.
+    wrapped.confirmHold = async function (this: SlotlockAgentCalendarBackend, context, input) {
+      if (!(context as TenantCallContext)[APPROVAL_GRANT]) {
+        const requestKey = requestKeyOf(context, 'slotlock_create_event', input.idempotency_key as string);
+        const prior = await withTenant(store, { ...context, dryRun: false }, (tenantStore) =>
+          tenantStore.findApproval({ tenantRef: context.principal.tenantRef, requestKey }),
+        );
+        if (prior && prior.status !== 'granted') throw approvalAnswer(prior);
+      }
+      return confirm.call(this, context, input);
+    };
+  }
+  return wrapped;
+}
+
+/**
+ * Run a granted approval's write as the agent that asked for it, in one transaction with the grant:
+ * its holds give way, the write is made, and the approval is marked granted.
+ */
+export async function runSlotlockApprovalGrant(
+  agentBackend: SlotlockAgentCalendarBackend,
+  approval: SlotlockApproval & { requester: Record<string, unknown> },
+  grant: {
+    tenantRef: string;
+    decidedBy: string;
+    signal: AbortSignal;
+    origin?: SlotlockChangeOrigin;
+    /** Make the booking and the grant, then roll both back (RFC 0004 A3). */
+    dryRun?: boolean;
+  },
+): Promise<Record<string, unknown>> {
+  const requester = approval.requester as {
+    subject?: unknown;
+    scopes?: unknown;
+    key_id?: unknown;
+    resource_scope?: { locations?: unknown; groups?: unknown };
+    pool?: unknown;
+  };
+  if (typeof requester.subject !== 'string') throw new SlotlockAgentOperationError('store_inconsistent', 503);
+  const scope = requester.resource_scope;
+  const context = {
+    principal: {
+      subject: requester.subject,
+      tenantRef: grant.tenantRef,
+      ...(Array.isArray(requester.scopes) ? { scopes: requester.scopes as string[] } : {}),
+      ...(typeof requester.key_id === 'string' ? { keyId: requester.key_id } : {}),
+      ...(scope && Array.isArray(scope.locations) && Array.isArray(scope.groups)
+        ? { resourceScope: { locations: scope.locations as string[], groups: scope.groups as string[] } }
+        : {}),
+    },
+    operation: approval.operation,
+    signal: grant.signal,
+    ...(grant.origin !== undefined ? { origin: grant.origin } : {}),
+    ...(grant.dryRun ? { dryRun: true } : {}),
+    [APPROVAL_GRANT]: {
+      id: approval.id,
+      decidedBy: grant.decidedBy,
+      ...(typeof requester.pool === 'string' ? { pool: requester.pool } : {}),
+    },
+  } as SlotlockAgentInvocationContext;
+  const method =
+    approval.operation === 'slotlock_book_together'
+      ? agentBackend.bookTogether
+      : approval.operation === 'slotlock_update_event'
+        ? agentBackend.updateEvent
+        : agentBackend.createEvent;
+  if (!method) throw new SlotlockAgentOperationError('approvals_unavailable', 409);
+  return method.call(agentBackend, context, approval.request);
 }
 
 /**
@@ -2831,10 +3379,103 @@ export function createSlotlockStoreApplicationBackend(
       }, WRITE);
     },
 
+    async listApprovalPolicies(context) {
+      return withTenant(store, context, async (tenant) => ({
+        policies: (await tenant.listApprovalPolicies({ tenantRef: tenantOf(context) })).map(approvalPolicyOutput),
+      }));
+    },
+
+    async putApprovalPolicy(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        let policy: SlotlockApprovalPolicy | null;
+        try {
+          policy = await tenant.putApprovalPolicy({
+            tenantRef: tenantOf(context),
+            ref: input.policy_ref as string,
+            name: input.name as string,
+            outcome: input.outcome as SlotlockApprovalPolicy['outcome'],
+            ...(input.applies_to !== undefined ? { appliesTo: approvalAppliesTo(input.applies_to) } : {}),
+            ...(input.conditions !== undefined ? { conditions: approvalConditions(input.conditions) } : {}),
+            ...(input.approval_ttl_minutes !== undefined ? { approvalTtlMinutes: input.approval_ttl_minutes as number } : {}),
+            ...(input.lead_minutes !== undefined ? { leadMinutes: input.lead_minutes as number } : {}),
+          });
+        } catch (error) {
+          if (error instanceof SlotlockApprovalPolicyError) {
+            throw new SlotlockAgentOperationError(error.code, 400, { reason: error.message.slice(0, 200) });
+          }
+          throw error;
+        }
+        if (!policy) throw new SlotlockAgentOperationError('approval_policy_limit_reached', 409);
+        return { policy: approvalPolicyOutput(policy) };
+      }, WRITE);
+    },
+
+    async deleteApprovalPolicy(context, input) {
+      return withTenant(store, context, (tenant) =>
+        tenant.deleteApprovalPolicy({ tenantRef: tenantOf(context), ref: input.policy_ref as string }),
+      );
+    },
+
+    async listApprovals(context, input) {
+      return withTenant(store, context, async (tenant) => ({
+        approvals: (
+          await tenant.listApprovals({
+            tenantRef: tenantOf(context),
+            limit: input.limit as number,
+            ...(input.status !== undefined ? { status: input.status as SlotlockApproval['status'] } : {}),
+          })
+        ).map(approvalOutput),
+      }));
+    },
+
+    async getApproval(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const approval = await tenant.getApproval({ tenantRef: tenantOf(context), id: input.approval_id as string });
+        if (!approval) throw new SlotlockAgentOperationError('approval_not_found', 404);
+        return { approval: approvalOutput(approval) };
+      });
+    },
+
+    async decideApproval(context, input) {
+      const tenantRef = tenantOf(context);
+      const id = input.approval_id as string;
+      const decidedBy = actorOf(context) ?? 'unknown';
+      if (input.decision === 'decline') {
+        const declined = await withTenant(store, context, (tenant) =>
+          tenant.declineApproval({
+            tenantRef,
+            id,
+            decidedBy,
+            ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+          }),
+        WRITE);
+        if (!declined.ok) throw approvalRefusal(declined.code);
+        await offerFreedTime(store, context);
+        return { approval: approvalOutput(declined.approval), booking: null };
+      }
+      if (!options.agentBackend) throw new SlotlockAgentOperationError('approvals_unavailable', 409);
+      const approval = await withTenant(store, context, (tenant) => tenant.getApproval({ tenantRef, id }));
+      if (!approval) throw approvalRefusal('approval_not_found');
+      if (approval.status !== 'pending') throw approvalRefusal('approval_not_pending');
+      // A dry run's grant is a dry run of the booking: rolled back with it.
+      const booking = await runSlotlockApprovalGrant(options.agentBackend, approval, {
+        tenantRef,
+        decidedBy,
+        signal: context.signal,
+        ...(context.origin !== undefined ? { origin: context.origin } : {}),
+        ...(context.dryRun ? { dryRun: true } : {}),
+      });
+      const granted = context.dryRun
+        ? { ...approval, status: 'granted' as const, decidedBy, decidedAt: new Date() }
+        : await withTenant(store, context, (tenant) => tenant.getApproval({ tenantRef, id }));
+      if (!granted) throw new SlotlockAgentOperationError('store_inconsistent', 503);
+      return { approval: approvalOutput(granted), booking };
+    },
+
     async runMaintenance(context) {
       assertActive(context);
       try {
-        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
@@ -2844,6 +3485,7 @@ export function createSlotlockStoreApplicationBackend(
           stale_sources: staleSources,
           no_shows: noShows,
           waitlist_offers: waitlistOffers,
+          approvals_expired: approvalsExpired,
         };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);

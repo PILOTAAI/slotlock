@@ -287,6 +287,28 @@ export const TOOL_ERRORS = {
 /** Every tool: schema validation, `authorize`, `consumeRateLimit`, a request that went away. */
 export const COMMON_ERRORS = ['invalid_arguments', 'forbidden', 'rate_limited', 'request_aborted'];
 
+/** The bookings an approval policy can hold for a person (RFC 0004 A4). */
+export const APPROVAL_TOOLS = [
+  'slotlock_create_event',
+  'slotlock_confirm_slot',
+  'slotlock_book_pool',
+  'slotlock_book_together',
+  'slotlock_update_event',
+  'slotlock_reschedule',
+];
+
+/** What those answer when a policy covers them. */
+export const APPROVAL_ERRORS = [
+  'approval_pending',
+  'approval_declined',
+  'approval_expired',
+  'approval_policy_refused',
+  'approval_required',
+  'approval_too_late',
+  'approval_series_unsupported',
+  'approval_limit_reached',
+];
+
 /** Write tools, when the server asks a person to confirm them (`confirmation`). */
 export const CONFIRMATION_ERRORS = [
   'confirmation_required',

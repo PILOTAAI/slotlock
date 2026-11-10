@@ -1233,6 +1233,8 @@ export async function startSlotlockServer(
             application: {
               backend: createSlotlockStoreApplicationBackend(store, {
                 maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
+                // A granted approval's booking is made as an agent's would be (RFC 0004 A4).
+                agentBackend,
                 partners: createSlotlockPartnerStore(sql, {
                   keys: createSlotlockApiKeyStore(sql),
                   eraseTenant: (tenantRef) => store.eraseTenant({ tenantRef }),
@@ -1277,7 +1279,7 @@ export async function startSlotlockServer(
               : {}),
             ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             keys: createSlotlockApiKeyStore(sql),
-            resources: createSlotlockDashboardResources(store),
+            resources: createSlotlockDashboardResources(store, { agentBackend }),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
             ...(config.usage ? { usage: true } : {}),
@@ -2042,6 +2044,7 @@ async function maintainTenant(
         staleSources: 0,
         noShows: 0,
         waitlistOffers: 0,
+        approvalsExpired: 0,
         capped: true,
         passes: 0,
       };
@@ -2056,6 +2059,7 @@ async function maintainTenant(
         sum.staleSources += pass.staleSources;
         sum.noShows += pass.noShows;
         sum.waitlistOffers += pass.waitlistOffers;
+        sum.approvalsExpired += pass.approvalsExpired;
         // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
         // before the series it had put back, the next pass meets new ones (and perhaps a healthy
         // one); once it reached them, another pass would meet them again.

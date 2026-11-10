@@ -452,6 +452,21 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         const waiting = await tenant.joinWaitlist({ tenantRef, resourceId, ...slot(2), holderRef: 'waiting' });
         if (!waiting.ok) throw new Error(waiting.code);
         await tenant.setBookingRuleDefaults({ tenantRef, pool: null, rules: { minNoticeMinutes: 0 } });
+        // A policy, and a booking it holds for a person (RFC 0004 A4).
+        await tenant.putApprovalPolicy({ tenantRef, ref: 'vans', name: 'Vans', outcome: 'require_approval' });
+        const approval = await tenant.requestApproval({
+          tenantRef,
+          policyRef: 'vans',
+          operation: 'slotlock_create_event',
+          request: { resource_id: resourceId },
+          requester: { subject: 'agent-1' },
+          requesterRef: 'agent-1',
+          requestKey: 'a'.repeat(64),
+          holds: [{ resourceId, ...slot(5) }],
+          ...slot(5),
+          expiresAt: new Date(Date.now() + HOUR),
+        });
+        if (!approval.ok) throw new Error(approval.code);
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',

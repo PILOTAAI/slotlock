@@ -26,6 +26,7 @@ const MAINTENANCE_COUNTS = [
   'staleSources',
   'noShows',
   'waitlistOffers',
+  'approvalsExpired',
 ] as const;
 /** A label value: an operation, protocol or outcome code. Anything else is counted as `other`. */
 const LABEL = /^[a-z0-9_.]{1,64}$/;

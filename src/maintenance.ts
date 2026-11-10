@@ -37,6 +37,8 @@ export interface SlotlockMaintenanceResult {
   noShows: number;
   /** Waitlist entries whose window came free, each now holding it (`waitlist.offered`). */
   waitlistOffers: number;
+  /** Approvals no one decided in time, their held time freed (`approval.expired`). */
+  approvalsExpired: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -144,7 +146,9 @@ export async function maintainSlotlockTenant(
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );
   const staleSources = await withTenant((tenant) => tenant.reportStaleCoverage({ tenantRef }));
-  // No-shows first: the time they free is offered to the waitlist in the same pass.
+  // Approvals past their wait, and no-shows, first: the time they free is offered to the waitlist
+  // in the same pass.
+  const approvals = await withTenant((tenant) => tenant.expireApprovals({ tenantRef, limit: 100 }));
   const noShows = await withTenant((tenant) => tenant.releaseNoShows({ tenantRef }));
   // The whole waitlist in join order, a page per transaction, so a later free entry is offered
   // however many wait before it.
@@ -170,7 +174,8 @@ export async function maintainSlotlockTenant(
     staleSources,
     noShows,
     waitlistOffers,
-    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft,
+    approvalsExpired: approvals.expired,
+    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft || approvals.expired === 100,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
 }

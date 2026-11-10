@@ -552,6 +552,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                 ),
             })
           : null;
+        const agentBackend = createSlotlockStoreAgentBackend(store, {
+          availabilityRules: async () => availability.map((rule) => ({ ...rule })),
+        });
         requestScope = {
           sql,
           keys: createSlotlockApiKeyStore(sql),
@@ -575,10 +578,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                     ),
                 })
               : null,
-          agent: createSlotlockStoreAgentBackend(store, {
-            availabilityRules: async () => availability.map((rule) => ({ ...rule })),
-          }),
-          resources: createSlotlockDashboardResources(store),
+          agent: agentBackend,
+          // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with.
+          resources: createSlotlockDashboardResources(store, { agentBackend }),
           state: createSlotlockDashboardState(sql),
         };
         return await scope.run(requestScope, () => dashboard.fetch(request));

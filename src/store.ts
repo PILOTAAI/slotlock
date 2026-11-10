@@ -107,6 +107,8 @@ import type {
   SlotlockAgendaEntry,
   SlotlockHold,
   SlotlockBookingDescription,
+  SlotlockApproval,
+  SlotlockApprovalPolicy,
   SlotlockReservation,
   SlotlockResource,
   PutCalendarEventCommand,
@@ -115,8 +117,30 @@ import type {
   WeeklyAvailabilityRule,
 } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
+import {
+  type PutApprovalPolicyParams,
+  APPROVAL_COLUMNS,
+  approvalByRequestKey,
+  approvalPoliciesFor,
+  beginApprovalGrant,
+  declineApproval,
+  deleteApprovalPolicy,
+  expireApprovals,
+  finishApprovalGrant,
+  getApproval,
+  listApprovalPolicies,
+  listApprovals,
+  putApprovalPolicy,
+  recordApprovalChange,
+  toApproval,
+} from './approvals.js';
 
 const EXCLUSION_VIOLATION = '23P01';
+/** Holds one approval may own: a bundle's resources, or a move's new time in pieces. */
+const SLOTLOCK_MAX_APPROVAL_HOLDS = 20;
+/** Approvals one requester, and one tenant, may have waiting at once. */
+const SLOTLOCK_MAX_PENDING_APPROVALS_PER_REQUESTER = 50;
+const SLOTLOCK_MAX_PENDING_APPROVALS = 500;
 /**
  * Concurrent inserts on the same EXCLUDE range can deadlock inside the constraint check itself
  * (intrinsic to Postgres EXCLUDE). The victim is fully rolled back, so one retry either wins or
@@ -2765,6 +2789,79 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   describeBooking(params: { tenantRef: string; id: string }): Promise<SlotlockBookingDescription | null>;
   /**
+   * The time an owner's calendar events occupy now, buffers included, one row per occupation: what
+   * an approval (RFC 0004 A4) holds for a write, read in the write's own rolled-back transaction.
+   */
+  eventOccupancy(params: {
+    tenantRef: string;
+    ownerRef: string;
+    externalRefs: readonly string[];
+  }): Promise<{ resourceId: string; start: Date; end: Date; recurring: boolean }[]>;
+  /** Create or replace an approval policy; null when the tenant has its 50 already. */
+  putApprovalPolicy(params: PutApprovalPolicyParams): Promise<SlotlockApprovalPolicy | null>;
+  listApprovalPolicies(params: { tenantRef: string }): Promise<SlotlockApprovalPolicy[]>;
+  deleteApprovalPolicy(params: { tenantRef: string; ref: string }): Promise<{ deleted: boolean }>;
+  /** The tenant's policies that apply to any of these resources (by id, pool, location, group, or all). */
+  approvalPoliciesFor(params: { tenantRef: string; resourceIds: readonly string[] }): Promise<SlotlockApprovalPolicy[]>;
+  /**
+   * A write waiting for a person: its time held by holds the approval owns, until `expiresAt`, and
+   * the request kept to run as its requester when granted. A retry with the same `requestKey`
+   * answers the same approval (`replayed`), or `idempotency_conflict` for another request. With
+   * `consumeHold`, the requester's own hold of that time gives way to the approval's in the same
+   * transaction. `overlap` when the time is taken; `approval_limit_reached` past the pending caps.
+   */
+  requestApproval(params: {
+    tenantRef: string;
+    policyRef: string;
+    operation: SlotlockApproval['operation'];
+    request: Record<string, unknown>;
+    requester: Record<string, unknown>;
+    requesterRef: string;
+    requestKey: string;
+    holds: readonly { resourceId: string; start: Date; end: Date }[];
+    start: Date;
+    end: Date;
+    expiresAt: Date;
+    consumeHold?: { holdId: string; holderRef: string };
+  }): Promise<
+    | { ok: true; approval: SlotlockApproval; replayed: boolean }
+    | { ok: false; code: 'overlap' | 'approval_limit_reached' | 'idempotency_conflict'; limit?: number }
+  >;
+  /** The approval a request key made, or null. */
+  findApproval(params: { tenantRef: string; requestKey: string }): Promise<SlotlockApproval | null>;
+  getApproval(params: {
+    tenantRef: string;
+    id: string;
+  }): Promise<(SlotlockApproval & { requester: Record<string, unknown> }) | null>;
+  listApprovals(params: {
+    tenantRef: string;
+    status?: SlotlockApproval['status'];
+    limit?: number;
+  }): Promise<SlotlockApproval[]>;
+  /**
+   * Lock a pending, unexpired approval and let its holds go, so its write can take their time in
+   * the same transaction; finishApprovalGrant then marks it granted.
+   */
+  beginApprovalGrant(params: {
+    tenantRef: string;
+    id: string;
+  }): Promise<
+    | { ok: true; approval: SlotlockApproval }
+    | { ok: false; code: 'approval_not_found' | 'approval_not_pending' | 'approval_expired' }
+  >;
+  finishApprovalGrant(params: { tenantRef: string; id: string; decidedBy: string }): Promise<SlotlockApproval>;
+  declineApproval(params: {
+    tenantRef: string;
+    id: string;
+    decidedBy: string;
+    reason?: string;
+  }): Promise<
+    | { ok: true; approval: SlotlockApproval }
+    | { ok: false; code: 'approval_not_found' | 'approval_not_pending' | 'approval_expired' }
+  >;
+  /** Maintenance: up to `limit` pending approvals past their wait expire and free their time. */
+  expireApprovals(params: { tenantRef: string; limit?: number }): Promise<{ expired: number }>;
+  /**
    * The tenant's bookings on one resource whose occupied time meets `window` (at most 367 days),
    * by start then id, keyset-paginated: pass the last one's `{ start, id }` as `after`.
    */
@@ -3772,6 +3869,12 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'setResourceParent',
   'setPoolOrder',
   'notePoolBooking',
+  'putApprovalPolicy',
+  'deleteApprovalPolicy',
+  'requestApproval',
+  'beginApprovalGrant',
+  'finishApprovalGrant',
+  'declineApproval',
   'setTenantAvailability',
   'createReservation',
   'createExternalReservation',
@@ -5685,6 +5788,209 @@ function buildSlotlockStore(
         start: row.occupied_start,
         end: row.occupied_end,
       };
+    },
+
+    async eventOccupancy(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.ownerRef)) {
+        throw invalidIdentityError('Slotlock tenant and owner must be 1-500 UTF-8 bytes');
+      }
+      const refs = params.externalRefs.filter((ref) => isValidIdentity(ref));
+      if (refs.length === 0) return [];
+      const rows = await sql<{ resource_id: string; start: Date; end: Date; recurring: boolean }[]>`
+        SELECT booking.resource_id,
+               COALESCE(booking.occupied_starts_at, booking.starts_at) AS start,
+               COALESCE(booking.occupied_ends_at, booking.ends_at) AS "end",
+               event.recurrence_rule IS NOT NULL AS recurring
+          FROM slotlock.calendar_events event
+          JOIN slotlock.reservations booking ON booking.calendar_event_id = event.id
+         WHERE event.tenant_ref = ${params.tenantRef} AND event.owner_ref = ${params.ownerRef}
+           AND event.external_ref = ANY (${refs}::text[])
+         ORDER BY booking.resource_id, 2, booking.id`;
+      return rows.map((row) => ({ resourceId: row.resource_id, start: row.start, end: row.end, recurring: row.recurring }));
+    },
+
+    async putApprovalPolicy(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return putApprovalPolicy(sql, params);
+    },
+
+    async listApprovalPolicies(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return listApprovalPolicies(sql, params.tenantRef);
+    },
+
+    async deleteApprovalPolicy(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return { deleted: await deleteApprovalPolicy(sql, params.tenantRef, params.ref) };
+    },
+
+    async approvalPoliciesFor(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return approvalPoliciesFor(sql, params.tenantRef, params.resourceIds);
+    },
+
+    async requestApproval(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.requesterRef)) {
+        throw invalidIdentityError('Slotlock tenant and requester must be 1-500 UTF-8 bytes');
+      }
+      if (!/^[0-9a-f]{64}$/.test(params.requestKey)) {
+        throw invalidIdentityError('Slotlock approval request key must be 64 hex characters');
+      }
+      if (
+        params.holds.length < 1 ||
+        params.holds.length > SLOTLOCK_MAX_APPROVAL_HOLDS ||
+        params.holds.some((hold) => !isValidResourceId(hold.resourceId) || !(hold.end > hold.start))
+      ) {
+        throw invalidIdentityError(`Slotlock approval holds must be 1-${SLOTLOCK_MAX_APPROVAL_HOLDS} intervals on resources`);
+      }
+      const { tenantRef } = params;
+      try {
+        return await inTransaction(sql, async (tx) => {
+          // Retries of one request wait for each other, so the second answers the first's approval.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([
+            'slotlock-approval',
+            tenantRef,
+            params.requestKey,
+          ])}, 0))`;
+          const prior = await approvalByRequestKey(tx, tenantRef, params.requestKey);
+          if (prior) {
+            const [same] = await tx<{ same: boolean }[]>`
+              SELECT request = ${tx.json(params.request as never)}::jsonb AS same
+                FROM slotlock.approvals WHERE id = ${prior.id}`;
+            return same?.same
+              ? { ok: true as const, approval: prior, replayed: true }
+              : { ok: false as const, code: 'idempotency_conflict' as const };
+          }
+          // Counted under a lock on the tenant's approvals, so racing requests stop at the caps.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-approvals', tenantRef])}, 0))`;
+          const [pending] = await tx<{ tenant: number; requester: number }[]>`
+            SELECT count(*)::int AS tenant,
+                   (count(*) FILTER (WHERE requester ->> 'subject' = ${params.requesterRef}))::int AS requester
+              FROM slotlock.approvals
+             WHERE tenant_ref = ${tenantRef} AND status = 'pending' AND expires_at > statement_timestamp()`;
+          if ((pending?.requester ?? 0) >= SLOTLOCK_MAX_PENDING_APPROVALS_PER_REQUESTER) {
+            return { ok: false as const, code: 'approval_limit_reached' as const, limit: SLOTLOCK_MAX_PENDING_APPROVALS_PER_REQUESTER };
+          }
+          if ((pending?.tenant ?? 0) >= SLOTLOCK_MAX_PENDING_APPROVALS) {
+            return { ok: false as const, code: 'approval_limit_reached' as const, limit: SLOTLOCK_MAX_PENDING_APPROVALS };
+          }
+          const id = randomUUID();
+          // The requester's own hold of the time gives way to the approval's.
+          if (params.consumeHold && isValidResourceId(params.consumeHold.holdId)) {
+            await tx`
+              DELETE FROM slotlock.reservations
+               WHERE id = ${params.consumeHold.holdId} AND status = 'held'
+                 AND holder_ref = ${params.consumeHold.holderRef}`;
+          }
+          const holds = [...params.holds].sort(
+            (left, right) => left.resourceId.localeCompare(right.resourceId) || left.start.getTime() - right.start.getTime(),
+          );
+          for (const hold of holds) await reapExpiredHolds(tx, hold.resourceId, hold.start, hold.end);
+          const held = await tx<{ id: string }[]>`
+            INSERT INTO slotlock.reservations (
+              resource_id, starts_at, ends_at, buffer_after_ms, buffer_before_ms, status, expires_at,
+              source, holder_ref, hold_group_id
+            )
+            SELECT wanted.resource_id, wanted.starts_at, wanted.ends_at, 0, 0, 'held', ${params.expiresAt},
+                   'slotlock:approval', ${`approval:${id}`}, ${id}::uuid
+              FROM ROWS FROM (pg_catalog.unnest(${holds.map((hold) => hold.resourceId)}::uuid[]),
+                              pg_catalog.unnest(${holds.map((hold) => hold.start.toISOString())}::text[]::timestamptz[]),
+                              pg_catalog.unnest(${holds.map((hold) => hold.end.toISOString())}::text[]::timestamptz[]))
+                   AS wanted(resource_id, starts_at, ends_at)
+            RETURNING id`;
+          const [row] = await tx<Parameters<typeof toApproval>[0][]>`
+            INSERT INTO slotlock.approvals (
+              id, tenant_ref, policy_ref, operation, request, requester, hold_ids, resource_ids,
+              starts_at, ends_at, request_key, expires_at
+            ) VALUES (
+              ${id}, ${tenantRef}, ${params.policyRef}, ${params.operation}, ${tx.json(params.request as never)},
+              ${tx.json(params.requester as never)}, ${held.map((hold) => hold.id)}::uuid[],
+              ${[...new Set(holds.map((hold) => hold.resourceId))]}::uuid[], ${params.start}, ${params.end},
+              ${params.requestKey}, ${params.expiresAt}
+            )
+            RETURNING ${tx.unsafe(APPROVAL_COLUMNS)}`;
+          if (!row) throw new Error('slotlock: approval insert returned no row');
+          const approval = toApproval(row);
+          await recordApprovalChange(tx, tenantRef, 'approval.requested', approval);
+          return { ok: true as const, approval, replayed: false };
+        }, 'read committed');
+      } catch (err) {
+        if (pgCode(err) === EXCLUSION_VIOLATION) return { ok: false, code: 'overlap' };
+        throw err;
+      }
+    },
+
+    async findApproval(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      if (!/^[0-9a-f]{64}$/.test(params.requestKey)) return null;
+      return approvalByRequestKey(sql, params.tenantRef, params.requestKey);
+    },
+
+    async getApproval(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return getApproval(sql, params.tenantRef, params.id);
+    },
+
+    async listApprovals(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        throw invalidIdentityError('Slotlock approval list limit must be 1-200');
+      }
+      return listApprovals(sql, {
+        tenantRef: params.tenantRef,
+        limit,
+        ...(params.status !== undefined ? { status: params.status } : {}),
+      });
+    },
+
+    async beginApprovalGrant(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return beginApprovalGrant(sql, params.tenantRef, params.id);
+    },
+
+    async finishApprovalGrant(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.decidedBy)) {
+        throw invalidIdentityError('Slotlock tenant and decider must be 1-500 UTF-8 bytes');
+      }
+      return finishApprovalGrant(sql, params.tenantRef, params.id, params.decidedBy);
+    },
+
+    async declineApproval(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.decidedBy)) {
+        throw invalidIdentityError('Slotlock tenant and decider must be 1-500 UTF-8 bytes');
+      }
+      if (params.reason !== undefined && params.reason.length > 500) {
+        throw invalidIdentityError('Slotlock approval reason must be at most 500 characters');
+      }
+      return declineApproval(sql, params);
+    },
+
+    async expireApprovals(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 100;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+        throw invalidIdentityError('Slotlock approval expiry limit must be 1-1000');
+      }
+      return { expired: await expireApprovals(sql, params.tenantRef, limit) };
     },
 
     async getReservation(params) {

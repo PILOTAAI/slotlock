@@ -93,9 +93,12 @@ import {
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
 import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
+import { SlotlockAgentOperationError } from './agent-server.js';
+import { runSlotlockApprovalGrant } from './agent-store-backend.js';
 import type {
   Interval,
   SlotlockAgendaEntry,
+  SlotlockApproval,
   SlotlockResource,
   SlotlockBookingRuleDefaults,
   WeeklyAvailabilityRule,
@@ -153,6 +156,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/webhooks/delete',
   '/webhooks/enable',
   '/waitlist/leave',
+  '/approvals/decide',
   '/hours',
   '/organization',
   '/environment',
@@ -333,6 +337,20 @@ export interface SlotlockDashboardResources {
       place: { location: string | null; groups: readonly string[] },
       actor?: string,
     ): Promise<SlotlockResource | null>;
+  };
+  /**
+   * The tenant's approvals (RFC 0004 A4), newest first, and deciding one: a grant makes the booking
+   * as the agent asked for it; a refusal says why (approval_not_pending, overlap, a booking rule).
+   */
+  approvals?: {
+    list(tenantRef: string, limit: number): Promise<SlotlockApproval[]>;
+    decide(
+      tenantRef: string,
+      id: string,
+      decision: 'grant' | 'decline',
+      actor?: string,
+      reason?: string,
+    ): Promise<{ ok: true } | { ok: false; code: string }>;
   };
   /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
   waitlist?: {
@@ -596,11 +614,60 @@ export interface SlotlockDashboard {
  * The dashboard's resources, in the store under each tenant's row-level security. Adds hold the cap
  * in the database (a READ COMMITTED transaction, under a per-tenant lock).
  */
-export function createSlotlockDashboardResources(store: SlotlockStore): SlotlockDashboardResources {
+export function createSlotlockDashboardResources(
+  store: SlotlockStore,
+  options: {
+    /**
+     * The agent backend (`createSlotlockStoreAgentBackend`) a granted approval's booking is made
+     * through: with it, the dashboard lists approvals and decides them.
+     */
+    agentBackend?: SlotlockAgentCalendarBackend;
+  } = {},
+): SlotlockDashboardResources {
   // Every change here is the dashboard's, made by the person signed in (actor) when known.
   const by = (actor: string | undefined) =>
     actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
+  const agentBackend = options.agentBackend;
   return {
+    ...(agentBackend
+      ? {
+          approvals: {
+            list: (tenantRef: string, limit: number) =>
+              store.withTenant(tenantRef, (tenant) => tenant.listApprovals({ tenantRef, limit })),
+            async decide(tenantRef: string, id: string, decision: 'grant' | 'decline', actor?: string, reason?: string) {
+              const decidedBy = actor ?? 'dashboard';
+              if (decision === 'decline') {
+                const declined = await store.withTenant(
+                  tenantRef,
+                  (tenant) => tenant.declineApproval({ tenantRef, id, decidedBy, ...(reason ? { reason } : {}) }),
+                  by(actor),
+                );
+                if (!declined.ok) return declined;
+                // Its held time is free: offer it to the waitlist, as a release does.
+                await store
+                  .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), { origin: 'maintenance' })
+                  .catch(() => undefined);
+                return { ok: true as const };
+              }
+              const approval = await store.withTenant(tenantRef, (tenant) => tenant.getApproval({ tenantRef, id }));
+              if (!approval) return { ok: false as const, code: 'approval_not_found' };
+              if (approval.status !== 'pending') return { ok: false as const, code: 'approval_not_pending' };
+              try {
+                await runSlotlockApprovalGrant(agentBackend, approval, {
+                  tenantRef,
+                  decidedBy,
+                  signal: new AbortController().signal,
+                  origin: 'dashboard',
+                });
+              } catch (error) {
+                if (error instanceof SlotlockAgentOperationError) return { ok: false as const, code: error.code };
+                throw error;
+              }
+              return { ok: true as const };
+            },
+          },
+        }
+      : {}),
     list: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) =>
         tenant.listResources({ tenantRef, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES + 1 }),
@@ -946,6 +1013,8 @@ const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
 const WAITLIST_SHOWN = 200;
+/** Approvals the dashboard lists, pending and recent decided together, newest first. */
+const APPROVALS_SHOWN = 100;
 const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 /** How the booking rules form names each rule. */
 const RULE_LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
@@ -1032,6 +1101,7 @@ const ICONS = Object.freeze({
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
   check: icon('<path d="M5 12l5 5L20 7"/>'),
+  approvals: icon('<circle cx="12" cy="12" r="8"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'),
   signOut: icon('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
   plus: icon('<path d="M12 5v14M5 12h14"/>'),
   google: new Html(
@@ -1178,6 +1248,10 @@ const CHANGE_LABELS: Readonly<Record<string, { text: string; tone: Tone }>> = Ob
   'coverage.stale': { text: 'Calendar sync is behind', tone: 'bad' },
   'waitlist.offered': { text: 'Waitlist offer sent', tone: 'good' },
   'waitlist.expired': { text: 'Waitlist offer lapsed', tone: 'neutral' },
+  'approval.requested': { text: 'Waiting for approval', tone: 'neutral' },
+  'approval.granted': { text: 'Approved and booked', tone: 'good' },
+  'approval.declined': { text: 'Approval declined', tone: 'bad' },
+  'approval.expired': { text: 'Approval not decided in time', tone: 'bad' },
   'webhook.disabled': { text: 'Webhook disabled', tone: 'bad' },
   'usage.threshold_reached': { text: 'Monthly quota nearly or fully used', tone: 'bad' },
 });
@@ -1635,6 +1709,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     | 'overview'
     | 'resources'
     | 'waitlist'
+    | 'approvals'
     | 'keys'
     | 'webhooks'
     | 'assistant'
@@ -1648,6 +1723,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
     ...(options.resources.waitlist
       ? [{ section: 'waitlist' as const, label: 'Waitlist', path: '/waitlist', icon: ICONS.waitlist }]
+      : []),
+    ...(options.resources.approvals
+      ? [{ section: 'approvals' as const, label: 'Approvals', path: '/approvals', icon: ICONS.approvals }]
       : []),
     { section: 'keys', label: 'API keys', path: '/keys', icon: ICONS.keys },
     ...(options.resources.webhooks
@@ -2752,6 +2830,97 @@ ${
     return redirect(303, `${root}/waitlist`);
   }
 
+  // ---- Approvals (RFC 0004 A4) ----
+
+  async function approvalsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const approvals = options.resources.approvals;
+    if (!approvals) return notFound(session);
+    const tenantRef = tenantOf(session);
+    const [entries, resources] = await Promise.all([
+      approvals.list(tenantRef, APPROVALS_SHOWN),
+      options.resources.list(tenantRef),
+    ]);
+    const byId = new Map(resources.map((resource) => [resource.id, resource]));
+    const token = csrfToken(session);
+    const pending = entries.filter((entry) => entry.status === 'pending' && entry.expiresAt.getTime() > now());
+    const decided = entries.filter((entry) => !pending.includes(entry));
+    const what = (entry: SlotlockApproval) =>
+      entry.resourceIds.map((id) => resourceName(byId.get(id), id)).join(', ');
+    const when = (entry: SlotlockApproval) => {
+      const zone = byId.get(entry.resourceIds[0] ?? '')?.timezone ?? 'UTC';
+      const day = dayLabel(entry.start, zone, now());
+      return `${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}`;
+    };
+    const KINDS: Record<SlotlockApproval['operation'], string> = {
+      slotlock_create_event: 'Booking',
+      slotlock_book_together: 'Bundle',
+      slotlock_update_event: 'Move',
+    };
+    const form = (entry: SlotlockApproval, decision: 'grant' | 'decline', body: Html) =>
+      html`<form method="post" action="${root}/approvals/decide"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><input type="hidden" name="decision" value="${decision}">${body}</form>`;
+    const pendingRows = pending.map(
+      (entry) => html`<tr>
+<td data-label="When" class="strong">${when(entry)}</td>
+<td data-label="What"><span class="cell"><span class="truncate" title="${what(entry)}">${what(entry)}</span><span class="meta">${KINDS[entry.operation]}, policy ${entry.policyRef}</span></span></td>
+<td data-label="Asked by"><code class="truncate" title="${entry.requestedBy ?? ''}">${entry.requestedBy ?? 'unknown'}</code></td>
+<td data-label="Decide by">${clock(entry.expiresAt, 'UTC')} UTC, ${dayLabel(entry.expiresAt, 'UTC', now()).label}</td>
+<td class="actions">${form(entry, 'grant', html`<button type="submit">Approve</button>`)}<details class="act danger"><summary>Decline</summary><div class="pop"><p>The held time is freed. The agent is told on its next try.</p>${form(entry, 'decline', html`<label>Reason (optional)<input name="reason" maxlength="500" autocomplete="off"></label><button class="danger" type="submit">Decline</button>`)}</div></details></td>
+</tr>`,
+    );
+    const STATUS: Record<SlotlockApproval['status'], { text: string; tone: string }> = {
+      pending: { text: 'Lapsed', tone: 'revoked' },
+      granted: { text: 'Approved', tone: 'active' },
+      declined: { text: 'Declined', tone: 'revoked' },
+      expired: { text: 'Expired', tone: 'revoked' },
+    };
+    const decidedRows = decided.map(
+      (entry) => html`<tr>
+<td data-label="When" class="strong">${when(entry)}</td>
+<td data-label="What"><span class="truncate" title="${what(entry)}">${what(entry)}</span></td>
+<td data-label="Status"><span class="cell"><span class="pill ${STATUS[entry.status].tone}">${STATUS[entry.status].text}</span>${entry.reason ? html`<span class="meta" title="${entry.reason}">${entry.reason}</span>` : html``}</span></td>
+<td data-label="Decided by"><code class="truncate" title="${entry.decidedBy ?? ''}">${entry.decidedBy ?? '—'}</code></td>
+<td data-label="Asked">${ago(entry.createdAt, now())}</td>
+</tr>`,
+    );
+    const content = html`${noticeOf(notice)}
+${pageHead('Approvals')}
+<p class="fine">Bookings an approval policy holds for a person. Their time stays held until you decide or the wait ends. Policies are set through the API (slotlock_put_approval_policy).</p>
+<div class="stats">
+<div class="stat"><span class="stat-label">Waiting for you</span><span class="stat-value">${String(pending.length)}</span></div>
+</div>
+${
+  pending.length === 0
+    ? emptyState(ICONS.approvals, 'Nothing is waiting. A policy that holds bookings for a person sends them here.')
+    : html`<div class="table"><table><thead><tr><th>When</th><th>What</th><th>Asked by</th><th>Decide by</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
+}
+${
+  decided.length === 0
+    ? html``
+    : html`<h2>Decided</h2><div class="table"><table><thead><tr><th>When</th><th>What</th><th>Status</th><th>Decided by</th><th>Asked</th></tr></thead><tbody>${decidedRows}</tbody></table></div>`
+}`;
+    return respond(status, layout('Approvals', content, session, 'approvals'));
+  }
+
+  async function decideApproval(session: Session, form: URLSearchParams): Promise<Response> {
+    const approvals = options.resources.approvals;
+    if (!approvals) return notFound(session);
+    const decision = form.get('decision');
+    if (decision !== 'grant' && decision !== 'decline') return approvalsPage(session, 400, 'Choose approve or decline.');
+    const reason = (form.get('reason') ?? '').trim().slice(0, 500);
+    const decided = await approvals.decide(tenantOf(session), form.get('id') ?? '', decision, personOf(session), reason || undefined);
+    if (!decided.ok) {
+      const messages: Record<string, string> = {
+        approval_not_found: 'That approval is not one of yours.',
+        approval_not_pending: 'That approval was already decided.',
+        approval_expired: 'The wait for that approval ended: its time is no longer held.',
+        overlap: 'That time is taken now, so it cannot be booked. Decline it instead.',
+        revision_conflict: 'The agent changed that event since it asked. Decline this one; it can ask again.',
+      };
+      return approvalsPage(session, 409, messages[decided.code] ?? `That booking cannot be made now (${decided.code}). Decline it instead.`);
+    }
+    return redirect(303, `${root}/approvals`);
+  }
+
 
   // ---- The assistant ----
 
@@ -3715,6 +3884,7 @@ ${upgrade}
     if (route.startsWith('/keys')) return keysPage;
     if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
     if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
+    if (route.startsWith('/approvals') && options.resources.approvals) return approvalsPage;
     if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
       return locationsPage;
     }
@@ -4655,6 +4825,8 @@ ${
         return changeWebhook(session, form, 'enable');
       case '/waitlist/leave':
         return leaveWaitlist(session, form);
+      case '/approvals/decide':
+        return decideApproval(session, form);
       case '/assistant':
         return sendToAssistant(session, form);
       case '/assistant/approve':
@@ -4707,6 +4879,7 @@ ${
             case '/resources':
             case '/webhooks':
             case '/waitlist':
+            case '/approvals':
             case '/assistant':
             case '/plan':
             case '/teams':
@@ -4728,6 +4901,7 @@ ${
               if (route === '/resources') return await resourcesPage(session);
               if (route === '/webhooks') return await webhooksPage(session);
               if (route === '/waitlist') return await waitlistPage(session);
+              if (route === '/approvals') return await approvalsPage(session);
               if (route === '/assistant') return await assistantPage(session);
               // A provider preset fills the assistant's form; nothing is saved until Save.
               const preset = SLOTLOCK_ASSISTANT_PRESETS.find(

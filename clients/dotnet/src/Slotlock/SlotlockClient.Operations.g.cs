@@ -93,6 +93,12 @@ public sealed partial class SlotlockClient
         ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], ["dry_run"]),
         ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
         ["slotlock_get_usage"] = new("GET", "/v1/usage", [], ["from", "to"]),
+        ["slotlock_list_approval_policies"] = new("GET", "/v1/approval-policies", [], []),
+        ["slotlock_put_approval_policy"] = new("PUT", "/v1/approval-policies/{policy_ref}", ["policy_ref"], []),
+        ["slotlock_delete_approval_policy"] = new("DELETE", "/v1/approval-policies/{policy_ref}", ["policy_ref"], ["dry_run"]),
+        ["slotlock_list_approvals"] = new("GET", "/v1/approvals", [], ["status", "limit"]),
+        ["slotlock_get_approval"] = new("GET", "/v1/approvals/{approval_id}", ["approval_id"], []),
+        ["slotlock_decide_approval"] = new("POST", "/v1/approvals/{approval_id}/decision", ["approval_id"], []),
         ["slotlock_partner_get_account"] = new("GET", "/v1/partner/accounts/{account}", ["account"], []),
         ["slotlock_partner_put_account"] = new("PUT", "/v1/partner/accounts/{account}", ["account"], []),
         ["slotlock_partner_list_accounts"] = new("GET", "/v1/partner/accounts", [], []),
@@ -2794,6 +2800,171 @@ public sealed partial class SlotlockClient
         if (from.HasValue) values["from"] = Json.ToNode(from.Value);
         if (to.HasValue) values["to"] = Json.ToNode(to.Value);
         return CallAsync("slotlock_get_usage", values, cancellationToken);
+    }
+
+    /// <summary>List approval policies.</summary>
+    /// <remarks>
+    /// The tenant's approval policies, by reference: which agent bookings wait for a person
+    /// (require_approval) or are refused (refuse).
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListApprovalPoliciesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_approval_policies", values, cancellationToken);
+    }
+
+    /// <summary>Create or replace an approval policy.</summary>
+    /// <remarks>
+    /// Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool,
+    /// slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a
+    /// person approves first, or are refused. applies_to names resources, pools, locations (with
+    /// the locations in them) and groups; empty, every resource. conditions narrow it:
+    /// longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single,
+    /// pool, bundle, move); a booking meets the policy when it meets every condition given.
+    /// outcome require_approval holds the exact time the booking would take, under the approval,
+    /// and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A
+    /// person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
+    /// ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
+    /// of the two. Where several apply, refuse wins, then the one that must be decided soonest.
+    /// At most 50 policies: one more is 409 approval_policy_limit_reached.
+    /// </remarks>
+    /// <param name="policyRef">policy_ref</param>
+    /// <param name="name">name</param>
+    /// <param name="outcome">outcome</param>
+    /// <param name="appliesTo">applies_to</param>
+    /// <param name="conditions">conditions</param>
+    /// <param name="approvalTtlMinutes">approval_ttl_minutes</param>
+    /// <param name="leadMinutes">lead_minutes</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PutApprovalPolicyAsync(
+        string policyRef,
+        string name,
+        string outcome,
+        Optional<JsonObject> appliesTo = default,
+        Optional<JsonObject> conditions = default,
+        Optional<long> approvalTtlMinutes = default,
+        Optional<long> leadMinutes = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["policy_ref"] = Json.ToNode(policyRef);
+        values["name"] = Json.ToNode(name);
+        values["outcome"] = Json.ToNode(outcome);
+        if (appliesTo.HasValue) values["applies_to"] = Json.ToNode(appliesTo.Value);
+        if (conditions.HasValue) values["conditions"] = Json.ToNode(conditions.Value);
+        if (approvalTtlMinutes.HasValue) values["approval_ttl_minutes"] = Json.ToNode(approvalTtlMinutes.Value);
+        if (leadMinutes.HasValue) values["lead_minutes"] = Json.ToNode(leadMinutes.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_put_approval_policy", values, cancellationToken);
+    }
+
+    /// <summary>Delete an approval policy.</summary>
+    /// <remarks>
+    /// Stop applying a policy to new bookings. Approvals it already asked for stay as they are,
+    /// to be decided.
+    /// </remarks>
+    /// <param name="policyRef">policy_ref</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteApprovalPolicyAsync(
+        string policyRef,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["policy_ref"] = Json.ToNode(policyRef);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_delete_approval_policy", values, cancellationToken);
+    }
+
+    /// <summary>List approvals.</summary>
+    /// <remarks>
+    /// The tenant's approvals, newest first: bookings an agent asked for that a policy holds for
+    /// a person (pending, holding their time until expires_at), and those decided (granted,
+    /// declined, expired). Filter by status.
+    /// </remarks>
+    /// <param name="status">status</param>
+    /// <param name="limit">limit</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListApprovalsAsync(
+        Optional<string> status = default,
+        Optional<long> limit = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (status.HasValue) values["status"] = Json.ToNode(status.Value);
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        return CallAsync("slotlock_list_approvals", values, cancellationToken);
+    }
+
+    /// <summary>Get an approval.</summary>
+    /// <remarks>
+    /// One approval by id, with the booking it would make. 404 approval_not_found.
+    /// </remarks>
+    /// <param name="approvalId">approval_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetApprovalAsync(
+        string approvalId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["approval_id"] = Json.ToNode(approvalId);
+        return CallAsync("slotlock_get_approval", values, cancellationToken);
+    }
+
+    /// <summary>Grant or decline an approval.</summary>
+    /// <remarks>
+    /// Decide a pending approval. grant makes the booking as the agent asked for it, as that
+    /// agent, in one transaction with letting the approval's hold go, and answers it under
+    /// booking; the agent's retry with its idempotency key then answers the same booking. A write
+    /// refused now (a booking rule changed, say) is refused with its own code and the approval
+    /// stays pending. decline frees the time; the agent's retry answers 403 approval_declined
+    /// with the reason. 404 approval_not_found; 409 approval_not_pending when already decided;
+    /// 409 approval_expired after its wait.
+    /// </remarks>
+    /// <param name="approvalId">approval_id</param>
+    /// <param name="decision">decision</param>
+    /// <param name="reason">reason</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DecideApprovalAsync(
+        string approvalId,
+        string decision,
+        Optional<string> reason = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["approval_id"] = Json.ToNode(approvalId);
+        values["decision"] = Json.ToNode(decision);
+        if (reason.HasValue) values["reason"] = Json.ToNode(reason.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_decide_approval", values, cancellationToken);
     }
 
     /// <summary>Read an account.</summary>

@@ -486,6 +486,7 @@ describe.skipIf(!url)('Slotlock README examples (real Postgres)', () => {
       staleSources: 0,
       noShows: 0,
       waitlistOffers: 0,
+      approvalsExpired: 0,
       extended: 1,
       conflicts: 0,
       refused: 0,

@@ -118,6 +118,17 @@ export const GROUPS = [
     ],
   },
   {
+    name: 'Approvals',
+    operations: [
+      'slotlock_list_approval_policies',
+      'slotlock_put_approval_policy',
+      'slotlock_delete_approval_policy',
+      'slotlock_list_approvals',
+      'slotlock_get_approval',
+      'slotlock_decide_approval',
+    ],
+  },
+  {
     name: 'Tenant',
     operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
   },

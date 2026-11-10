@@ -554,6 +554,48 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("from", "to"),
     ),
+    "slotlock_list_approval_policies": Operation(
+        "slotlock_list_approval_policies",
+        "GET",
+        "/v1/approval-policies",
+        (),
+        (),
+    ),
+    "slotlock_put_approval_policy": Operation(
+        "slotlock_put_approval_policy",
+        "PUT",
+        "/v1/approval-policies/{policy_ref}",
+        ("policy_ref",),
+        (),
+    ),
+    "slotlock_delete_approval_policy": Operation(
+        "slotlock_delete_approval_policy",
+        "DELETE",
+        "/v1/approval-policies/{policy_ref}",
+        ("policy_ref",),
+        ("dry_run",),
+    ),
+    "slotlock_list_approvals": Operation(
+        "slotlock_list_approvals",
+        "GET",
+        "/v1/approvals",
+        (),
+        ("status", "limit"),
+    ),
+    "slotlock_get_approval": Operation(
+        "slotlock_get_approval",
+        "GET",
+        "/v1/approvals/{approval_id}",
+        ("approval_id",),
+        (),
+    ),
+    "slotlock_decide_approval": Operation(
+        "slotlock_decide_approval",
+        "POST",
+        "/v1/approvals/{approval_id}/decision",
+        ("approval_id",),
+        (),
+    ),
     "slotlock_partner_get_account": Operation(
         "slotlock_partner_get_account",
         "GET",
@@ -2597,6 +2639,141 @@ class Operations(Transport):
         if to is not None:
             values["to"] = to
         return self.call("slotlock_get_usage", values)
+
+    def list_approval_policies(self) -> dict[str, Any]:
+        """List approval policies.
+
+        The tenant's approval policies, by reference: which agent bookings wait for a person
+        (require_approval) or are refused (refuse).
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_approval_policies", values)
+
+    def put_approval_policy(
+        self,
+        policy_ref: str,
+        *,
+        name: str,
+        outcome: str,
+        applies_to: dict[str, Any] | None = None,
+        conditions: dict[str, Any] | None = None,
+        approval_ttl_minutes: int | None = None,
+        lead_minutes: int | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Create or replace an approval policy.
+
+        Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool,
+        slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a
+        person approves first, or are refused. applies_to names resources, pools, locations (with
+        the locations in them) and groups; empty, every resource. conditions narrow it:
+        longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single,
+        pool, bundle, move); a booking meets the policy when it meets every condition given.
+        outcome require_approval holds the exact time the booking would take, under the approval,
+        and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A
+        person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
+        ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
+        of the two. Where several apply, refuse wins, then the one that must be decided soonest.
+        At most 50 policies: one more is 409 approval_policy_limit_reached.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"policy_ref": policy_ref, "name": name, "outcome": outcome}
+        if applies_to is not None:
+            values["applies_to"] = applies_to
+        if conditions is not None:
+            values["conditions"] = conditions
+        if approval_ttl_minutes is not None:
+            values["approval_ttl_minutes"] = approval_ttl_minutes
+        if lead_minutes is not None:
+            values["lead_minutes"] = lead_minutes
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_put_approval_policy", values)
+
+    def delete_approval_policy(
+        self,
+        policy_ref: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Delete an approval policy.
+
+        Stop applying a policy to new bookings. Approvals it already asked for stay as they are,
+        to be decided.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"policy_ref": policy_ref}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_approval_policy", values)
+
+    def list_approvals(
+        self,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List approvals.
+
+        The tenant's approvals, newest first: bookings an agent asked for that a policy holds for
+        a person (pending, holding their time until expires_at), and those decided (granted,
+        declined, expired). Filter by status.
+        """
+        values: dict[str, Any] = {}
+        if status is not None:
+            values["status"] = status
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_list_approvals", values)
+
+    def get_approval(self, approval_id: str) -> dict[str, Any]:
+        """Get an approval.
+
+        One approval by id, with the booking it would make. 404 approval_not_found.
+        """
+        values: dict[str, Any] = {"approval_id": approval_id}
+        return self.call("slotlock_get_approval", values)
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        *,
+        decision: str,
+        reason: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Grant or decline an approval.
+
+        Decide a pending approval. grant makes the booking as the agent asked for it, as that
+        agent, in one transaction with letting the approval's hold go, and answers it under
+        booking; the agent's retry with its idempotency key then answers the same booking. A write
+        refused now (a booking rule changed, say) is refused with its own code and the approval
+        stays pending. decline frees the time; the agent's retry answers 403 approval_declined
+        with the reason. 404 approval_not_found; 409 approval_not_pending when already decided;
+        409 approval_expired after its wait.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"approval_id": approval_id, "decision": decision}
+        if reason is not None:
+            values["reason"] = reason
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_decide_approval", values)
 
     def partner_get_account(self, account: str) -> dict[str, Any]:
         """Read an account.

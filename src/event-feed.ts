@@ -32,6 +32,11 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'coverage.stale',
   'waitlist.offered',
   'waitlist.expired',
+  // A write waiting for a person (approval policies): requested, then granted, declined or expired.
+  'approval.requested',
+  'approval.granted',
+  'approval.declined',
+  'approval.expired',
   'webhook.disabled',
   // A plan's monthly quota 80% or 100% used (quotas.ts): the metric, the share and the counts.
   'usage.threshold_reached',

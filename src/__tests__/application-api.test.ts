@@ -162,6 +162,12 @@ const backend = {
   listWaitlist: vi.fn(),
   leaveWaitlist: vi.fn(),
   getUsage: vi.fn(),
+  listApprovalPolicies: vi.fn(),
+  putApprovalPolicy: vi.fn(),
+  deleteApprovalPolicy: vi.fn(),
+  listApprovals: vi.fn(),
+  getApproval: vi.fn(),
+  decideApproval: vi.fn(),
   partnerPutAccount: vi.fn(),
   partnerListAccounts: vi.fn(),
   partnerGetAccount: vi.fn(),
@@ -322,6 +328,33 @@ const PARTNER_KEY = {
   last_used_at: null,
   revoked_at: null,
 };
+const APPROVAL_POLICY = {
+  policy_ref: 'long-van-hires',
+  name: 'Van hires over a day',
+  applies_to: { pools: ['van'] },
+  conditions: { longer_than_minutes: 1440 },
+  outcome: 'require_approval',
+  approval_ttl_minutes: 240,
+  lead_minutes: 60,
+  created_at: '2026-11-01T09:00:00.000Z',
+  updated_at: '2026-11-01T09:00:00.000Z',
+};
+const APPROVAL = {
+  approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d',
+  policy_ref: 'long-van-hires',
+  status: 'pending',
+  operation: 'slotlock_create_event',
+  request: { resource_id: '00000000-0000-4000-8000-000000000001', starts_at: '2027-03-02T09:00:00Z' },
+  requested_by: 'agent-1',
+  resource_ids: ['00000000-0000-4000-8000-000000000001'],
+  starts_at: '2027-03-02T09:00:00.000Z',
+  ends_at: '2027-03-04T09:00:00.000Z',
+  expires_at: '2026-11-01T13:00:00.000Z',
+  decided_by: null,
+  decided_at: null,
+  reason: null,
+  created_at: '2026-11-01T09:00:00.000Z',
+};
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
   updateResource: { resource: { ...RESOURCE, name: 'Van 42', labels: ['ev'], location: 'leeds', groups: ['physio'] } },
@@ -377,7 +410,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
-  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
+  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, capped: false },
   listChanges: {
     changes: [
       {
@@ -436,6 +469,15 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     ],
     keys: [{ key_id: null, operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 0 }],
     surfaces: [{ origin: 'rest', operations: 3, bookings: 1, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 }],
+  },
+  listApprovalPolicies: { policies: [APPROVAL_POLICY] },
+  putApprovalPolicy: { policy: APPROVAL_POLICY },
+  deleteApprovalPolicy: { deleted: true },
+  listApprovals: { approvals: [APPROVAL] },
+  getApproval: { approval: APPROVAL },
+  decideApproval: {
+    approval: { ...APPROVAL, status: 'declined', decided_by: 'admin', decided_at: '2026-11-01T10:00:00.000Z', reason: 'Fleet busy' },
+    booking: null,
   },
   partnerPutAccount: { account: PARTNER_ACCOUNT, created: true },
   partnerListAccounts: { accounts: [PARTNER_ACCOUNT] },

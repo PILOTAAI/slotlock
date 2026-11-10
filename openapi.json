@@ -16008,6 +16008,11 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "approvals_expired": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "capped": {
                       "type": "boolean"
                     }
@@ -16021,6 +16026,7 @@
                     "stale_sources",
                     "no_shows",
                     "waitlist_offers",
+                    "approvals_expired",
                     "capped"
                   ],
                   "additionalProperties": false
@@ -16225,7 +16231,7 @@
                   },
                   "event_types": {
                     "minItems": 1,
-                    "maxItems": 33,
+                    "maxItems": 37,
                     "type": "array",
                     "items": {
                       "type": "string",
@@ -16248,6 +16254,10 @@
                         "coverage.stale",
                         "waitlist.offered",
                         "waitlist.expired",
+                        "approval.requested",
+                        "approval.granted",
+                        "approval.declined",
+                        "approval.expired",
                         "webhook.disabled",
                         "usage.threshold_reached",
                         "resource.created",
@@ -16378,6 +16388,10 @@
                                   "coverage.stale",
                                   "waitlist.offered",
                                   "waitlist.expired",
+                                  "approval.requested",
+                                  "approval.granted",
+                                  "approval.declined",
+                                  "approval.expired",
                                   "webhook.disabled",
                                   "usage.threshold_reached",
                                   "resource.created",
@@ -16634,6 +16648,10 @@
                                     "coverage.stale",
                                     "waitlist.offered",
                                     "waitlist.expired",
+                                    "approval.requested",
+                                    "approval.granted",
+                                    "approval.declined",
+                                    "approval.expired",
                                     "webhook.disabled",
                                     "usage.threshold_reached",
                                     "resource.created",
@@ -16977,6 +16995,10 @@
                                   "coverage.stale",
                                   "waitlist.offered",
                                   "waitlist.expired",
+                                  "approval.requested",
+                                  "approval.granted",
+                                  "approval.declined",
+                                  "approval.expired",
                                   "webhook.disabled",
                                   "usage.threshold_reached",
                                   "resource.created",
@@ -17447,6 +17469,1160 @@
             "$ref": "#/components/responses/Error"
           },
           "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/approval-policies": {
+      "get": {
+        "operationId": "slotlock_list_approval_policies",
+        "summary": "List approval policies",
+        "description": "The tenant's approval policies, by reference: which agent bookings wait for a person (require_approval) or are refused (refuse).",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "policies": {
+                      "maxItems": 50,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "policy_ref": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "applies_to": {
+                            "type": "object",
+                            "properties": {
+                              "resource_ids": {
+                                "maxItems": 50,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                }
+                              },
+                              "pools": {
+                                "maxItems": 50,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                }
+                              },
+                              "locations": {
+                                "maxItems": 50,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                }
+                              },
+                              "groups": {
+                                "maxItems": 50,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "conditions": {
+                            "type": "object",
+                            "properties": {
+                              "longer_than_minutes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 5270400
+                              },
+                              "outside_hours": {
+                                "type": "boolean"
+                              },
+                              "kinds": {
+                                "minItems": 1,
+                                "maxItems": 4,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "single",
+                                    "pool",
+                                    "bundle",
+                                    "move"
+                                  ]
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "require_approval",
+                              "refuse"
+                            ]
+                          },
+                          "approval_ttl_minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 43200
+                          },
+                          "lead_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 43200
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "policy_ref",
+                          "name",
+                          "applies_to",
+                          "conditions",
+                          "outcome",
+                          "approval_ttl_minutes",
+                          "lead_minutes",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "policies"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/approval-policies/{policy_ref}": {
+      "put": {
+        "operationId": "slotlock_put_approval_policy",
+        "summary": "Create or replace an approval policy",
+        "description": "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "applies_to": {
+                    "type": "object",
+                    "properties": {
+                      "resource_ids": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      },
+                      "pools": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                        }
+                      },
+                      "locations": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                        }
+                      },
+                      "groups": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "conditions": {
+                    "type": "object",
+                    "properties": {
+                      "longer_than_minutes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 5270400
+                      },
+                      "outside_hours": {
+                        "type": "boolean"
+                      },
+                      "kinds": {
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "single",
+                            "pool",
+                            "bundle",
+                            "move"
+                          ]
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "require_approval",
+                      "refuse"
+                    ]
+                  },
+                  "approval_ttl_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 43200
+                  },
+                  "lead_minutes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 43200
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "name",
+                  "outcome"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "policy_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "policy": {
+                      "type": "object",
+                      "properties": {
+                        "policy_ref": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "applies_to": {
+                          "type": "object",
+                          "properties": {
+                            "resource_ids": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "format": "uuid"
+                              }
+                            },
+                            "pools": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                              }
+                            },
+                            "locations": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                              }
+                            },
+                            "groups": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "conditions": {
+                          "type": "object",
+                          "properties": {
+                            "longer_than_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 5270400
+                            },
+                            "outside_hours": {
+                              "type": "boolean"
+                            },
+                            "kinds": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "single",
+                                  "pool",
+                                  "bundle",
+                                  "move"
+                                ]
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "outcome": {
+                          "type": "string",
+                          "enum": [
+                            "require_approval",
+                            "refuse"
+                          ]
+                        },
+                        "approval_ttl_minutes": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 43200
+                        },
+                        "lead_minutes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 43200
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updated_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "policy_ref",
+                        "name",
+                        "applies_to",
+                        "conditions",
+                        "outcome",
+                        "approval_ttl_minutes",
+                        "lead_minutes",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "policy"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "slotlock_delete_approval_policy",
+        "summary": "Delete an approval policy",
+        "description": "Stop applying a policy to new bookings. Approvals it already asked for stay as they are, to be decided.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "policy_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/approvals": {
+      "get": {
+        "operationId": "slotlock_list_approvals",
+        "summary": "List approvals",
+        "description": "The tenant's approvals, newest first: bookings an agent asked for that a policy holds for a person (pending, holding their time until expires_at), and those decided (granted, declined, expired). Filter by status.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "granted",
+                "declined",
+                "expired"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "approvals": {
+                      "maxItems": 200,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "approval_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "policy_ref": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "granted",
+                              "declined",
+                              "expired"
+                            ]
+                          },
+                          "operation": {
+                            "type": "string",
+                            "enum": [
+                              "slotlock_create_event",
+                              "slotlock_book_together",
+                              "slotlock_update_event"
+                            ]
+                          },
+                          "request": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          },
+                          "requested_by": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "resource_ids": {
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "format": "uuid"
+                            }
+                          },
+                          "starts_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "ends_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expires_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "decided_by": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "decided_at": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "approval_id",
+                          "policy_ref",
+                          "status",
+                          "operation",
+                          "request",
+                          "requested_by",
+                          "resource_ids",
+                          "starts_at",
+                          "ends_at",
+                          "expires_at",
+                          "decided_by",
+                          "decided_at",
+                          "reason",
+                          "created_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "approvals"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/approvals/{approval_id}": {
+      "get": {
+        "operationId": "slotlock_get_approval",
+        "summary": "Get an approval",
+        "description": "One approval by id, with the booking it would make. 404 approval_not_found.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "approval": {
+                      "type": "object",
+                      "properties": {
+                        "approval_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "policy_ref": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "granted",
+                            "declined",
+                            "expired"
+                          ]
+                        },
+                        "operation": {
+                          "type": "string",
+                          "enum": [
+                            "slotlock_create_event",
+                            "slotlock_book_together",
+                            "slotlock_update_event"
+                          ]
+                        },
+                        "request": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        },
+                        "requested_by": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resource_ids": {
+                          "minItems": 1,
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        },
+                        "starts_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ends_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "decided_by": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "decided_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "approval_id",
+                        "policy_ref",
+                        "status",
+                        "operation",
+                        "request",
+                        "requested_by",
+                        "resource_ids",
+                        "starts_at",
+                        "ends_at",
+                        "expires_at",
+                        "decided_by",
+                        "decided_at",
+                        "reason",
+                        "created_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "approval"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/approvals/{approval_id}/decision": {
+      "post": {
+        "operationId": "slotlock_decide_approval",
+        "summary": "Grant or decline an approval",
+        "description": "Decide a pending approval. grant makes the booking as the agent asked for it, as that agent, in one transaction with letting the approval's hold go, and answers it under booking; the agent's retry with its idempotency key then answers the same booking. A write refused now (a booking rule changed, say) is refused with its own code and the approval stays pending. decline frees the time; the agent's retry answers 403 approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending when already decided; 409 approval_expired after its wait.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "grant",
+                      "decline"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "required": [
+                  "decision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "approval": {
+                      "type": "object",
+                      "properties": {
+                        "approval_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "policy_ref": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "granted",
+                            "declined",
+                            "expired"
+                          ]
+                        },
+                        "operation": {
+                          "type": "string",
+                          "enum": [
+                            "slotlock_create_event",
+                            "slotlock_book_together",
+                            "slotlock_update_event"
+                          ]
+                        },
+                        "request": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        },
+                        "requested_by": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resource_ids": {
+                          "minItems": 1,
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        },
+                        "starts_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ends_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "decided_by": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "decided_at": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "approval_id",
+                        "policy_ref",
+                        "status",
+                        "operation",
+                        "request",
+                        "requested_by",
+                        "resource_ids",
+                        "starts_at",
+                        "ends_at",
+                        "expires_at",
+                        "decided_by",
+                        "decided_at",
+                        "reason",
+                        "created_at"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "booking": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "approval",
+                    "booking"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
             "$ref": "#/components/responses/Error"
           },
           "429": {
@@ -19057,6 +20233,22 @@
           "conflicting_event_id": {
             "type": "string",
             "description": "An overlap with an event of your own: its id, to move or cancel it."
+          },
+          "approval_id": {
+            "type": "string",
+            "description": "approval_pending, approval_declined or approval_expired: the approval a policy made of the booking. Retry with the same idempotency_key to learn how it was decided."
+          },
+          "policy_ref": {
+            "type": "string",
+            "description": "An approval refusal: the policy that applies."
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "approval_pending or approval_required: until when a person may decide (the time is held until then)."
+          },
+          "reason": {
+            "type": "string",
+            "description": "approval_declined: what the person who declined it said, if anything."
           },
           "alternatives": {
             "type": "array",

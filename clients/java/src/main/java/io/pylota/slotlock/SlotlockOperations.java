@@ -90,6 +90,12 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of("dry_run"))),
           Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())),
           Map.entry("slotlock_get_usage", new Operation("GET", "/v1/usage", List.of(), List.of("from", "to"))),
+          Map.entry("slotlock_list_approval_policies", new Operation("GET", "/v1/approval-policies", List.of(), List.of())),
+          Map.entry("slotlock_put_approval_policy", new Operation("PUT", "/v1/approval-policies/{policy_ref}", List.of("policy_ref"), List.of())),
+          Map.entry("slotlock_delete_approval_policy", new Operation("DELETE", "/v1/approval-policies/{policy_ref}", List.of("policy_ref"), List.of("dry_run"))),
+          Map.entry("slotlock_list_approvals", new Operation("GET", "/v1/approvals", List.of(), List.of("status", "limit"))),
+          Map.entry("slotlock_get_approval", new Operation("GET", "/v1/approvals/{approval_id}", List.of("approval_id"), List.of())),
+          Map.entry("slotlock_decide_approval", new Operation("POST", "/v1/approvals/{approval_id}/decision", List.of("approval_id"), List.of())),
           Map.entry("slotlock_partner_get_account", new Operation("GET", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
           Map.entry("slotlock_partner_put_account", new Operation("PUT", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
           Map.entry("slotlock_partner_list_accounts", new Operation("GET", "/v1/partner/accounts", List.of(), List.of())),
@@ -2707,6 +2713,186 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> getUsage() {
     return getUsage(null);
+  }
+
+  /**
+   * List approval policies. The tenant's approval policies, by reference: which agent bookings
+   * wait for a person (require_approval) or are refused (refuse).
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listApprovalPolicies() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_list_approval_policies", values);
+  }
+
+  /**
+   * Create or replace an approval policy. Which agent bookings (slotlock_create_event,
+   * slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by
+   * slotlock_update_event or slotlock_reschedule) a person approves first, or are refused.
+   * applies_to names resources, pools, locations (with the locations in them) and groups; empty,
+   * every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the
+   * resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy
+   * when it meets every condition given. outcome require_approval holds the exact time the
+   * booking would take, under the approval, and answers the agent 409 approval_pending; refuse
+   * answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default
+   * 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the
+   * booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then
+   * the one that must be decided soonest. At most 50 policies: one more is 409
+   * approval_policy_limit_reached.
+   *
+   * @param policyRef {@code policy_ref}, string
+   * @param name {@code name}, string
+   * @param outcome {@code outcome}, string
+   * @param optional the optional arguments, or null: {@code applies_to} (object), {@code
+   * conditions} (object), {@code approval_ttl_minutes} (integer), {@code lead_minutes} (integer),
+   * {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> putApprovalPolicy(String policyRef, String name, String outcome, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("policy_ref", policyRef);
+    values.put("name", name);
+    values.put("outcome", outcome);
+    putOptional(values, optional, Set.of("applies_to", "conditions", "approval_ttl_minutes", "lead_minutes", "dry_run"), "slotlock_put_approval_policy");
+    return call("slotlock_put_approval_policy", values);
+  }
+
+  /**
+   * Create or replace an approval policy. Which agent bookings (slotlock_create_event,
+   * slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by
+   * slotlock_update_event or slotlock_reschedule) a person approves first, or are refused.
+   * applies_to names resources, pools, locations (with the locations in them) and groups; empty,
+   * every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the
+   * resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy
+   * when it meets every condition given. outcome require_approval holds the exact time the
+   * booking would take, under the approval, and answers the agent 409 approval_pending; refuse
+   * answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default
+   * 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the
+   * booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then
+   * the one that must be decided soonest. At most 50 policies: one more is 409
+   * approval_policy_limit_reached.
+   *
+   * @param policyRef {@code policy_ref}, string
+   * @param name {@code name}, string
+   * @param outcome {@code outcome}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> putApprovalPolicy(String policyRef, String name, String outcome) {
+    return putApprovalPolicy(policyRef, name, outcome, null);
+  }
+
+  /**
+   * Delete an approval policy. Stop applying a policy to new bookings. Approvals it already asked
+   * for stay as they are, to be decided.
+   *
+   * @param policyRef {@code policy_ref}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteApprovalPolicy(String policyRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("policy_ref", policyRef);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_approval_policy");
+    return call("slotlock_delete_approval_policy", values);
+  }
+
+  /**
+   * Delete an approval policy. Stop applying a policy to new bookings. Approvals it already asked
+   * for stay as they are, to be decided.
+   *
+   * @param policyRef {@code policy_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteApprovalPolicy(String policyRef) {
+    return deleteApprovalPolicy(policyRef, null);
+  }
+
+  /**
+   * List approvals. The tenant's approvals, newest first: bookings an agent asked for that a
+   * policy holds for a person (pending, holding their time until expires_at), and those decided
+   * (granted, declined, expired). Filter by status.
+   *
+   * @param optional the optional arguments, or null: {@code status} (string), {@code limit}
+   * (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listApprovals(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("status", "limit"), "slotlock_list_approvals");
+    return call("slotlock_list_approvals", values);
+  }
+
+  /**
+   * List approvals. The tenant's approvals, newest first: bookings an agent asked for that a
+   * policy holds for a person (pending, holding their time until expires_at), and those decided
+   * (granted, declined, expired). Filter by status.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listApprovals() {
+    return listApprovals(null);
+  }
+
+  /**
+   * Get an approval. One approval by id, with the booking it would make. 404 approval_not_found.
+   *
+   * @param approvalId {@code approval_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getApproval(String approvalId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("approval_id", approvalId);
+    return call("slotlock_get_approval", values);
+  }
+
+  /**
+   * Grant or decline an approval. Decide a pending approval. grant makes the booking as the agent
+   * asked for it, as that agent, in one transaction with letting the approval's hold go, and
+   * answers it under booking; the agent's retry with its idempotency key then answers the same
+   * booking. A write refused now (a booking rule changed, say) is refused with its own code and
+   * the approval stays pending. decline frees the time; the agent's retry answers 403
+   * approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending when
+   * already decided; 409 approval_expired after its wait.
+   *
+   * @param approvalId {@code approval_id}, string
+   * @param decision {@code decision}, string
+   * @param optional the optional arguments, or null: {@code reason} (string), {@code dry_run}
+   * (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> decideApproval(String approvalId, String decision, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("approval_id", approvalId);
+    values.put("decision", decision);
+    putOptional(values, optional, Set.of("reason", "dry_run"), "slotlock_decide_approval");
+    return call("slotlock_decide_approval", values);
+  }
+
+  /**
+   * Grant or decline an approval. Decide a pending approval. grant makes the booking as the agent
+   * asked for it, as that agent, in one transaction with letting the approval's hold go, and
+   * answers it under booking; the agent's retry with its idempotency key then answers the same
+   * booking. A write refused now (a booking rule changed, say) is refused with its own code and
+   * the approval stays pending. decline frees the time; the agent's retry answers 403
+   * approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending when
+   * already decided; 409 approval_expired after its wait.
+   *
+   * @param approvalId {@code approval_id}, string
+   * @param decision {@code decision}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> decideApproval(String approvalId, String decision) {
+    return decideApproval(approvalId, decision, null);
   }
 
   /**

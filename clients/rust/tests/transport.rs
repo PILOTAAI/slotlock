@@ -147,6 +147,7 @@ fn refuses_a_dot_segment_path_parameter_before_any_request() {
         let input = SetResourceAvailabilityInput {
             resource_id: reference.into(),
             rules: None,
+            ..Default::default()
         };
         let refused = client(port).set_resource_availability(&input).unwrap_err();
         assert!(

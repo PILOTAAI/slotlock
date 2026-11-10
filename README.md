@@ -1211,6 +1211,28 @@ put to a person to confirm, and is charged as a read (on REST, when `dry_run=tru
 string). Tenant erasure, maintenance and the partner API refuse one (`dry_run_not_supported`); a
 read takes no `dry_run`.
 
+An approval policy puts a person in front of the bookings it names (`slotlock_put_approval_policy`,
+an admin operation): by resource, pool, location or group, narrowed by length
+(`longer_than_minutes`), time outside the resource's bookable hours (`outside_hours`) and kind
+(`single`, `pool`, `bundle`, `move`). A covered `slotlock_create_event`, `slotlock_confirm_slot`,
+`slotlock_book_pool`, `slotlock_book_together`, or move by `slotlock_update_event` or
+`slotlock_reschedule`, is first tried as a dry run, so it meets every check it would. Under
+`require_approval` its exact time is then held for the approval (a move holds only the time its
+event does not already take), and the agent is answered `409 approval_pending` with the
+`approval_id` and `expires_at`; under `refuse` it is `403 approval_policy_refused`. A person decides
+in the dashboard's Approvals page or with `slotlock_decide_approval`: granting makes the booking as
+the agent asked for it, as that agent, in the transaction that lets the hold go; declining frees the
+time. The agent learns the outcome by retrying with the same `idempotency_key`: the booking with
+`replayed: true` once granted, `403 approval_declined` (with the person's `reason`) or
+`409 approval_expired`. The wait is each policy's own (`approval_ttl_minutes`, a day by default, up
+to 30 days, and the backend's `maxApprovalMinutes`), ending `lead_minutes` before the booking
+starts; a booking too close to its start for that is `approval_too_late`. Where several policies
+apply, `refuse` wins, then the one that must be decided soonest. A dry run of a covered write
+answers `approval_required`; a recurring series cannot be held whole and is
+`approval_series_unsupported`; one agent may have 50 approvals waiting and a tenant 500
+(`approval_limit_reached`). Maintenance expires what no one decided. The feed records
+`approval.requested`, `approval.granted`, `approval.declined` and `approval.expired`.
+
 An agent offering a person several times holds them first, so none is taken while the person
 decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
 `refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in

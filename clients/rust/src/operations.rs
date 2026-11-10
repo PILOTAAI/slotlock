@@ -555,6 +555,48 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["from", "to"],
     },
     Operation {
+        name: "slotlock_list_approval_policies",
+        method: "GET",
+        path: "/v1/approval-policies",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_put_approval_policy",
+        method: "PUT",
+        path: "/v1/approval-policies/{policy_ref}",
+        path_params: &["policy_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_approval_policy",
+        method: "DELETE",
+        path: "/v1/approval-policies/{policy_ref}",
+        path_params: &["policy_ref"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_list_approvals",
+        method: "GET",
+        path: "/v1/approvals",
+        path_params: &[],
+        query: &["status", "limit"],
+    },
+    Operation {
+        name: "slotlock_get_approval",
+        method: "GET",
+        path: "/v1/approvals/{approval_id}",
+        path_params: &["approval_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_decide_approval",
+        method: "POST",
+        path: "/v1/approvals/{approval_id}/decision",
+        path_params: &["approval_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_partner_get_account",
         method: "GET",
         path: "/v1/partner/accounts/{account}",
@@ -1715,6 +1757,75 @@ pub struct GetUsageInput {
     pub to: Option<String>,
 }
 
+/// The arguments of [`Client::list_approval_policies`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListApprovalPoliciesInput {
+}
+
+/// The arguments of [`Client::put_approval_policy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PutApprovalPolicyInput {
+    pub policy_ref: String,
+    pub name: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applies_to: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_ttl_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead_minutes: Option<i64>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_approval_policy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteApprovalPolicyInput {
+    pub policy_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_approvals`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListApprovalsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
+/// The arguments of [`Client::get_approval`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetApprovalInput {
+    pub approval_id: String,
+}
+
+/// The arguments of [`Client::decide_approval`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DecideApprovalInput {
+    pub approval_id: String,
+    pub decision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::partner_get_account`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PartnerGetAccountInput {
@@ -2598,6 +2709,69 @@ impl Client {
     /// after today.
     pub fn get_usage(&self, input: &GetUsageInput) -> Result<Value, Error> {
         self.call("slotlock_get_usage", serde_json::to_value(input)?)
+    }
+
+    /// List approval policies.
+    ///
+    /// The tenant's approval policies, by reference: which agent bookings wait for a person
+    /// (require_approval) or are refused (refuse).
+    pub fn list_approval_policies(&self, input: &ListApprovalPoliciesInput) -> Result<Value, Error> {
+        self.call("slotlock_list_approval_policies", serde_json::to_value(input)?)
+    }
+
+    /// Create or replace an approval policy.
+    ///
+    /// Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool,
+    /// slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a
+    /// person approves first, or are refused. applies_to names resources, pools, locations (with
+    /// the locations in them) and groups; empty, every resource. conditions narrow it:
+    /// longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single,
+    /// pool, bundle, move); a booking meets the policy when it meets every condition given.
+    /// outcome require_approval holds the exact time the booking would take, under the approval,
+    /// and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A
+    /// person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
+    /// ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
+    /// of the two. Where several apply, refuse wins, then the one that must be decided soonest.
+    /// At most 50 policies: one more is 409 approval_policy_limit_reached.
+    pub fn put_approval_policy(&self, input: &PutApprovalPolicyInput) -> Result<Value, Error> {
+        self.call("slotlock_put_approval_policy", serde_json::to_value(input)?)
+    }
+
+    /// Delete an approval policy.
+    ///
+    /// Stop applying a policy to new bookings. Approvals it already asked for stay as they are,
+    /// to be decided.
+    pub fn delete_approval_policy(&self, input: &DeleteApprovalPolicyInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_approval_policy", serde_json::to_value(input)?)
+    }
+
+    /// List approvals.
+    ///
+    /// The tenant's approvals, newest first: bookings an agent asked for that a policy holds for
+    /// a person (pending, holding their time until expires_at), and those decided (granted,
+    /// declined, expired). Filter by status.
+    pub fn list_approvals(&self, input: &ListApprovalsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_approvals", serde_json::to_value(input)?)
+    }
+
+    /// Get an approval.
+    ///
+    /// One approval by id, with the booking it would make. 404 approval_not_found.
+    pub fn get_approval(&self, input: &GetApprovalInput) -> Result<Value, Error> {
+        self.call("slotlock_get_approval", serde_json::to_value(input)?)
+    }
+
+    /// Grant or decline an approval.
+    ///
+    /// Decide a pending approval. grant makes the booking as the agent asked for it, as that
+    /// agent, in one transaction with letting the approval's hold go, and answers it under
+    /// booking; the agent's retry with its idempotency key then answers the same booking. A write
+    /// refused now (a booking rule changed, say) is refused with its own code and the approval
+    /// stays pending. decline frees the time; the agent's retry answers 403 approval_declined
+    /// with the reason. 404 approval_not_found; 409 approval_not_pending when already decided;
+    /// 409 approval_expired after its wait.
+    pub fn decide_approval(&self, input: &DecideApprovalInput) -> Result<Value, Error> {
+        self.call("slotlock_decide_approval", serde_json::to_value(input)?)
     }
 
     /// Read an account.

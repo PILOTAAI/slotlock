@@ -17,6 +17,11 @@ import {
   SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
 } from './event-feed.js';
 import { z } from 'zod';
+import {
+  SLOTLOCK_APPROVAL_KINDS,
+  SLOTLOCK_MAX_APPROVAL_MINUTES,
+  SLOTLOCK_MAX_APPROVAL_POLICIES,
+} from './approvals.js';
 import { SLOTLOCK_PARTNER_ACCOUNT, SLOTLOCK_PARTNER_PLAN } from './partner-names.js';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
@@ -96,6 +101,12 @@ export type SlotlockApplicationOperation =
   | 'slotlock_delete_webhook'
   | 'slotlock_enable_webhook'
   | 'slotlock_get_usage'
+  | 'slotlock_list_approval_policies'
+  | 'slotlock_put_approval_policy'
+  | 'slotlock_delete_approval_policy'
+  | 'slotlock_list_approvals'
+  | 'slotlock_get_approval'
+  | 'slotlock_decide_approval'
   | 'slotlock_partner_put_account'
   | 'slotlock_partner_list_accounts'
   | 'slotlock_partner_get_account'
@@ -223,6 +234,12 @@ export interface SlotlockApplicationBackend {
   deleteWebhook: Handler;
   enableWebhook: Handler;
   getUsage: Handler;
+  listApprovalPolicies: Handler;
+  putApprovalPolicy: Handler;
+  deleteApprovalPolicy: Handler;
+  listApprovals: Handler;
+  getApproval: Handler;
+  decideApproval: Handler;
   partnerPutAccount: Handler;
   partnerListAccounts: Handler;
   partnerGetAccount: Handler;
@@ -424,6 +441,58 @@ const PROFILE_INPUT = {
 
 /** A location's or a group's reference: as a pool's. */
 const GROUPING_REF = z.string().regex(SLOTLOCK_GROUPING_REF);
+
+/** An approval policy's reference (RFC 0004 A4). */
+const APPROVAL_POLICY_REF = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/);
+const APPROVAL_APPLIES_TO = z
+  .object({
+    resource_ids: z.array(z.string().uuid()).max(50).optional(),
+    pools: z.array(GROUPING_REF).max(50).optional(),
+    locations: z.array(GROUPING_REF).max(50).optional(),
+    groups: z.array(GROUPING_REF).max(50).optional(),
+  })
+  .strict();
+const APPROVAL_CONDITIONS = z
+  .object({
+    longer_than_minutes: z.number().int().min(0).max(5_270_400).optional(),
+    outside_hours: z.boolean().optional(),
+    kinds: z.array(z.enum(SLOTLOCK_APPROVAL_KINDS as unknown as ['single', 'pool', 'bundle', 'move'])).min(1).max(4).optional(),
+  })
+  .strict();
+const APPROVAL_POLICY = z
+  .object({
+    policy_ref: APPROVAL_POLICY_REF,
+    name: z.string().min(1).max(200),
+    applies_to: APPROVAL_APPLIES_TO,
+    conditions: APPROVAL_CONDITIONS,
+    outcome: z.enum(['require_approval', 'refuse']),
+    approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
+    lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
+    created_at: DATE_TIME,
+    updated_at: DATE_TIME,
+  })
+  .strict();
+const APPROVAL_STATUS = z.enum(['pending', 'granted', 'declined', 'expired']);
+/** A write waiting for a person, or decided. */
+const APPROVAL = z
+  .object({
+    approval_id: z.string().uuid(),
+    policy_ref: APPROVAL_POLICY_REF,
+    status: APPROVAL_STATUS,
+    /** The agent operation it runs when granted, with its arguments as the agent sent them. */
+    operation: z.enum(['slotlock_create_event', 'slotlock_book_together', 'slotlock_update_event']),
+    request: z.record(z.string(), z.unknown()),
+    requested_by: z.string().max(200).nullable(),
+    resource_ids: z.array(z.string().uuid()).min(1).max(20),
+    starts_at: DATE_TIME,
+    ends_at: DATE_TIME,
+    expires_at: DATE_TIME,
+    decided_by: z.string().max(500).nullable(),
+    decided_at: DATE_TIME.nullable(),
+    reason: z.string().max(500).nullable(),
+    created_at: DATE_TIME,
+  })
+  .strict();
 
 /** A place a tenant's resources are at (RFC 0003 G2). */
 const LOCATION = z
@@ -1567,6 +1636,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           stale_sources: z.number().int().min(0),
           no_shows: z.number().int().min(0),
           waitlist_offers: z.number().int().min(0),
+          approvals_expired: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),
@@ -1671,6 +1741,113 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'getUsage',
       example: { from: '2026-11-01', to: '2026-11-30' },
+    },
+    // Approval policies (RFC 0004 A4): writes a person approves before they are made.
+    {
+      name: 'slotlock_list_approval_policies',
+      title: 'List approval policies',
+      description:
+        "The tenant's approval policies, by reference: which agent bookings wait for a person (require_approval) or are refused (refuse).",
+      method: 'GET',
+      path: '/v1/approval-policies',
+      input: z.object({}).strict(),
+      output: z.object({ policies: z.array(APPROVAL_POLICY).max(SLOTLOCK_MAX_APPROVAL_POLICIES) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listApprovalPolicies',
+      example: {},
+    },
+    {
+      name: 'slotlock_put_approval_policy',
+      title: 'Create or replace an approval policy',
+      description:
+        "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.",
+      method: 'PUT',
+      path: '/v1/approval-policies/{policy_ref}',
+      input: z
+        .object({
+          policy_ref: APPROVAL_POLICY_REF,
+          name: z.string().trim().min(1).max(200),
+          applies_to: APPROVAL_APPLIES_TO.optional(),
+          conditions: APPROVAL_CONDITIONS.optional(),
+          outcome: z.enum(['require_approval', 'refuse']),
+          approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
+          lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
+        })
+        .strict(),
+      output: z.object({ policy: APPROVAL_POLICY }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'putApprovalPolicy',
+      example: {
+        policy_ref: 'long-van-hires',
+        name: 'Van hires over a day',
+        applies_to: { pools: ['van'] },
+        conditions: { longer_than_minutes: 1440 },
+        outcome: 'require_approval',
+        approval_ttl_minutes: 240,
+        lead_minutes: 60,
+      },
+    },
+    {
+      name: 'slotlock_delete_approval_policy',
+      title: 'Delete an approval policy',
+      description:
+        'Stop applying a policy to new bookings. Approvals it already asked for stay as they are, to be decided.',
+      method: 'DELETE',
+      path: '/v1/approval-policies/{policy_ref}',
+      input: z.object({ policy_ref: APPROVAL_POLICY_REF }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteApprovalPolicy',
+      example: { policy_ref: 'long-van-hires' },
+    },
+    {
+      name: 'slotlock_list_approvals',
+      title: 'List approvals',
+      description:
+        "The tenant's approvals, newest first: bookings an agent asked for that a policy holds for a person (pending, holding their time until expires_at), and those decided (granted, declined, expired). Filter by status.",
+      method: 'GET',
+      path: '/v1/approvals',
+      input: z
+        .object({
+          status: APPROVAL_STATUS.optional(),
+          limit: z.coerce.number().int().min(1).max(200).default(50),
+        })
+        .strict(),
+      output: z.object({ approvals: z.array(APPROVAL).max(200) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listApprovals',
+      example: { status: 'pending', limit: 50 },
+    },
+    {
+      name: 'slotlock_get_approval',
+      title: 'Get an approval',
+      description: 'One approval by id, with the booking it would make. 404 approval_not_found.',
+      method: 'GET',
+      path: '/v1/approvals/{approval_id}',
+      input: z.object({ approval_id: z.string().uuid() }).strict(),
+      output: z.object({ approval: APPROVAL }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getApproval',
+      example: { approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d' },
+    },
+    {
+      name: 'slotlock_decide_approval',
+      title: 'Grant or decline an approval',
+      description:
+        "Decide a pending approval. grant makes the booking as the agent asked for it, as that agent, in one transaction with letting the approval's hold go, and answers it under booking; the agent's retry with its idempotency key then answers the same booking. A write refused now (a booking rule changed, say) is refused with its own code and the approval stays pending. decline frees the time; the agent's retry answers 403 approval_declined with the reason. 404 approval_not_found; 409 approval_not_pending when already decided; 409 approval_expired after its wait.",
+      method: 'POST',
+      path: '/v1/approvals/{approval_id}/decision',
+      input: z
+        .object({
+          approval_id: z.string().uuid(),
+          decision: z.enum(['grant', 'decline']),
+          reason: z.string().trim().min(1).max(500).optional(),
+        })
+        .strict(),
+      output: z.object({ approval: APPROVAL, booking: z.record(z.string(), z.unknown()).nullable() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'decideApproval',
+      example: { approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d', decision: 'grant' },
     },
     // The partner API (RFC 0003 P3): a partner key's, for that partner's own accounts only.
     {

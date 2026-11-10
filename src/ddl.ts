@@ -1894,6 +1894,14 @@ BEGIN
   DELETE FROM slotlock.composite_claims WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'approvals';
+  DELETE FROM slotlock.approvals WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'approval_policies';
+  DELETE FROM slotlock.approval_policies WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'reservations';
   DELETE FROM slotlock.reservations
    WHERE tenant_ref = requested_tenant_ref
@@ -4606,6 +4614,77 @@ CREATE OR REPLACE TRIGGER slotlock_reservations_composite_claim
   AFTER INSERT OR UPDATE OR DELETE ON slotlock.reservations
   FOR EACH ROW EXECUTE FUNCTION slotlock.composite_claim();
 
+-- Approval policies (RFC 0004 A4): which writes a person approves before they are made, or
+-- refuses outright. applies_to names resources, pools, locations (each with the locations in it)
+-- or groups ({} is every resource); conditions name what makes a write need it: longer than some
+-- minutes, outside the resource's hours, or a kind of write. The wait is the policy's own, bounded
+-- by the booking's start less lead_minutes and by the server's maximum.
+CREATE TABLE IF NOT EXISTS slotlock.approval_policies (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text NOT NULL,
+  applies_to jsonb NOT NULL DEFAULT '{}'::jsonb,
+  conditions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  outcome text NOT NULL,
+  approval_ttl_minutes integer NOT NULL DEFAULT 1440,
+  lead_minutes integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_approval_policies_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[a-z0-9][a-z0-9_-]{0,62}$'
+    AND char_length(name) BETWEEN 1 AND 200
+    AND jsonb_typeof(applies_to) = 'object' AND jsonb_typeof(conditions) = 'object'
+    AND outcome IN ('require_approval', 'refuse')
+    AND approval_ttl_minutes BETWEEN 1 AND 43200
+    AND lead_minutes BETWEEN 0 AND 43200
+  )
+);
+
+-- A write waiting for a person: its time held by holds whose holder is the approval (never the
+-- agent, so it cannot release them and they do not count against its caps), and the request to run
+-- as its requester when granted, in the same transaction that lets the holds go.
+CREATE TABLE IF NOT EXISTS slotlock.approvals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  policy_ref text NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  operation text NOT NULL,
+  request jsonb NOT NULL,
+  requester jsonb NOT NULL,
+  hold_ids uuid[] NOT NULL,
+  -- What it holds, kept for the record once the holds are gone.
+  resource_ids uuid[] NOT NULL,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  -- The requester, operation and idempotency key, hashed: a retry finds the approval it made.
+  request_key text NOT NULL,
+  expires_at timestamptz NOT NULL,
+  decided_by text,
+  decided_at timestamptz,
+  reason text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_approvals_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND status IN ('pending', 'granted', 'declined', 'expired')
+    AND operation IN ('slotlock_create_event', 'slotlock_book_together', 'slotlock_update_event')
+    AND jsonb_typeof(request) = 'object' AND jsonb_typeof(requester) = 'object'
+    AND cardinality(hold_ids) BETWEEN 1 AND 20
+    AND cardinality(resource_ids) BETWEEN 1 AND 20 AND ends_at > starts_at
+    AND request_key ~ '^[0-9a-f]{64}$'
+    AND (decided_by IS NULL OR octet_length(decided_by) BETWEEN 1 AND 500)
+    AND (reason IS NULL OR char_length(reason) <= 500)
+    AND ((status = 'pending') = (decided_at IS NULL))
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_approvals_request_idx
+  ON slotlock.approvals (tenant_ref, request_key);
+CREATE INDEX IF NOT EXISTS slotlock_approvals_pending_idx
+  ON slotlock.approvals (tenant_ref, created_at, id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS slotlock_approvals_expiry_idx
+  ON slotlock.approvals (expires_at) WHERE status = 'pending';
+
 -- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
 -- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
 -- so a hold could take a booking's buffer and a buffered booking could cover a hold. The upgrade
@@ -5563,6 +5642,8 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'resource_group_members',
   'pool_settings',
   'composite_claims',
+  'approval_policies',
+  'approvals',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -5711,6 +5792,10 @@ ALTER TABLE slotlock.pool_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.pool_settings FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.composite_claims ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.composite_claims FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approval_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approval_policies FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.approvals FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -5747,7 +5832,9 @@ BEGIN
          'resource_groups',
          'resource_group_members',
          'pool_settings',
-         'composite_claims'
+         'composite_claims',
+         'approval_policies',
+         'approvals'
        )
   LOOP
     EXECUTE format(
@@ -6038,6 +6125,26 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'approval_policies'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.approval_policies
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'approvals'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.approvals
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -6091,6 +6198,10 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.pool_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.composite_claims
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.approval_policies
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.approvals
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -6139,7 +6250,9 @@ WHERE schemaname = 'slotlock'
     'resource_groups',
     'resource_group_members',
     'pool_settings',
-    'composite_claims'
+    'composite_claims',
+    'approval_policies',
+    'approvals'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

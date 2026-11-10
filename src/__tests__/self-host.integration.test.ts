@@ -540,6 +540,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         staleSources: 0,
         noShows: 0,
         waitlistOffers: 0,
+        approvalsExpired: 0,
         extended: 0,
         conflicts: 0,
         refused: 0,
@@ -964,7 +965,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       });
       expect(await rest(application.key, 'POST', '/v1/maintenance', {})).toEqual({
         status: 200,
-        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
+        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, capped: false },
       });
 
       expect((await run(['key', 'revoke', application.id])).code).toBe(0);
@@ -1156,6 +1157,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       staleSources: 0,
       noShows: 0,
       waitlistOffers: 0,
+      approvalsExpired: 0,
       extended: 0,
       conflicts: 0,
       refused: 0,

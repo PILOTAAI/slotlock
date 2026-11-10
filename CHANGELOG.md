@@ -7,6 +7,16 @@ versioning.
 
 ### Added
 
+- Approval policies (RFC 0004 A4): an admin names which agent bookings a person approves first, or
+  which are refused, by resource, pool, location or group, narrowed by length, time outside the
+  resource's hours and kind (single, pool, bundle, move). A covered booking is tried as a dry run,
+  then its exact time is held for the approval and the agent is answered `409 approval_pending`;
+  a grant (the dashboard's Approvals page or `slotlock_decide_approval`) books it as the agent
+  asked, in the transaction that frees the hold, and the agent's retry with the same key answers
+  the booking. Declined and expired approvals free their time. Each policy sets its own wait,
+  bounded by the booking's start less `lead_minutes` and 30 days. Six application operations
+  (`/v1/approval-policies`, `/v1/approvals`), the feed's `approval.*` changes, and
+  `approvals_expired` in maintenance's answer.
 - Alternatives with a refusal (RFC 0004 A1): an agent write refused with `overlap`, `pool_full` or
   a booking rule (other than `booking_rule_uncertain`) carries `alternatives`, up to three free
   times of the same length from the time asked for, within seven days, found by
@@ -342,6 +352,9 @@ versioning.
 
 ### Changed
 
+- Rust client: every write's input struct has a `dry_run: Option<bool>` field (RFC 0004 A3). A
+  struct literal that lists every field must now end with `..Default::default()`, as the README's
+  examples do; the other clients take it as an optional argument.
 - `resource_ids` is optional on `slotlock_get_free_busy`, `slotlock_find_next_available` and
   `slotlock_find_available_slots`, since a selection can stand in for it. Calls written before
   still compile in every client: Rust keeps the field a `Vec<String>` (left out when empty), Java

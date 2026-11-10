@@ -231,7 +231,25 @@ back. The answer is what would have happened (`would_create`, or the refusal wit
 alternatives). A dry run counts as a read for rate limits and quotas, writes no history and
 fires no webhooks.
 
-**A4. Approval policies (T2).** A tenant's policies, each a condition and an outcome:
+**A4. Approval policies (T2).** Status: built, with D3's dynamic wait. As built:
+
+- A policy names resources, pools, locations (with those inside) and groups, or every resource,
+  and narrows them by `longer_than_minutes`, `outside_hours` and `kinds` (`single`, `pool`,
+  `bundle`, `move`). Six admin operations keep and decide them (`/v1/approval-policies`,
+  `/v1/approvals`, `POST /v1/approvals/{id}/decision`), and the dashboard has an Approvals page.
+- A covered write is first tried as A3's dry run, so it meets every check and the constraint as it
+  would. `require_approval` then holds the exact time it would occupy (a move only what its event
+  does not already take), with the approval as the holder, so the agent cannot release it and it
+  does not count against the agent's hold caps. The agent sees `409 approval_pending` with the
+  approval's id and expiry.
+- A grant runs the stored request as the agent that asked, in one transaction with letting the
+  holds go and marking the approval granted. The agent's retry with the same key answers the
+  booking as a replay; a decline or expiry frees the time and the retry says so.
+- The two conditions on agents (a key without a `trusted` flag, more than N bookings a day) belong
+  to A5's per-key settings and are not built here. A recurring series is refused
+  (`approval_series_unsupported`): its occurrences cannot all be held.
+
+The plan as proposed: a tenant's policies, each a condition and an outcome:
 
 - Conditions:
   - longer than N minutes;
@@ -508,13 +526,14 @@ Cost and stopgap:
 
 **Decision (owner): it depends on the rules and the business, not a fixed 24 hours.**
 
-A4 builds it this way:
-- Each policy sets its own wait (`approval_ttl_minutes`).
-- A tenant may set a default.
+A4 builds it this way (built):
+- Each policy sets its own wait (`approval_ttl_minutes`, a day when it names none).
 - The wait is always bounded:
-  - by the booking's start, less the policy's lead time, so an approval cannot outlive the time
-    it holds;
-  - by the server's maximum, `SLOTLOCK_MAX_APPROVAL_DAYS`, 30 by default.
+  - by the booking's start, less the policy's lead time (`lead_minutes`), so an approval cannot
+    outlive the time it holds; one too close to its start is `approval_too_late`;
+  - by the server's maximum: 30 days, which a library user can lower with the agent backend's
+    `maxApprovalMinutes`.
+- Where several policies apply, the one that must be decided soonest sets the wait.
 - A pending approval holds its time, so a long wait is a business choice the policy makes
   explicit.
 
