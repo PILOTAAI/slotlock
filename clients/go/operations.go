@@ -2215,10 +2215,11 @@ func (in CreateWebhookInput) values() map[string]any {
 // https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp,
 // webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of
 // failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret
-// is returned here only. At most 10 per tenant. With resource_ids, pools, locations (each with
-// every location in it) or groups, only changes about a resource that matches one of them, as it
-// is when the change is delivered: a change about no resource (a key, a webhook, a usage notice)
-// is not sent. At most 100 resource ids and 20 of each other kind (400 invalid_webhook_filter).
+// is returned here only. At most 25 per tenant, or fewer on a plan (409 webhook_limit_reached).
+// With resource_ids, pools, locations (each with every location in it) or groups, only changes
+// about a resource that matches one of them, as it is when the change is delivered: a change
+// about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids and
+// 20 of each other kind (400 invalid_webhook_filter).
 func (c *Client) CreateWebhook(ctx context.Context, in CreateWebhookInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_webhook", in.values())
 }

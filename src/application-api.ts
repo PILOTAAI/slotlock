@@ -14,6 +14,7 @@ import {
   SLOTLOCK_WEBHOOK_FILTER_REFS,
   SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
   type SlotlockChangeOrigin,
+  SLOTLOCK_MAX_WEBHOOK_ENDPOINTS,
 } from './event-feed.js';
 import { z } from 'zod';
 import { SLOTLOCK_PARTNER_ACCOUNT, SLOTLOCK_PARTNER_PLAN } from './partner-names.js';
@@ -1567,7 +1568,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_webhook',
       title: 'Add a webhook',
       description:
-        `Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most 10 per tenant. With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES} resource ids and ${SLOTLOCK_WEBHOOK_FILTER_REFS} of each other kind (400 invalid_webhook_filter).`,
+        `Send the changes slotlock_list_changes lists from now on to an https URL, each as a CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature), in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned here only. At most ${SLOTLOCK_MAX_WEBHOOK_ENDPOINTS} per tenant, or fewer on a plan (409 webhook_limit_reached). With resource_ids, pools, locations (each with every location in it) or groups, only changes about a resource that matches one of them, as it is when the change is delivered: a change about no resource (a key, a webhook, a usage notice) is not sent. At most ${SLOTLOCK_WEBHOOK_FILTER_RESOURCES} resource ids and ${SLOTLOCK_WEBHOOK_FILTER_REFS} of each other kind (400 invalid_webhook_filter).`,
       method: 'POST',
       path: '/v1/webhooks',
       input: z

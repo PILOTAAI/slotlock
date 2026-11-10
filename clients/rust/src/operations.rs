@@ -2167,11 +2167,11 @@ impl Client {
     /// CloudEvent signed as Standard Webhooks (webhook-id, webhook-timestamp, webhook-signature),
     /// in order, until a 2xx. A failure is retried with backoff; after 24 hours of failures, or a
     /// 410, the webhook is disabled and the feed records webhook.disabled. The secret is returned
-    /// here only. At most 10 per tenant. With resource_ids, pools, locations (each with every
-    /// location in it) or groups, only changes about a resource that matches one of them, as it
-    /// is when the change is delivered: a change about no resource (a key, a webhook, a usage
-    /// notice) is not sent. At most 100 resource ids and 20 of each other kind (400
-    /// invalid_webhook_filter).
+    /// here only. At most 25 per tenant, or fewer on a plan (409 webhook_limit_reached). With
+    /// resource_ids, pools, locations (each with every location in it) or groups, only changes
+    /// about a resource that matches one of them, as it is when the change is delivered: a change
+    /// about no resource (a key, a webhook, a usage notice) is not sent. At most 100 resource ids
+    /// and 20 of each other kind (400 invalid_webhook_filter).
     pub fn create_webhook(&self, input: &CreateWebhookInput) -> Result<Value, Error> {
         self.call("slotlock_create_webhook", serde_json::to_value(input)?)
     }
