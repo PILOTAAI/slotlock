@@ -460,6 +460,15 @@ jobs:
       # from npm.
       - name: Check psql and pgbench
         run: psql --version && pgbench --version
+      # Slotlock's own schema, for the workloads that book into it (RFC 0004 A7) beside the two
+      # designs RFC 0002 compares.
+      - name: Apply Slotlock's schema
+        env:
+          DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          node --input-type=module -e "import postgres from 'postgres'; import { createSlotlockStore } from './dist/index.js'; const sql = postgres(process.env.DATABASE_URL, { max: 1, onnotice: () => {} }); await createSlotlockStore(sql).applySchema(); await sql.end();"
       - name: Run the workloads (8 clients, 8 s a run)
         env:
           DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock

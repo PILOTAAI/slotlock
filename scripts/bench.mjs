@@ -42,8 +42,9 @@ if (outIndex >= 0 && !out) throw new RangeError('--out needs a directory');
 const psql = (args) => execFileSync('psql', ['-X', '-q', '-v', 'ON_ERROR_STOP=1', ...args, url], { encoding: 'utf8' });
 
 function tps(workload, design) {
-  // Both designs start empty for every run, so a workload never inherits the last one's rows.
+  // Every design starts empty for every run, so a workload never inherits the last one's rows.
   psql(['-c', 'TRUNCATE slotlock_bench.ranges, slotlock_bench.slots']);
+  if (design === 'real') psql(['-c', 'SELECT slotlock_bench.reset_real()']);
   if (workload.seed) psql(['-f', join(BENCH, workload.seed)]);
   const file = `${workload.files ?? workload.id}-${design}.sql`;
   const env = { ...process.env };
@@ -60,19 +61,29 @@ function tps(workload, design) {
 }
 
 for (const workload of WORKLOADS) {
-  for (const design of ['range', 'slots']) {
+  for (const design of ['range', 'slots', ...(workload.real ? ['real'] : [])]) {
     const file = join(BENCH, `${workload.files ?? workload.id}-${design}.sql`);
     if (!existsSync(file)) throw new Error(`bench: ${file} is missing`);
   }
 }
 
 psql(['-f', join(BENCH, 'setup.sql')]);
+// Slotlock's own schema too, where it is applied (RFC 0004 A7): `slotlock migrate` first.
+const realSchema = psql(['-At', '-c', "SELECT to_regclass('slotlock.reservations') IS NOT NULL"]).trim() === 't';
+if (realSchema) psql(['-f', join(BENCH, 'real-setup.sql')]);
+else console.error('bench: no Slotlock schema in this database, so its own column is left out (run slotlock migrate first)');
 const results = [];
 try {
   for (const workload of WORKLOADS) {
-    results.push({ workload: workload.id, range: tps(workload, 'range'), slots: tps(workload, 'slots') });
+    results.push({
+      workload: workload.id,
+      range: tps(workload, 'range'),
+      slots: tps(workload, 'slots'),
+      ...(realSchema && workload.real ? { real: tps(workload, 'real') } : {}),
+    });
   }
 } finally {
+  if (realSchema) psql(['-c', "SELECT slotlock_bench.reset_real(); SELECT count(*) FROM slotlock.erase_tenant('slotlock-bench')"]);
   psql(['-c', 'DROP SCHEMA IF EXISTS slotlock_bench CASCADE']);
 }
 

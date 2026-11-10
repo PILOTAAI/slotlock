@@ -1743,20 +1743,62 @@ async function lockExternalIdentity(
 }
 
 /**
- * Whether the resource is the tenant's (`missing` when not), and whether it is archived.
- * Share-locked to the end of the transaction, so it is neither archived nor deleted meanwhile.
+ * Lock a resource a write is about to occupy time on, with its composite parent, in id order, to
+ * the end of the transaction (RFC 0004 A7): writes to one resource, or one composite's family,
+ * take turns. Without it, writers racing for the same time each insert, then wait at the
+ * exclusion constraint for one another, and PostgreSQL breaks each such deadlock only after its
+ * deadlock_timeout (a second), so a burst of agents for one slot could take many seconds. With
+ * it, each meets the winner's committed row and is refused at once. NO KEY UPDATE, so foreign
+ * keys to the resource are not blocked; an archive or delete waits for the write, as before. The
+ * resource's own row, or null when there is none (for the tenant, when one is given).
+ */
+async function lockResourceForWrite(
+  tx: TransactionSql,
+  resourceId: string,
+  tenantRef: string | null,
+): Promise<{ tenant_ref: string | null; archived: boolean } | null> {
+  const rows = await tx<{ id: string; tenant_ref: string | null; archived: boolean }[]>`
+    SELECT id, tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
+     WHERE (id = ${resourceId}
+            OR id = (SELECT parent_id FROM slotlock.resources WHERE id = ${resourceId}))
+       AND (${tenantRef}::text IS NULL OR tenant_ref = ${tenantRef})
+     ORDER BY id
+     FOR NO KEY UPDATE`;
+  const own = rows.find((row) => row.id === resourceId);
+  return own ? { tenant_ref: own.tenant_ref, archived: own.archived } : null;
+}
+
+/**
+ * Whether the resource is the tenant's (`missing` when not), and whether it is archived, locked
+ * for the write that follows (lockResourceForWrite).
  */
 async function tenantResourceState(
   tx: TransactionSql,
   resourceId: string,
   tenantRef: string,
 ): Promise<'missing' | 'archived' | 'active'> {
-  const [row] = await tx<{ archived: boolean }[]>`
-    SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
-     WHERE id = ${resourceId} AND tenant_ref = ${tenantRef}
-     FOR SHARE`;
+  const row = await readResourceForWrite(tx, resourceId, tenantRef);
   if (!row) return 'missing';
   return row.archived ? 'archived' : 'active';
+}
+
+/**
+ * A resource a write is about to check its booking against, key-share locked so it is not deleted
+ * meanwhile. It does not make writers wait for each other: lockResourceForWrite does, later, right
+ * before the occupation is written, and checks again that the resource is there and not archived.
+ * (KEY SHARE never conflicts with the NO KEY UPDATE that follows, so two writers cannot deadlock
+ * upgrading.)
+ */
+async function readResourceForWrite(
+  tx: TransactionSql,
+  resourceId: string,
+  tenantRef: string | null,
+): Promise<{ tenant_ref: string | null; archived: boolean } | null> {
+  const [row] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
+    SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
+     WHERE id = ${resourceId} AND (${tenantRef}::text IS NULL OR tenant_ref = ${tenantRef})
+     FOR KEY SHARE`;
+  return row ?? null;
 }
 
 function pgCode(err: unknown): string | undefined {
@@ -5138,12 +5180,7 @@ function buildSlotlockStore(
               await limitTenant(tx, 'reservations', params.resourceId, params.tenantRef),
               'reservations',
             );
-            const [resource] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
-              SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
-               WHERE id = ${params.resourceId}
-                 AND (${params.tenantRef ?? null}::text IS NULL
-                      OR tenant_ref = ${params.tenantRef ?? null})
-               FOR SHARE`;
+            const resource = await readResourceForWrite(tx, params.resourceId, params.tenantRef ?? null);
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (bookingLimit !== null && resource.tenant_ref !== null) {
@@ -5164,6 +5201,10 @@ function buildSlotlockStore(
             ) {
               return { ok: false, code: 'recurrence_not_materialized' };
             }
+            // Writers to this resource take turns from here to the insert (lockResourceForWrite).
+            const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef ?? null);
+            if (!locked) return { ok: false, code: 'resource_not_found' };
+            if (locked.archived) return { ok: false, code: 'resource_archived' };
             await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
             const [row] = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
@@ -5267,6 +5308,10 @@ function buildSlotlockStore(
             ) {
               return { ok: false, code: 'recurrence_not_materialized' };
             }
+            // Writers to this resource take turns from here to the insert (lockResourceForWrite).
+            const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
+            if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
+            if (locked.archived) return { ok: false, code: 'resource_archived' };
             await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
             const rows = await tx<ReservationRow[]>`
               INSERT INTO slotlock.reservations (
@@ -5366,6 +5411,10 @@ function buildSlotlockStore(
             ) {
               return { ok: false, code: 'recurrence_not_materialized' };
             }
+            // Writers to this resource take turns from here to the insert (lockResourceForWrite).
+            const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
+            if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
+            if (locked.archived) return { ok: false, code: 'resource_archived' };
             await reapExpiredHolds(tx, params.resourceId, occupied.start, occupied.end);
             const rows = await tx<ReservationRow[]>`
               UPDATE slotlock.reservations
@@ -5571,11 +5620,7 @@ function buildSlotlockStore(
               await limitTenant(tx, 'holds', params.resourceId, tenantRef),
               'holds',
             );
-            const [resource] = await tx<{ tenant_ref: string | null; archived: boolean }[]>`
-              SELECT tenant_ref, archived_at IS NOT NULL AS archived FROM slotlock.resources
-               WHERE id = ${params.resourceId}
-                 AND (${tenantRef ?? null}::text IS NULL OR tenant_ref = ${tenantRef ?? null})
-               FOR SHARE`;
+            const resource = await readResourceForWrite(tx, params.resourceId, tenantRef ?? null);
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
@@ -5626,6 +5671,10 @@ function buildSlotlockStore(
             ) {
               return { ok: false, code: 'recurrence_not_materialized' };
             }
+            // Writers to this resource take turns from here to the insert (lockResourceForWrite).
+            const locked = await lockResourceForWrite(tx, params.resourceId, tenantRef ?? null);
+            if (!locked) return { ok: false, code: 'resource_not_found' };
+            if (locked.archived) return { ok: false, code: 'resource_archived' };
             await reapExpiredHolds(tx, params.resourceId, reach.start, reach.end);
             const [row] = await tx<HoldRow[]>`
               INSERT INTO slotlock.reservations (
@@ -5911,6 +5960,10 @@ function buildSlotlockStore(
           const holds = [...params.holds].sort(
             (left, right) => left.resourceId.localeCompare(right.resourceId) || left.start.getTime() - right.start.getTime(),
           );
+          // Locked as any booking write locks them, in id order, so a racing booking takes turns.
+          for (const resourceId of [...new Set(holds.map((hold) => hold.resourceId))].sort()) {
+            await lockResourceForWrite(tx, resourceId, tenantRef);
+          }
           for (const hold of holds) await reapExpiredHolds(tx, hold.resourceId, hold.start, hold.end);
           const held = await tx<{ id: string }[]>`
             INSERT INTO slotlock.reservations (
@@ -6066,12 +6119,9 @@ function buildSlotlockStore(
         const bookingTenant = owner.resource_tenant;
         if (bookingTenant !== null) await lockExternalIdentity(tx, bookingTenant, holdId);
         const bookingLimit = await tenantLimitReached(tx, bookingTenant, 'reservations');
-        // The resource's share lock, as every booking write takes it: an archive waits for this
+        // The resource's lock, as every booking write takes it: an archive waits for this
         // confirmation.
-        const [resource] = await tx<{ archived: boolean }[]>`
-          SELECT archived_at IS NOT NULL AS archived FROM slotlock.resources
-           WHERE id = ${owner.resource_id}
-           FOR SHARE`;
+        const resource = await lockResourceForWrite(tx, owner.resource_id, null);
         const [row] = await tx<
           (ReservationRow & { status: string; live: boolean; hold_group_id: string | null; holder_ref: string | null })[]
         >`
@@ -6496,6 +6546,10 @@ function buildSlotlockStore(
             // The normalized children are canonical; the JSON columns above are a compatibility
             // mirror until older readers retire.
             await replaceCalendarEventChildren(tx, params.tenantRef, eventId, event);
+            // Writers to this resource take turns from here to its occupations (lockResourceForWrite).
+            const locked = await lockResourceForWrite(tx, params.resourceId, params.tenantRef);
+            if (!locked) return { ok: false, code: 'resource_tenant_mismatch' };
+            if (locked.archived) return { ok: false, code: 'resource_archived' };
             await replaceCalendarEventOccurrences(tx, {
               tenantRef: params.tenantRef,
               eventId,

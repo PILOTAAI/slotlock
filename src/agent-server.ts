@@ -533,6 +533,23 @@ async function findAvailableSlots(
   }
   const earliest = (a: Slot, b: Slot) =>
     Date.parse(a.start) - Date.parse(b.start) || a.resource_id.localeCompare(b.resource_id);
+  // Each resource's first `limit` slots from one read each, merged earliest first: what the walk
+  // below finds, in fewer transactions.
+  if (backend.findNextSlots) {
+    const merged: Slot[] = [];
+    for (const resourceId of resourceIds) {
+      const found = await backend.findNextSlots(context, {
+        resource_id: resourceId,
+        start: window.start.toISOString(),
+        end,
+        duration_minutes: input.duration_minutes as number,
+        limit,
+      });
+      if (!found.certain) return { slots: [], coverage: coverage(false) };
+      merged.push(...found.slots.map((slot) => ({ resource_id: resourceId, start: slot.start, end: slot.end })));
+    }
+    return { slots: merged.sort(earliest).slice(0, limit), coverage: coverage(true) };
+  }
   const heads: Slot[] = [];
   for (const resourceId of resourceIds) {
     const head = await next(resourceId, window.start.toISOString());
@@ -925,6 +942,16 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. Up to `limit` successive free slots of one resource from `start`, each the earliest
+   * after the last one ends, as as many `findNextAvailable` calls would find them, from one read.
+   * `certain` false when coverage is incomplete. `slotlock_find_available_slots` and refusals'
+   * alternatives use it where present.
+   */
+  findNextSlots?(
+    context: SlotlockAgentInvocationContext,
+    input: { resource_id: string; start: string; end: string; duration_minutes: number; limit: number },
+  ): Promise<{ slots: { start: string; end: string }[]; certain: boolean }>;
 }
 
 /**

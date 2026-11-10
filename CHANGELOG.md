@@ -7,6 +7,11 @@ versioning.
 
 ### Added
 
+- Contention at scale (RFC 0004 A7): a CI test races 100 REST clients for one slot (one booking, 99
+  `overlap` refusals with alternatives, no 5xx, p99 under a second), and the benchmark runs three
+  write workloads against Slotlock's own schema as a new column. A refusal's alternatives now come
+  from one read through the backend's optional `findNextSlots`, as do
+  `slotlock_find_available_slots`' slots, and time zone names resolve once a process.
 - Per-key limits (RFC 0004 A5): a key can be held below the server's limits, never above them:
   its live holds and the hours they hold, its requests a minute (a bucket of its own, `key_limit`),
   and `requires_approval`, which makes every booking it asks for wait for a person (policy
@@ -401,6 +406,12 @@ versioning.
 
 ### Fixed
 
+- Many agents racing for one slot no longer stall for seconds (RFC 0004 A7). Writers each inserted,
+  then waited for one another at the exclusion constraint, and PostgreSQL broke each such deadlock
+  only after `deadlock_timeout`: about one 100-client race in three took 4 to 20 seconds, though
+  every answer was right. Booking writes now lock the resource, and a part's composite parent, in id
+  order (`FOR NO KEY UPDATE`) right before writing its occupied time, so racing writers take turns
+  for that step and the losers are refused at once.
 - From RFC 0004's audit (P0):
   - A no-show was announced twice, as `reservation.no_show` and as `reservation.cancelled`, so a
     consumer counting cancellations counted it. The feed's trigger now names the deletion, so the

@@ -1169,6 +1169,50 @@ export function createSlotlockStoreAgentBackend(
       });
     },
 
+    async findNextSlots(context, input) {
+      const window = interval(input);
+      const durationMs = input.duration_minutes * 60_000;
+      const charge = busyBudget();
+      return withTenant(store, context, async (tenantStore) => {
+        const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, input.resource_id);
+        const search = bookingSearch({
+          rules: resource.effectiveBookingRules,
+          timezone: resource.timezone,
+          window,
+          now: new Date(),
+        });
+        const sources = await requiredSources(options, context, resource);
+        const freeBusy = await readFreeBusy(tenantStore, {
+          tenantRef: context.principal.tenantRef,
+          resourceId: input.resource_id,
+          window: search ? bookingSearchReach({ ...search, window }) : window,
+          requiredSources: [...sources],
+          ...(options.coverageMaxAgeMs !== undefined ? { coverageMaxAgeMs: options.coverageMaxAgeMs } : {}),
+        });
+        charge(freeBusy.busy.length);
+        if (freeBusy.coverage.state !== 'complete') return { slots: [], certain: false };
+        if (!search) return { slots: [], certain: true };
+        const rules = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
+        const windows = expandRules(rules, search.window, resource.timezone);
+        if (windows.length > MAX_REQUEST_RULE_WINDOWS) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+        const busy = bookingSearchBlocked(freeBusy.busy, search);
+        // Each next slot as a search from where the last one ended would find it: the same busy
+        // time and hours, with the hours before that end left out.
+        const slots: { start: string; end: string }[] = [];
+        let from = search.window.start.getTime();
+        while (slots.length < input.limit) {
+          const open = windows
+            .map((hours) => ({ start: new Date(Math.max(hours.start.getTime(), from)), end: hours.end }))
+            .filter((hours) => hours.end.getTime() - hours.start.getTime() >= durationMs);
+          const found = findNextAvailable({ busy, windows: open, durationMs, ...(search.align ? { align: search.align } : {}) });
+          if (!found) break;
+          slots.push({ start: found.start.toISOString(), end: found.end.toISOString() });
+          from = found.end.getTime();
+        }
+        return { slots, certain: true };
+      });
+    },
+
     async findNextAvailable(context, input) {
       const window = interval(input as { start: string; end: string });
       const resourceIds = distinctResourceIds(input);

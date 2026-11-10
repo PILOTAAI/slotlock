@@ -10,7 +10,7 @@ const { renderMarkdown, validateReport, WORKLOADS } = (await import(
 )) as {
   renderMarkdown(report: unknown): string;
   validateReport<T>(report: T): T;
-  WORKLOADS: { id: string; files?: string; seed?: string }[];
+  WORKLOADS: { id: string; files?: string; seed?: string; real?: boolean }[];
 };
 const report = {
   format: 1,
@@ -53,6 +53,19 @@ describe('the benchmark report', () => {
     );
   });
 
+  it("adds Slotlock's own schema as a column where a run measured it (RFC 0004 A7)", () => {
+    const lines = renderMarkdown({
+      ...report,
+      results: [{ workload: 'contended-many', range: 11980, slots: 12731, real: 4192.4 }, ...report.results],
+    }).split('\n');
+    expect(lines[2]).toBe('| Workload | Durable commits | Range constraint | Slot rows | Slots ÷ range | Slotlock schema |');
+    expect(lines[4]).toBe('| Contended, 1,000 resources | on | 11,980 | 12,731 | 1.06× | 4,192 |');
+    expect(lines[5]).toBe('| Non-overlapping, 1 resource | on | 6,694 | 9,718 | 1.45× | — |');
+    expect(() =>
+      validateReport({ ...report, results: [{ workload: 'contended-many', range: 1, slots: 1, real: 0 }] }),
+    ).toThrow('contended-many.real is not a positive number');
+  });
+
   it('refuses a malformed or foreign result', () => {
     const bad: [string, unknown][] = [
       ['not an object', null],
@@ -72,7 +85,7 @@ describe('the benchmark report', () => {
 
   it('has both SQL files for every workload, and a seed file where it names one', () => {
     for (const workload of WORKLOADS) {
-      for (const design of ['range', 'slots']) {
+      for (const design of ['range', 'slots', ...(workload.real ? ['real'] : [])]) {
         expect(() => readFileSync(join(root, 'bench', `${workload.files ?? workload.id}-${design}.sql`))).not.toThrow();
       }
       if (workload.seed) expect(() => readFileSync(join(root, 'bench', workload.seed ?? ''))).not.toThrow();

@@ -291,7 +291,26 @@ People approve or decline in the dashboard, or with `POST /v1/approvals/{id}`. T
 - `slotlock sandbox race --agents 100 --slot ...` runs a contention scenario and reports winners,
   refusals and alternatives.
 
-**A7. Contention at scale (T1).**
+**A7. Contention at scale (T1).** Status: built.
+- `contention.integration.test.ts`: 100 REST clients, each its own agent, race for one slot after
+  a warm-up round. One books it, 99 get `overlap` with alternatives, none a 5xx, p99 under a second
+  (about 0.45 s locally).
+- What the test found: writers racing for the same time each inserted, then waited at the
+  exclusion constraint for one another, and PostgreSQL broke each such deadlock only after its
+  `deadlock_timeout` (a second). About one race in three took 4 to 20 seconds, though every answer
+  was right. Booking writes now lock the resource (and a part's composite parent), in id order,
+  `FOR NO KEY UPDATE`, right before they write its occupied time: writers take turns for that
+  last step only, each meets the winner's committed row and is refused at once. The checks before
+  it keep a key-share lock, which never conflicts with the one that follows, so two writers cannot
+  deadlock upgrading. Archive and delete wait for a write as before.
+- Also: a refusal's alternatives now come from one read (`findNextSlots`) instead of one
+  transaction a slot (67 queries a refused request down to 49), and time zone names resolve once
+  a process.
+- `scripts/bench.mjs` runs three write workloads against the real schema too, where it is applied
+  (the release job applies it), as a fourth column: about 4,100 bookings a second on 1,000
+  resources locally, against 11,900 for the bare constraint.
+
+As proposed:
 - A CI test where 100 concurrent REST clients race for one slot. Exactly one wins; 99 get
   `overlap` with alternatives; no 5xx; p99 under 1 s on the CI database.
 - The pgbench workloads run against the real schema, not the stand-in.
