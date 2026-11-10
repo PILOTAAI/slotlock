@@ -1901,6 +1901,8 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
     hold_id: entry.holdId,
     offered_resource_id: entry.offeredResourceId,
     offered_at: entry.offeredAt?.toISOString() ?? null,
+    duration_minutes: entry.durationMs === null ? null : Math.round(entry.durationMs / 60_000),
+    decided_at: entry.decidedAt?.toISOString() ?? null,
     created_at: entry.createdAt.toISOString(),
   };
 }
@@ -3451,6 +3453,7 @@ export function createSlotlockStoreApplicationBackend(
           end: new Date(input.end as string),
           holderRef: input.holder_ref as string,
           ...(ttl !== undefined ? { offerTtlMs: ttl * 1000 } : {}),
+          ...(input.duration_minutes !== undefined ? { durationMs: (input.duration_minutes as number) * 60_000 } : {}),
           ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key as string } : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
@@ -3478,6 +3481,16 @@ export function createSlotlockStoreApplicationBackend(
       }));
       if (left.left) await offerFreedTime(store, context);
       return left;
+    },
+
+    async declineWaitlistOffer(context, input) {
+      const declined = await withTenant(store, context, (tenant) =>
+        tenant.declineWaitlistOffer({ tenantRef: tenantOf(context), id: input.entry_id as string }),
+      );
+      if (!declined) throw new SlotlockAgentOperationError('waitlist_offer_not_found', 404);
+      // The time it let go goes to the next who waits.
+      await offerFreedTime(store, context);
+      return { entry: waitlistOutput(declined) };
     },
 
     async getCoverage(context, input) {

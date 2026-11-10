@@ -1967,6 +1967,8 @@ describe('resource detail, webhooks and the waitlist', () => {
         offeredResourceId: null,
         offeredAt: null,
         createdAt: new Date(now - 600_000),
+        durationMs: null,
+        decidedAt: null,
       },
     ];
     const store = {

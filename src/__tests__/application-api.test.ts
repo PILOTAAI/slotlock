@@ -181,6 +181,7 @@ const backend = {
   joinWaitlist: vi.fn(),
   listWaitlist: vi.fn(),
   leaveWaitlist: vi.fn(),
+  declineWaitlistOffer: vi.fn(),
   getUsage: vi.fn(),
   listApprovalPolicies: vi.fn(),
   putApprovalPolicy: vi.fn(),
@@ -333,6 +334,8 @@ const WAITLIST_ENTRY = {
     offered_resource_id: null,
     offered_at: null,
     created_at: '2027-03-01T09:00:00.000Z',
+    duration_minutes: null,
+    decided_at: null,
   };
 
 const PARTNER_ACCOUNT = {
@@ -411,6 +414,7 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   joinWaitlist: { entry: WAITLIST_ENTRY, replayed: false },
   listWaitlist: { entries: [WAITLIST_ENTRY] },
   leaveWaitlist: { left: true },
+  declineWaitlistOffer: { entry: { ...WAITLIST_ENTRY, status: 'declined', decided_at: '2027-03-29T09:10:00.000Z' } },
   exportTenantEvent: {
     event: {
       '@type': 'Event',

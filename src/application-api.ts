@@ -93,6 +93,7 @@ export type SlotlockApplicationOperation =
   | 'slotlock_join_waitlist'
   | 'slotlock_list_waitlist'
   | 'slotlock_leave_waitlist'
+  | 'slotlock_decline_waitlist_offer'
   | 'slotlock_record_coverage'
   | 'slotlock_list_tenant_events'
   | 'slotlock_get_tenant_event'
@@ -240,6 +241,7 @@ export interface SlotlockApplicationBackend {
   joinWaitlist: Handler;
   listWaitlist: Handler;
   leaveWaitlist: Handler;
+  declineWaitlistOffer: Handler;
   recordCoverage: Handler;
   listTenantEvents: Handler;
   getTenantEvent: Handler;
@@ -744,12 +746,20 @@ const WAITLIST_ENTRY = z
     end: DATE_TIME,
     holder_ref: z.string().min(1).max(500),
     offer_ttl_seconds: z.number().int().min(60).max(86_400),
-    /** waiting; offered (hold_id holds the window on offered_resource_id); expired (it started first). */
-    status: z.enum(['waiting', 'offered', 'expired']),
+    /**
+     * waiting; offered (hold_id holds the time on offered_resource_id); then accepted (the hold was
+     * confirmed), declined (let go) or lapsed (it expired); or expired (no slot could be offered in
+     * the window).
+     */
+    status: z.enum(['waiting', 'offered', 'accepted', 'declined', 'lapsed', 'expired']),
     hold_id: z.string().uuid().nullable(),
     offered_resource_id: RESOURCE_ID.nullable(),
     offered_at: DATE_TIME.nullable(),
     created_at: DATE_TIME,
+    /** The length it waits for, any slot of it within the window; null: the whole window. */
+    duration_minutes: z.number().int().min(1).nullable(),
+    /** When its offer was accepted, declined or lapsed. */
+    decided_at: DATE_TIME.nullable(),
   })
   .strict();
 
@@ -1581,7 +1591,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_join_waitlist',
       title: 'Join the waitlist',
       description:
-        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
+        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now, or with duration_minutes for any slot of that length within it. When time comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting are offered in the order they joined: the first that fits gets a hold of it (the window, or the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined), or let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot can be offered to before its window closes expires (waitlist.expired). Joining and leaving are on the feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
       method: 'POST',
       path: '/v1/waitlist',
       input: z
@@ -1592,6 +1602,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           end: DATE_TIME,
           holder_ref: z.string().trim().min(1).max(500),
           offer_ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+          /** Any slot of this length within the window (RFC 0004 B6); left out, the whole window. */
+          duration_minutes: z.number().int().min(1).max(44_640).optional(),
           idempotency_key: IDEMPOTENCY_KEY.optional(),
         })
         .strict()
@@ -1639,6 +1651,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       output: z.object({ left: z.boolean() }).strict(),
       risk: { readOnly: false, destructive: true, idempotent: true },
       invoke: 'leaveWaitlist',
+      example: { entry_id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427' },
+    },
+    {
+      name: 'slotlock_decline_waitlist_offer',
+      title: 'Decline a waitlist offer',
+      description:
+        'Turn down the hold a waitlist entry was offered: the hold is let go, the entry is declined (waitlist.declined), and the time is offered to the next who waits. 404 waitlist_offer_not_found when the entry has no open offer.',
+      method: 'POST',
+      path: '/v1/waitlist/{entry_id}/decline',
+      input: z.object({ entry_id: z.string().uuid() }).strict(),
+      output: z.object({ entry: WAITLIST_ENTRY }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'declineWaitlistOffer',
       example: { entry_id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427' },
     },
     {

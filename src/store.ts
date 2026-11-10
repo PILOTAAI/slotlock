@@ -1668,6 +1668,93 @@ async function bookingRuling(
   };
 }
 
+/** An entry's offer: the hold made for it, said on the entry and the feed. */
+async function recordWaitlistOffer(
+  tx: StoreSql,
+  tenantRef: string,
+  entry: WaitlistRow,
+  offer: { resourceId: string; holdId: string; start: Date; end: Date; expiresAt: Date },
+): Promise<void> {
+  await tx`
+    UPDATE slotlock.waitlist_entries
+       SET status = 'offered', hold_id = ${offer.holdId}, offered_resource_id = ${offer.resourceId},
+           offered_at = statement_timestamp()
+     WHERE id = ${entry.id}`;
+  await tx`
+    INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+    VALUES (${tenantRef}, ${offer.resourceId}, 'waitlist.offered', ${entry.id},
+            jsonb_strip_nulls(jsonb_build_object(
+              'id', ${entry.id}::uuid, 'hold_id', ${offer.holdId}::uuid,
+              'resource_id', ${offer.resourceId}::uuid, 'pool', ${entry.pool_ref}::text,
+              'start', ${offer.start}::timestamptz, 'end', ${offer.end}::timestamptz,
+              'expires_at', ${offer.expiresAt}::timestamptz,
+              'holder_ref', ${entry.holder_ref}::text)),
+            'slotlock:maintenance')`;
+}
+
+/**
+ * The earliest slot of the entry's length within its window, from now, on its resource or any
+ * member of its pool (by id), held for its holder: what is busy is read with each resource's
+ * buffers, and the hold itself still meets the booking rules and the constraint. Null when none.
+ */
+async function offerSlotOfLength(
+  tx: StoreSql,
+  inner: SlotlockStore,
+  tenantRef: string,
+  entry: WaitlistRow,
+): Promise<{ resourceId: string; holdId: string; start: Date; end: Date; expiresAt: Date } | null> {
+  const durationMs = Number(entry.duration_ms);
+  const candidates = await tx<{ id: string; before_ms: number; after_ms: number; now: Date }[]>`
+    SELECT resources.id,
+           COALESCE(least(greatest((effective.effective_booking_rules->>'bufferBeforeMinutes')::numeric, 0), 1440)::int, 0) * 60000
+             AS before_ms,
+           COALESCE(least(greatest((effective.effective_booking_rules->>'turnaroundMinutes')::numeric, 0), 10080)::int, 0) * 60000
+             AS after_ms,
+           statement_timestamp() AS now
+      FROM slotlock.resources, LATERAL (SELECT ${tx.unsafe(EFFECTIVE_BOOKING_RULES)}) effective
+     WHERE resources.tenant_ref = ${tenantRef} AND resources.archived_at IS NULL
+       AND (resources.id = ${entry.resource_id}::uuid
+            OR (${entry.resource_id}::uuid IS NULL AND resources.pool_ref = ${entry.pool_ref}))
+     ORDER BY resources.id
+     LIMIT ${OFFER_CANDIDATES}`;
+  for (const candidate of candidates) {
+    const from = new Date(Math.ceil(Math.max(entry.starts_at.getTime(), candidate.now.getTime()) / 60_000) * 60_000);
+    if (from.getTime() + durationMs > entry.ends_at.getTime()) continue;
+    const busy = await tx<{ start: Date; end: Date }[]>`
+      SELECT COALESCE(occupied_starts_at, starts_at) AS start, COALESCE(occupied_ends_at, ends_at) AS end
+        FROM slotlock.reservations
+       WHERE resource_id = ${candidate.id}
+         AND tstzrange(COALESCE(occupied_starts_at, starts_at), COALESCE(occupied_ends_at, ends_at), '[)')
+             && tstzrange(${new Date(from.getTime() - Number(candidate.before_ms) - 86_400_000)}::timestamptz,
+                          ${new Date(entry.ends_at.getTime() + Number(candidate.after_ms) + 86_400_000)}::timestamptz, '[)')
+         AND (status <> 'held' OR expires_at > statement_timestamp())`;
+    // A slot [s, s + d) with its buffers occupies [s - before, s + d + after).
+    const blocked = busy.map((taken) => ({
+      start: new Date(taken.start.getTime() - Number(candidate.after_ms)),
+      end: new Date(taken.end.getTime() + Number(candidate.before_ms)),
+    }));
+    const slot = findNextAvailable({
+      busy: blocked,
+      windows: [{ start: from, end: entry.ends_at }],
+      durationMs,
+      align: (start) => new Date(Math.ceil(start.getTime() / 60_000) * 60_000),
+    });
+    if (!slot) continue;
+    const hold = await inner.acquireHold({
+      resourceId: candidate.id,
+      start: slot.start,
+      end: slot.end,
+      ttlMs: Number(entry.offer_ttl_ms),
+      tenantRef,
+      holderRef: entry.holder_ref,
+      source: 'slotlock:waitlist',
+    });
+    if (!hold.ok) continue;
+    return { resourceId: candidate.id, holdId: hold.hold.id, start: slot.start, end: slot.end, expiresAt: hold.hold.expiresAt };
+  }
+  return null;
+}
+
 /** An admin's reason for going past a cutoff (RFC 0004 B5): 1-500 characters, no control characters. */
 function isValidOverrideReason(value: unknown): value is string {
   return typeof value === 'string' && /^[^\u0000-\u001f\u007f]{1,500}$/u.test(value) && value.trim() !== '';
@@ -1939,10 +2026,12 @@ interface WaitlistRow {
   offered_resource_id: string | null;
   offered_at: Date | null;
   created_at: Date;
+  duration_ms: string | number | null;
+  decided_at: Date | null;
 }
 
 const WAITLIST_COLUMNS =
-  'id, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms, status, hold_id, offered_resource_id, offered_at, created_at';
+  'id, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms, status, hold_id, offered_resource_id, offered_at, created_at, duration_ms, decided_at';
 
 function toWaitlistEntry(row: WaitlistRow): SlotlockWaitlistEntry {
   return {
@@ -1958,6 +2047,8 @@ function toWaitlistEntry(row: WaitlistRow): SlotlockWaitlistEntry {
     offeredResourceId: row.offered_resource_id,
     offeredAt: row.offered_at,
     createdAt: row.created_at,
+    durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+    decidedAt: row.decided_at,
   };
 }
 
@@ -3325,11 +3416,22 @@ export interface SlotlockStore extends SlotlockEventFeed {
     holderRef: string;
     offerTtlMs?: number;
     /**
+     * Wait for any slot of this many milliseconds within the window (RFC 0004 B6), a whole minute
+     * from one minute to the window's length; left out, the whole window.
+     */
+    durationMs?: number;
+    /**
      * A retry identity, kept as long as the entry: the same key and request answer the entry the
      * first made (`replayed`), another request `idempotency_conflict`.
      */
     idempotencyKey?: string;
   }): Promise<JoinWaitlistResult>;
+  /**
+   * Decline an entry's offer (RFC 0004 B6): its hold is let go and the entry is `declined`, so the
+   * time is offered to the next. With `holderRef`, only that holder's. Null when there is no such
+   * offer.
+   */
+  declineWaitlistOffer(params: { tenantRef: string; id: string; holderRef?: string }): Promise<SlotlockWaitlistEntry | null>;
   /** The tenant's waitlist entries, oldest first, optionally of one resource, pool or holder. */
   listWaitlist(params: {
     tenantRef: string;
@@ -3521,12 +3623,20 @@ export interface SlotlockWaitlistEntry {
   end: Date;
   holderRef: string;
   offerTtlMs: number;
-  /** `waiting`, `offered` (a hold was made: `holdId` on `offeredResourceId`) or `expired`. */
-  status: 'waiting' | 'offered' | 'expired';
+  /**
+   * `waiting`; `offered` (a hold was made: `holdId` on `offeredResourceId`); then `accepted` (the
+   * hold was confirmed), `declined` (let go) or `lapsed` (it expired); or `expired` (no slot could
+   * be offered before the window closed).
+   */
+  status: 'waiting' | 'offered' | 'accepted' | 'declined' | 'lapsed' | 'expired';
   holdId: string | null;
   offeredResourceId: string | null;
   offeredAt: Date | null;
   createdAt: Date;
+  /** The length it waits for, any slot of it within the window (RFC 0004 B6); null: the whole window. */
+  durationMs: number | null;
+  /** When its offer was accepted, declined or lapsed. */
+  decidedAt: Date | null;
 }
 
 export type JoinWaitlistResult =
@@ -4159,6 +4269,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'checkInReservation',
   'joinWaitlist',
   'leaveWaitlist',
+  'declineWaitlistOffer',
   'putAssistantSettings',
   'deleteAssistantSettings',
   'resealAssistantKey',
@@ -6801,6 +6912,11 @@ function buildSlotlockStore(
               ) {
                 return { ok: false, code: 'hold_mismatch' };
               }
+              // The hold booked is accepted, not let go (slotlock.waitlist_offer_settle); the rest of
+              // its group is released.
+              await tx`SELECT set_config('slotlock.ending', 'confirmed', true)`;
+              await tx`DELETE FROM slotlock.reservations WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}`;
+              await tx`SELECT set_config('slotlock.ending', '', true)`;
               await tx`
                 DELETE FROM slotlock.reservations
                  WHERE status = 'held' AND holder_ref = ${holderRef}
@@ -7993,6 +8109,16 @@ function buildSlotlockStore(
       if (!Number.isSafeInteger(offerTtlMs) || offerTtlMs < 60_000 || offerTtlMs > 86_400_000) {
         return { ok: false, code: 'invalid_ttl' };
       }
+      const durationMs = params.durationMs ?? null;
+      if (
+        durationMs !== null &&
+        (!Number.isSafeInteger(durationMs) ||
+          durationMs < 60_000 ||
+          durationMs % 60_000 !== 0 ||
+          durationMs > window.end.getTime() - window.start.getTime())
+      ) {
+        return { ok: false, code: 'invalid_window' };
+      }
       const key = params.idempotencyKey;
       if (key !== undefined && !isValidIdentity(key)) return { ok: false, code: 'invalid_identity' };
       const payloadHash =
@@ -8007,6 +8133,7 @@ function buildSlotlockStore(
                   window.end.toISOString(),
                   holderRef,
                   offerTtlMs,
+                  ...(durationMs === null ? [] : [durationMs]),
                 ]),
               )
               .digest('hex');
@@ -8050,11 +8177,20 @@ function buildSlotlockStore(
         const [row] = await tx<WaitlistRow[]>`
           INSERT INTO slotlock.waitlist_entries
             (tenant_ref, resource_id, pool_ref, starts_at, ends_at, holder_ref, offer_ttl_ms,
-             idempotency_key, payload_hash)
+             idempotency_key, payload_hash, duration_ms)
           VALUES (${tenantRef}, ${params.resourceId ?? null}, ${params.pool ?? null}, ${window.start},
-                  ${window.end}, ${holderRef}, ${offerTtlMs}, ${key ?? null}, ${payloadHash})
+                  ${window.end}, ${holderRef}, ${offerTtlMs}, ${key ?? null}, ${payloadHash}, ${durationMs})
           RETURNING ${tx.unsafe(WAITLIST_COLUMNS)}`;
-        return { ok: true, entry: toWaitlistEntry(row as WaitlistRow), replayed: false };
+        const entry = row as WaitlistRow;
+        await tx`
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          VALUES (${tenantRef}, ${entry.resource_id}::uuid, 'waitlist.joined', ${entry.id},
+                  jsonb_strip_nulls(jsonb_build_object(
+                    'id', ${entry.id}::uuid, 'resource_id', ${entry.resource_id}::uuid, 'pool', ${entry.pool_ref}::text,
+                    'start', ${entry.starts_at}::timestamptz, 'end', ${entry.ends_at}::timestamptz,
+                    'duration_ms', ${durationMs}::bigint, 'holder_ref', ${entry.holder_ref}::text)),
+                  NULLIF(current_setting('slotlock.actor', true), ''))`;
+        return { ok: true, entry: toWaitlistEntry(entry), replayed: false };
       });
     },
 
@@ -8079,17 +8215,44 @@ function buildSlotlockStore(
     async leaveWaitlist(params) {
       if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) return false;
       return inTransaction(sql, async (tx) => {
-        const [left] = await tx<{ hold_id: string | null }[]>`
+        const [left] = await tx<{ hold_id: string | null; status: string; resource_id: string | null; pool_ref: string | null; holder_ref: string }[]>`
           DELETE FROM slotlock.waitlist_entries
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
              AND (${params.holderRef ?? null}::text IS NULL OR holder_ref = ${params.holderRef ?? null})
-          RETURNING hold_id`;
+          RETURNING hold_id, status, resource_id, pool_ref, holder_ref`;
         if (!left) return false;
+        await tx`
+          INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+          VALUES (${params.tenantRef}, ${left.resource_id}::uuid, 'waitlist.left', ${params.id},
+                  jsonb_strip_nulls(jsonb_build_object(
+                    'id', ${params.id}::uuid, 'resource_id', ${left.resource_id}::uuid, 'pool', ${left.pool_ref}::text,
+                    'status', ${left.status}::text, 'holder_ref', ${left.holder_ref}::text)),
+                  NULLIF(current_setting('slotlock.actor', true), ''))`;
+        // An offer still open goes with it; the entry is gone, so its hold's end changes no entry.
+        if (left.status !== 'offered') return true;
         // An untaken offer's hold goes too; a confirmed one is a booking now and stays.
         if (left.hold_id) {
           await buildSlotlockStore(tx, options, null).releaseHold(left.hold_id, { tenantRef: params.tenantRef });
         }
         return true;
+      });
+    },
+
+    async declineWaitlistOffer(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.id)) return null;
+      if (params.holderRef !== undefined && !isValidIdentity(params.holderRef)) return null;
+      return inTransaction(sql, async (tx) => {
+        const [offer] = await tx<{ hold_id: string }[]>`
+          SELECT hold_id FROM slotlock.waitlist_entries
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id} AND status = 'offered'
+             AND (${params.holderRef ?? null}::text IS NULL OR holder_ref = ${params.holderRef ?? null})
+           FOR UPDATE`;
+        if (!offer) return null;
+        // Letting the hold go declines the entry (slotlock.waitlist_offer_settle) and frees the time.
+        await buildSlotlockStore(tx, options, null).releaseHold(offer.hold_id, { tenantRef: params.tenantRef });
+        const [row] = await tx<WaitlistRow[]>`
+          SELECT ${tx.unsafe(WAITLIST_COLUMNS)} FROM slotlock.waitlist_entries WHERE id = ${params.id}`;
+        return row ? toWaitlistEntry(row) : null;
       });
     },
 
@@ -8289,10 +8452,21 @@ function buildSlotlockStore(
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['slotlock-waitlist', tenantRef])}, 0))`;
         let expired = 0;
         if (!after) {
+          // Offers whose hold ran out lapse (slotlock.waitlist_offer_settle), freeing their time.
+          await tx`
+            DELETE FROM slotlock.reservations offer
+             USING slotlock.resources resource
+             WHERE resource.id = offer.resource_id AND resource.tenant_ref = ${tenantRef}
+               AND offer.status = 'held' AND offer.source = 'slotlock:waitlist'
+               AND offer.expires_at <= statement_timestamp()`;
           const [gone] = await tx<{ count: number }[]>`
             WITH gone AS (
               UPDATE slotlock.waitlist_entries SET status = 'expired'
-               WHERE tenant_ref = ${tenantRef} AND status = 'waiting' AND starts_at <= statement_timestamp()
+               WHERE tenant_ref = ${tenantRef} AND status = 'waiting'
+                 -- The whole window once it starts; a length once no slot of it fits before the end.
+                 AND (CASE WHEN duration_ms IS NULL THEN starts_at
+                           ELSE ends_at - make_interval(secs => duration_ms / 1000.0) END)
+                     <= statement_timestamp()
               RETURNING id, resource_id, pool_ref, starts_at, ends_at, holder_ref
             ), reported AS (
               INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
@@ -8325,6 +8499,15 @@ function buildSlotlockStore(
             SELECT 1 FROM slotlock.waitlist_entries
              WHERE id = ${entry.id} AND status = 'waiting' FOR UPDATE`;
           if (!still) continue;
+          if (entry.duration_ms !== null) {
+            // Any slot of its length within its window (RFC 0004 B6), on its resource or any member.
+            const slot = await offerSlotOfLength(tx, inner, tenantRef, entry);
+            if (slot) {
+              await recordWaitlistOffer(tx, tenantRef, entry, slot);
+              offered += 1;
+            }
+            continue;
+          }
           // Only resources that look free (buffers included) are tried: a refused hold keeps its
           // locks until the transaction ends.
           const candidates = await tx<{ id: string }[]>`
@@ -8360,21 +8543,13 @@ function buildSlotlockStore(
               source: 'slotlock:waitlist',
             });
             if (!hold.ok) continue;
-            await tx`
-              UPDATE slotlock.waitlist_entries
-                 SET status = 'offered', hold_id = ${hold.hold.id}, offered_resource_id = ${resourceId},
-                     offered_at = statement_timestamp()
-               WHERE id = ${entry.id}`;
-            await tx`
-              INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
-              VALUES (${tenantRef}, ${resourceId}, 'waitlist.offered', ${entry.id},
-                      jsonb_strip_nulls(jsonb_build_object(
-                        'id', ${entry.id}::uuid, 'hold_id', ${hold.hold.id}::uuid,
-                        'resource_id', ${resourceId}::uuid, 'pool', ${entry.pool_ref}::text,
-                        'start', ${entry.starts_at}::timestamptz, 'end', ${entry.ends_at}::timestamptz,
-                        'expires_at', ${hold.hold.expiresAt}::timestamptz,
-                        'holder_ref', ${entry.holder_ref}::text)),
-                      'slotlock:maintenance')`;
+            await recordWaitlistOffer(tx, tenantRef, entry, {
+              resourceId,
+              holdId: hold.hold.id,
+              start: entry.starts_at,
+              end: entry.ends_at,
+              expiresAt: hold.hold.expiresAt,
+            });
             offered += 1;
             break;
           }

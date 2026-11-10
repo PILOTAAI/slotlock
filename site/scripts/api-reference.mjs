@@ -112,7 +112,7 @@ export const GROUPS = [
   },
   {
     name: 'Waitlist',
-    operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist'],
+    operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist', 'slotlock_decline_waitlist_offer'],
   },
   {
     name: 'Changes and webhooks',

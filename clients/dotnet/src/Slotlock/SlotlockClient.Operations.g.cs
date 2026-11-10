@@ -83,6 +83,7 @@ public sealed partial class SlotlockClient
         ["slotlock_list_waitlist"] = new("GET", "/v1/waitlist", [], ["resource_id", "pool", "holder_ref", "limit"]),
         ["slotlock_join_waitlist"] = new("POST", "/v1/waitlist", [], []),
         ["slotlock_leave_waitlist"] = new("DELETE", "/v1/waitlist/{entry_id}", ["entry_id"], ["dry_run"]),
+        ["slotlock_decline_waitlist_offer"] = new("POST", "/v1/waitlist/{entry_id}/decline", ["entry_id"], []),
         ["slotlock_record_coverage"] = new("PUT", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], []),
         ["slotlock_delete_coverage"] = new("DELETE", "/v1/resources/{resource_id}/coverage/{source}", ["resource_id", "source"], ["dry_run"]),
         ["slotlock_get_coverage"] = new("GET", "/v1/resources/{resource_id}/coverage", ["resource_id"], []),
@@ -2531,15 +2532,19 @@ public sealed partial class SlotlockClient
     /// <summary>Join the waitlist.</summary>
     /// <remarks>
     /// Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
-    /// taken now. When it comes free (a booking cancelled, a hold released or expired, a
-    /// no-show), the entries waiting for it are offered in the order they joined: the first gets
-    /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
-    /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
-    /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-    /// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
-    /// Idempotency-Key header or idempotency_key), a retry answers the entry the first request
-    /// made (replayed: true) for as long as it is kept; the same key with another request is 422
-    /// idempotency_conflict.
+    /// taken now, or with duration_minutes for any slot of that length within it. When time comes
+    /// free (a booking cancelled, a hold released or expired, a no-show), the entries waiting are
+    /// offered in the order they joined: the first that fits gets a hold of it (the window, or
+    /// the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default 900), and
+    /// the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it
+    /// (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined),
+    /// or let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot
+    /// can be offered to before its window closes expires (waitlist.expired). Joining and leaving
+    /// are on the feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at
+    /// once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key
+    /// (the Idempotency-Key header or idempotency_key), a retry answers the entry the first
+    /// request made (replayed: true) for as long as it is kept; the same key with another request
+    /// is 422 idempotency_conflict.
     /// </remarks>
     /// <param name="start">start</param>
     /// <param name="end">end</param>
@@ -2547,6 +2552,7 @@ public sealed partial class SlotlockClient
     /// <param name="resourceId">resource_id</param>
     /// <param name="pool">pool</param>
     /// <param name="offerTtlSeconds">offer_ttl_seconds</param>
+    /// <param name="durationMinutes">duration_minutes</param>
     /// <param name="idempotencyKey">A retry identity, also accepted as the Idempotency-Key
     /// header: the same key with the same request answers what the first did; with another
     /// request, 422 idempotency_conflict.</param>
@@ -2564,6 +2570,7 @@ public sealed partial class SlotlockClient
         Optional<string> resourceId = default,
         Optional<string> pool = default,
         Optional<long> offerTtlSeconds = default,
+        Optional<long> durationMinutes = default,
         Optional<string> idempotencyKey = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
@@ -2575,6 +2582,7 @@ public sealed partial class SlotlockClient
         if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         if (offerTtlSeconds.HasValue) values["offer_ttl_seconds"] = Json.ToNode(offerTtlSeconds.Value);
+        if (durationMinutes.HasValue) values["duration_minutes"] = Json.ToNode(durationMinutes.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_join_waitlist", values, cancellationToken);
@@ -2603,6 +2611,31 @@ public sealed partial class SlotlockClient
         values["entry_id"] = Json.ToNode(entryId);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_leave_waitlist", values, cancellationToken);
+    }
+
+    /// <summary>Decline a waitlist offer.</summary>
+    /// <remarks>
+    /// Turn down the hold a waitlist entry was offered: the hold is let go, the entry is declined
+    /// (waitlist.declined), and the time is offered to the next who waits. 404
+    /// waitlist_offer_not_found when the entry has no open offer.
+    /// </remarks>
+    /// <param name="entryId">entry_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeclineWaitlistOfferAsync(
+        string entryId,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["entry_id"] = Json.ToNode(entryId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_decline_waitlist_offer", values, cancellationToken);
     }
 
     /// <summary>Record calendar coverage.</summary>

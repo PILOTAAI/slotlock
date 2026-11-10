@@ -35,6 +35,12 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'coverage.stale',
   'waitlist.offered',
   'waitlist.expired',
+  // A waitlist entry joined, its offer accepted, declined or lapsed, and an entry left (RFC 0004 B6).
+  'waitlist.joined',
+  'waitlist.accepted',
+  'waitlist.declined',
+  'waitlist.lapsed',
+  'waitlist.left',
   // A write waiting for a person (approval policies): requested, then granted, declined or expired.
   'approval.requested',
   'approval.granted',

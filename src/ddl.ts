@@ -2890,6 +2890,78 @@ END
 $slotlock_waitlist_key$;
 CREATE UNIQUE INDEX IF NOT EXISTS slotlock_waitlist_entries_key_idx
   ON slotlock.waitlist_entries (tenant_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- Waitlists that match (RFC 0004 B6): an entry may ask for any slot of a length within its window
+-- (duration_ms; NULL is the whole window), and an offer ends accepted (its hold confirmed), declined
+-- (let go) or lapsed (expired), when it was decided. The wider checks admit every row the old ones
+-- did, so they are added NOT VALID (no scan under the lock), and the old ones dropped.
+ALTER TABLE slotlock.waitlist_entries ADD COLUMN IF NOT EXISTS duration_ms bigint;
+ALTER TABLE slotlock.waitlist_entries ADD COLUMN IF NOT EXISTS decided_at timestamptz;
+DO $slotlock_waitlist_outcomes$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_waitlist_entries_outcome_valid'
+                    AND conrelid = 'slotlock.waitlist_entries'::regclass) THEN
+    ALTER TABLE slotlock.waitlist_entries ADD CONSTRAINT slotlock_waitlist_entries_outcome_valid CHECK (
+      status IN ('waiting', 'offered', 'accepted', 'declined', 'lapsed', 'expired')
+      AND (status <> 'offered' OR (hold_id IS NOT NULL AND offered_at IS NOT NULL AND offered_resource_id IS NOT NULL))
+      AND (status <> 'waiting' OR (hold_id IS NULL AND offered_at IS NULL))
+      AND (duration_ms IS NULL OR (duration_ms >= 60000
+                                   AND duration_ms <= extract(epoch FROM ends_at - starts_at) * 1000))
+    ) NOT VALID;
+  END IF;
+  ALTER TABLE slotlock.waitlist_entries DROP CONSTRAINT IF EXISTS slotlock_waitlist_entries_status_valid;
+  ALTER TABLE slotlock.waitlist_entries DROP CONSTRAINT IF EXISTS slotlock_waitlist_entries_offer_valid;
+END
+$slotlock_waitlist_outcomes$;
+
+-- How an offer ends (RFC 0004 B6), from what becomes of its hold, whatever path took it: confirmed
+-- (or consumed by a booking that names it, under slotlock.ending = 'confirmed') is accepted;
+-- expired is lapsed; let go before then is declined. The entry says so, and the feed.
+CREATE OR REPLACE FUNCTION slotlock.waitlist_offer_settle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_waitlist_offer_settle$
+DECLARE
+  outcome text;
+  settled slotlock.waitlist_entries%ROWTYPE;
+BEGIN
+  IF OLD.status <> 'held' OR OLD.source IS DISTINCT FROM 'slotlock:waitlist' THEN RETURN NULL; END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.status = 'held' THEN RETURN NULL; END IF;
+    outcome := 'accepted';
+  ELSIF current_setting('slotlock.ending', true) = 'confirmed' THEN
+    outcome := 'accepted';
+  ELSIF OLD.expires_at <= statement_timestamp() THEN
+    outcome := 'lapsed';
+  ELSE
+    outcome := 'declined';
+  END IF;
+  UPDATE slotlock.waitlist_entries SET status = outcome, decided_at = statement_timestamp()
+   WHERE hold_id = OLD.id AND status = 'offered'
+  RETURNING * INTO settled;
+  IF settled.id IS NULL THEN RETURN NULL; END IF;
+  -- Erasure (erase_tenant, running as the schema's owner) is not reported.
+  IF settled.tenant_ref = current_setting('slotlock.erasing', true)
+     AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
+                          WHERE nspname = 'slotlock') THEN
+    RETURN NULL;
+  END IF;
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    settled.tenant_ref, settled.offered_resource_id, 'waitlist.' || outcome, settled.id::text,
+    jsonb_strip_nulls(jsonb_build_object(
+      'id', settled.id, 'hold_id', settled.hold_id, 'resource_id', settled.offered_resource_id,
+      'pool', settled.pool_ref, 'holder_ref', settled.holder_ref)),
+    COALESCE(NULLIF(current_setting('slotlock.actor', true), ''),
+             CASE WHEN outcome = 'lapsed' THEN 'slotlock:maintenance' END)
+  );
+  RETURN NULL;
+END
+$slotlock_waitlist_offer_settle$;
+DROP TRIGGER IF EXISTS slotlock_waitlist_offer_settle ON slotlock.reservations;
+CREATE TRIGGER slotlock_waitlist_offer_settle
+  AFTER UPDATE OF status OR DELETE ON slotlock.reservations
+  FOR EACH ROW EXECUTE FUNCTION slotlock.waitlist_offer_settle();
 CREATE INDEX IF NOT EXISTS slotlock_waitlist_entries_tenant_idx
   ON slotlock.waitlist_entries (tenant_ref, starts_at);
 

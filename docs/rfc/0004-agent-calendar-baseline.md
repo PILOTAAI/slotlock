@@ -421,11 +421,16 @@ As built:
   tombstone and feed change keep it.
 - A recurring series is not held to the cutoffs: cancelling it cancels what is still to come.
 
-**B6. Waitlists that match (T1).**
+**B6. Waitlists that match (T1).** Status: built.
 - An entry matches any slot of its length within its window, on a resource or a pool.
 - Entries can be `accepted`, `declined` and `lapsed`, with feed events for join, offer, accept,
   decline and leave.
 - Join is idempotent (P0-5).
+
+As built: a trigger on the offer's hold decides how the offer ends, whatever path took the hold.
+Confirmed, or consumed by a booking that names it, is accepted. Expired is lapsed. Let go before
+then is declined. An entry for a length expires when no slot of it can still fit before its
+window's end. Maintenance makes offers whose hold ran out lapse, so their time is offered on.
 
 **B7. Holds across resources (T2).** `hold_together` holds a set (driver and car) all or
 nothing, under one group with one TTL. Confirming it books the set. The application API gains

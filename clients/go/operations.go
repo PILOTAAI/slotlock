@@ -78,6 +78,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_list_waitlist", method: "GET", path: "/v1/waitlist", pathParams: nil, query: []string{"resource_id", "pool", "holder_ref", "limit"}},
 		{name: "slotlock_join_waitlist", method: "POST", path: "/v1/waitlist", pathParams: nil, query: nil},
 		{name: "slotlock_leave_waitlist", method: "DELETE", path: "/v1/waitlist/{entry_id}", pathParams: []string{"entry_id"}, query: []string{"dry_run"}},
+		{name: "slotlock_decline_waitlist_offer", method: "POST", path: "/v1/waitlist/{entry_id}/decline", pathParams: []string{"entry_id"}, query: nil},
 		{name: "slotlock_record_coverage", method: "PUT", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_delete_coverage", method: "DELETE", path: "/v1/resources/{resource_id}/coverage/{source}", pathParams: []string{"resource_id", "source"}, query: []string{"dry_run"}},
 		{name: "slotlock_get_coverage", method: "GET", path: "/v1/resources/{resource_id}/coverage", pathParams: []string{"resource_id"}, query: nil},
@@ -2623,6 +2624,8 @@ type JoinWaitlistInput struct {
 
 	OfferTTLSeconds *int64
 
+	DurationMinutes *int64
+
 	// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
 	// request answers what the first did; with another request, 422 idempotency_conflict.
 	IdempotencyKey *string
@@ -2648,6 +2651,9 @@ func (in JoinWaitlistInput) values() map[string]any {
 	if in.OfferTTLSeconds != nil {
 		values["offer_ttl_seconds"] = *in.OfferTTLSeconds
 	}
+	if in.DurationMinutes != nil {
+		values["duration_minutes"] = *in.DurationMinutes
+	}
 	if in.IdempotencyKey != nil {
 		values["idempotency_key"] = *in.IdempotencyKey
 	}
@@ -2658,11 +2664,15 @@ func (in JoinWaitlistInput) values() map[string]any {
 }
 
 // JoinWaitlist: Join the waitlist. Wait for a window on one resource (resource_id) or on any
-// member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold
-// released or expired, a no-show), the entries waiting for it are offered in the order they
-// joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and
-// the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose
-// window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
+// member of a pool (pool) that is taken now, or with duration_minutes for any slot of that length
+// within it. When time comes free (a booking cancelled, a hold released or expired, a no-show),
+// the entries waiting are offered in the order they joined: the first that fits gets a hold of it
+// (the window, or the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default
+// 900), and the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it
+// (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined), or
+// let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot can be
+// offered to before its window closes expires (waitlist.expired). Joining and leaving are on the
+// feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at once (409
 // waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
 // Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
 // (replayed: true) for as long as it is kept; the same key with another request is 422
@@ -2696,6 +2706,33 @@ func (in LeaveWaitlistInput) values() map[string]any {
 // and stays. left is false when there was no such entry.
 func (c *Client) LeaveWaitlist(ctx context.Context, in LeaveWaitlistInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_leave_waitlist", in.values())
+}
+
+// DeclineWaitlistOfferInput holds the arguments of [Client.DeclineWaitlistOffer].
+type DeclineWaitlistOfferInput struct {
+	EntryID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeclineWaitlistOfferInput) values() map[string]any {
+	values := map[string]any{}
+	values["entry_id"] = in.EntryID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeclineWaitlistOffer: Decline a waitlist offer. Turn down the hold a waitlist entry was
+// offered: the hold is let go, the entry is declined (waitlist.declined), and the time is offered
+// to the next who waits. 404 waitlist_offer_not_found when the entry has no open offer.
+func (c *Client) DeclineWaitlistOffer(ctx context.Context, in DeclineWaitlistOfferInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_decline_waitlist_offer", in.values())
 }
 
 // RecordCoverageInput holds the arguments of [Client.RecordCoverage].

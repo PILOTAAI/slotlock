@@ -80,6 +80,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_list_waitlist", new Operation("GET", "/v1/waitlist", List.of(), List.of("resource_id", "pool", "holder_ref", "limit"))),
           Map.entry("slotlock_join_waitlist", new Operation("POST", "/v1/waitlist", List.of(), List.of())),
           Map.entry("slotlock_leave_waitlist", new Operation("DELETE", "/v1/waitlist/{entry_id}", List.of("entry_id"), List.of("dry_run"))),
+          Map.entry("slotlock_decline_waitlist_offer", new Operation("POST", "/v1/waitlist/{entry_id}/decline", List.of("entry_id"), List.of())),
           Map.entry("slotlock_record_coverage", new Operation("PUT", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_delete_coverage", new Operation("DELETE", "/v1/resources/{resource_id}/coverage/{source}", List.of("resource_id", "source"), List.of("dry_run"))),
           Map.entry("slotlock_get_coverage", new Operation("GET", "/v1/resources/{resource_id}/coverage", List.of("resource_id"), List.of())),
@@ -2403,22 +2404,26 @@ public abstract class SlotlockOperations {
 
   /**
    * Join the waitlist. Wait for a window on one resource (resource_id) or on any member of a pool
-   * (pool) that is taken now. When it comes free (a booking cancelled, a hold released or
-   * expired, a no-show), the entries waiting for it are offered in the order they joined: the
-   * first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed
-   * says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
-   * starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-   * waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
-   * Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
-   * (replayed: true) for as long as it is kept; the same key with another request is 422
-   * idempotency_conflict.
+   * (pool) that is taken now, or with duration_minutes for any slot of that length within it.
+   * When time comes free (a booking cancelled, a hold released or expired, a no-show), the
+   * entries waiting are offered in the order they joined: the first that fits gets a hold of it
+   * (the window, or the earliest slot of its length) for holder_ref, for offer_ttl_seconds
+   * (default 900), and the feed says so (waitlist.offered, with hold_id). Confirm the hold to
+   * book it (waitlist.accepted), decline it with slotlock_decline_waitlist_offer
+   * (waitlist.declined), or let it lapse (waitlist.lapsed); either way the time goes to the next.
+   * An entry no slot can be offered to before its window closes expires (waitlist.expired).
+   * Joining and leaving are on the feed too (waitlist.joined, waitlist.left). A holder may wait
+   * for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an
+   * idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry
+   * the first request made (replayed: true) for as long as it is kept; the same key with another
+   * request is 422 idempotency_conflict.
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
    * @param holderRef {@code holder_ref}, string
    * @param optional the optional arguments, or null: {@code resource_id} (string), {@code pool}
-   * (string), {@code offer_ttl_seconds} (integer), {@code idempotency_key} (string), {@code
-   * dry_run} (boolean)
+   * (string), {@code offer_ttl_seconds} (integer), {@code duration_minutes} (integer), {@code
+   * idempotency_key} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2427,21 +2432,25 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("holder_ref", holderRef);
-    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds", "idempotency_key", "dry_run"), "slotlock_join_waitlist");
+    putOptional(values, optional, Set.of("resource_id", "pool", "offer_ttl_seconds", "duration_minutes", "idempotency_key", "dry_run"), "slotlock_join_waitlist");
     return call("slotlock_join_waitlist", values);
   }
 
   /**
    * Join the waitlist. Wait for a window on one resource (resource_id) or on any member of a pool
-   * (pool) that is taken now. When it comes free (a booking cancelled, a hold released or
-   * expired, a no-show), the entries waiting for it are offered in the order they joined: the
-   * first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed
-   * says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
-   * starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-   * waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
-   * Idempotency-Key header or idempotency_key), a retry answers the entry the first request made
-   * (replayed: true) for as long as it is kept; the same key with another request is 422
-   * idempotency_conflict.
+   * (pool) that is taken now, or with duration_minutes for any slot of that length within it.
+   * When time comes free (a booking cancelled, a hold released or expired, a no-show), the
+   * entries waiting are offered in the order they joined: the first that fits gets a hold of it
+   * (the window, or the earliest slot of its length) for holder_ref, for offer_ttl_seconds
+   * (default 900), and the feed says so (waitlist.offered, with hold_id). Confirm the hold to
+   * book it (waitlist.accepted), decline it with slotlock_decline_waitlist_offer
+   * (waitlist.declined), or let it lapse (waitlist.lapsed); either way the time goes to the next.
+   * An entry no slot can be offered to before its window closes expires (waitlist.expired).
+   * Joining and leaving are on the feed too (waitlist.joined, waitlist.left). A holder may wait
+   * for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an
+   * idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry
+   * the first request made (replayed: true) for as long as it is kept; the same key with another
+   * request is 422 idempotency_conflict.
    *
    * @param start {@code start}, string
    * @param end {@code end}, string
@@ -2481,6 +2490,36 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> leaveWaitlist(String entryId) {
     return leaveWaitlist(entryId, null);
+  }
+
+  /**
+   * Decline a waitlist offer. Turn down the hold a waitlist entry was offered: the hold is let
+   * go, the entry is declined (waitlist.declined), and the time is offered to the next who waits.
+   * 404 waitlist_offer_not_found when the entry has no open offer.
+   *
+   * @param entryId {@code entry_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> declineWaitlistOffer(String entryId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("entry_id", entryId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_decline_waitlist_offer");
+    return call("slotlock_decline_waitlist_offer", values);
+  }
+
+  /**
+   * Decline a waitlist offer. Turn down the hold a waitlist entry was offered: the hold is let
+   * go, the entry is declined (waitlist.declined), and the time is offered to the next who waits.
+   * 404 waitlist_offer_not_found when the entry has no open offer.
+   *
+   * @param entryId {@code entry_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> declineWaitlistOffer(String entryId) {
+    return declineWaitlistOffer(entryId, null);
   }
 
   /**

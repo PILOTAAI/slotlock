@@ -485,6 +485,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["dry_run"],
     },
     Operation {
+        name: "slotlock_decline_waitlist_offer",
+        method: "POST",
+        path: "/v1/waitlist/{entry_id}/decline",
+        path_params: &["entry_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_record_coverage",
         method: "PUT",
         path: "/v1/resources/{resource_id}/coverage/{source}",
@@ -1749,6 +1756,8 @@ pub struct JoinWaitlistInput {
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_ttl_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
     /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
     /// request answers what the first did; with another request, 422 idempotency_conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1764,6 +1773,18 @@ pub struct JoinWaitlistInput {
 /// The arguments of [`Client::leave_waitlist`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LeaveWaitlistInput {
+    pub entry_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::decline_waitlist_offer`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeclineWaitlistOfferInput {
     pub entry_id: String,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
@@ -2825,15 +2846,19 @@ impl Client {
     /// Join the waitlist.
     ///
     /// Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
-    /// taken now. When it comes free (a booking cancelled, a hold released or expired, a
-    /// no-show), the entries waiting for it are offered in the order they joined: the first gets
-    /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
-    /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
-    /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-    /// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
-    /// Idempotency-Key header or idempotency_key), a retry answers the entry the first request
-    /// made (replayed: true) for as long as it is kept; the same key with another request is 422
-    /// idempotency_conflict.
+    /// taken now, or with duration_minutes for any slot of that length within it. When time comes
+    /// free (a booking cancelled, a hold released or expired, a no-show), the entries waiting are
+    /// offered in the order they joined: the first that fits gets a hold of it (the window, or
+    /// the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default 900), and
+    /// the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it
+    /// (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined),
+    /// or let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot
+    /// can be offered to before its window closes expires (waitlist.expired). Joining and leaving
+    /// are on the feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at
+    /// once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key
+    /// (the Idempotency-Key header or idempotency_key), a retry answers the entry the first
+    /// request made (replayed: true) for as long as it is kept; the same key with another request
+    /// is 422 idempotency_conflict.
     pub fn join_waitlist(&self, input: &JoinWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_join_waitlist", serde_json::to_value(input)?)
     }
@@ -2845,6 +2870,15 @@ impl Client {
     /// when there was no such entry.
     pub fn leave_waitlist(&self, input: &LeaveWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_leave_waitlist", serde_json::to_value(input)?)
+    }
+
+    /// Decline a waitlist offer.
+    ///
+    /// Turn down the hold a waitlist entry was offered: the hold is let go, the entry is declined
+    /// (waitlist.declined), and the time is offered to the next who waits. 404
+    /// waitlist_offer_not_found when the entry has no open offer.
+    pub fn decline_waitlist_offer(&self, input: &DeclineWaitlistOfferInput) -> Result<Value, Error> {
+        self.call("slotlock_decline_waitlist_offer", serde_json::to_value(input)?)
     }
 
     /// Record calendar coverage.
