@@ -303,6 +303,7 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.tenant_usage(text, date, date)',
   'slotlock.tenant_quota_usage(text, date)',
   'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
+  'slotlock.tenant_plan_quotas(text)',
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -362,8 +363,32 @@ export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
 ] as const);
 
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
+/**
+ * Partner accounts (RFC 0003 part 4): what the serving role may call for a partner key and the
+ * partner API. A partner, its keys and its contract are made by the schema owner (`slotlock partner`).
+ */
+export const SLOTLOCK_PARTNER_FUNCTIONS = Object.freeze([
+  'slotlock.partner_tenant_blocked(text)',
+  'slotlock.authenticate_partner_key(bytea)',
+  'slotlock.partner_contract(text)',
+  'slotlock.put_partner_account(text, text, text)',
+  'slotlock.list_partner_accounts(text)',
+  'slotlock.get_partner_account(text, text)',
+  'slotlock.set_partner_account_suspended(text, text, boolean, text)',
+  'slotlock.partner_usage(text, date, date, text)',
+] as const);
+
+/** The partner tables: owner-only, reached through SLOTLOCK_PARTNER_FUNCTIONS. */
+export const SLOTLOCK_PARTNER_TABLES = Object.freeze([
+  'partners',
+  'partner_keys',
+  'partner_accounts',
+  'partner_invoices',
+] as const);
+
 export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_API_KEY_FUNCTIONS,
+  ...SLOTLOCK_PARTNER_FUNCTIONS,
   ...SLOTLOCK_DASHBOARD_FUNCTIONS,
   ...SLOTLOCK_SCHEMA_FUNCTIONS,
   ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
@@ -372,6 +397,7 @@ export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
 export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_API_KEY_TABLES,
+  ...SLOTLOCK_PARTNER_TABLES,
   ...SLOTLOCK_DASHBOARD_TABLES,
   ...SLOTLOCK_SCHEMA_TABLES,
   ...SLOTLOCK_TENANT_ADMIN_TABLES,
@@ -709,16 +735,21 @@ $slotlock_set_api_key_resource_scope$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[6]} FROM PUBLIC;
 
 -- As authenticate_api_key, with the key's scope: null locations and groups for a key with none.
+-- A key of a partner's account whose partner is not active (RFC 0003 P2) authenticates as nothing.
 CREATE OR REPLACE FUNCTION slotlock.authenticate_scoped_api_key(presented_secret_hash bytea)
 RETURNS TABLE (key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[])
-LANGUAGE sql
+LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_authenticate_scoped_api_key$
+BEGIN
+  RETURN QUERY
   SELECT found.key_id, found.key_tenant_ref, found.key_scopes, scope.locations, scope.groups
     FROM slotlock.authenticate_api_key(presented_secret_hash) found
-    LEFT JOIN slotlock.api_key_resource_scopes scope ON scope.key_id = found.key_id;
+    LEFT JOIN slotlock.api_key_resource_scopes scope ON scope.key_id = found.key_id
+   WHERE NOT slotlock.partner_tenant_blocked(found.key_tenant_ref);
+END
 $slotlock_authenticate_scoped_api_key$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[7]} FROM PUBLIC;
 
@@ -979,10 +1010,11 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_suspended$
+  -- Its own suspension, or its partner's (a partner's account, RFC 0003 P2).
   SELECT EXISTS (
     SELECT 1 FROM slotlock.tenant_suspensions suspended
      WHERE suspended.tenant_ref = requested_tenant_ref
-  );
+  ) OR slotlock.partner_tenant_blocked(requested_tenant_ref);
 $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
 
@@ -1015,6 +1047,32 @@ CREATE TABLE IF NOT EXISTS slotlock.tenant_plans (
   )
 );
 ALTER TABLE slotlock.tenant_plans ENABLE ROW LEVEL SECURITY;
+-- A partner's account (RFC 0003 P4) is on one of its contract's plans: its own name and numbers,
+-- quotas included, set by put_partner_account. Every other row is a plan Pylota sells.
+ALTER TABLE slotlock.tenant_plans
+  ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'direct',
+  ADD COLUMN IF NOT EXISTS partner_id text,
+  ADD COLUMN IF NOT EXISTS quota_operations bigint,
+  ADD COLUMN IF NOT EXISTS quota_bookings bigint,
+  ADD COLUMN IF NOT EXISTS quota_stop_percent integer;
+DO $slotlock_tenant_plans_source$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.tenant_plans'::regclass AND conname = 'slotlock_tenant_plans_source_valid'
+  ) THEN
+    -- Wider than the plan check it replaces, so added NOT VALID (DEPLOYMENT_VALIDATE_CONSTRAINTS).
+    ALTER TABLE slotlock.tenant_plans DROP CONSTRAINT IF EXISTS slotlock_tenant_plans_plan_valid;
+    ALTER TABLE slotlock.tenant_plans ADD CONSTRAINT slotlock_tenant_plans_source_valid CHECK (
+      (source = 'direct' AND partner_id IS NULL AND plan IN ('free', 'developer')
+       AND quota_operations IS NULL AND quota_bookings IS NULL AND quota_stop_percent IS NULL)
+      OR (source = 'partner' AND partner_id ~ '^[a-z][a-z0-9-]{1,39}$' AND plan ~ '^[a-z][a-z0-9_]{0,40}$'
+          AND quota_operations BETWEEN 1 AND 1000000000000 AND quota_bookings BETWEEN 1 AND 1000000000000
+          AND quota_stop_percent BETWEEN 100 AND 1000)
+    ) NOT VALID;
+  END IF;
+END
+$slotlock_tenant_plans_source$;
 REVOKE ALL ON slotlock.tenant_plans FROM PUBLIC;
 
 -- The plan a hosted deployment puts every tenant without a row of its own on, from applies_from:
@@ -1081,6 +1139,21 @@ AS $slotlock_plan_default$
          fallback.max_webhook_endpoints, fallback.applies_from
     FROM slotlock.plan_defaults fallback;
 $slotlock_plan_default$;
+
+-- The tenant's plan and its own quotas, when it has them (a partner's account, RFC 0003 P4): null
+-- quotas are the plan's (plans.ts SLOTLOCK_PLAN_QUOTAS).
+CREATE OR REPLACE FUNCTION slotlock.tenant_plan_quotas(requested_tenant_ref text)
+RETURNS TABLE (plan text, operations bigint, bookings bigint, stop_percent integer)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_plan_quotas$
+  SELECT given.plan, own.quota_operations, own.quota_bookings, own.quota_stop_percent
+    FROM slotlock.tenant_plan(requested_tenant_ref) given
+    LEFT JOIN slotlock.tenant_plans own ON own.tenant_ref = requested_tenant_ref;
+$slotlock_tenant_plan_quotas$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[19]} FROM PUBLIC;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[12]} FROM PUBLIC;
 
 -- Before the default applies to every tenant, a new one is put on it at once: one with no API key
@@ -1734,6 +1807,11 @@ BEGIN
   RETURN NEXT;
   erased_table := 'tenant_plans';
   DELETE FROM slotlock.tenant_plans WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- A partner's account: its partner's record of it goes too (RFC 0003 P3 erase).
+  erased_table := 'partner_accounts';
+  DELETE FROM slotlock.partner_accounts WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'assistant_conversations';
@@ -2999,6 +3077,346 @@ DROP TRIGGER IF EXISTS slotlock_outbox_calendar_event_change ON slotlock.calenda
 CREATE TRIGGER slotlock_outbox_calendar_event_change
   AFTER INSERT OR UPDATE OR DELETE ON slotlock.calendar_events
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_calendar_event_change();
+`;
+
+/**
+ * Partner accounts (RFC 0003 part 4, P1-P4, P6): a partner (stackapi.app, say) creates and runs
+ * Slotlock tenants for its own users, `partner:<partner>:<account>`, with plans from its contract,
+ * and Pylota invoices the partner. Owner-only tables; the serving role reaches them only through
+ * SLOTLOCK_PARTNER_FUNCTIONS, each scoped to the one partner a partner key names.
+ */
+const SLOTLOCK_PARTNER_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.partners (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'active',
+  -- The plans its accounts may be on, the scopes their keys may have, and its prices (partners.ts).
+  contract jsonb NOT NULL,
+  stripe_customer text,
+  -- Where usage.period_closed goes (P5), signed with the secret.
+  webhook_url text,
+  webhook_secret text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partners_valid CHECK (
+    id ~ '^[a-z][a-z0-9-]{1,39}$'
+    AND char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'
+    AND status IN ('active', 'suspended')
+    AND jsonb_typeof(contract) = 'object'
+    AND (stripe_customer IS NULL OR stripe_customer ~ '^cus_[A-Za-z0-9]{1,250}$')
+    AND (webhook_url IS NULL OR (webhook_url ~ '^https://' AND octet_length(webhook_url) <= 2048))
+    AND (webhook_secret IS NULL OR webhook_secret ~ '^whsec_[A-Za-z0-9+/=]{32,200}$')
+  )
+);
+ALTER TABLE slotlock.partners ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partners FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS slotlock.partner_keys (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE CASCADE,
+  name text NOT NULL,
+  prefix text NOT NULL,
+  secret_hash bytea NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  last_used_at timestamptz,
+  revoked_at timestamptz,
+  CONSTRAINT slotlock_partner_keys_secret_hash_key UNIQUE (secret_hash),
+  CONSTRAINT slotlock_partner_keys_valid CHECK (
+    octet_length(secret_hash) = 32
+    AND char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'
+    AND prefix ~ '^slk_partner_[0-9A-Za-z]{6}$'
+  )
+);
+ALTER TABLE slotlock.partner_keys ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_keys FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS slotlock.partner_accounts (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  account text NOT NULL,
+  tenant_ref text NOT NULL,
+  plan text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_partner_accounts_pkey PRIMARY KEY (partner_id, account),
+  CONSTRAINT slotlock_partner_accounts_tenant_key UNIQUE (tenant_ref),
+  CONSTRAINT slotlock_partner_accounts_valid CHECK (
+    account ~ '^[A-Za-z0-9._-]{1,128}$'
+    AND tenant_ref = 'partner:' || partner_id || ':' || account
+    AND plan ~ '^[a-z][a-z0-9_]{0,40}$'
+  )
+);
+ALTER TABLE slotlock.partner_accounts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_accounts FROM PUBLIC;
+
+-- Each line of a partner's month (P6), recorded before it is sent to Stripe and with its Stripe id
+-- after, so a month is billed once however often the job runs.
+CREATE TABLE IF NOT EXISTS slotlock.partner_invoices (
+  partner_id text NOT NULL REFERENCES slotlock.partners (id) ON DELETE RESTRICT,
+  month date NOT NULL,
+  line text NOT NULL,
+  description text NOT NULL,
+  quantity bigint NOT NULL,
+  amount bigint NOT NULL,
+  currency text NOT NULL,
+  stripe_item text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  sent_at timestamptz,
+  CONSTRAINT slotlock_partner_invoices_pkey PRIMARY KEY (partner_id, month, line),
+  CONSTRAINT slotlock_partner_invoices_valid CHECK (
+    extract(day FROM month) = 1
+    AND line ~ '^[a-z][a-z0-9_]{0,60}$'
+    AND char_length(description) BETWEEN 1 AND 500
+    AND quantity >= 0 AND amount >= 0
+    AND currency ~ '^[a-z]{3}$'
+    AND (stripe_item IS NULL OR stripe_item ~ '^ii_[A-Za-z0-9]{1,250}$')
+  )
+);
+ALTER TABLE slotlock.partner_invoices ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.partner_invoices FROM PUBLIC;
+
+-- Whether the tenant is a partner's account whose partner is not active: its keys authenticate as
+-- nothing and it is suspended with its partner (tenant_suspended). Any other tenant reference, one
+-- that merely starts with partner: included, is never blocked here.
+CREATE OR REPLACE FUNCTION slotlock.partner_tenant_blocked(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_tenant_blocked$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.partner_accounts owned
+      JOIN slotlock.partners partner ON partner.id = owned.partner_id
+     WHERE owned.tenant_ref = requested_tenant_ref AND partner.status <> 'active'
+  );
+$slotlock_partner_tenant_blocked$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[0]} FROM PUBLIC;
+
+-- A partner key's partner, while the key is not revoked and the partner is active; last_used_at
+-- moves at most once a minute.
+CREATE OR REPLACE FUNCTION slotlock.authenticate_partner_key(presented_secret_hash bytea)
+RETURNS TABLE (key_id uuid, partner_id text)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_authenticate_partner_key$
+#variable_conflict use_column
+BEGIN
+  UPDATE slotlock.partner_keys used
+     SET last_used_at = now()
+   WHERE used.secret_hash = presented_secret_hash AND used.revoked_at IS NULL
+     AND (used.last_used_at IS NULL OR used.last_used_at < now() - interval '1 minute');
+  RETURN QUERY
+  SELECT found.id, found.partner_id
+    FROM slotlock.partner_keys found
+    JOIN slotlock.partners partner ON partner.id = found.partner_id
+   WHERE found.secret_hash = presented_secret_hash AND found.revoked_at IS NULL
+     AND partner.status = 'active';
+END
+$slotlock_authenticate_partner_key$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[1]} FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION slotlock.partner_contract(requested_partner_id text)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_contract$
+  SELECT partner.contract FROM slotlock.partners partner
+   WHERE partner.id = requested_partner_id AND partner.status = 'active';
+$slotlock_partner_contract$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[2]} FROM PUBLIC;
+
+-- Create the partner's account, or put it on another of its contract's plans: the account's tenant
+-- gets that plan's limits and quotas (tenant_plans, source partner). Refused (invalid_parameter_value)
+-- for a plan the contract does not have; nothing for a partner that is not active.
+CREATE OR REPLACE FUNCTION slotlock.put_partner_account(
+  requested_partner_id text, requested_account text, requested_plan text
+)
+RETURNS TABLE (account text, tenant_ref text, plan text, created_at timestamptz, updated_at timestamptz, created boolean)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_put_partner_account$
+#variable_conflict use_column
+DECLARE
+  terms jsonb;
+  chosen jsonb;
+  tenant text := 'partner:' || requested_partner_id || ':' || requested_account;
+  existed boolean;
+BEGIN
+  SELECT partner.contract INTO terms FROM slotlock.partners partner
+   WHERE partner.id = requested_partner_id AND partner.status = 'active';
+  IF NOT FOUND THEN RETURN; END IF;
+  IF requested_account IS NULL OR requested_account !~ '^[A-Za-z0-9._-]{1,128}$' THEN
+    RAISE EXCEPTION 'Slotlock partner account must be 1-128 letters, digits, dots, dashes or underscores'
+      USING ERRCODE = 'invalid_parameter_value', HINT = 'invalid_partner_account';
+  END IF;
+  chosen := terms -> 'plans' -> requested_plan;
+  IF requested_plan IS NULL OR chosen IS NULL OR jsonb_typeof(chosen) <> 'object' THEN
+    RAISE EXCEPTION 'Slotlock partner plan is not one of the contract''s'
+      USING ERRCODE = 'invalid_parameter_value', HINT = 'invalid_partner_plan';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || tenant, 0));
+  existed := EXISTS (SELECT 1 FROM slotlock.partner_accounts kept
+                      WHERE kept.partner_id = requested_partner_id AND kept.account = requested_account);
+  INSERT INTO slotlock.partner_accounts AS kept (partner_id, account, tenant_ref, plan)
+  VALUES (requested_partner_id, requested_account, tenant, requested_plan)
+  ON CONFLICT (partner_id, account) DO UPDATE
+    SET plan = EXCLUDED.plan,
+        updated_at = CASE WHEN kept.plan = EXCLUDED.plan THEN kept.updated_at ELSE statement_timestamp() END;
+  INSERT INTO slotlock.tenant_plans AS kept (
+    tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints,
+    source, partner_id, quota_operations, quota_bookings, quota_stop_percent
+  ) VALUES (
+    tenant, requested_plan, 'active',
+    (chosen ->> 'resources')::integer, (chosen ->> 'api_keys')::integer, (chosen ->> 'webhook_endpoints')::integer,
+    'partner', requested_partner_id,
+    (chosen ->> 'operations')::bigint, (chosen ->> 'bookings')::bigint, (chosen ->> 'stop_percent')::integer
+  )
+  ON CONFLICT (tenant_ref) DO UPDATE
+    SET plan = EXCLUDED.plan, status = 'active',
+        max_resources = EXCLUDED.max_resources, max_api_keys = EXCLUDED.max_api_keys,
+        max_webhook_endpoints = EXCLUDED.max_webhook_endpoints,
+        source = 'partner', partner_id = EXCLUDED.partner_id,
+        quota_operations = EXCLUDED.quota_operations, quota_bookings = EXCLUDED.quota_bookings,
+        quota_stop_percent = EXCLUDED.quota_stop_percent,
+        stripe_customer = NULL, stripe_subscription = NULL, current_period_end = NULL,
+        updated_at = statement_timestamp();
+  RETURN QUERY
+  SELECT kept.account, kept.tenant_ref, kept.plan, kept.created_at, kept.updated_at, NOT existed
+    FROM slotlock.partner_accounts kept
+   WHERE kept.partner_id = requested_partner_id AND kept.account = requested_account;
+END
+$slotlock_put_partner_account$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[3]} FROM PUBLIC;
+
+-- PL/pgSQL, as partner_usage: these read tables created after this section, which a SQL function's
+-- body may not name when it is created on a new schema.
+CREATE OR REPLACE FUNCTION slotlock.list_partner_accounts(requested_partner_id text)
+RETURNS TABLE (account text, plan text, suspended boolean, created_at timestamptz, updated_at timestamptz)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_list_partner_accounts$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  SELECT owned.account, owned.plan,
+         EXISTS (SELECT 1 FROM slotlock.tenant_suspensions held WHERE held.tenant_ref = owned.tenant_ref),
+         owned.created_at, owned.updated_at
+    FROM slotlock.partner_accounts owned
+   WHERE owned.partner_id = requested_partner_id
+   ORDER BY owned.account
+   LIMIT 10000;
+END
+$slotlock_list_partner_accounts$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[4]} FROM PUBLIC;
+
+-- One account, with how many resources (archived ones included) and active keys it holds.
+CREATE OR REPLACE FUNCTION slotlock.get_partner_account(requested_partner_id text, requested_account text)
+RETURNS TABLE (account text, tenant_ref text, plan text, suspended boolean, created_at timestamptz,
+               updated_at timestamptz, resources bigint, api_keys bigint)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_get_partner_account$
+#variable_conflict use_column
+DECLARE
+  owned slotlock.partner_accounts%ROWTYPE;
+  setting text;
+  previous jsonb := '{}'::jsonb;
+  counted bigint;
+BEGIN
+  SELECT * INTO owned FROM slotlock.partner_accounts kept
+   WHERE kept.partner_id = requested_partner_id AND kept.account = requested_account;
+  IF NOT FOUND THEN RETURN; END IF;
+  -- Resources have forced row-level security, their owner bound too: counted in the account's context.
+  FOR setting IN SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
+  LOOP
+    previous := previous || jsonb_build_object(setting, current_setting(setting, true));
+    PERFORM set_config(setting, owned.tenant_ref, true);
+  END LOOP;
+  SELECT count(*) INTO counted FROM slotlock.resources held WHERE held.tenant_ref = owned.tenant_ref;
+  FOR setting IN SELECT jsonb_object_keys(previous) LOOP
+    PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
+  END LOOP;
+  RETURN QUERY
+  SELECT owned.account, owned.tenant_ref, owned.plan,
+         EXISTS (SELECT 1 FROM slotlock.tenant_suspensions held WHERE held.tenant_ref = owned.tenant_ref),
+         owned.created_at, owned.updated_at, counted,
+         (SELECT count(*) FROM slotlock.api_keys issued
+           WHERE issued.tenant_ref = owned.tenant_ref AND issued.revoked_at IS NULL
+             AND (issued.expires_at IS NULL OR issued.expires_at > now()));
+END
+$slotlock_get_partner_account$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[5]} FROM PUBLIC;
+
+-- Suspend an account of the partner's, or lift a suspension the partner made: one Pylota made (for
+-- abuse, say) the partner cannot lift. True when it changed something; null for no such account.
+CREATE OR REPLACE FUNCTION slotlock.set_partner_account_suspended(
+  requested_partner_id text, requested_account text, requested_suspended boolean, requested_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_partner_account_suspended$
+DECLARE
+  tenant text;
+BEGIN
+  SELECT owned.tenant_ref INTO tenant FROM slotlock.partner_accounts owned
+    JOIN slotlock.partners partner ON partner.id = owned.partner_id AND partner.status = 'active'
+   WHERE owned.partner_id = requested_partner_id AND owned.account = requested_account;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  -- As suspend_tenant: the tenant's lock and its key lock, so writes in flight finish first.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || tenant, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || tenant, 0));
+  IF requested_suspended THEN
+    INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
+    VALUES (tenant, 'partner: ' || COALESCE(left(requested_reason, 200), 'suspended by its partner'))
+    ON CONFLICT (tenant_ref) DO NOTHING;
+    RETURN FOUND;
+  END IF;
+  DELETE FROM slotlock.tenant_suspensions held
+   WHERE held.tenant_ref = tenant AND held.reason LIKE 'partner: %';
+  RETURN FOUND;
+END
+$slotlock_set_partner_account_suspended$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[6]} FROM PUBLIC;
+
+-- The partner's accounts' usage (P5), from usage_daily, by account, UTC day and metric, from
+-- from_day to to_day (at most the retention); one account, or all of them.
+CREATE OR REPLACE FUNCTION slotlock.partner_usage(
+  requested_partner_id text, from_day date, to_day date, requested_account text
+)
+RETURNS TABLE (account text, day date, metric text, count bigint)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_partner_usage$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  SELECT owned.account, used.day, used.metric,
+         CASE WHEN used.metric = 'resources' THEN max(used.count) ELSE sum(used.count) END::bigint
+    FROM slotlock.partner_accounts owned
+    JOIN slotlock.usage_daily used ON used.tenant_ref = owned.tenant_ref
+   WHERE owned.partner_id = requested_partner_id
+     AND (requested_account IS NULL OR owned.account = requested_account)
+     AND used.day BETWEEN from_day AND to_day
+     AND to_day - from_day BETWEEN 0 AND ${SLOTLOCK_USAGE_RETENTION_DAYS}
+   GROUP BY owned.account, used.day, used.metric
+   ORDER BY owned.account, used.day, used.metric;
+END
+$slotlock_partner_usage$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[7]} FROM PUBLIC;
 `;
 
 // btree_gist is created in slotlock when it is missing; one installed elsewhere stays where it is.
@@ -4521,7 +4939,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id

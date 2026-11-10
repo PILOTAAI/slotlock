@@ -526,6 +526,83 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("from", "to"),
     ),
+    "slotlock_partner_get_account": Operation(
+        "slotlock_partner_get_account",
+        "GET",
+        "/v1/partner/accounts/{account}",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_put_account": Operation(
+        "slotlock_partner_put_account",
+        "PUT",
+        "/v1/partner/accounts/{account}",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_list_accounts": Operation(
+        "slotlock_partner_list_accounts",
+        "GET",
+        "/v1/partner/accounts",
+        (),
+        (),
+    ),
+    "slotlock_partner_list_keys": Operation(
+        "slotlock_partner_list_keys",
+        "GET",
+        "/v1/partner/accounts/{account}/keys",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_create_key": Operation(
+        "slotlock_partner_create_key",
+        "POST",
+        "/v1/partner/accounts/{account}/keys",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_rotate_key": Operation(
+        "slotlock_partner_rotate_key",
+        "POST",
+        "/v1/partner/accounts/{account}/keys/{key_id}/rotate",
+        ("account", "key_id"),
+        (),
+    ),
+    "slotlock_partner_revoke_key": Operation(
+        "slotlock_partner_revoke_key",
+        "DELETE",
+        "/v1/partner/accounts/{account}/keys/{key_id}",
+        ("account", "key_id"),
+        (),
+    ),
+    "slotlock_partner_suspend_account": Operation(
+        "slotlock_partner_suspend_account",
+        "POST",
+        "/v1/partner/accounts/{account}/suspend",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_unsuspend_account": Operation(
+        "slotlock_partner_unsuspend_account",
+        "POST",
+        "/v1/partner/accounts/{account}/unsuspend",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_erase_account": Operation(
+        "slotlock_partner_erase_account",
+        "POST",
+        "/v1/partner/accounts/{account}/erase",
+        ("account",),
+        (),
+    ),
+    "slotlock_partner_get_usage": Operation(
+        "slotlock_partner_get_usage",
+        "GET",
+        "/v1/partner/usage",
+        (),
+        ("from", "to", "account"),
+    ),
 }
 
 
@@ -1911,3 +1988,134 @@ class Operations(Transport):
         if to is not None:
             values["to"] = to
         return self.call("slotlock_get_usage", values)
+
+    def partner_get_account(self, account: str) -> dict[str, Any]:
+        """Read an account.
+
+        One of the partner's accounts, with how many resources (archived ones included) and active
+        API keys it holds. 404 account_not_found for an account the partner does not have.
+        """
+        values: dict[str, Any] = {"account": account}
+        return self.call("slotlock_partner_get_account", values)
+
+    def partner_put_account(self, account: str, *, plan: str) -> dict[str, Any]:
+        """Create or update an account.
+
+        Create the partner's account with this id (your own id for your user, 1-128 letters,
+        digits, dots, dashes or underscores), or put it on another plan: one of your contract's,
+        whose limits and monthly quotas the account then has. Its tenant is
+        partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call
+        changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.
+        """
+        values: dict[str, Any] = {"account": account, "plan": plan}
+        return self.call("slotlock_partner_put_account", values)
+
+    def partner_list_accounts(self) -> dict[str, Any]:
+        """List accounts.
+
+        The partner's accounts, by id: plan, whether suspended, and when made and last changed.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_partner_list_accounts", values)
+
+    def partner_list_keys(self, account: str) -> dict[str, Any]:
+        """List an account's keys.
+
+        The account's API keys, revoked and expired ones included, newest first; never the keys
+        themselves.
+        """
+        values: dict[str, Any] = {"account": account}
+        return self.call("slotlock_partner_list_keys", values)
+
+    def partner_create_key(
+        self,
+        account: str,
+        *,
+        name: str,
+        scopes: list[str] | None = None,
+        expires_in_days: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a key for an account.
+
+        An API key for the account, shown once in key and never again; only its SHA-256 is kept.
+        Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
+        any key. scopes: some of the ones your contract allows (read and write unless it says), by
+        default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
+        another scope; 409 api_key_limit_reached past the account plan's keys.
+        """
+        values: dict[str, Any] = {"account": account, "name": name}
+        if scopes is not None:
+            values["scopes"] = scopes
+        if expires_in_days is not None:
+            values["expires_in_days"] = expires_in_days
+        return self.call("slotlock_partner_create_key", values)
+
+    def partner_rotate_key(self, account: str, key_id: str) -> dict[str, Any]:
+        """Rotate an account's key.
+
+        A new secret for one of the account's active keys, shown once; the old one stops at once.
+        The key keeps its id and what it booked. 404 key_not_found otherwise.
+        """
+        values: dict[str, Any] = {"account": account, "key_id": key_id}
+        return self.call("slotlock_partner_rotate_key", values)
+
+    def partner_revoke_key(self, account: str, key_id: str) -> dict[str, Any]:
+        """Revoke an account's key.
+
+        Revoke one of the account's keys at once; revoking it again changes nothing. 404
+        key_not_found otherwise.
+        """
+        values: dict[str, Any] = {"account": account, "key_id": key_id}
+        return self.call("slotlock_partner_revoke_key", values)
+
+    def partner_suspend_account(self, account: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Suspend an account.
+
+        Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys
+        get no new secret. suspended says whether it was not suspended already.
+        """
+        values: dict[str, Any] = {"account": account}
+        if reason is not None:
+            values["reason"] = reason
+        return self.call("slotlock_partner_suspend_account", values)
+
+    def partner_unsuspend_account(self, account: str) -> dict[str, Any]:
+        """Lift a suspension.
+
+        Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as
+        when the account was not suspended.
+        """
+        values: dict[str, Any] = {"account": account}
+        return self.call("slotlock_partner_unsuspend_account", values)
+
+    def partner_erase_account(self, account: str, *, confirm: str) -> dict[str, Any]:
+        """Erase an account.
+
+        Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's
+        record of it. confirm repeats the account. Cannot be undone.
+        """
+        values: dict[str, Any] = {"account": account, "confirm": confirm}
+        return self.call("slotlock_partner_erase_account", values)
+
+    def partner_get_usage(
+        self,
+        *,
+        from_: str | None = None,
+        to: str | None = None,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        """Read the accounts' usage.
+
+        The partner's accounts' usage, the counts Pylota invoices from, by account, UTC day and
+        metric (operations, bookings, holds, webhook_deliveries, resources: each day's count),
+        from one UTC day to another (inclusive, at most 400 days apart; by default this month);
+        one account, or all. 400 invalid_usage_range otherwise.
+        """
+        values: dict[str, Any] = {}
+        if from_ is not None:
+            values["from"] = from_
+        if to is not None:
+            values["to"] = to
+        if account is not None:
+            values["account"] = account
+        return self.call("slotlock_partner_get_usage", values)

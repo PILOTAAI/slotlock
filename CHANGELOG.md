@@ -102,6 +102,26 @@ versioning.
   resource's location (with its name) and groups, and narrows by `location` and `group`, with or
   without a pool. `resource.created` and `resource.updated` carry the location. Run `slotlock
   migrate`.
+- Partner accounts (RFC 0003 P1-P4, T2). A partner reselling Slotlock runs a tenant for each of
+  its users, `partner:<partner>:<account>`. The schema owner makes partners with a contract (the
+  plans their accounts may be on, with limits and monthly quotas, the scopes their keys may carry,
+  and prices) and their keys: `slotlock partner create|list|suspend|unsuspend|key|revoke-key|
+  customer|webhook`. A partner key (`slk_partner_…`, a SHA-256 kept) carries the new `partner`
+  scope, which reaches only the eleven partner operations under `/v1/partner` (a new `Partner`
+  OpenAPI tag, `x-slotlock-scope: partner`, in the five clients): create an account or change its
+  plan, list and read accounts, make, list, rotate and revoke their keys, suspend and lift its own
+  suspension (never the deployment's), erase an account, and read its accounts' usage. An
+  application operation may now name its scope (`scope: 'partner'`); a principal carries
+  `partnerId`. New owner-only tables `slotlock.partners`, `partner_keys`, `partner_accounts` and
+  `partner_invoices`, and functions `partner_tenant_blocked`, `authenticate_partner_key`,
+  `partner_contract`, `put_partner_account`, `list_partner_accounts`, `get_partner_account`,
+  `set_partner_account_suspended` and `partner_usage`. `tenant_plans` gains `source`,
+  `partner_id` and the account's own quotas (`slotlock.tenant_plan_quotas`), and its plan check
+  takes a contract's plan names for a partner's account (added NOT VALID); quotas read a tenant's
+  own numbers before its plan's (`readSlotlockTenantQuotas`; `createSlotlockQuotas`'s `plan`
+  returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
+  their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
+  partner's record of it. Run `slotlock migrate`.
 - Keys limited to part of their tenant (RFC 0003 G6). `slotlock key create --locations <refs>
   --groups <refs>`, the dashboard's "Limit to locations or groups" (Developer plan and up when the
   dashboard has plans) or the key store's `resourceScope` makes a key that reaches only the

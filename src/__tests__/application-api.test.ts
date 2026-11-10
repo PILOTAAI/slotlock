@@ -159,6 +159,17 @@ const backend = {
   listWaitlist: vi.fn(),
   leaveWaitlist: vi.fn(),
   getUsage: vi.fn(),
+  partnerPutAccount: vi.fn(),
+  partnerListAccounts: vi.fn(),
+  partnerGetAccount: vi.fn(),
+  partnerListKeys: vi.fn(),
+  partnerCreateKey: vi.fn(),
+  partnerRotateKey: vi.fn(),
+  partnerRevokeKey: vi.fn(),
+  partnerSuspendAccount: vi.fn(),
+  partnerUnsuspendAccount: vi.fn(),
+  partnerEraseAccount: vi.fn(),
+  partnerGetUsage: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -168,6 +179,7 @@ const onEvent = vi.fn();
 const admin = { subject: 'app-1', tenantRef: 'tenant-a', scopes: ['read', 'write', 'admin'] };
 const agent = { subject: 'agent-1', tenantRef: 'tenant-a', scopes: ['read', 'write'] };
 const operator = { subject: 'operator', tenantRef: 'tenant-a' };
+const partner = { subject: 'partner_key:p1', tenantRef: 'partner:stackapi', scopes: ['partner'], partnerId: 'stackapi' };
 
 /** Options to change; `undefined` leaves an option out. */
 type Overrides = { [Name in keyof SlotlockAgentServerOptions]?: SlotlockAgentServerOptions[Name] | undefined };
@@ -181,6 +193,7 @@ function buildServer(overrides: Overrides = {}) {
       if (token === 'Bearer admin') return admin;
       if (token === 'Bearer agent') return agent;
       if (token === 'Bearer operator') return operator;
+      if (token === 'Bearer partner') return partner;
       return null;
     },
     authorize: async () => true,
@@ -288,6 +301,23 @@ const WAITLIST_ENTRY = {
     created_at: '2027-03-01T09:00:00.000Z',
   };
 
+const PARTNER_ACCOUNT = {
+  account: 'user-4821',
+  plan: 'partner_pro',
+  status: 'active',
+  created_at: '2026-11-01T09:00:00.000Z',
+  updated_at: '2026-11-01T09:00:00.000Z',
+};
+const PARTNER_KEY = {
+  id: '7d1e4f8a-2b3c-4d5e-8f90-123456789abc',
+  name: 'Booking agent',
+  prefix: 'slk_AbCdEfGh',
+  scopes: ['read', 'write'],
+  created_at: '2026-11-01T09:00:00.000Z',
+  expires_at: null,
+  last_used_at: null,
+  revoked_at: null,
+};
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
   updateResource: { resource: { ...RESOURCE, name: 'Van 42', labels: ['ev'], location: 'leeds', groups: ['physio'] } },
@@ -402,6 +432,21 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     keys: [{ key_id: null, operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 0 }],
     surfaces: [{ origin: 'rest', operations: 3, bookings: 1, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 }],
   },
+  partnerPutAccount: { account: PARTNER_ACCOUNT, created: true },
+  partnerListAccounts: { accounts: [PARTNER_ACCOUNT] },
+  partnerGetAccount: { account: { ...PARTNER_ACCOUNT, resources: 2, api_keys: 1 } },
+  partnerListKeys: { keys: [PARTNER_KEY] },
+  partnerCreateKey: { key: `slk_${'a'.repeat(46)}`, api_key: PARTNER_KEY },
+  partnerRotateKey: { key: `slk_${'b'.repeat(46)}`, api_key: PARTNER_KEY },
+  partnerRevokeKey: { api_key: { ...PARTNER_KEY, revoked_at: '2026-11-10T12:00:00.000Z' } },
+  partnerSuspendAccount: { suspended: true },
+  partnerUnsuspendAccount: { unsuspended: true },
+  partnerEraseAccount: { erased: true, rows: 12 },
+  partnerGetUsage: {
+    from: '2026-11-01',
+    to: '2026-11-30',
+    usage: [{ account: 'user-4821', day: '2026-11-10', metric: 'operations', count: 42 }],
+  },
 };
 
 beforeEach(() => {
@@ -481,7 +526,9 @@ describe('the application API over REST', () => {
   it('runs each operation for an admin key with the input its schema parsed, in the key\'s tenant', async () => {
     const server = buildServer();
     for (const definition of SLOTLOCK_APPLICATION_OPERATIONS) {
-      const response = await server.fetch(exampleRequest(definition.name));
+      // The partner API's are a partner key's; the rest an admin key's.
+      const caller = definition.scope === 'partner' ? partner : admin;
+      const response = await server.fetch(exampleRequest(definition.name, definition.scope === 'partner' ? 'partner' : 'admin'));
       expect({ name: definition.name, status: response.status }).toEqual({
         name: definition.name,
         status: 200,
@@ -493,12 +540,12 @@ describe('the application API over REST', () => {
         { principal: unknown; operation: string; signal: AbortSignal },
         Record<string, unknown>,
       ];
-      expect(context.principal).toEqual(admin);
+      expect(context.principal).toEqual(caller);
       expect(context.operation).toBe(definition.name);
       expect(context.signal).toBeInstanceOf(AbortSignal);
       expect(input).toEqual(definition.input.parse(definition.example));
       expect(authorizeApplication).toHaveBeenLastCalledWith({
-        principal: admin,
+        principal: caller,
         operation: definition.name,
         input,
       });
@@ -506,9 +553,19 @@ describe('the application API over REST', () => {
     // Each call is charged once, as one protocol request; no agent tool ran.
     expect(consumeRateLimit).toHaveBeenCalledTimes(SLOTLOCK_APPLICATION_OPERATIONS.length);
     for (const [args] of consumeRateLimit.mock.calls) {
-      expect(args).toEqual({ principal: admin, operation: 'protocol' });
+      expect(args).toMatchObject({ operation: 'protocol' });
     }
     for (const method of Object.values(agentBackend)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it('keeps the partner API to partner keys, and partner keys to it', async () => {
+    const server = buildServer();
+    for (const definition of SLOTLOCK_APPLICATION_OPERATIONS) {
+      const wrong = definition.scope === 'partner' ? 'admin' : 'partner';
+      const response = await server.fetch(exampleRequest(definition.name, wrong));
+      expect({ name: definition.name, status: response.status }).toEqual({ name: definition.name, status: 403 });
+    }
+    expect(authorizeApplication).not.toHaveBeenCalled();
   });
 
   it('refuses a key without the admin scope before reading the arguments', async () => {
@@ -862,7 +919,7 @@ describe('the OpenAPI document with the application API', () => {
     const result = await validator.validate(document);
     expect(result.errors ?? []).toEqual([]);
     expect(result.valid).toBe(true);
-    expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application']);
+    expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application', 'Partner']);
 
     const operations = Object.values(document.paths).flatMap((methods) => Object.values(methods));
     const ids = operations.map((operation) => operation.operationId as string);
@@ -881,8 +938,8 @@ describe('the OpenAPI document with the application API', () => {
       expect(operation).toMatchObject({
         operationId: definition.name,
         summary: definition.title,
-        tags: ['Application'],
-        'x-slotlock-scope': 'admin',
+        tags: [definition.scope === 'partner' ? 'Partner' : 'Application'],
+        'x-slotlock-scope': definition.scope ?? 'admin',
       });
       const responses = operation.responses as Record<string, unknown>;
       expect(Object.keys(responses)).toEqual(

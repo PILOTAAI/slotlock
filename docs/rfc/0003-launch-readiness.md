@@ -479,6 +479,14 @@ the user; stackapi bills nothing for Slotlock.
 stackapi holds the relationship and the billing. Each stackapi user gets a Slotlock tenant of their
 own, created and managed by stackapi; stackapi pays Pylota wholesale and charges its users retail.
 
+**P1-P4 status:** built on `claude/inspiring-dijkstra-bfvqif`, as below, with a partner's own
+tenant `partner:<id>` holding no data, the partner key format `slk_partner_` (40 random base62 and
+a 6-character checksum, as tenant keys), the contract kept as snake_case JSON (`plans`,
+`key_scopes`, `pricing`), `tenant_plans.source` `direct` or `partner` (not `stripe`), and the
+partner API as eleven application operations of their own scope, including listing an account's
+keys. Suspension through the partner API is recorded with a `partner: ` reason, so a partner lifts
+only its own.
+
 **P1. Partner accounts (T2).** `slotlock.partners (id, name, status, tenant_prefix, stripe_customer,
 contract jsonb)`, created only by the deployment owner (`slotlock partner create stackapi`).
 Partner keys (`slk_partner_…`), stored like API keys (SHA-256 digests, definer functions), carry a

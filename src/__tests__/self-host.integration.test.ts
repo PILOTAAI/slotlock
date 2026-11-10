@@ -898,7 +898,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         tags: { name: string }[];
         paths: Record<string, unknown>;
       };
-      expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application']);
+      expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application', 'Partner']);
       expect(document.paths).toHaveProperty(['/v1/holds/{hold_id}/confirm']);
 
       const created = await rest(application.key, 'POST', '/v1/resources', {

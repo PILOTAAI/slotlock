@@ -85,7 +85,18 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_create_webhook", new Operation("POST", "/v1/webhooks", List.of(), List.of())),
           Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of())),
           Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())),
-          Map.entry("slotlock_get_usage", new Operation("GET", "/v1/usage", List.of(), List.of("from", "to"))));
+          Map.entry("slotlock_get_usage", new Operation("GET", "/v1/usage", List.of(), List.of("from", "to"))),
+          Map.entry("slotlock_partner_get_account", new Operation("GET", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_put_account", new Operation("PUT", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_list_accounts", new Operation("GET", "/v1/partner/accounts", List.of(), List.of())),
+          Map.entry("slotlock_partner_list_keys", new Operation("GET", "/v1/partner/accounts/{account}/keys", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_create_key", new Operation("POST", "/v1/partner/accounts/{account}/keys", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_rotate_key", new Operation("POST", "/v1/partner/accounts/{account}/keys/{key_id}/rotate", List.of("account", "key_id"), List.of())),
+          Map.entry("slotlock_partner_revoke_key", new Operation("DELETE", "/v1/partner/accounts/{account}/keys/{key_id}", List.of("account", "key_id"), List.of())),
+          Map.entry("slotlock_partner_suspend_account", new Operation("POST", "/v1/partner/accounts/{account}/suspend", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_unsuspend_account", new Operation("POST", "/v1/partner/accounts/{account}/unsuspend", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_erase_account", new Operation("POST", "/v1/partner/accounts/{account}/erase", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_get_usage", new Operation("GET", "/v1/partner/usage", List.of(), List.of("from", "to", "account"))));
 
   /**
    * Runs an operation by its name with its arguments, path parameters included.
@@ -2062,6 +2073,226 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> getUsage() {
     return getUsage(null);
+  }
+
+  /**
+   * Read an account. One of the partner's accounts, with how many resources (archived ones
+   * included) and active API keys it holds. 404 account_not_found for an account the partner does
+   * not have.
+   *
+   * @param account {@code account}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerGetAccount(String account) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    return call("slotlock_partner_get_account", values);
+  }
+
+  /**
+   * Create or update an account. Create the partner's account with this id (your own id for your
+   * user, 1-128 letters, digits, dots, dashes or underscores), or put it on another plan: one of
+   * your contract's, whose limits and monthly quotas the account then has. Its tenant is
+   * partner:&lt;partner&gt;:&lt;account&gt;, an ordinary Slotlock tenant of its own. Repeating
+   * the call changes nothing more. 400 invalid_partner_plan for a plan your contract does not
+   * have.
+   *
+   * @param account {@code account}, string
+   * @param plan {@code plan}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerPutAccount(String account, String plan) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    values.put("plan", plan);
+    return call("slotlock_partner_put_account", values);
+  }
+
+  /**
+   * List accounts. The partner's accounts, by id: plan, whether suspended, and when made and last
+   * changed.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerListAccounts() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_partner_list_accounts", values);
+  }
+
+  /**
+   * List an account's keys. The account's API keys, revoked and expired ones included, newest
+   * first; never the keys themselves.
+   *
+   * @param account {@code account}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerListKeys(String account) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    return call("slotlock_partner_list_keys", values);
+  }
+
+  /**
+   * Create a key for an account. An API key for the account, shown once in key and never again;
+   * only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over
+   * MCP, A2A and REST, as any key. scopes: some of the ones your contract allows (read and write
+   * unless it says), by default all of them; expires_in_days: 1-3650, or none. 403
+   * scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's
+   * keys.
+   *
+   * @param account {@code account}, string
+   * @param name {@code name}, string
+   * @param optional the optional arguments, or null: {@code scopes} (list of string), {@code
+   * expires_in_days} (integer)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerCreateKey(String account, String name, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    values.put("name", name);
+    putOptional(values, optional, Set.of("scopes", "expires_in_days"), "slotlock_partner_create_key");
+    return call("slotlock_partner_create_key", values);
+  }
+
+  /**
+   * Create a key for an account. An API key for the account, shown once in key and never again;
+   * only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over
+   * MCP, A2A and REST, as any key. scopes: some of the ones your contract allows (read and write
+   * unless it says), by default all of them; expires_in_days: 1-3650, or none. 403
+   * scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's
+   * keys.
+   *
+   * @param account {@code account}, string
+   * @param name {@code name}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerCreateKey(String account, String name) {
+    return partnerCreateKey(account, name, null);
+  }
+
+  /**
+   * Rotate an account's key. A new secret for one of the account's active keys, shown once; the
+   * old one stops at once. The key keeps its id and what it booked. 404 key_not_found otherwise.
+   *
+   * @param account {@code account}, string
+   * @param keyId {@code key_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerRotateKey(String account, String keyId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    values.put("key_id", keyId);
+    return call("slotlock_partner_rotate_key", values);
+  }
+
+  /**
+   * Revoke an account's key. Revoke one of the account's keys at once; revoking it again changes
+   * nothing. 404 key_not_found otherwise.
+   *
+   * @param account {@code account}, string
+   * @param keyId {@code key_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerRevokeKey(String account, String keyId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    values.put("key_id", keyId);
+    return call("slotlock_partner_revoke_key", values);
+  }
+
+  /**
+   * Suspend an account. Suspend the account, as slotlock tenant suspend: it may read, and writes
+   * nothing; its keys get no new secret. suspended says whether it was not suspended already.
+   *
+   * @param account {@code account}, string
+   * @param optional the optional arguments, or null: {@code reason} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerSuspendAccount(String account, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    putOptional(values, optional, Set.of("reason"), "slotlock_partner_suspend_account");
+    return call("slotlock_partner_suspend_account", values);
+  }
+
+  /**
+   * Suspend an account. Suspend the account, as slotlock tenant suspend: it may read, and writes
+   * nothing; its keys get no new secret. suspended says whether it was not suspended already.
+   *
+   * @param account {@code account}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerSuspendAccount(String account) {
+    return partnerSuspendAccount(account, null);
+  }
+
+  /**
+   * Lift a suspension. Lift a suspension the partner made. One Pylota made stays: unsuspended is
+   * false then, as when the account was not suspended.
+   *
+   * @param account {@code account}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerUnsuspendAccount(String account) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    return call("slotlock_partner_unsuspend_account", values);
+  }
+
+  /**
+   * Erase an account. Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the
+   * partner's record of it. confirm repeats the account. Cannot be undone.
+   *
+   * @param account {@code account}, string
+   * @param confirm {@code confirm}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerEraseAccount(String account, String confirm) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    values.put("confirm", confirm);
+    return call("slotlock_partner_erase_account", values);
+  }
+
+  /**
+   * Read the accounts' usage. The partner's accounts' usage, the counts Pylota invoices from, by
+   * account, UTC day and metric (operations, bookings, holds, webhook_deliveries, resources: each
+   * day's count), from one UTC day to another (inclusive, at most 400 days apart; by default this
+   * month); one account, or all. 400 invalid_usage_range otherwise.
+   *
+   * @param optional the optional arguments, or null: {@code from} (string), {@code to} (string),
+   * {@code account} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerGetUsage(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("from", "to", "account"), "slotlock_partner_get_usage");
+    return call("slotlock_partner_get_usage", values);
+  }
+
+  /**
+   * Read the accounts' usage. The partner's accounts' usage, the counts Pylota invoices from, by
+   * account, UTC day and metric (operations, bookings, holds, webhook_deliveries, resources: each
+   * day's count), from one UTC day to another (inclusive, at most 400 days apart; by default this
+   * month); one account, or all. 400 invalid_usage_range otherwise.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerGetUsage() {
+    return partnerGetUsage(null);
   }
 
 }

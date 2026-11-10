@@ -117,6 +117,22 @@ export const GROUPS = [
     name: 'Tenant',
     operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
   },
+  {
+    name: 'Partner accounts',
+    operations: [
+      'slotlock_partner_put_account',
+      'slotlock_partner_list_accounts',
+      'slotlock_partner_get_account',
+      'slotlock_partner_list_keys',
+      'slotlock_partner_create_key',
+      'slotlock_partner_rotate_key',
+      'slotlock_partner_revoke_key',
+      'slotlock_partner_suspend_account',
+      'slotlock_partner_unsuspend_account',
+      'slotlock_partner_erase_account',
+      'slotlock_partner_get_usage',
+    ],
+  },
 ];
 
 /** What a status code means on every route; a route's own codes are in the README and tools page. */

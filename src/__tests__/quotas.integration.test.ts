@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
-import { readSlotlockTenantPlan, setSlotlockTenantPlan } from '../plans.js';
+import { SLOTLOCK_PLAN_QUOTAS, readSlotlockTenantQuotas, setSlotlockTenantPlan } from '../plans.js';
 import {
   createSlotlockQuotas,
   noteSlotlockQuotaThreshold,
@@ -184,7 +184,7 @@ describe.skipIf(!url)('monthly quotas (real Postgres, application role)', () => 
     await keyed(acme);
     await setSlotlockTenantPlan(application, { tenantRef: acme, plan: 'free', status: 'active' });
     const quotas = createSlotlockQuotas({
-      plan: async (tenantRef) => (await readSlotlockTenantPlan(application, tenantRef))?.plan ?? null,
+      plan: (tenantRef) => readSlotlockTenantQuotas(application, tenantRef),
       used: (tenantRef, fromDay) => readSlotlockQuotaUse(application, tenantRef, fromDay),
       notice: (notice) => noteSlotlockQuotaThreshold(application, notice),
     });
@@ -194,7 +194,7 @@ describe.skipIf(!url)('monthly quotas (real Postgres, application role)', () => 
       standings: [{ metric: 'operations', used: 24_999, stop: 25_000 }, { metric: 'bookings', used: 0 }],
     });
     const later = createSlotlockQuotas({
-      plan: async () => 'free',
+      plan: async () => SLOTLOCK_PLAN_QUOTAS.free,
       used: (tenantRef, fromDay) => readSlotlockQuotaUse(application, tenantRef, fromDay),
     });
     await operations(acme, 1);

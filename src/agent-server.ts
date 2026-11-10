@@ -29,6 +29,7 @@ import {
 import {
   SLOTLOCK_APPLICATION_OPERATIONS,
   SLOTLOCK_APPLICATION_SCOPE,
+  slotlockApplicationScope,
   type SlotlockApplicationBackend,
   type SlotlockApplicationInvocationContext,
   type SlotlockApplicationOperation,
@@ -532,6 +533,11 @@ export interface SlotlockAgentPrincipal {
    * backend runs its operations with the store's `resourceScope`, so nothing outside is found.
    */
   resourceScope?: { readonly locations: readonly string[]; readonly groups: readonly string[] };
+  /**
+   * For a partner key (RFC 0003 P1), its partner: with the `partner` scope, the partner API acts
+   * for this partner's accounts and no other (partners.ts).
+   */
+  partnerId?: string;
 }
 
 /** Whether a principal's scopes, if it carries any, cover an operation. */
@@ -1632,6 +1638,7 @@ export function slotlockApplicationOperations() {
     path: operation.path,
     inputSchema: toJsonSchema(operation.input, 'input'),
     outputSchema: toJsonSchema(operation.output, 'output'),
+    ...(operation.scope ? { scope: operation.scope } : {}),
   }));
 }
 
@@ -4362,9 +4369,10 @@ export function createSlotlockAgentServer(options: SlotlockAgentServerOptions): 
     const served = application as NonNullable<SlotlockAgentServerOptions['application']>;
     try {
       const scopes: unknown = principal.scopes;
+      // admin, or for the partner API, a partner key's partner (application-api.ts).
       if (
         scopes !== undefined &&
-        !(Array.isArray(scopes) && scopes.includes(SLOTLOCK_APPLICATION_SCOPE))
+        !(Array.isArray(scopes) && scopes.includes(slotlockApplicationScope(definition)))
       ) {
         return { ok: false, status: 403, code: 'forbidden' };
       }

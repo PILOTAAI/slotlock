@@ -89,6 +89,17 @@ public sealed partial class SlotlockClient
         ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], []),
         ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
         ["slotlock_get_usage"] = new("GET", "/v1/usage", [], ["from", "to"]),
+        ["slotlock_partner_get_account"] = new("GET", "/v1/partner/accounts/{account}", ["account"], []),
+        ["slotlock_partner_put_account"] = new("PUT", "/v1/partner/accounts/{account}", ["account"], []),
+        ["slotlock_partner_list_accounts"] = new("GET", "/v1/partner/accounts", [], []),
+        ["slotlock_partner_list_keys"] = new("GET", "/v1/partner/accounts/{account}/keys", ["account"], []),
+        ["slotlock_partner_create_key"] = new("POST", "/v1/partner/accounts/{account}/keys", ["account"], []),
+        ["slotlock_partner_rotate_key"] = new("POST", "/v1/partner/accounts/{account}/keys/{key_id}/rotate", ["account", "key_id"], []),
+        ["slotlock_partner_revoke_key"] = new("DELETE", "/v1/partner/accounts/{account}/keys/{key_id}", ["account", "key_id"], []),
+        ["slotlock_partner_suspend_account"] = new("POST", "/v1/partner/accounts/{account}/suspend", ["account"], []),
+        ["slotlock_partner_unsuspend_account"] = new("POST", "/v1/partner/accounts/{account}/unsuspend", ["account"], []),
+        ["slotlock_partner_erase_account"] = new("POST", "/v1/partner/accounts/{account}/erase", ["account"], []),
+        ["slotlock_partner_get_usage"] = new("GET", "/v1/partner/usage", [], ["from", "to", "account"]),
     };
 
     /// <summary>List calendar resources.</summary>
@@ -2236,6 +2247,239 @@ public sealed partial class SlotlockClient
         if (from.HasValue) values["from"] = Json.ToNode(from.Value);
         if (to.HasValue) values["to"] = Json.ToNode(to.Value);
         return CallAsync("slotlock_get_usage", values, cancellationToken);
+    }
+
+    /// <summary>Read an account.</summary>
+    /// <remarks>
+    /// One of the partner's accounts, with how many resources (archived ones included) and active
+    /// API keys it holds. 404 account_not_found for an account the partner does not have.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerGetAccountAsync(
+        string account,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        return CallAsync("slotlock_partner_get_account", values, cancellationToken);
+    }
+
+    /// <summary>Create or update an account.</summary>
+    /// <remarks>
+    /// Create the partner's account with this id (your own id for your user, 1-128 letters,
+    /// digits, dots, dashes or underscores), or put it on another plan: one of your contract's,
+    /// whose limits and monthly quotas the account then has. Its tenant is
+    /// partner:&lt;partner&gt;:&lt;account&gt;, an ordinary Slotlock tenant of its own. Repeating
+    /// the call changes nothing more. 400 invalid_partner_plan for a plan your contract does not
+    /// have.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="plan">plan</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerPutAccountAsync(
+        string account,
+        string plan,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        values["plan"] = Json.ToNode(plan);
+        return CallAsync("slotlock_partner_put_account", values, cancellationToken);
+    }
+
+    /// <summary>List accounts.</summary>
+    /// <remarks>
+    /// The partner's accounts, by id: plan, whether suspended, and when made and last changed.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerListAccountsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_partner_list_accounts", values, cancellationToken);
+    }
+
+    /// <summary>List an account's keys.</summary>
+    /// <remarks>
+    /// The account's API keys, revoked and expired ones included, newest first; never the keys
+    /// themselves.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerListKeysAsync(
+        string account,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        return CallAsync("slotlock_partner_list_keys", values, cancellationToken);
+    }
+
+    /// <summary>Create a key for an account.</summary>
+    /// <remarks>
+    /// An API key for the account, shown once in key and never again; only its SHA-256 is kept.
+    /// Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
+    /// any key. scopes: some of the ones your contract allows (read and write unless it says), by
+    /// default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
+    /// another scope; 409 api_key_limit_reached past the account plan's keys.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="name">name</param>
+    /// <param name="scopes">scopes</param>
+    /// <param name="expiresInDays">expires_in_days</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerCreateKeyAsync(
+        string account,
+        string name,
+        Optional<IEnumerable<string>> scopes = default,
+        Optional<long> expiresInDays = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        values["name"] = Json.ToNode(name);
+        if (scopes.HasValue) values["scopes"] = Json.ToNode(scopes.Value);
+        if (expiresInDays.HasValue) values["expires_in_days"] = Json.ToNode(expiresInDays.Value);
+        return CallAsync("slotlock_partner_create_key", values, cancellationToken);
+    }
+
+    /// <summary>Rotate an account's key.</summary>
+    /// <remarks>
+    /// A new secret for one of the account's active keys, shown once; the old one stops at once.
+    /// The key keeps its id and what it booked. 404 key_not_found otherwise.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="keyId">key_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerRotateKeyAsync(
+        string account,
+        string keyId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        values["key_id"] = Json.ToNode(keyId);
+        return CallAsync("slotlock_partner_rotate_key", values, cancellationToken);
+    }
+
+    /// <summary>Revoke an account's key.</summary>
+    /// <remarks>
+    /// Revoke one of the account's keys at once; revoking it again changes nothing. 404
+    /// key_not_found otherwise.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="keyId">key_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerRevokeKeyAsync(
+        string account,
+        string keyId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        values["key_id"] = Json.ToNode(keyId);
+        return CallAsync("slotlock_partner_revoke_key", values, cancellationToken);
+    }
+
+    /// <summary>Suspend an account.</summary>
+    /// <remarks>
+    /// Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys
+    /// get no new secret. suspended says whether it was not suspended already.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="reason">reason</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerSuspendAccountAsync(
+        string account,
+        Optional<string> reason = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        if (reason.HasValue) values["reason"] = Json.ToNode(reason.Value);
+        return CallAsync("slotlock_partner_suspend_account", values, cancellationToken);
+    }
+
+    /// <summary>Lift a suspension.</summary>
+    /// <remarks>
+    /// Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as
+    /// when the account was not suspended.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerUnsuspendAccountAsync(
+        string account,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        return CallAsync("slotlock_partner_unsuspend_account", values, cancellationToken);
+    }
+
+    /// <summary>Erase an account.</summary>
+    /// <remarks>
+    /// Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's
+    /// record of it. confirm repeats the account. Cannot be undone.
+    /// </remarks>
+    /// <param name="account">account</param>
+    /// <param name="confirm">confirm</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerEraseAccountAsync(
+        string account,
+        string confirm,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["account"] = Json.ToNode(account);
+        values["confirm"] = Json.ToNode(confirm);
+        return CallAsync("slotlock_partner_erase_account", values, cancellationToken);
+    }
+
+    /// <summary>Read the accounts' usage.</summary>
+    /// <remarks>
+    /// The partner's accounts' usage, the counts Pylota invoices from, by account, UTC day and
+    /// metric (operations, bookings, holds, webhook_deliveries, resources: each day's count),
+    /// from one UTC day to another (inclusive, at most 400 days apart; by default this month);
+    /// one account, or all. 400 invalid_usage_range otherwise.
+    /// </remarks>
+    /// <param name="from">from</param>
+    /// <param name="to">to</param>
+    /// <param name="account">account</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> PartnerGetUsageAsync(
+        Optional<string> from = default,
+        Optional<string> to = default,
+        Optional<string> account = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (from.HasValue) values["from"] = Json.ToNode(from.Value);
+        if (to.HasValue) values["to"] = Json.ToNode(to.Value);
+        if (account.HasValue) values["account"] = Json.ToNode(account.Value);
+        return CallAsync("slotlock_partner_get_usage", values, cancellationToken);
     }
 
 }

@@ -58,6 +58,26 @@ import type {
   WeeklyAvailabilityRule,
 } from './types.js';
 import { maintainSlotlockTenant } from './maintenance.js';
+import type { SlotlockApiKeyScope } from './api-keys.js';
+import {
+  type SlotlockPartnerAccount,
+  type SlotlockPartnerStore,
+  slotlockPartnerKeyOutput,
+  slotlockPrincipalPartner,
+} from './partners.js';
+
+/** A partner's account as the partner API shows it. */
+function partnerAccountOutput(account: SlotlockPartnerAccount): Record<string, unknown> {
+  return {
+    account: account.account,
+    plan: account.plan,
+    status: account.status,
+    created_at: account.createdAt.toISOString(),
+    updated_at: account.updatedAt.toISOString(),
+    ...(account.resources !== undefined ? { resources: account.resources } : {}),
+    ...(account.apiKeys !== undefined ? { api_keys: account.apiKeys } : {}),
+  };
+}
 import { parseAvailabilityRules } from './weekly-hours.js';
 
 export interface SlotlockStoreAgentBackendOptions {
@@ -1284,6 +1304,11 @@ export interface SlotlockStoreApplicationBackendOptions {
    * undone, and an operator may owe a tenant's data a retention or review first.
    */
   tenantErasure?: boolean;
+  /**
+   * The partner API (RFC 0003 P3): the partner store (partners.ts) its operations run through, for
+   * the partner a partner key names. Unset: they answer 404 partner_api_not_served.
+   */
+  partners?: SlotlockPartnerStore;
 }
 
 function storeRefusal(error: unknown): unknown {
@@ -1612,6 +1637,22 @@ export function createSlotlockStoreApplicationBackend(
         next_before: entries.length === limit ? (entries.at(-1)?.id ?? null) : null,
       };
     });
+  }
+
+  /** The partner store and the partner a partner key names; any other caller is forbidden. */
+  function partnerOf(context: SlotlockApplicationInvocationContext) {
+    assertActive(context);
+    const partners = options.partners;
+    if (!partners) throw new SlotlockAgentOperationError('partner_api_not_served', 404);
+    return { partners, partner: slotlockPrincipalPartner(context.principal) };
+  }
+
+  /** As partnerOf, with the account's tenant: 404 account_not_found for one the partner lacks. */
+  async function partnerAccount(context: SlotlockApplicationInvocationContext, input: Record<string, unknown>) {
+    const { partners, partner } = partnerOf(context);
+    const tenantRef = await partners.tenantOf(partner, input.account as string);
+    if (!tenantRef) throw new SlotlockAgentOperationError('account_not_found', 404);
+    return { partners, partner, tenantRef };
   }
 
   return {
@@ -2433,6 +2474,121 @@ export function createSlotlockStoreApplicationBackend(
       return withTenant(store, context, async (tenant) =>
         tenant.deleteWebhookEndpoint({ tenantRef: tenantOf(context), id: input.webhook_id as string }),
       WRITE);
+    },
+
+    // The partner API (RFC 0003 P3): the partner the key names, its own accounts only.
+    async partnerPutAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const put = await partners.putAccount(partner, input.account as string, input.plan as string);
+      if (!put) throw new SlotlockAgentOperationError('forbidden', 403);
+      return { account: partnerAccountOutput(put.account), created: put.created };
+    },
+
+    async partnerListAccounts(context) {
+      const { partners, partner } = partnerOf(context);
+      return { accounts: (await partners.listAccounts(partner)).map(partnerAccountOutput) };
+    },
+
+    async partnerGetAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const found = await partners.getAccount(partner, input.account as string);
+      if (!found) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { account: partnerAccountOutput(found) };
+    },
+
+    async partnerListKeys(context, input) {
+      const { partners, tenantRef } = await partnerAccount(context, input);
+      return { keys: (await partners.keys.list({ tenantRef })).map(slotlockPartnerKeyOutput) };
+    },
+
+    async partnerCreateKey(context, input) {
+      const { partners, partner, tenantRef } = await partnerAccount(context, input);
+      const contract = await partners.contract(partner);
+      if (!contract) throw new SlotlockAgentOperationError('forbidden', 403);
+      const scopes = (input.scopes as SlotlockApiKeyScope[] | undefined) ?? [...contract.keyScopes];
+      if (scopes.some((scope) => !contract.keyScopes.includes(scope))) {
+        throw new SlotlockAgentOperationError('scope_not_in_contract', 403);
+      }
+      const days = input.expires_in_days as number | undefined;
+      try {
+        const created = await partners.keys.create({
+          tenantRef,
+          name: input.name as string,
+          scopes,
+          createdBy: `partner:${partner}`,
+          actor: context.principal.subject,
+          origin: 'application',
+          ...(days !== undefined ? { expiresAt: new Date(Date.now() + days * 86_400_000) } : {}),
+        });
+        return { key: created.key, api_key: slotlockPartnerKeyOutput(created.apiKey) };
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (code === 'api_key_limit_reached') throw new SlotlockAgentOperationError(code, 409);
+        if (code === 'tenant_suspended') throw new SlotlockAgentOperationError(code, 403);
+        throw error;
+      }
+    },
+
+    async partnerRotateKey(context, input) {
+      const { partners, tenantRef } = await partnerAccount(context, input);
+      const rotated = await partners.keys
+        .rotate({ tenantRef, id: input.key_id as string, actor: context.principal.subject, origin: 'application' })
+        .catch((error: unknown) => {
+          if ((error as { code?: unknown }).code === 'tenant_suspended') {
+            throw new SlotlockAgentOperationError('tenant_suspended', 403);
+          }
+          throw error;
+        });
+      if (!rotated) throw new SlotlockAgentOperationError('key_not_found', 404);
+      return { key: rotated.key, api_key: slotlockPartnerKeyOutput(rotated.apiKey) };
+    },
+
+    async partnerRevokeKey(context, input) {
+      const { partners, tenantRef } = await partnerAccount(context, input);
+      const revoked = await partners.keys.revoke({
+        tenantRef,
+        id: input.key_id as string,
+        actor: context.principal.subject,
+        origin: 'application',
+      });
+      if (!revoked) throw new SlotlockAgentOperationError('key_not_found', 404);
+      return { api_key: slotlockPartnerKeyOutput(revoked) };
+    },
+
+    async partnerSuspendAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const changed = await partners.setSuspended(partner, input.account as string, true, input.reason as string | undefined);
+      if (changed === null) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { suspended: changed };
+    },
+
+    async partnerUnsuspendAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const changed = await partners.setSuspended(partner, input.account as string, false);
+      if (changed === null) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { unsuspended: changed };
+    },
+
+    async partnerEraseAccount(context, input) {
+      const { partners, partner } = partnerOf(context);
+      if (input.confirm !== input.account) throw new SlotlockAgentOperationError('confirmation_mismatch', 400);
+      const erased = await partners.eraseAccount(partner, input.account as string);
+      if (!erased.erased) throw new SlotlockAgentOperationError('account_not_found', 404);
+      return { erased: true, rows: erased.total };
+    },
+
+    async partnerGetUsage(context, input) {
+      const { partners, partner } = partnerOf(context);
+      const now = Date.now();
+      const range = slotlockUsageMonthToDate(now);
+      const from = (input.from as string | undefined) ?? range.from;
+      const to = (input.to as string | undefined) ?? range.to;
+      const span = slotlockUsageSpanDays(from, to);
+      if (span < 0 || span > SLOTLOCK_USAGE_RETENTION_DAYS || slotlockUsageSpanDays(to, slotlockUsageDay(now)) < 0) {
+        throw new SlotlockAgentOperationError('invalid_usage_range', 400);
+      }
+      const rows = await partners.usage(partner, from, to, input.account as string | undefined);
+      return { from, to, usage: rows };
     },
 
     async getUsage(context, input) {

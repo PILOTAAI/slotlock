@@ -228,6 +228,29 @@ export function generateSlotlockApiKey(): { key: string; prefix: string; digest:
   return { key, prefix: key.slice(0, DISPLAY_CHARACTERS), digest: slotlockApiKeyDigest(key) };
 }
 
+/** What a partner key (RFC 0003 P1) starts with: never a tenant's key, which `slk_` and base62 follow. */
+export const SLOTLOCK_PARTNER_KEY_PREFIX = 'slk_partner_';
+const PARTNER_KEY_PATTERN = /^slk_partner_[0-9A-Za-z]{46}$/;
+
+/** Whether `value` is shaped as a partner key with a matching checksum, as isSlotlockApiKey. */
+export function isSlotlockPartnerKey(value: string): boolean {
+  if (typeof value !== 'string' || !PARTNER_KEY_PATTERN.test(value)) return false;
+  const start = SLOTLOCK_PARTNER_KEY_PREFIX.length;
+  const random = value.slice(start, start + RANDOM_CHARACTERS);
+  return value.slice(start + RANDOM_CHARACTERS) === checksum(random);
+}
+
+/** A new partner key, with the prefix lists show (`slk_partner_` and 6 more) and its digest. */
+export function generateSlotlockPartnerKey(): { key: string; prefix: string; digest: Buffer } {
+  const random = randomBase62(RANDOM_CHARACTERS);
+  const key = `${SLOTLOCK_PARTNER_KEY_PREFIX}${random}${checksum(random)}`;
+  return {
+    key,
+    prefix: key.slice(0, SLOTLOCK_PARTNER_KEY_PREFIX.length + 6),
+    digest: slotlockApiKeyDigest(key),
+  };
+}
+
 /** The credential of an `Authorization: Bearer <credential>` header, or undefined. */
 export function slotlockBearerCredential(request: Request): string | undefined {
   return /^Bearer +(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1];

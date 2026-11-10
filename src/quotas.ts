@@ -14,7 +14,7 @@
 import { type SlotlockAgentOperation, SlotlockAgentOperationError } from './agent-server.js';
 import type { SlotlockApplicationOperation } from './application-api.js';
 import { SLOTLOCK_QUOTA_METRICS, SLOTLOCK_QUOTA_NOTICE_PERCENTS } from './ddl.js';
-import { SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan } from './plans.js';
+import type { SlotlockPlanQuotas } from './plans.js';
 import type { SlotlockSql } from './store.js';
 import type { SlotlockRecordedUsageMetric } from './usage.js';
 
@@ -91,8 +91,11 @@ export interface SlotlockQuotaNotice {
 }
 
 export interface SlotlockQuotasOptions {
-  /** The tenant's plan, or null when it has none (then no quota binds it). */
-  plan(tenantRef: string): Promise<SlotlockPlan | null>;
+  /**
+   * The quotas the tenant's plan gives it (plans.ts readSlotlockTenantQuotas: a partner account's
+   * own, else its plan's), or null when it has none: then no quota binds it.
+   */
+  plan(tenantRef: string): Promise<SlotlockPlanQuotas | null>;
   /** The tenant's operations and bookings from `fromDay` (`YYYY-MM-DD`) until now. */
   used(tenantRef: string, fromDay: string): Promise<SlotlockQuotaUse>;
   /**
@@ -124,7 +127,7 @@ export interface SlotlockQuotas {
 }
 
 interface Entry {
-  plan: SlotlockPlan | null;
+  plan: SlotlockPlanQuotas | null;
   periodStart: string;
   /** When the read began, by `now`. */
   at: number;
@@ -190,7 +193,7 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
 
   function standingsOf(tenantRef: string, entry: Entry, resetsAt: Date): SlotlockQuotaStanding[] {
     if (!entry.plan) return [];
-    const quotas = SLOTLOCK_PLAN_QUOTAS[entry.plan];
+    const quotas = entry.plan;
     const local = options.local?.(tenantRef, 'operations', entry.periodStart);
     // The read's unrecorded operations, and every one this meter counted since. A running total
     // below the one at the read means the meter started its totals again: all of it is new.

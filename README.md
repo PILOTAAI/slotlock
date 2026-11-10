@@ -235,6 +235,36 @@ slotlock key revoke <id>
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
 
+### Partner accounts
+
+A platform that resells Slotlock to its own users (a partner) runs a Slotlock tenant for each of
+them, `partner:<partner>:<account>`, and pays the deployment for them:
+
+```sh
+# As the schema owner (SLOTLOCK_MIGRATE_DATABASE_URL): the partner, its contract and its key.
+slotlock partner create stackapi "stackapi.app" --contract @stackapi-contract.json
+slotlock partner key stackapi "Main"
+slotlock partner list
+slotlock partner suspend stackapi        # every account with it; its keys stop
+```
+
+- A contract names the plans its accounts may be on (`plans`: each with `resources`, `api_keys`,
+  `webhook_endpoints`, monthly `operations` and `bookings`, and `stop_percent`), the scopes their
+  keys may carry (`key_scopes`, `read` and `write` unless it says) and the partner's prices
+  (`pricing`, for its monthly invoice).
+- A partner key (`slk_partner_…`, stored as a SHA-256 like any key) carries the `partner` scope,
+  which reaches the partner API under `/v1/partner` and nothing else: no calendar data and no
+  tenant's tools. No tenant key reaches the partner API.
+- With it the partner creates an account and puts it on a contract plan (`PUT
+  /v1/partner/accounts/{account}`: the account's limits and quotas are that plan's), lists and
+  reads them, makes, rotates and revokes their keys (`/v1/partner/accounts/{account}/keys`, shown
+  once, scopes capped by the contract), suspends one and lifts its own suspension (never one the
+  deployment made), erases one, and reads their usage (`GET /v1/partner/usage`, the counts the
+  partner is invoiced from). Another partner's accounts are not there for it.
+- An account is an ordinary tenant: forced row-level security keeps each from every other, and its
+  keys work over MCP, A2A and REST as any key. A suspended partner suspends its accounts and their
+  keys stop authenticating.
+
 ### Retiring resources and tenants
 
 ```sh

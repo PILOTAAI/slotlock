@@ -526,6 +526,83 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path_params: &[],
         query: &["from", "to"],
     },
+    Operation {
+        name: "slotlock_partner_get_account",
+        method: "GET",
+        path: "/v1/partner/accounts/{account}",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_put_account",
+        method: "PUT",
+        path: "/v1/partner/accounts/{account}",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_list_accounts",
+        method: "GET",
+        path: "/v1/partner/accounts",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_list_keys",
+        method: "GET",
+        path: "/v1/partner/accounts/{account}/keys",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_create_key",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/keys",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_rotate_key",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/keys/{key_id}/rotate",
+        path_params: &["account", "key_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_revoke_key",
+        method: "DELETE",
+        path: "/v1/partner/accounts/{account}/keys/{key_id}",
+        path_params: &["account", "key_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_suspend_account",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/suspend",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_unsuspend_account",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/unsuspend",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_erase_account",
+        method: "POST",
+        path: "/v1/partner/accounts/{account}/erase",
+        path_params: &["account"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_partner_get_usage",
+        method: "GET",
+        path: "/v1/partner/usage",
+        path_params: &[],
+        query: &["from", "to", "account"],
+    },
 ];
 
 /// The arguments of [`Client::list_resources`].
@@ -1274,6 +1351,87 @@ pub struct GetUsageInput {
     pub to: Option<String>,
 }
 
+/// The arguments of [`Client::partner_get_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerGetAccountInput {
+    pub account: String,
+}
+
+/// The arguments of [`Client::partner_put_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerPutAccountInput {
+    pub account: String,
+    pub plan: String,
+}
+
+/// The arguments of [`Client::partner_list_accounts`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerListAccountsInput {
+}
+
+/// The arguments of [`Client::partner_list_keys`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerListKeysInput {
+    pub account: String,
+}
+
+/// The arguments of [`Client::partner_create_key`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerCreateKeyInput {
+    pub account: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
+}
+
+/// The arguments of [`Client::partner_rotate_key`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerRotateKeyInput {
+    pub account: String,
+    pub key_id: String,
+}
+
+/// The arguments of [`Client::partner_revoke_key`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerRevokeKeyInput {
+    pub account: String,
+    pub key_id: String,
+}
+
+/// The arguments of [`Client::partner_suspend_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerSuspendAccountInput {
+    pub account: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The arguments of [`Client::partner_unsuspend_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerUnsuspendAccountInput {
+    pub account: String,
+}
+
+/// The arguments of [`Client::partner_erase_account`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerEraseAccountInput {
+    pub account: String,
+    pub confirm: String,
+}
+
+/// The arguments of [`Client::partner_get_usage`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PartnerGetUsageInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
 impl Client {
     /// List calendar resources.
     ///
@@ -2004,6 +2162,101 @@ impl Client {
     /// after today.
     pub fn get_usage(&self, input: &GetUsageInput) -> Result<Value, Error> {
         self.call("slotlock_get_usage", serde_json::to_value(input)?)
+    }
+
+    /// Read an account.
+    ///
+    /// One of the partner's accounts, with how many resources (archived ones included) and active
+    /// API keys it holds. 404 account_not_found for an account the partner does not have.
+    pub fn partner_get_account(&self, input: &PartnerGetAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_get_account", serde_json::to_value(input)?)
+    }
+
+    /// Create or update an account.
+    ///
+    /// Create the partner's account with this id (your own id for your user, 1-128 letters,
+    /// digits, dots, dashes or underscores), or put it on another plan: one of your contract's,
+    /// whose limits and monthly quotas the account then has. Its tenant is
+    /// partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call
+    /// changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.
+    pub fn partner_put_account(&self, input: &PartnerPutAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_put_account", serde_json::to_value(input)?)
+    }
+
+    /// List accounts.
+    ///
+    /// The partner's accounts, by id: plan, whether suspended, and when made and last changed.
+    pub fn partner_list_accounts(&self, input: &PartnerListAccountsInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_list_accounts", serde_json::to_value(input)?)
+    }
+
+    /// List an account's keys.
+    ///
+    /// The account's API keys, revoked and expired ones included, newest first; never the keys
+    /// themselves.
+    pub fn partner_list_keys(&self, input: &PartnerListKeysInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_list_keys", serde_json::to_value(input)?)
+    }
+
+    /// Create a key for an account.
+    ///
+    /// An API key for the account, shown once in key and never again; only its SHA-256 is kept.
+    /// Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
+    /// any key. scopes: some of the ones your contract allows (read and write unless it says), by
+    /// default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
+    /// another scope; 409 api_key_limit_reached past the account plan's keys.
+    pub fn partner_create_key(&self, input: &PartnerCreateKeyInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_create_key", serde_json::to_value(input)?)
+    }
+
+    /// Rotate an account's key.
+    ///
+    /// A new secret for one of the account's active keys, shown once; the old one stops at once.
+    /// The key keeps its id and what it booked. 404 key_not_found otherwise.
+    pub fn partner_rotate_key(&self, input: &PartnerRotateKeyInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_rotate_key", serde_json::to_value(input)?)
+    }
+
+    /// Revoke an account's key.
+    ///
+    /// Revoke one of the account's keys at once; revoking it again changes nothing. 404
+    /// key_not_found otherwise.
+    pub fn partner_revoke_key(&self, input: &PartnerRevokeKeyInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_revoke_key", serde_json::to_value(input)?)
+    }
+
+    /// Suspend an account.
+    ///
+    /// Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys
+    /// get no new secret. suspended says whether it was not suspended already.
+    pub fn partner_suspend_account(&self, input: &PartnerSuspendAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_suspend_account", serde_json::to_value(input)?)
+    }
+
+    /// Lift a suspension.
+    ///
+    /// Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as
+    /// when the account was not suspended.
+    pub fn partner_unsuspend_account(&self, input: &PartnerUnsuspendAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_unsuspend_account", serde_json::to_value(input)?)
+    }
+
+    /// Erase an account.
+    ///
+    /// Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's
+    /// record of it. confirm repeats the account. Cannot be undone.
+    pub fn partner_erase_account(&self, input: &PartnerEraseAccountInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_erase_account", serde_json::to_value(input)?)
+    }
+
+    /// Read the accounts' usage.
+    ///
+    /// The partner's accounts' usage, the counts Pylota invoices from, by account, UTC day and
+    /// metric (operations, bookings, holds, webhook_deliveries, resources: each day's count),
+    /// from one UTC day to another (inclusive, at most 400 days apart; by default this month);
+    /// one account, or all. 400 invalid_usage_range otherwise.
+    pub fn partner_get_usage(&self, input: &PartnerGetUsageInput) -> Result<Value, Error> {
+        self.call("slotlock_partner_get_usage", serde_json::to_value(input)?)
     }
 
 }

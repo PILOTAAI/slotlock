@@ -84,6 +84,17 @@ var operations = func() map[string]operation {
 		{name: "slotlock_delete_webhook", method: "DELETE", path: "/v1/webhooks/{webhook_id}", pathParams: []string{"webhook_id"}, query: nil},
 		{name: "slotlock_enable_webhook", method: "POST", path: "/v1/webhooks/{webhook_id}/enable", pathParams: []string{"webhook_id"}, query: nil},
 		{name: "slotlock_get_usage", method: "GET", path: "/v1/usage", pathParams: nil, query: []string{"from", "to"}},
+		{name: "slotlock_partner_get_account", method: "GET", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_put_account", method: "PUT", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_list_accounts", method: "GET", path: "/v1/partner/accounts", pathParams: nil, query: nil},
+		{name: "slotlock_partner_list_keys", method: "GET", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_create_key", method: "POST", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_rotate_key", method: "POST", path: "/v1/partner/accounts/{account}/keys/{key_id}/rotate", pathParams: []string{"account", "key_id"}, query: nil},
+		{name: "slotlock_partner_revoke_key", method: "DELETE", path: "/v1/partner/accounts/{account}/keys/{key_id}", pathParams: []string{"account", "key_id"}, query: nil},
+		{name: "slotlock_partner_suspend_account", method: "POST", path: "/v1/partner/accounts/{account}/suspend", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_unsuspend_account", method: "POST", path: "/v1/partner/accounts/{account}/unsuspend", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_erase_account", method: "POST", path: "/v1/partner/accounts/{account}/erase", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_get_usage", method: "GET", path: "/v1/partner/usage", pathParams: nil, query: []string{"from", "to", "account"}},
 	}
 	byName := make(map[string]operation, len(list))
 	for _, op := range list {
@@ -2252,4 +2263,244 @@ func (in GetUsageInput) values() map[string]any {
 // today.
 func (c *Client) GetUsage(ctx context.Context, in GetUsageInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_get_usage", in.values())
+}
+
+// PartnerGetAccountInput holds the arguments of [Client.PartnerGetAccount].
+type PartnerGetAccountInput struct {
+	Account string
+}
+
+func (in PartnerGetAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	return values
+}
+
+// PartnerGetAccount: Read an account. One of the partner's accounts, with how many resources
+// (archived ones included) and active API keys it holds. 404 account_not_found for an account the
+// partner does not have.
+func (c *Client) PartnerGetAccount(ctx context.Context, in PartnerGetAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_get_account", in.values())
+}
+
+// PartnerPutAccountInput holds the arguments of [Client.PartnerPutAccount].
+type PartnerPutAccountInput struct {
+	Account string
+
+	Plan string
+}
+
+func (in PartnerPutAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["plan"] = in.Plan
+	return values
+}
+
+// PartnerPutAccount: Create or update an account. Create the partner's account with this id (your
+// own id for your user, 1-128 letters, digits, dots, dashes or underscores), or put it on another
+// plan: one of your contract's, whose limits and monthly quotas the account then has. Its tenant
+// is partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call
+// changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.
+func (c *Client) PartnerPutAccount(ctx context.Context, in PartnerPutAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_put_account", in.values())
+}
+
+// PartnerListAccountsInput holds the arguments of [Client.PartnerListAccounts].
+type PartnerListAccountsInput struct {
+}
+
+func (in PartnerListAccountsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// PartnerListAccounts: List accounts. The partner's accounts, by id: plan, whether suspended, and
+// when made and last changed.
+func (c *Client) PartnerListAccounts(ctx context.Context, in PartnerListAccountsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_list_accounts", in.values())
+}
+
+// PartnerListKeysInput holds the arguments of [Client.PartnerListKeys].
+type PartnerListKeysInput struct {
+	Account string
+}
+
+func (in PartnerListKeysInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	return values
+}
+
+// PartnerListKeys: List an account's keys. The account's API keys, revoked and expired ones
+// included, newest first; never the keys themselves.
+func (c *Client) PartnerListKeys(ctx context.Context, in PartnerListKeysInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_list_keys", in.values())
+}
+
+// PartnerCreateKeyInput holds the arguments of [Client.PartnerCreateKey].
+type PartnerCreateKeyInput struct {
+	Account string
+
+	Name string
+
+	Scopes []string
+
+	ExpiresInDays *int64
+}
+
+func (in PartnerCreateKeyInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["name"] = in.Name
+	if in.Scopes != nil {
+		values["scopes"] = in.Scopes
+	}
+	if in.ExpiresInDays != nil {
+		values["expires_in_days"] = *in.ExpiresInDays
+	}
+	return values
+}
+
+// PartnerCreateKey: Create a key for an account. An API key for the account, shown once in key
+// and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the
+// account's tenant, over MCP, A2A and REST, as any key. scopes: some of the ones your contract
+// allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or
+// none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account
+// plan's keys.
+func (c *Client) PartnerCreateKey(ctx context.Context, in PartnerCreateKeyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_create_key", in.values())
+}
+
+// PartnerRotateKeyInput holds the arguments of [Client.PartnerRotateKey].
+type PartnerRotateKeyInput struct {
+	Account string
+
+	KeyID string
+}
+
+func (in PartnerRotateKeyInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["key_id"] = in.KeyID
+	return values
+}
+
+// PartnerRotateKey: Rotate an account's key. A new secret for one of the account's active keys,
+// shown once; the old one stops at once. The key keeps its id and what it booked. 404
+// key_not_found otherwise.
+func (c *Client) PartnerRotateKey(ctx context.Context, in PartnerRotateKeyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_rotate_key", in.values())
+}
+
+// PartnerRevokeKeyInput holds the arguments of [Client.PartnerRevokeKey].
+type PartnerRevokeKeyInput struct {
+	Account string
+
+	KeyID string
+}
+
+func (in PartnerRevokeKeyInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["key_id"] = in.KeyID
+	return values
+}
+
+// PartnerRevokeKey: Revoke an account's key. Revoke one of the account's keys at once; revoking
+// it again changes nothing. 404 key_not_found otherwise.
+func (c *Client) PartnerRevokeKey(ctx context.Context, in PartnerRevokeKeyInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_revoke_key", in.values())
+}
+
+// PartnerSuspendAccountInput holds the arguments of [Client.PartnerSuspendAccount].
+type PartnerSuspendAccountInput struct {
+	Account string
+
+	Reason *string
+}
+
+func (in PartnerSuspendAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	if in.Reason != nil {
+		values["reason"] = *in.Reason
+	}
+	return values
+}
+
+// PartnerSuspendAccount: Suspend an account. Suspend the account, as slotlock tenant suspend: it
+// may read, and writes nothing; its keys get no new secret. suspended says whether it was not
+// suspended already.
+func (c *Client) PartnerSuspendAccount(ctx context.Context, in PartnerSuspendAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_suspend_account", in.values())
+}
+
+// PartnerUnsuspendAccountInput holds the arguments of [Client.PartnerUnsuspendAccount].
+type PartnerUnsuspendAccountInput struct {
+	Account string
+}
+
+func (in PartnerUnsuspendAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	return values
+}
+
+// PartnerUnsuspendAccount: Lift a suspension. Lift a suspension the partner made. One Pylota made
+// stays: unsuspended is false then, as when the account was not suspended.
+func (c *Client) PartnerUnsuspendAccount(ctx context.Context, in PartnerUnsuspendAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_unsuspend_account", in.values())
+}
+
+// PartnerEraseAccountInput holds the arguments of [Client.PartnerEraseAccount].
+type PartnerEraseAccountInput struct {
+	Account string
+
+	Confirm string
+}
+
+func (in PartnerEraseAccountInput) values() map[string]any {
+	values := map[string]any{}
+	values["account"] = in.Account
+	values["confirm"] = in.Confirm
+	return values
+}
+
+// PartnerEraseAccount: Erase an account. Erase the account's tenant, every row it owns, as
+// /v1/tenant/erase, and the partner's record of it. confirm repeats the account. Cannot be
+// undone.
+func (c *Client) PartnerEraseAccount(ctx context.Context, in PartnerEraseAccountInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_erase_account", in.values())
+}
+
+// PartnerGetUsageInput holds the arguments of [Client.PartnerGetUsage].
+type PartnerGetUsageInput struct {
+	From *string
+
+	To *string
+
+	Account *string
+}
+
+func (in PartnerGetUsageInput) values() map[string]any {
+	values := map[string]any{}
+	if in.From != nil {
+		values["from"] = *in.From
+	}
+	if in.To != nil {
+		values["to"] = *in.To
+	}
+	if in.Account != nil {
+		values["account"] = *in.Account
+	}
+	return values
+}
+
+// PartnerGetUsage: Read the accounts' usage. The partner's accounts' usage, the counts Pylota
+// invoices from, by account, UTC day and metric (operations, bookings, holds, webhook_deliveries,
+// resources: each day's count), from one UTC day to another (inclusive, at most 400 days apart;
+// by default this month); one account, or all. 400 invalid_usage_range otherwise.
+func (c *Client) PartnerGetUsage(ctx context.Context, in PartnerGetUsageInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_partner_get_usage", in.values())
 }

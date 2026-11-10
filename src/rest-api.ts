@@ -288,6 +288,8 @@ export interface SlotlockOpenApiOperation {
   description: string;
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
+  /** An operation's own scope: a tool's, or the partner API's (else the application scope). */
+  scope?: string;
 }
 
 /** The OpenAPI operation object for one route. */
@@ -399,8 +401,8 @@ export function slotlockOpenApiDocument(args: {
     add(
       route,
       openApiOperation(route, operation, {
-        tag: 'Application',
-        scope: SLOTLOCK_APPLICATION_SCOPE,
+        tag: operation.scope === 'partner' ? 'Partner' : 'Application',
+        scope: operation.scope === 'partner' ? 'partner' : SLOTLOCK_APPLICATION_SCOPE,
         responses: {
           '400': ERROR_RESPONSE,
           '401': ERROR_RESPONSE,
@@ -450,6 +452,11 @@ export function slotlockOpenApiDocument(args: {
               description:
                 'What the application around the agents does. Needs the admin scope; never offered to agents.',
             },
+            {
+              name: 'Partner',
+              description:
+                "What a partner reselling Slotlock does for its own users' accounts. Needs a partner key (`slk_partner_…`), whose `partner` scope reaches nothing else.",
+            },
           ]
         : []),
     ],
@@ -460,7 +467,7 @@ export function slotlockOpenApiDocument(args: {
           type: 'http',
           scheme: 'bearer',
           description:
-            'A Slotlock API key (`slk_…`) or the server token. `x-slotlock-scope` on each operation names the scope it needs.',
+            'A Slotlock API key (`slk_…`), a partner key (`slk_partner_…`) or the server token. `x-slotlock-scope` on each operation names the scope it needs.',
         },
       },
       schemas: {

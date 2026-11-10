@@ -235,6 +235,22 @@ export {
   SLOTLOCK_ASSISTANT_TOOL_USE,
 } from './assistant.js';
 export type { SlotlockAssistantStore } from './assistant.js';
+export {
+  createSlotlockPartnerKeyAuthenticator,
+  createSlotlockPartnerStore,
+  parseSlotlockPartnerContract,
+  slotlockPartnerTenantRef,
+  SLOTLOCK_PARTNER_ACCOUNT,
+  SLOTLOCK_PARTNER_ID,
+  SLOTLOCK_PARTNER_SCOPE,
+} from './partners.js';
+export type {
+  SlotlockPartnerAccount,
+  SlotlockPartnerContract,
+  SlotlockPartnerPlan,
+  SlotlockPartnerPricing,
+  SlotlockPartnerStore,
+} from './partners.js';
 export type {
   CreateSlotlockApiKeyInput,
   SlotlockApiKey,

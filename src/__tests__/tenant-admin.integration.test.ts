@@ -538,7 +538,9 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       const tables = await tenantTables();
       // The suspension is kept on purpose (an erased abuser stays suspended); every other table with
       // a tenant column is the tenant's data and must be erased.
-      const owned = tables.filter((table) => table !== 'tenant_suspensions');
+      // partner_accounts is a partner's record of one of its accounts (partner:<id>:<account>):
+      // erased with it, which partners.integration covers, and never a direct tenant's.
+      const owned = tables.filter((table) => table !== 'tenant_suspensions' && table !== 'partner_accounts');
       expect(tables).toContain('tenant_suspensions');
       const before = await counts(tenantRef, owned);
       const canaryBefore = await counts(canary, owned);

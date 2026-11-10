@@ -9,7 +9,7 @@ import {
   deliverSlotlockWebhooks,
   startSlotlockWebhookDelivery,
 } from './webhooks.js';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
 import {
@@ -61,7 +61,23 @@ import {
   slotlockKeySubscriptions,
 } from './config.js';
 import { type SlotlockBookingRules, parseBookingRules } from './booking-rules.js';
-import { SLOTLOCK_APPLICATION_SCOPE } from './application-api.js';
+import {
+  SLOTLOCK_APPLICATION_SCOPE,
+  slotlockApplicationOperation,
+  slotlockApplicationScope,
+} from './application-api.js';
+import {
+  createSlotlockPartnerKey,
+  createSlotlockPartnerKeyAuthenticator,
+  createSlotlockPartnerStore,
+  listSlotlockPartners,
+  putSlotlockPartner,
+  revokeSlotlockPartnerKey,
+  setSlotlockPartnerBilling,
+  setSlotlockPartnerStatus,
+  slotlockPartnerContractJson,
+} from './partners.js';
+import { readFile } from 'node:fs/promises';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
   SLOTLOCK_QUOTA_FUNCTIONS,
@@ -87,6 +103,7 @@ import {
   type SlotlockPlan,
   readSlotlockPlanDefault,
   readSlotlockTenantPlan,
+  readSlotlockTenantQuotas,
   setSlotlockPlanDefault,
 } from './plans.js';
 import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
@@ -970,7 +987,7 @@ export async function startSlotlockServer(
     const quotas =
       config.quotas && usage
         ? createSlotlockQuotas({
-            plan: async (tenantRef) => (await readSlotlockTenantPlan(sql, tenantRef))?.plan ?? null,
+            plan: (tenantRef) => readSlotlockTenantQuotas(sql, tenantRef),
             used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
             local: (tenantRef, metric, fromDay) => usage.local(tenantRef, metric, fromDay),
             notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
@@ -982,6 +999,8 @@ export async function startSlotlockServer(
     const store = createSlotlockServeStore(sql, caps, config.availability, config.retentionDays);
     const retention = config.retentionDays !== undefined ? { retentionDays: config.retentionDays } : {};
     const publicUrl = new URL(config.publicUrl);
+    // Partner keys (`slk_partner_…`, RFC 0003 P1): the partner API, for the partner's accounts only.
+    const authenticatePartner = createSlotlockPartnerKeyAuthenticator(sql);
     const authenticateKey = createSlotlockApiKeyAuthenticator(createSlotlockApiKeyStore(sql), {
       maxConcurrentLookups: caps.key_lookups,
       maxWaitingLookups: caps.key_lookup_queue,
@@ -1034,9 +1053,13 @@ export async function startSlotlockServer(
       // The token is compared in constant time first; only then is a key looked up. A person the
       // dashboard no longer allows loses their keys with their session.
       authenticate: async (request) => {
-        const principal = (await authenticateToken?.(request)) ?? (await authenticateKey(request));
+        const principal =
+          (await authenticateToken?.(request)) ??
+          (await authenticatePartner(request)) ??
+          (await authenticateKey(request));
         if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
-        maintenance?.touch(principal.tenantRef);
+        // A partner key's own tenant holds nothing to maintain; its accounts' keys are as any key.
+        if (principal.partnerId === undefined) maintenance?.touch(principal.tenantRef);
         return principal;
       },
       // Counts and pseudonyms only: never an address, a credential or a tenant.
@@ -1100,9 +1123,15 @@ export async function startSlotlockServer(
             application: {
               backend: createSlotlockStoreApplicationBackend(store, {
                 maxTenantResources: SERVE_MAX_TENANT_RESOURCES,
+                partners: createSlotlockPartnerStore(sql, {
+                  keys: createSlotlockApiKeyStore(sql),
+                  eraseTenant: (tenantRef) => store.eraseTenant({ tenantRef }),
+                }),
               }),
               authorize: async ({ principal, operation, input }) => {
-                if (principal.scopes?.includes(SLOTLOCK_APPLICATION_SCOPE) !== true) return false;
+                // admin, or a partner key's partner scope for the partner API: never either for the other.
+                const needed = slotlockApplicationScope(slotlockApplicationOperation(operation));
+                if (principal.scopes?.includes(needed) !== true) return false;
                 await limits.quota({ principal, operation });
                 await limits.admit({ principal, operation, input });
                 return true;
@@ -1503,6 +1532,100 @@ async function changeResource(
 }
 
 /**
+ * `partner …` (RFC 0003 part 4), as the schema owner (SLOTLOCK_MIGRATE_DATABASE_URL when set): make
+ * a partner with its contract, list them, suspend one (every account with it) or make it active,
+ * make or revoke its keys (shown once), and set its Stripe customer and its webhook (whose secret
+ * is made here and shown once).
+ */
+async function runPartnerCommand(
+  config: SlotlockDatabaseConfig,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  action: string,
+  operands: readonly string[],
+  contractGiven: string | undefined,
+): Promise<number> {
+  const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
+  const [id = '', second = ''] = operands;
+  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  try {
+    switch (action) {
+      case 'create': {
+        const text = contractGiven?.startsWith('@')
+          ? await readFile(contractGiven.slice(1), 'utf8')
+          : (contractGiven ?? '');
+        let contract: unknown;
+        try {
+          contract = JSON.parse(text);
+        } catch {
+          throw Object.assign(new Error('Slotlock partner contract: --contract is not JSON'), { code: 'invalid_partner_contract' });
+        }
+        const partner = await putSlotlockPartner(owner, { id, name: second, contract });
+        line({ id: partner.id, name: partner.name, status: partner.status, contract: slotlockPartnerContractJson(partner.contract) });
+        return 0;
+      }
+      case 'list':
+        for (const partner of await listSlotlockPartners(owner)) {
+          line({
+            id: partner.id,
+            name: partner.name,
+            status: partner.status,
+            stripe_customer: partner.stripeCustomer,
+            webhook_url: partner.webhookUrl,
+            plans: Object.keys(partner.contract.plans),
+          });
+        }
+        return 0;
+      case 'suspend':
+      case 'unsuspend': {
+        const changed = await setSlotlockPartnerStatus(owner, id, action === 'suspend' ? 'suspended' : 'active');
+        if (!changed) {
+          io.stderr.write('slotlock: no partner with that id\n');
+          return 1;
+        }
+        line({ id, status: action === 'suspend' ? 'suspended' : 'active' });
+        return 0;
+      }
+      case 'key': {
+        const created = await createSlotlockPartnerKey(owner, id, second);
+        line({ partner: id, id: created.id, prefix: created.prefix, key: created.key });
+        io.stderr.write('slotlock: the partner key is shown once and only its SHA-256 is stored; send it to the partner securely\n');
+        return 0;
+      }
+      case 'revoke-key': {
+        if (!(await revokeSlotlockPartnerKey(owner, id, second))) {
+          io.stderr.write('slotlock: no key with that id for that partner\n');
+          return 1;
+        }
+        line({ partner: id, id: second, revoked: true });
+        return 0;
+      }
+      case 'customer': {
+        if (!(await setSlotlockPartnerBilling(owner, id, { stripeCustomer: second }))) {
+          io.stderr.write('slotlock: no partner with that id\n');
+          return 1;
+        }
+        line({ id, stripe_customer: second });
+        return 0;
+      }
+      case 'webhook': {
+        const secret = `whsec_${randomBytes(32).toString('base64')}`;
+        if (!(await setSlotlockPartnerBilling(owner, id, { webhookUrl: second, webhookSecret: secret }))) {
+          io.stderr.write('slotlock: no partner with that id\n');
+          return 1;
+        }
+        line({ id, webhook_url: second, webhook_secret: secret });
+        io.stderr.write('slotlock: the webhook secret is shown once; the partner verifies usage.period_closed with it\n');
+        return 0;
+      }
+      default:
+        return 2;
+    }
+  } finally {
+    await owner.end({ timeout: 5 });
+  }
+}
+
+/**
  * `tenant status|suspend|unsuspend|erase` for SLOTLOCK_TENANT. Suspending and lifting a suspension
  * are the deployment role's alone, so they connect as SLOTLOCK_MIGRATE_DATABASE_URL when it is set;
  * the serving role reads a suspension and may erase.
@@ -1776,6 +1899,20 @@ Commands:
   key rotate <id>          Give an active key a new secret and print it once; the old one stops
                            working at once, and the key keeps its id and what it booked
   key revoke <id>          Revoke one of the tenant's API keys at once
+  partner create <id> <name> --contract <json | @file>
+                           Create a partner reselling Slotlock, or change its name and contract:
+                           its plans (limits and quotas), its accounts' key scopes and its prices
+                           (as the schema owner, SLOTLOCK_MIGRATE_DATABASE_URL)
+  partner list             Print the partners, one JSON object per line
+  partner suspend <id>     Suspend a partner: every account with it, and its keys stop
+  partner unsuspend <id>   Make a suspended partner active again
+  partner key <id> <name>  Create a partner key (slk_partner_…) and print it once
+  partner revoke-key <id> <key-id>
+                           Revoke one of a partner's keys at once
+  partner customer <id> <cus_…>
+                           The Stripe customer its monthly invoice goes to
+  partner webhook <id> <https-url>
+                           Where usage.period_closed goes; prints its signing secret once
   tenant status            Print whether the tenant is suspended
   tenant suspend [--reason <text>]
                            Suspend the tenant: it may read, and writes nothing; its keys get
@@ -1915,7 +2052,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'hours' ||
     command === 'rules' ||
     command === 'tenant' ||
-    command === 'plan'
+    command === 'plan' ||
+    command === 'partner'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -1943,6 +2081,14 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'hours clear': 1,
     'rules set': 2,
     'rules clear': 1,
+    'partner create': 3,
+    'partner list': 1,
+    'partner suspend': 2,
+    'partner unsuspend': 2,
+    'partner key': 3,
+    'partner revoke-key': 3,
+    'partner customer': 3,
+    'partner webhook': 3,
   };
   const expected = expectedOperands[subcommand];
   if (expected === undefined) return usage(`unknown command "${subcommand}"`);
@@ -1955,6 +2101,12 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     if (values[option] !== undefined && subcommand !== 'key create') {
       return usage(`--${option} applies only to key create`);
     }
+  }
+  if (values.contract !== undefined && subcommand !== 'partner create') {
+    return usage('--contract applies only to partner create');
+  }
+  if (subcommand === 'partner create' && values.contract === undefined) {
+    return usage('partner create needs --contract <json>, or --contract @<file>');
   }
   if (values.reason !== undefined && subcommand !== 'tenant suspend') {
     return usage('--reason applies only to tenant suspend');
@@ -2136,6 +2288,35 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         }
         return 0;
       }
+      case 'partner create':
+      case 'partner list':
+      case 'partner suspend':
+      case 'partner unsuspend':
+      case 'partner key':
+      case 'partner revoke-key':
+      case 'partner customer':
+      case 'partner webhook': {
+        try {
+          return await runPartnerCommand(
+            readSlotlockDatabaseConfig(io.env),
+            io,
+            subcommand.slice('partner '.length),
+            operands.slice(1),
+            values.contract,
+          );
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'invalid_partner_contract' || code === 'invalid_partner') {
+            io.stderr.write(`slotlock: ${(error as Error).message}\n`);
+            return 2;
+          }
+          if (code === '42501') {
+            io.stderr.write('slotlock: only the schema owner runs partner commands; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n');
+            return 1;
+          }
+          throw error;
+        }
+      }
       case 'plan status':
       case 'plan default': {
         try {
@@ -2266,6 +2447,7 @@ function parseCliArguments(argv: readonly string[]) {
       'expires-in-days': { type: 'string' },
       locations: { type: 'string' },
       groups: { type: 'string' },
+      contract: { type: 'string' },
       resource: { type: 'string' },
       all: { type: 'boolean' },
       reason: { type: 'string' },

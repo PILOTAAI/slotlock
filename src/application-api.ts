@@ -16,6 +16,7 @@ import {
   type SlotlockChangeOrigin,
 } from './event-feed.js';
 import { z } from 'zod';
+import { SLOTLOCK_PARTNER_ACCOUNT, SLOTLOCK_PARTNER_PLAN } from './partner-names.js';
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
@@ -92,10 +93,26 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_webhooks'
   | 'slotlock_delete_webhook'
   | 'slotlock_enable_webhook'
-  | 'slotlock_get_usage';
+  | 'slotlock_get_usage'
+  | 'slotlock_partner_put_account'
+  | 'slotlock_partner_list_accounts'
+  | 'slotlock_partner_get_account'
+  | 'slotlock_partner_list_keys'
+  | 'slotlock_partner_create_key'
+  | 'slotlock_partner_rotate_key'
+  | 'slotlock_partner_revoke_key'
+  | 'slotlock_partner_suspend_account'
+  | 'slotlock_partner_unsuspend_account'
+  | 'slotlock_partner_erase_account'
+  | 'slotlock_partner_get_usage';
 
-/** The scope an application operation needs, whichever operation it is. */
+/** The scope an application operation needs, but the partner API's (`slotlockApplicationScope`). */
 export const SLOTLOCK_APPLICATION_SCOPE = 'admin';
+
+/** The scope one application operation needs: `partner` for the partner API's, else `admin`. */
+export function slotlockApplicationScope(definition: { scope?: 'partner' }): string {
+  return definition.scope ?? SLOTLOCK_APPLICATION_SCOPE;
+}
 
 export interface SlotlockApplicationInvocationContext {
   principal: SlotlockAgentPrincipal;
@@ -178,6 +195,17 @@ export interface SlotlockApplicationBackend {
   deleteWebhook: Handler;
   enableWebhook: Handler;
   getUsage: Handler;
+  partnerPutAccount: Handler;
+  partnerListAccounts: Handler;
+  partnerGetAccount: Handler;
+  partnerListKeys: Handler;
+  partnerCreateKey: Handler;
+  partnerRotateKey: Handler;
+  partnerRevokeKey: Handler;
+  partnerSuspendAccount: Handler;
+  partnerUnsuspendAccount: Handler;
+  partnerEraseAccount: Handler;
+  partnerGetUsage: Handler;
 }
 
 export interface SlotlockApplicationOperationDefinition {
@@ -191,6 +219,11 @@ export interface SlotlockApplicationOperationDefinition {
   output: z.ZodType<Record<string, unknown>>;
   risk: { readOnly: boolean; destructive: boolean; idempotent: boolean };
   invoke: keyof SlotlockApplicationBackend;
+  /**
+   * The scope the operation needs: `admin` (SLOTLOCK_APPLICATION_SCOPE) unless it is the partner
+   * API's, which needs a partner key's `partner` (RFC 0003 P3) and nothing else reaches.
+   */
+  scope?: 'partner';
   /** Valid input, path parameters included (a test runs each against the schema). */
   example: Record<string, unknown>;
 }
@@ -210,6 +243,31 @@ const USAGE_TOTALS = {
   assistant_messages: USAGE_COUNT,
   resources: USAGE_COUNT,
 };
+const PARTNER_ACCOUNT = z.string().regex(SLOTLOCK_PARTNER_ACCOUNT);
+const PARTNER_PLAN_NAME = z.string().regex(SLOTLOCK_PARTNER_PLAN);
+const PARTNER_ACCOUNT_OUTPUT = z
+  .object({
+    account: PARTNER_ACCOUNT,
+    plan: PARTNER_PLAN_NAME,
+    status: z.enum(['active', 'suspended']),
+    created_at: z.string().datetime(),
+    updated_at: z.string().datetime(),
+    resources: z.number().int().min(0).optional(),
+    api_keys: z.number().int().min(0).optional(),
+  })
+  .strict();
+const PARTNER_KEY_OUTPUT = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().min(1).max(100),
+    prefix: z.string().min(1).max(20),
+    scopes: z.array(z.enum(['read', 'write', 'admin'])),
+    created_at: z.string().datetime(),
+    expires_at: z.string().datetime().nullable(),
+    last_used_at: z.string().datetime().nullable(),
+    revoked_at: z.string().datetime().nullable(),
+  })
+  .strict();
 const RESOURCE_ID = z.string().trim().min(1).max(200);
 const HOLD_ID = z.string().trim().min(1).max(200);
 const EVENT_ID = z.string().trim().min(1).max(200);
@@ -1557,6 +1615,173 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
         .strict(),
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'getUsage',
+      example: { from: '2026-11-01', to: '2026-11-30' },
+    },
+    // The partner API (RFC 0003 P3): a partner key's, for that partner's own accounts only.
+    {
+      name: 'slotlock_partner_put_account',
+      title: 'Create or update an account',
+      description:
+        "Create the partner's account with this id (your own id for your user, 1-128 letters, digits, dots, dashes or underscores), or put it on another plan: one of your contract's, whose limits and monthly quotas the account then has. Its tenant is partner:<partner>:<account>, an ordinary Slotlock tenant of its own. Repeating the call changes nothing more. 400 invalid_partner_plan for a plan your contract does not have.",
+      method: 'PUT',
+      path: '/v1/partner/accounts/{account}',
+      input: z.object({ account: PARTNER_ACCOUNT, plan: PARTNER_PLAN_NAME }).strict(),
+      output: z.object({ account: PARTNER_ACCOUNT_OUTPUT, created: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerPutAccount',
+      scope: 'partner',
+      example: { account: 'user-4821', plan: 'partner_pro' },
+    },
+    {
+      name: 'slotlock_partner_list_accounts',
+      title: 'List accounts',
+      description: "The partner's accounts, by id: plan, whether suspended, and when made and last changed.",
+      method: 'GET',
+      path: '/v1/partner/accounts',
+      input: z.object({}).strict(),
+      output: z.object({ accounts: z.array(PARTNER_ACCOUNT_OUTPUT).max(10000) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerListAccounts',
+      scope: 'partner',
+      example: {},
+    },
+    {
+      name: 'slotlock_partner_get_account',
+      title: 'Read an account',
+      description:
+        'One of the partner\'s accounts, with how many resources (archived ones included) and active API keys it holds. 404 account_not_found for an account the partner does not have.',
+      method: 'GET',
+      path: '/v1/partner/accounts/{account}',
+      input: z.object({ account: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ account: PARTNER_ACCOUNT_OUTPUT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerGetAccount',
+      scope: 'partner',
+      example: { account: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_list_keys',
+      title: "List an account's keys",
+      description: "The account's API keys, revoked and expired ones included, newest first; never the keys themselves.",
+      method: 'GET',
+      path: '/v1/partner/accounts/{account}/keys',
+      input: z.object({ account: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ keys: z.array(PARTNER_KEY_OUTPUT).max(1000) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerListKeys',
+      scope: 'partner',
+      example: { account: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_create_key',
+      title: 'Create a key for an account',
+      description:
+        "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/keys',
+      input: z
+        .object({
+          account: PARTNER_ACCOUNT,
+          name: z.string().trim().min(1).max(100),
+          scopes: z.array(z.enum(['read', 'write', 'admin'])).min(1).max(3).optional(),
+          expires_in_days: z.number().int().min(1).max(3650).optional(),
+        })
+        .strict(),
+      output: z.object({ key: z.string().regex(/^slk_[0-9A-Za-z]{46}$/), api_key: PARTNER_KEY_OUTPUT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'partnerCreateKey',
+      scope: 'partner',
+      example: { account: 'user-4821', name: 'Booking agent' },
+    },
+    {
+      name: 'slotlock_partner_rotate_key',
+      title: "Rotate an account's key",
+      description:
+        'A new secret for one of the account\'s active keys, shown once; the old one stops at once. The key keeps its id and what it booked. 404 key_not_found otherwise.',
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/keys/{key_id}/rotate',
+      input: z.object({ account: PARTNER_ACCOUNT, key_id: z.string().uuid() }).strict(),
+      output: z.object({ key: z.string().regex(/^slk_[0-9A-Za-z]{46}$/), api_key: PARTNER_KEY_OUTPUT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'partnerRotateKey',
+      scope: 'partner',
+      example: { account: 'user-4821', key_id: '7d1e4f8a-2b3c-4d5e-8f90-123456789abc' },
+    },
+    {
+      name: 'slotlock_partner_revoke_key',
+      title: "Revoke an account's key",
+      description: "Revoke one of the account's keys at once; revoking it again changes nothing. 404 key_not_found otherwise.",
+      method: 'DELETE',
+      path: '/v1/partner/accounts/{account}/keys/{key_id}',
+      input: z.object({ account: PARTNER_ACCOUNT, key_id: z.string().uuid() }).strict(),
+      output: z.object({ api_key: PARTNER_KEY_OUTPUT }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'partnerRevokeKey',
+      scope: 'partner',
+      example: { account: 'user-4821', key_id: '7d1e4f8a-2b3c-4d5e-8f90-123456789abc' },
+    },
+    {
+      name: 'slotlock_partner_suspend_account',
+      title: 'Suspend an account',
+      description:
+        'Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys get no new secret. suspended says whether it was not suspended already.',
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/suspend',
+      input: z.object({ account: PARTNER_ACCOUNT, reason: z.string().trim().min(1).max(200).optional() }).strict(),
+      output: z.object({ suspended: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerSuspendAccount',
+      scope: 'partner',
+      example: { account: 'user-4821', reason: 'unpaid' },
+    },
+    {
+      name: 'slotlock_partner_unsuspend_account',
+      title: 'Lift a suspension',
+      description:
+        'Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as when the account was not suspended.',
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/unsuspend',
+      input: z.object({ account: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ unsuspended: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'partnerUnsuspendAccount',
+      scope: 'partner',
+      example: { account: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_erase_account',
+      title: 'Erase an account',
+      description:
+        "Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's record of it. confirm repeats the account. Cannot be undone.",
+      method: 'POST',
+      path: '/v1/partner/accounts/{account}/erase',
+      input: z.object({ account: PARTNER_ACCOUNT, confirm: PARTNER_ACCOUNT }).strict(),
+      output: z.object({ erased: z.boolean(), rows: z.number().int().min(0) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'partnerEraseAccount',
+      scope: 'partner',
+      example: { account: 'user-4821', confirm: 'user-4821' },
+    },
+    {
+      name: 'slotlock_partner_get_usage',
+      title: "Read the accounts' usage",
+      description:
+        "The partner's accounts' usage, the counts Pylota invoices from, by account, UTC day and metric (operations, bookings, holds, webhook_deliveries, resources: each day's count), from one UTC day to another (inclusive, at most 400 days apart; by default this month); one account, or all. 400 invalid_usage_range otherwise.",
+      method: 'GET',
+      path: '/v1/partner/usage',
+      input: z.object({ from: USAGE_DAY.optional(), to: USAGE_DAY.optional(), account: PARTNER_ACCOUNT.optional() }).strict(),
+      output: z
+        .object({
+          from: USAGE_DAY,
+          to: USAGE_DAY,
+          usage: z
+            .array(z.object({ account: PARTNER_ACCOUNT, day: USAGE_DAY, metric: z.string().min(1).max(40), count: USAGE_COUNT }).strict())
+            .max(500000),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'partnerGetUsage',
+      scope: 'partner',
       example: { from: '2026-11-01', to: '2026-11-30' },
     },
   ]);

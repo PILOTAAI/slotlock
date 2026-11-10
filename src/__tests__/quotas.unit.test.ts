@@ -31,7 +31,7 @@ function fixture(options: { plan?: SlotlockPlan | null; used?: SlotlockQuotaUse 
     now: () => state.at,
     plan: async () => {
       if (state.fail) throw new Error('database away');
-      return state.plan;
+      return state.plan ? SLOTLOCK_PLAN_QUOTAS[state.plan] : null;
     },
     used: async (_tenant, fromDay) => {
       state.reads += 1;

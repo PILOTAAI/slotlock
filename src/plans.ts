@@ -67,6 +67,24 @@ interface TenantPlanRow {
   current_period_end: Date | null;
 }
 
+/**
+ * The monthly quotas the tenant is held to (quotas.ts): its own (a partner's account, on its
+ * contract plan's numbers, RFC 0003 P4), else its plan's, else null (no plan, or one with none).
+ */
+export async function readSlotlockTenantQuotas(
+  sql: SlotlockSql,
+  tenantRef: string,
+): Promise<SlotlockPlanQuotas | null> {
+  const [row] = await sql<
+    { plan: string; operations: string | null; bookings: string | null; stop_percent: number | null }[]
+  >`SELECT plan, operations::text, bookings::text, stop_percent FROM slotlock.tenant_plan_quotas(${tenantRef}::text)`;
+  if (!row) return null;
+  if (row.operations !== null && row.bookings !== null && row.stop_percent !== null) {
+    return { operations: Number(row.operations), bookings: Number(row.bookings), stopPercent: row.stop_percent };
+  }
+  return Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, row.plan) ? SLOTLOCK_PLAN_QUOTAS[row.plan as SlotlockPlan] : null;
+}
+
 /** The tenant's plan, or null when it has none (no plan limits apply). */
 export async function readSlotlockTenantPlan(
   sql: SlotlockSql,
