@@ -370,6 +370,17 @@ resources, so you can give each person API keys without running `slotlock key cr
   organizations, the served ones the person belongs to, or with `enabled` up to 20 of theirs): the
   GitHub token is used once and dropped.
   It asks for no scope, or `read:org` with organizations.
+- **Sign-in with Google too**, for people without a GitHub account: set `SLOTLOCK_GOOGLE_CLIENT_ID`
+  and `SLOTLOCK_GOOGLE_CLIENT_SECRET` (an OAuth client of a Google Cloud project, of type Web
+  application, with the same redirect URI, `<SLOTLOCK_PUBLIC_URL>/dashboard/callback`). The sign-in
+  page then offers Continue with Google. Each such person is their own tenant,
+  `google:<subject>` (Google's stable account id); `SLOTLOCK_DASHBOARD_USERS` names them as
+  `google:<subject>` beside GitHub ids, or `*` lets every account in. Sign-in asks for `openid
+  email`, uses `state`, PKCE and a nonce, and checks the ID token Google's token endpoint returns
+  (issuer, audience, expiry, nonce); it keeps the subject, and the email only once Google has
+  verified it, to show who is signed in. Google sign-in does not go with a list of
+  `SLOTLOCK_DASHBOARD_ORGS` (GitHub's organizations); with `enabled`, a Google person has their own
+  tenant only.
 - A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist is checked on every
   request, dashboard and API alike: removing an id and restarting the server signs that person out
   and stops every key in their tenant at once.

@@ -2646,3 +2646,91 @@ describe('the plan page', () => {
     expect(() => dashboard({ billing: { ...billing, contact: 'javascript:alert(1)' } })).toThrow();
   });
 });
+
+describe('Google sign-in', () => {
+  const GOOGLE = { clientId: '1234-abc.apps.googleusercontent.com', clientSecret: 'GOCSPX-' + 'g'.repeat(20) + '0123456789' };
+  const SUBJECT = '109876543210987654321';
+  /** Google's token endpoint, answering with an ID token whose claims a test chooses. */
+  function fakeGoogle(claims: (nonce: string) => Record<string, unknown>) {
+    let asked: URLSearchParams | null = null;
+    let nonce = '';
+    const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      if (String(input) === 'https://oauth2.googleapis.com/token') {
+        asked = new URLSearchParams(String(init.body));
+        const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+        return Response.json({ id_token: `${part({ alg: 'RS256' })}.${part(claims(nonce))}.c2lnbmF0dXJl`, access_token: 'ya29.fake' });
+      }
+      return github.fetch(input, init);
+    });
+    return { fetch, asked: () => asked, setNonce: (value: string) => (nonce = value) };
+  }
+  const valid = (nonce: string) => ({
+    iss: 'https://accounts.google.com',
+    aud: GOOGLE.clientId,
+    sub: SUBJECT,
+    email: 'desk@clinic.example',
+    email_verified: true,
+    nonce,
+    exp: Math.floor(now / 1000) + 3600,
+  });
+  async function signInWithGoogle(target: ReturnType<typeof dashboard>, fake: ReturnType<typeof fakeGoogle>) {
+    const start = await get(target, '/base/dashboard/sign-in?with=google');
+    const location = new URL(start.headers.get('location') ?? '');
+    fake.setNonce(location.searchParams.get('nonce') ?? '');
+    const callback = await get(
+      target,
+      `/base/dashboard/callback?code=g-code&state=${location.searchParams.get('state')}`,
+      cookie(start, '__Host-slotlock-oauth')?.pair,
+    );
+    return { start, location, callback, session: cookie(callback, '__Host-slotlock-session')?.pair as string };
+  }
+
+  it("signs a person in with Google to a tenant of their own, and keeps only the account's id and email", async () => {
+    const fake = fakeGoogle(valid);
+    const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
+    expect(await (await get(target, '/base/dashboard')).text()).toContain('Continue with Google');
+    const { location, callback, session } = await signInWithGoogle(target, fake);
+    expect(location.origin + location.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+    expect(location.searchParams.get('scope')).toBe('openid email');
+    expect(location.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(location.searchParams.get('redirect_uri')).toBe(`${PUBLIC_URL}/dashboard/callback`);
+    expect(callback.status).toBe(303);
+    // The code was exchanged with the verifier PKCE needs.
+    expect(fake.asked()?.get('code_verifier')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await (await get(target, '/base/dashboard', session)).text()).toContain('desk@clinic.example');
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'Desk', access: 'read', expires: '30' }, session);
+    expect(keys.store.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tenantRef: `google:${SUBJECT}`, createdBy: `google:${SUBJECT}` }),
+    );
+  });
+
+  it('refuses an ID token that is not for this sign-in', async () => {
+    for (const change of [
+      { aud: 'someone-else.apps.googleusercontent.com' },
+      { iss: 'https://evil.example' },
+      { exp: Math.floor(now / 1000) - 1 },
+      { nonce: 'replayed' },
+      { sub: 'has spaces' },
+    ]) {
+      const fake = fakeGoogle((nonce) => ({ ...valid(nonce), ...change }));
+      const target = dashboard({ google: GOOGLE, allowedUsers: '*', fetch: fake.fetch });
+      const { callback, session } = await signInWithGoogle(target, fake);
+      expect(callback.status, JSON.stringify(change)).toBe(502);
+      expect(session).toBeUndefined();
+    }
+  });
+
+  it('lets in only the Google accounts a list names, and is not offered with GitHub organizations', async () => {
+    const fake = fakeGoogle(valid);
+    const listed = dashboard({ google: GOOGLE, allowedUsers: [String(GITHUB_USER.id), `google:${SUBJECT}`], fetch: fake.fetch });
+    expect((await signInWithGoogle(listed, fake)).callback.status).toBe(303);
+    const other = dashboard({ google: GOOGLE, allowedUsers: [String(GITHUB_USER.id), 'google:42'], fetch: fake.fetch });
+    expect((await signInWithGoogle(other, fake)).callback.status).toBe(403);
+    // A GitHub id that happens to equal the subject lets nobody in with Google.
+    const numeric = dashboard({ google: GOOGLE, allowedUsers: [SUBJECT], fetch: fake.fetch });
+    expect((await signInWithGoogle(numeric, fake)).callback.status).toBe(403);
+    const orgs = dashboard({ google: GOOGLE, allowedUsers: '*', organizations: ['91'], fetch: fake.fetch });
+    expect(await (await get(orgs, '/base/dashboard')).text()).not.toContain('Continue with Google');
+    expect((await get(orgs, '/base/dashboard/sign-in?with=google')).headers.get('location')).toMatch(/^https:\/\/github\.com\//);
+  });
+});

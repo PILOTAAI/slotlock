@@ -165,6 +165,8 @@ const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign 
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
 const GITHUB_TIMEOUT_MS = 10_000;
+/** A Google account's subject: ASCII, at most 255 characters (OpenID Connect); Google's are digits. */
+const GOOGLE_SUBJECT = /^[A-Za-z0-9._-]{1,255}$/;
 /** The REST API version GitHub documents for GET /user (docs.github.com, read 2026-10-10). */
 const GITHUB_API_VERSION = '2026-03-10';
 const USER_AGENT = 'slotlock-dashboard';
@@ -493,9 +495,23 @@ export interface SlotlockDashboardOptions {
     userUrl?: string;
     membershipsUrl?: string;
   };
+  /**
+   * Sign-in with Google (OpenID Connect), beside GitHub, for people without a GitHub account: each
+   * is their own tenant, `google:<subject>`. Not offered with a fixed list of `organizations`,
+   * which are GitHub's. Its redirect URI is the same `<publicUrl>/dashboard/callback`.
+   */
+  google?: {
+    clientId: string;
+    clientSecret: string;
+    authorizeUrl?: string;
+    tokenUrl?: string;
+  };
   /** Seals sessions and sign-in state and derives CSRF tokens: 32+ random characters. */
   sessionSecret: string;
-  /** GitHub user ids (numbers, as strings) that may sign in, or `'*'` for every GitHub account. */
+  /**
+   * GitHub user ids (numbers, as strings) and Google accounts (`google:<subject>`) that may sign in,
+   * or `'*'` for every account.
+   */
   allowedUsers: '*' | readonly string[];
   /**
    * GitHub organization ids (numbers, as strings) this dashboard serves. With them, a tenant is an
@@ -855,6 +871,8 @@ interface Session {
   org?: string;
   /** The test environment (RFC 0003 G9): the workspace's `<tenant>~test`. Live when absent. */
   env?: 'test';
+  /** Signed in with Google: `uid` is the Google subject, `login` the account's email. GitHub when absent. */
+  idp?: 'google';
 }
 
 interface Organization {
@@ -993,6 +1011,9 @@ const ICONS = Object.freeze({
   check: icon('<path d="M5 12l5 5L20 7"/>'),
   signOut: icon('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
   plus: icon('<path d="M12 5v14M5 12h14"/>'),
+  google: new Html(
+    '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M15.68 8.18c0-.57-.05-1.11-.15-1.64H8v3.1h4.3a3.68 3.68 0 0 1-1.6 2.41v2h2.58c1.51-1.39 2.4-3.44 2.4-5.87zM8 16c2.16 0 3.97-.72 5.29-1.94l-2.58-2c-.72.48-1.63.76-2.71.76-2.08 0-3.85-1.41-4.48-3.3H.86v2.07A8 8 0 0 0 8 16zM3.52 9.52a4.8 4.8 0 0 1 0-3.04V4.41H.86a8 8 0 0 0 0 7.18zM8 3.18c1.17 0 2.23.4 3.06 1.2l2.29-2.3A8 8 0 0 0 .86 4.41l2.66 2.07C4.15 4.59 5.92 3.18 8 3.18z"/></svg>',
+  ),
   github: new Html(
     '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
   ),
@@ -1423,9 +1444,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
   const secret = Buffer.from(options.sessionSecret, 'utf8');
   // A list, or exactly '*': any other string would match ids by substring.
-  const allowed = (uid: string) =>
+  // A GitHub person by their bare id, a Google one as google:<subject>.
+  const allowed = (uid: string, idp?: 'google') =>
     options.allowedUsers === '*' ||
-    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(uid));
+    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(idp === 'google' ? `google:${uid}` : uid));
+  const google = served ? null : (options.google ?? null);
   let signInsInFlight = 0;
   /** Sign-ins in flight by client address. */
   const signInsByClient = new Map<string, number>();
@@ -1500,7 +1523,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.uid !== 'string' ||
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
-      !allowed(payload.uid) ||
+      (payload.idp !== undefined && (payload.idp !== 'google' || !google)) ||
+      !allowed(payload.uid, payload.idp as 'google' | undefined) ||
       !organizationsHold(payload) ||
       (payload.env !== undefined && payload.env !== 'test') ||
       (await options.state.sessionEnded(payload.sid, payload.exp as number))
@@ -1549,9 +1573,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       .digest('base64url');
   /** The tenant the session acts in: the workspace's, or its test environment's (`~test`). */
   const tenantOf = (session: Session) =>
-    `${session.org !== undefined ? `github-org:${session.org}` : `github:${session.uid}`}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
+    `${session.org !== undefined ? `github-org:${session.org}` : personOf(session)}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
-  const personOf = (session: Session) => `github:${session.uid}`;
+  function personOf(session: Session): string {
+    return session.idp === 'google' ? `google:${session.uid}` : `github:${session.uid}`;
+  }
+  /** How the dashboard shows the person: their GitHub login, or their Google account's email. */
+  const shownAs = (session: Session) => (session.idp === 'google' ? session.login : `@${session.login}`);
 
   function respond(
     status: number,
@@ -1627,7 +1655,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
     const enabled = teams ? (session.orgs ?? []).filter((org) => enabledOf.get(session)?.has(org.id)) : [];
     if (teams && enabled.length > 0) {
-      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${current ? html`` : html` selected`}>@${session.login}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${current ? html`` : html` selected`}>${shownAs(session)}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
     if (current && choices.length > 1) {
       return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization" title="${current.login}">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
@@ -1673,7 +1701,7 @@ ${skip}
 <header class="side">
 <div class="side-top">${brand}${workspace(session)}${environmentSwitch(session)}</div>
 <nav class="nav" aria-label="Dashboard">${links}</nav>
-<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="@${session.login}">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
+<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="${shownAs(session)}">${shownAs(session)}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
 </header>
 <main class="page" id="main">${
       session.env === 'test'
@@ -1695,14 +1723,16 @@ ${live}
 <h1>Sign in to ${brandName}</h1>
 <p>Create keys for your agents, add what they book, and watch what they do.</p>
 ${noticeOf(notice)}
-<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>
+<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
+      google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
+    }
 <p class="fine">${
       teams
         ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and up to ${String(MAX_SESSION_ORGANIZATIONS)} of those organizations, for you to work in the ones turned on.`
         : served
         ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and the organizations it serves.`
         : `${brandName} reads only your public GitHub profile, and keeps only your user id and login.`
-    }</p>
+    }${google ? ` With Google, it reads your account's id and email address, and keeps only those.` : ''}</p>
 </section>`;
     return respond(status, layout('Sign in', content, null), {}, cookies);
   }
@@ -1719,7 +1749,7 @@ ${noticeOf(notice)}
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${session.org !== undefined ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
+<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${session.org !== undefined ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : key.createdBy?.startsWith('google:') ? 'a Google user' : 'someone unknown'}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
 <td data-label="Access">${
         key.resourceScope
@@ -1808,10 +1838,14 @@ ${noticeOf(notice)}
                 ? 'A deleted key'
                 : /^github:\d+$/.test(change.actor)
                   ? `GitHub user ${change.actor.slice(7)}`
-                  : /^dashboard-assistant:github:\d+$/.test(change.actor)
+                  : /^google:/.test(change.actor)
+                    ? 'A Google user'
+                  : /^dashboard-assistant:(github|google):/.test(change.actor)
                     ? change.actor === assistantActor(session)
-                      ? `Assistant for @${session.login}`
-                      : `Assistant for GitHub user ${change.actor.slice(27)}`
+                      ? `Assistant for ${shownAs(session)}`
+                      : change.actor.startsWith('dashboard-assistant:google:')
+                        ? 'Assistant for a Google user'
+                        : `Assistant for GitHub user ${change.actor.slice(27)}`
                     : change.actor.slice(0, 60)));
       const where = change.resourceId
         ? resourceName(byId.get(change.resourceId), change.resourceId)
@@ -2089,7 +2123,7 @@ ${
 </section>
 <section class="panel">
 <h2>Account</h2>
-<dl class="facts"><dt>Signed in as</dt><dd>@${session.login}</dd>${
+<dl class="facts"><dt>Signed in as</dt><dd>${shownAs(session)}</dd>${
       current
         ? html`<dt>Organization</dt><dd>${current.login}</dd>${(session.orgs?.length ?? 0) > 1 ? html`<dt>Also a member of</dt><dd>${(session.orgs ?? []).filter((org) => org.id !== current.id).map((org) => org.login).join(', ')}</dd>` : html``}`
         : html`<dt>Workspace</dt><dd>Personal</dd>`
@@ -2728,7 +2762,7 @@ ${
    * Who the assistant acts as, for the record and for ownership: the member by GitHub user id,
    * which a rename does not change. Shown as "Assistant for @login".
    */
-  const assistantActor = (session: Session) => `dashboard-assistant:github:${session.uid}`;
+  const assistantActor = (session: Session) => `dashboard-assistant:${personOf(session)}`;
   const CONFIRMED_WRITES: ReadonlySet<string> = new Set<SlotlockAgentWriteOperation>([
     'slotlock_create_event',
     'slotlock_update_event',
@@ -4002,6 +4036,95 @@ ${
       .slice(0, MAX_SESSION_ORGANIZATIONS);
   }
 
+  /** Google's sign-in (OpenID Connect, code flow with PKCE and a nonce), back to the same callback. */
+  async function startGoogleSignIn(provider: NonNullable<typeof google>): Promise<Response> {
+    const state = randomBytes(32).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    const nonce = randomBytes(24).toString('base64url');
+    const target = new URL(provider.authorizeUrl ?? 'https://accounts.google.com/o/oauth2/v2/auth');
+    target.search = new URLSearchParams({
+      client_id: provider.clientId,
+      redirect_uri: callbackUrl,
+      response_type: 'code',
+      scope: 'openid email',
+      state,
+      nonce,
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+    }).toString();
+    const sealed = seal('slotlock-dashboard-sign-in-v1', {
+      state,
+      verifier,
+      nonce,
+      idp: 'google',
+      exp: now() + SIGN_IN_TTL_MS,
+    });
+    return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
+  }
+
+  /**
+   * The person Google signed in, from the ID token its token endpoint returned for this code. The
+   * token comes straight from Google over TLS, which OpenID Connect lets stand for its signature
+   * (Core 1.0, 3.1.3.7); its issuer, audience, expiry and nonce are still checked.
+   */
+  async function askGoogle(
+    provider: NonNullable<typeof google>,
+    code: string,
+    verifier: string,
+    nonce: string,
+  ): Promise<{ uid: string; login: string; idp: 'google' } | null> {
+    try {
+      const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: new URLSearchParams({
+          code,
+          client_id: provider.clientId,
+          client_secret: provider.clientSecret,
+          redirect_uri: callbackUrl,
+          grant_type: 'authorization_code',
+          code_verifier: verifier,
+        }).toString(),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        report(`Google token exchange failed: HTTP ${response.status}`);
+        return null;
+      }
+      const body: unknown = await response.json().catch(() => null);
+      const token = isRecord(body) && typeof body.id_token === 'string' ? body.id_token : null;
+      const [, payload] = token?.split('.') ?? [];
+      if (!payload || !BASE64URL.test(payload)) return null;
+      const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+      if (!isRecord(claims)) return null;
+      const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+      if (
+        (claims.iss !== 'https://accounts.google.com' && claims.iss !== 'accounts.google.com') ||
+        !audience.includes(provider.clientId) ||
+        (audience.length > 1 && claims.azp !== provider.clientId) ||
+        typeof claims.exp !== 'number' ||
+        claims.exp * 1000 <= now() ||
+        typeof claims.nonce !== 'string' ||
+        !safeEqual(claims.nonce, nonce) ||
+        typeof claims.sub !== 'string' ||
+        !GOOGLE_SUBJECT.test(claims.sub)
+      ) {
+        report('Google sign-in refused: the ID token did not check out');
+        return null;
+      }
+      // The email names the person on the page only, and only once Google has verified it.
+      const email =
+        claims.email_verified === true && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
+          ? claims.email
+          : 'Google account';
+      return { uid: claims.sub, login: email, idp: 'google' };
+    } catch (error) {
+      report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      return null;
+    }
+  }
+
   async function askGitHub(
     code: string,
     verifier: string,
@@ -4055,13 +4178,18 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[] } | null;
+    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google' } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
         return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
       }
-      user = await askGitHub(code, verifier);
+      user =
+        pending.idp === 'google'
+          ? google && typeof pending.nonce === 'string'
+            ? await askGoogle(google, code, verifier, pending.nonce)
+            : null
+          : await askGitHub(code, verifier);
     } finally {
       signInsInFlight -= 1;
       if (client !== undefined) {
@@ -4071,12 +4199,18 @@ ${
       }
     }
     if (!user) {
-      return signedOutPage(502, 'GitHub did not complete the sign-in. Try again.', [clearSignIn]);
+      return signedOutPage(
+        502,
+        `${pending.idp === 'google' ? 'Google' : 'GitHub'} did not complete the sign-in. Try again.`,
+        [clearSignIn],
+      );
     }
-    if (!allowed(user.uid)) {
-      return signedOutPage(403, `This Slotlock server does not let @${user.login} sign in.`, [
-        clearSignIn,
-      ]);
+    if (!allowed(user.uid, user.idp)) {
+      return signedOutPage(
+        403,
+        `This Slotlock server does not let ${user.idp === 'google' ? user.login : `@${user.login}`} sign in.`,
+        [clearSignIn],
+      );
     }
     const orgs = user.orgs ?? [];
     if (served && orgs.length === 0) {
@@ -4091,7 +4225,8 @@ ${
       login: user.login,
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
-      ...(served ? { orgs, org: (orgs[0] as Organization).id } : teams ? { orgs } : {}),
+      ...(user.idp === 'google' ? { idp: 'google' } : {}),
+      ...(served ? { orgs, org: (orgs[0] as Organization).id } : teams && user.idp !== 'google' ? { orgs } : {}),
     });
     return redirect(303, root, [
       clearSignIn,
@@ -4302,7 +4437,7 @@ ${
       try {
         first =
           checked === 'ok' &&
-          (await options.state.use('form', once, session.exp, session.uid));
+          (await options.state.use('form', once, session.exp, session.idp === 'google' ? personOf(session) : session.uid));
       } catch (error) {
         if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
         return pageFor(route)(
@@ -4457,7 +4592,9 @@ ${
             case '/favicon.svg':
               return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
             case '/sign-in':
-              return await startSignIn();
+              return google && url.searchParams.get('with') === 'google'
+                ? await startGoogleSignIn(google)
+                : await startSignIn();
             case '/callback':
               return await finishSignIn(request, url);
             case '/hours': {

@@ -126,8 +126,10 @@ export interface SlotlockServeDashboardConfig {
   githubClientId: string;
   githubClientSecret: string;
   sessionSecret: string;
-  /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
+  /** GitHub user ids and Google accounts (`google:<subject>`) that may sign in, or `'*'` for everyone. */
   allowedUsers: '*' | string[];
+  /** Sign-in with Google too (SLOTLOCK_GOOGLE_CLIENT_ID and SLOTLOCK_GOOGLE_CLIENT_SECRET). */
+  google?: { clientId: string; clientSecret: string };
   /**
    * GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS), or
    * `'enabled'`: those an owner turned on from the dashboard (Teams on Cloud, teams.ts).
@@ -170,9 +172,10 @@ const DASHBOARD_VARIABLES = [
 export function readDashboardUsers(env: SlotlockEnv): '*' | string[] | undefined {
   const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
   if (users === undefined) return undefined;
-  if (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users)) {
+  const person = '(?:[1-9]\\d{0,19}|google:[A-Za-z0-9._-]{1,255})';
+  if (users !== '*' && !new RegExp(`^${person}(,${person})*$`).test(users)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_USERS must be * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
+      'SLOTLOCK_DASHBOARD_USERS must be * for every account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id) and Google accounts as google:<subject>',
     );
   }
   return users === '*' ? '*' : [...new Set(users.split(','))];
@@ -197,6 +200,16 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_GITHUB_CLIENT_SECRET is required to serve the dashboard: a client secret of that GitHub OAuth app',
     );
   }
+  const googleClientId = optional(env, 'SLOTLOCK_GOOGLE_CLIENT_ID');
+  const googleClientSecret = readSecret(env, 'SLOTLOCK_GOOGLE_CLIENT_SECRET');
+  if ((googleClientId === undefined) !== (googleClientSecret === undefined)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GOOGLE_CLIENT_ID and SLOTLOCK_GOOGLE_CLIENT_SECRET go together: an OAuth client of a Google Cloud project whose redirect URI is <SLOTLOCK_PUBLIC_URL>/dashboard/callback',
+    );
+  }
+  if (googleClientId !== undefined && !/^[A-Za-z0-9._-]{1,200}$/.test(googleClientId)) {
+    throw new SlotlockConfigError('SLOTLOCK_GOOGLE_CLIENT_ID must be a Google OAuth client id');
+  }
   const sessionSecret = readSecret(env, 'SLOTLOCK_SESSION_SECRET');
   if (sessionSecret === undefined) {
     throw new SlotlockConfigError(
@@ -207,6 +220,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     env.SLOTLOCK_GITHUB_CLIENT_SECRET,
     env.SLOTLOCK_AUTH_TOKEN,
     env.SLOTLOCK_CONFIRMATION_SECRET,
+    ...(googleClientSecret !== undefined ? [googleClientSecret] : []),
   ];
   if (others.includes(sessionSecret)) {
     throw new SlotlockConfigError('SLOTLOCK_SESSION_SECRET must differ from every other secret');
@@ -235,6 +249,11 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off');
   }
   const orgs = readDashboardOrganizations(env);
+  if (Array.isArray(orgs) && googleClientId !== undefined) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GOOGLE_CLIENT_ID does not go with a list of SLOTLOCK_DASHBOARD_ORGS: those organizations are GitHub\'s; use SLOTLOCK_DASHBOARD_ORGS=enabled to have both',
+    );
+  }
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -246,6 +265,9 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     githubClientSecret,
     sessionSecret,
     allowedUsers: users,
+    ...(googleClientId !== undefined && googleClientSecret !== undefined
+      ? { google: { clientId: googleClientId, clientSecret: googleClientSecret } }
+      : {}),
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),

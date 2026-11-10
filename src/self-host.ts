@@ -152,6 +152,8 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_KNOWN_CLIENTS',
   'SLOTLOCK_GITHUB_CLIENT_ID',
   'SLOTLOCK_GITHUB_CLIENT_SECRET',
+  'SLOTLOCK_GOOGLE_CLIENT_ID',
+  'SLOTLOCK_GOOGLE_CLIENT_SECRET',
   'SLOTLOCK_SESSION_SECRET',
   'SLOTLOCK_ASSISTANT_SECRET',
   'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS',
@@ -829,6 +831,8 @@ export function slotlockServeAllowsTenant(
   if (orgId !== undefined) return config.organizations === 'enabled' || config.organizations?.includes(orgId) === true;
   const users = config.allowedUsers;
   if (users === undefined || users === '*') return true;
+  // A Google person (google:<subject>) only while the list names them so.
+  if (live.startsWith('google:')) return users.includes(live);
   const githubId = /^github:(\d+)$/.exec(live)?.[1];
   return githubId === undefined || users.includes(githubId);
 }
@@ -1205,6 +1209,7 @@ export async function startSlotlockServer(
             },
             sessionSecret: config.dashboard.sessionSecret,
             allowedUsers: config.dashboard.allowedUsers,
+            ...(config.dashboard.google ? { google: config.dashboard.google } : {}),
             ...(config.dashboard.name ? { name: config.dashboard.name } : {}),
             ...(config.dashboard.organizations
               ? { organizations: config.dashboard.organizations }
@@ -2092,7 +2097,10 @@ Environment:
                                  resolves to, a loopback, private, link-local, CGNAT, unique-local
                                  or metadata address; on: allow them, for a self-hosted model
                                  (Ollama, vLLM) on this machine or network
-  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids that may sign in and whose keys work
+  SLOTLOCK_GOOGLE_CLIENT_ID      Sign-in with Google too: the client id of a Google OAuth client with
+                                 redirect URI .../dashboard/callback (not with organization ids)
+  SLOTLOCK_GOOGLE_CLIENT_SECRET  Its client secret
+  SLOTLOCK_DASHBOARD_USERS       * or comma-separated GitHub user ids (and google:<subject>) that may sign in and whose keys work
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant;
                                  or enabled: each person's own tenant, plus the organizations an
                                  owner turns on from the dashboard's Teams page

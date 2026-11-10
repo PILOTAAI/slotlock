@@ -2015,6 +2015,12 @@ BEGIN
        AND owner_hash = sha256(convert_to(
              'slotlock-dashboard-owner.' || substr(requested_tenant_ref, 8), 'UTF8'));
     GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  ELSIF requested_tenant_ref LIKE 'google:%' THEN
+    -- A Google person's form records are under their whole reference (dashboard.ts).
+    DELETE FROM slotlock.dashboard_tokens
+     WHERE kind = 'form'
+       AND owner_hash = sha256(convert_to('slotlock-dashboard-owner.' || requested_tenant_ref, 'UTF8'));
+    GET DIAGNOSTICS erased_rows = ROW_COUNT;
   END IF;
   RETURN NEXT;
 

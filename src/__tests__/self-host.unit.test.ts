@@ -537,6 +537,12 @@ describe('slotlock serve configuration', () => {
       expect(open.allowedUsers).toBe('*');
       expect(slotlockServeAllowsTenant(open, 'github:999')).toBe(true);
       expect(slotlockServeAllowsTenant(readSlotlockServeConfig(serveEnv()), 'github:999')).toBe(true);
+      // Google people are named in the same list, as google:<subject>.
+      const mixed = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '4242,google:109876543210' }));
+      expect(slotlockServeAllowsTenant(mixed, 'google:109876543210')).toBe(true);
+      expect(slotlockServeAllowsTenant(mixed, 'google:109876543210~test')).toBe(true);
+      expect(slotlockServeAllowsTenant(mixed, 'google:4242')).toBe(false);
+      expect(slotlockServeAllowsTenant(open, 'google:1')).toBe(true);
       expect(refusal(serveEnv({ SLOTLOCK_DASHBOARD_USERS: 'octocat' })).message).toMatch(
         /SLOTLOCK_DASHBOARD_USERS must be/,
       );
@@ -549,8 +555,15 @@ describe('slotlock serve configuration', () => {
       ['the session secret is missing', { SLOTLOCK_SESSION_SECRET: undefined }, /SLOTLOCK_SESSION_SECRET is required/],
       ['the session secret is weak', { SLOTLOCK_SESSION_SECRET: 'z'.repeat(40) }, /SLOTLOCK_SESSION_SECRET is too weak/],
       ['no one is allowed', { SLOTLOCK_DASHBOARD_USERS: undefined }, /SLOTLOCK_DASHBOARD_USERS is required/],
+      ['a Google entry is not a subject', { SLOTLOCK_DASHBOARD_USERS: 'google:a/b' }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['users are logins, not ids', { SLOTLOCK_DASHBOARD_USERS: 'octocat' }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['organizations are logins, not ids', { SLOTLOCK_DASHBOARD_ORGS: 'acme-fleet' }, /SLOTLOCK_DASHBOARD_ORGS must be/],
+      ['Google has an id and no secret', { SLOTLOCK_GOOGLE_CLIENT_ID: '1234-abc.apps.googleusercontent.com' }, /go together/],
+      [
+        'Google comes with a list of GitHub organizations',
+        { SLOTLOCK_GOOGLE_CLIENT_ID: '1234-abc.apps.googleusercontent.com', SLOTLOCK_GOOGLE_CLIENT_SECRET: secret(), SLOTLOCK_DASHBOARD_ORGS: '91' },
+        /does not go with a list/,
+      ],
     ])('refuses to start when %s', (_case, overrides, message) => {
       expect(refusal(dashboardEnv(overrides)).message).toMatch(message);
     });

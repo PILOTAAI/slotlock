@@ -316,6 +316,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       github: { clientId: config.githubClientId, clientSecret: config.githubClientSecret },
       sessionSecret: config.sessionSecret,
       allowedUsers: config.allowedUsers,
+      ...(config.google ? { google: config.google } : {}),
       ...(config.organizations ? { organizations: config.organizations } : {}),
       // Teams on Cloud: the organizations turned on, through the request's client.
       ...(config.organizations === 'enabled'

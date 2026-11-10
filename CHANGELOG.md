@@ -122,6 +122,14 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Sign-in with Google (OpenID Connect, RFC 0003 Later, T2), with `SLOTLOCK_GOOGLE_CLIENT_ID` and
+  `SLOTLOCK_GOOGLE_CLIENT_SECRET`: Continue with Google on the sign-in page (`/sign-in?with=google`,
+  back to the same callback), `openid email` with `state`, PKCE and a nonce; the ID token from
+  Google's token endpoint is checked for issuer, audience (and `azp`), expiry and nonce. Each
+  person is their own tenant, `google:<subject>`; `SLOTLOCK_DASHBOARD_USERS` takes
+  `google:<subject>` entries, and `serve` refuses a Google tenant's keys unless the list names it
+  (or is `*`). Not with a list of `SLOTLOCK_DASHBOARD_ORGS`. Erasing a Google person's tenant
+  removes their dashboard form records. The dashboard's `google` option.
 - The Team plan, an organization's (Teams on Cloud): Developer's limits with 2,000,000 operations
   and 100,000 bookings a month, stopping at 110%. The Worker offers it to an organization's owner
   once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY`, `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY`,

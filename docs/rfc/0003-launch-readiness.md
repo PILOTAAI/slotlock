@@ -668,7 +668,11 @@ before merge (GOVERNANCE.md).
   `claude/inspiring-dijkstra-bfvqif` as `SLOTLOCK_DASHBOARD_ORGS=enabled`, with each person's own
   tenant beside the organizations turned on; the Team plan follows.
 - **Sign-in without GitHub (T2):** Google (OpenID Connect) for the people who run a front desk, a
-  clinic's rota or a depot and use the assistant, who often have no GitHub account.
+  clinic's rota or a depot and use the assistant, who often have no GitHub account. Status: built
+  on `claude/inspiring-dijkstra-bfvqif` with `SLOTLOCK_GOOGLE_CLIENT_ID` and
+  `SLOTLOCK_GOOGLE_CLIENT_SECRET`: `google:<subject>` tenants, the ID token taken from Google's token
+  endpoint over TLS and checked for issuer, audience, expiry and nonce (no JWKS fetch), and the
+  allowlist's `google:<subject>` entries, read by `serve` too.
 - **Test environments (G9), composite resources (G8), acting on behalf of a sub-tenant (P3).**
 - **Metered overage for Developer**, once Stripe confirms Managed Payments supports metered prices.
 - RFC 0002 P2: OpenTelemetry export and published SLOs first, as a paid service needs them.

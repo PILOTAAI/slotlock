@@ -1,7 +1,7 @@
 // Teams on Cloud, against real Postgres as the serving role: organizations an owner turns on and
 // off, the check serve's keys pass through, and erasure of an organization's tenant. Skipped
 // without DATABASE_URL.
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockStore } from '../store.js';
@@ -79,5 +79,21 @@ describe.skipIf(!url)('organizations turned on (real Postgres)', () => {
     const erased = await createSlotlockStore(application).eraseTenant({ tenantRef: `github-org:${acme}` });
     expect(erased.rows.dashboard_organizations).toBe(1);
     expect(await teams.enabled([acme])).toEqual(new Set());
+  });
+
+  it("erases a Google person's form records with their tenant, and no GitHub person's", async () => {
+    const subject = String(Date.now());
+    const owner = (who: string) => createHash('sha256').update(`slotlock-dashboard-owner.${who}`).digest();
+    const record = (who: string) =>
+      admin`SELECT slotlock.use_dashboard_token('form', ${randomBytes(32)}::bytea, now() + interval '1 hour', ${owner(who)}::bytea)`;
+    await record(`google:${subject}`);
+    // A GitHub person with the same digits keeps theirs.
+    await record(subject);
+    const erased = await createSlotlockStore(admin).eraseTenant({ tenantRef: `google:${subject}` });
+    expect(erased.rows.dashboard_tokens).toBe(1);
+    expect(
+      (await admin`SELECT count(*)::int AS n FROM slotlock.dashboard_tokens WHERE owner_hash = ${owner(subject)}`)[0],
+    ).toEqual({ n: 1 });
+    await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${owner(subject)}`;
   });
 });
