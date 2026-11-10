@@ -1952,6 +1952,33 @@ describe('the overview', () => {
     expect(feed.match(/<li class="event">/g)).toHaveLength(1 + every.length);
   });
 
+  it('says a change it has no words for (a newer server\u2019s) without its type, whatever the type looks like', async () => {
+    const foreign = ['RESOURCE-UPDATED', 'resource:updated', 'Resource/Updated', 'constructor', '__proto__', 'toString'];
+    resources.rows.push({ id: '11111111-1111-4111-8111-111111111111', externalRef: 'room-1', tenantRef: 'github:4242', timezone: 'UTC' });
+    const { target } = withFeed(
+      [],
+      foreign.map((type, index) => ({
+        id: `msg_${String(index)}`,
+        type: type as SlotlockChange['type'],
+        resourceId: index === 0 ? '11111111-1111-4111-8111-111111111111' : null,
+        subject: 's',
+        data: {},
+        occurredAt: new Date(now - index * 60_000),
+        actor: null,
+        origin: null,
+        keyId: null,
+        position: `p${String(index)}`,
+      })),
+    );
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    const feed = /<ol class="feed">([\s\S]*?)<\/ol>/.exec(html)?.[1] ?? '';
+    for (const type of foreign) expect(feed.toLowerCase(), type).not.toContain(type.toLowerCase().replace(/[._:/-]/g, ' ').trim());
+    expect(feed).not.toMatch(/proto|tostring|constructor|updated/i);
+    expect(feed).toContain('Something changed on <strong>room-1</strong>');
+    expect(feed.match(/Something changed/g)).toHaveLength(foreign.length);
+  });
+
   it('puts what needs a person first: approvals waiting, and the plan near its quota', async () => {
     resources.rows.push({ id: '11111111-1111-4111-8111-111111111111', externalRef: 'room-1', tenantRef: 'github:4242', timezone: 'UTC' });
     const approval = (status: 'pending' | 'granted') => ({ id: randomUUID(), status }) as never;
@@ -2519,6 +2546,9 @@ describe('the dashboard design', () => {
     expect(js).toContain("fetch(page.getAttribute('data-stream'), {");
     expect(js.replaceAll('https?:\\/\\/', '')).not.toMatch(/https?:/);
     // Markup it writes is the server's: its own Markdown renderer's, or the turn the server rendered.
+    // Steps are found by the provider's call id: a map with no prototype, so `__proto__` names none.
+    expect(js).toContain('var stepNodes = Object.create(null);');
+    expect(js).not.toMatch(/stepNodes = \{\}/);
     const writes = js.split('\n').filter((line) => /innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(line));
     expect(writes.map((line) => line.trim())).toEqual([
       'if (prose) prose.innerHTML = renderMarkdown(proseText);',

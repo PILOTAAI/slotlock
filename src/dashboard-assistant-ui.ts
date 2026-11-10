@@ -328,7 +328,8 @@ export function slotlockAssistantScript(markdownSource: string): string {
     var prose = null;
     var proseText = '';
     var steps = null;
-    var stepNodes = {};
+    // Keyed by the provider's call id: no id, __proto__ included, may name an inherited property.
+    var stepNodes = Object.create(null);
     var frame = 0;
     follow(was);
     function draw() {

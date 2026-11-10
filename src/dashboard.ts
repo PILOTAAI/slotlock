@@ -2146,11 +2146,13 @@ ${
         runs.push({ change, times: 1 });
       }
     }
+    // Own entries only: a type such as `constructor` names nothing here.
+    const own = <T,>(map: Readonly<Record<string, T>>, type: string) => (Object.hasOwn(map, type) ? map[type] : undefined);
     return html`<ol class="feed">${runs.map(({ change, times }) => {
-      const tone = CHANGE_LABELS[change.type]?.tone ?? 'neutral';
+      const tone = own(CHANGE_LABELS, change.type)?.tone ?? 'neutral';
       const where = change.resourceId ? resourceName(byId.get(change.resourceId), change.resourceId) : null;
       const object = where ?? (ABOUT_A_RESOURCE.test(change.type) ? 'a resource' : null);
-      const words = ACTIVITY[change.type];
+      const words = own(ACTIVITY, change.type);
       let sentence: Html;
       if (change.type === 'usage.threshold_reached') {
         const metric = typeof change.data.metric === 'string' ? change.data.metric : 'use';
@@ -2162,9 +2164,11 @@ ${
         const [before, rest] = words.passive.split('{X}') as [string, string | undefined];
         sentence = rest === undefined ? html`${before}` : html`${before}<strong>${object ?? 'a resource'}</strong>${rest}`;
       } else {
-        // A change type this dashboard does not know yet: its label, or its name in words.
-        const label = CHANGE_LABELS[change.type]?.text ?? change.type.replace(/[._]/g, ' ').replace(/^./, (first) => first.toUpperCase());
-        sentence = html`${label}${object ? html` <span class="on">on</span> <strong>${object}</strong>` : html``}`;
+        // A change this dashboard has no words for (a newer server's): its label, never its type.
+        const label = own(CHANGE_LABELS, change.type)?.text;
+        sentence = label
+          ? html`${label}${object ? html` <span class="on">on</span> <strong>${object}</strong>` : html``}`
+          : html`Something changed${where ? html` on <strong>${where}</strong>` : html``}`;
       }
       return html`<li class="event"><span class="dot ${tone}" aria-hidden="true"></span><span class="what"><span class="title">${sentence}${
         times > 1 ? html` <span class="times">${times === 2 ? 'twice' : `${String(times)} times`}</span>` : html``
@@ -4230,14 +4234,30 @@ ${
    */
   async function streamToAssistant(session: Session, form: URLSearchParams, request: Request): Promise<Response> {
     const encoder = new TextEncoder();
-    const pipe = new TransformStream<Uint8Array, Uint8Array>();
-    const writer = pipe.writable.getWriter();
+    // Stop, or a client gone, cancels the body. That stops the turn, which keeps what it had, and
+    // the cancel settles only once it has: a Worker closes the request's connection then, and a
+    // runtime that never aborts request.signal on a disconnect stops the turn all the same.
+    const stop = new AbortController();
     let open = true;
+    let sink: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let work: Promise<void> = Promise.resolve();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        sink = controller;
+      },
+      cancel() {
+        open = false;
+        stop.abort();
+        return work;
+      },
+    });
     const write = (event: Record<string, unknown>) => {
       if (!open) return;
-      writer.write(encoder.encode(`${JSON.stringify(event)}\n`)).catch(() => {
+      try {
+        sink?.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      } catch {
         open = false;
-      });
+      }
     };
     const label = (name: string, state: 'run' | 'ok' | 'bad') =>
       slotlockAssistantStepLabel(
@@ -4252,10 +4272,10 @@ ${
         html: html`<li class="turn error" role="alert"><span>${message}</span></li>`.value,
         once: formNonce(session),
       });
-    const work = (async () => {
+    work = (async () => {
       try {
         const run = await runAssistantMessage(session, form, {
-          signal: request.signal,
+          signal: AbortSignal.any([request.signal, stop.signal]),
           onEvent: (event) => {
             if (event.type === 'text') write({ t: 'text', d: event.delta });
             else if (event.type === 'call') write({ t: 'step', id: event.id, s: 'run', label: label(event.name, 'run') });
@@ -4282,8 +4302,14 @@ ${
         report(error instanceof Error ? error.message : 'assistant stream failed');
         failed('Something went wrong. Reload the page and try again.');
       } finally {
-        await writer.close().catch(() => undefined);
-        open = false;
+        if (open) {
+          open = false;
+          try {
+            sink?.close();
+          } catch {
+            // Cancelled meanwhile.
+          }
+        }
       }
     })();
     ignoreRejection(work);
@@ -4292,7 +4318,7 @@ ${
     headers.set('Content-Type', 'application/x-ndjson; charset=utf-8');
     // Proxies that buffer (nginx) send each line as it is written.
     headers.set('X-Accel-Buffering', 'no');
-    return new Response(pipe.readable, { status: 200, headers });
+    return new Response(body, { status: 200, headers });
   }
 
   async function settleAction(

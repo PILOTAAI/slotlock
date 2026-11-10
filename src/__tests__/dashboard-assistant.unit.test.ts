@@ -526,6 +526,48 @@ describe.each(['anthropic', 'openai'] as const)('the chat over %s', (format) => 
     expect(await page(target, alice)).toContain('<p>You have <strong>vehicle-1</strong>.</p>');
   });
 
+  it('stops the turn when the stream is cancelled, though the request is never aborted, and settles the cancel once the turn is kept', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    let asked!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    model.script(async () => {
+      asked();
+      await held;
+      return { text: 'Too late.' };
+    });
+    try {
+      const shown = await page(target, alice);
+      const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+      const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+      // A Request made here has a signal nothing aborts, as on a runtime that does not abort it when
+      // the client goes: only the body's cancel can stop the turn.
+      const response = await target.fetch(
+        new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+          method: 'POST',
+          headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ csrf, once, message: 'What is free?' }).toString(),
+        }),
+      );
+      await reached;
+      await response.body?.cancel();
+      // By the time the cancel settles, the turn has stopped and is kept, with what it had.
+      const after = await page(target, alice);
+      expect(after).toContain('<div class="bubble">What is free?</div>');
+      expect(after).toContain('<li class="turn note">Stopped.</li>');
+      expect(after).not.toContain('Too late.');
+    } finally {
+      release();
+    }
+  });
+
   it('answers a refused stream with one error line and a fresh form value', async () => {
     const target = dashboard();
     const alice = await signIn(target, 'alice');
