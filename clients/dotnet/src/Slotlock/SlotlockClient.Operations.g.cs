@@ -271,7 +271,7 @@ public sealed partial class SlotlockClient
         string end,
         CancellationToken cancellationToken) =>
         GetFreeBusyAsync(
-            resourceIds: resourceIds,
+            resourceIds: new Optional<IEnumerable<string>>(resourceIds),
             start: start,
             end: end,
             cancellationToken: cancellationToken,
@@ -334,7 +334,7 @@ public sealed partial class SlotlockClient
         long durationMinutes,
         CancellationToken cancellationToken) =>
         FindNextAvailableAsync(
-            resourceIds: resourceIds,
+            resourceIds: new Optional<IEnumerable<string>>(resourceIds),
             start: start,
             end: end,
             durationMinutes: durationMinutes,

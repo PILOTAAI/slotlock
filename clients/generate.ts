@@ -814,7 +814,8 @@ function csharpCompatOverload(method: string, old: string[], current: string[]):
   const nameOf = (param: string) => param.slice(param.lastIndexOf(' ') + 1);
   const typeOf = (param: string) => param.slice(0, param.lastIndexOf(' '));
   // A parameter 0.2.0 required that is now optional (`T x` now `Optional<T> x`) is still kept: the
-  // overload passes it on, and Optional<T> converts from T.
+  // overload passes it on as `new Optional<T>(x)`, since C# applies no user-defined conversion
+  // from an interface type such as IEnumerable<string>.
   const optionalOf = (param: string) => `Optional<${typeOf(param)}> ${nameOf(param)}`;
   const missing = old.filter((param) => !current.includes(param) && !current.includes(optionalOf(param)));
   const relaxed = old.filter((param) => !current.includes(param) && current.includes(optionalOf(param)));
@@ -832,7 +833,11 @@ function csharpCompatOverload(method: string, old: string[], current: string[]):
     );
   }
   const args = [
-    ...old.map(nameOf).map((name) => `${name}: ${name}`),
+    ...old.map((param) =>
+      relaxed.includes(param)
+        ? `${nameOf(param)}: new Optional<${typeOf(param)}>(${nameOf(param)})`
+        : `${nameOf(param)}: ${nameOf(param)}`,
+    ),
     ...added.map(nameOf).map((name) => `${name}: default`),
   ];
   return [
