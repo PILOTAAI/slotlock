@@ -536,6 +536,13 @@ export interface SlotlockDashboardOptions {
   /** What the deployment is called in the dashboard: 1-60 characters. Defaults to `Slotlock`. */
   name?: string;
   /**
+   * The terms people accept by signing in, an https URL. The sign-in page links them beside the
+   * button; without it, the page names no terms.
+   */
+  termsUrl?: string;
+  /** The privacy notice the sign-in page links, an https URL. */
+  privacyUrl?: string;
+  /**
    * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
    * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
    * `publicUrl`.
@@ -1565,6 +1572,14 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
   }
+  for (const [label, url] of [
+    ['termsUrl', options.termsUrl],
+    ['privacyUrl', options.privacyUrl],
+  ] as const) {
+    if (url !== undefined && !/^https:\/\/[^\s"'<>`]+$/.test(url)) {
+      throw new Error(`Slotlock dashboard ${label} must be an https URL`);
+    }
+  }
   const fetchImpl = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   if (Buffer.byteLength(options.sessionSecret, 'utf8') < 32) {
@@ -1857,6 +1872,15 @@ ${live}
 ${noticeOf(notice)}
 <a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
       google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
+    }
+${
+      options.termsUrl
+        ? html`<p class="fine">By continuing you agree to the <a href="${options.termsUrl}">Terms of Service</a>.${
+            options.privacyUrl
+              ? html` The <a href="${options.privacyUrl}">Privacy notice</a> says what is kept.`
+              : html``
+          }</p>`
+        : html``
     }
 <p class="fine">${
       teams

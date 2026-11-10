@@ -11,6 +11,7 @@ import { llmsDetails } from './src/data/llms.mjs';
 const REPO = 'https://github.com/PILOTAAI/slotlock';
 const SIDEBAR_ORDER = [
   'index',
+  'use-cases',
   'quickstart',
   'agent-setup',
   'connect',
@@ -150,7 +151,14 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Get started',
-          items: ['docs', 'docs/quickstart', 'docs/agent-setup', 'docs/connect', 'docs/hosted'],
+          items: [
+            'docs',
+            'docs/use-cases',
+            'docs/quickstart',
+            'docs/agent-setup',
+            'docs/connect',
+            'docs/hosted',
+          ],
         },
         {
           label: 'Guides',

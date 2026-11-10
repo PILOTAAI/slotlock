@@ -515,6 +515,26 @@ describe('slotlock serve configuration', () => {
       );
     });
 
+    it('reads the policy pages the sign-in page links', () => {
+      const dashboard = readSlotlockServeConfig(
+        dashboardEnv({
+          SLOTLOCK_DASHBOARD_TERMS_URL: ' https://slotlock.example/docs/terms/ ',
+          SLOTLOCK_DASHBOARD_PRIVACY_URL: 'https://slotlock.example/docs/privacy/',
+        }),
+      ).dashboard;
+      expect(dashboard?.termsUrl).toBe('https://slotlock.example/docs/terms/');
+      expect(dashboard?.privacyUrl).toBe('https://slotlock.example/docs/privacy/');
+      expect('termsUrl' in (readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_TERMS_URL: '' })).dashboard ?? {})).toBe(false);
+      for (const value of ['http://slotlock.example/terms', 'not a url', 'https://user:pass@slotlock.example/']) {
+        expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_TERMS_URL: value })).message).toMatch(
+          /SLOTLOCK_DASHBOARD_TERMS_URL must be an https URL/,
+        );
+      }
+      expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_PRIVACY_URL: 'ftp://slotlock.example/' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_PRIVACY_URL must be an https URL/,
+      );
+    });
+
     it('reads the organizations without the dashboard, for a dashboard on Cloudflare Workers', () => {
       const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: '91' }));
       expect(config.dashboard).toBeUndefined();

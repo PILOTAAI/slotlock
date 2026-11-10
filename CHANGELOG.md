@@ -369,6 +369,11 @@ versioning.
   never overwritten. Each must be as strong as a secret, and differ from the others, from the
   current secret and from every other secret; the log redacts each one. Changing the assistant
   secret no longer makes owners enter their keys again.
+- `SLOTLOCK_DASHBOARD_TERMS_URL` and `SLOTLOCK_DASHBOARD_PRIVACY_URL`: with an https URL set, the
+  dashboard's sign-in page names the terms a person accepts by continuing, and links the privacy
+  notice. Without them it names no terms, as before.
+- Docs: a Use cases page, on how to model car and van rental, equipment hire, clinics, courts,
+  garage service bays, salons, meeting rooms and field service, and where Slotlock does not fit.
 
 ### Changed
 
@@ -407,7 +412,14 @@ versioning.
   OpenAI-compatible), what is sent to it, that writes wait for approval, its bounds, and that a model
   must be reachable from the internet. A test holds it to the bounds in the code. The Worker's
   wrangler.jsonc says to set `SLOTLOCK_ASSISTANT_SECRET` once and keep it.
-
+- Site: the landing page leads with what agents can book and with Slotlock Cloud, in under 1,300
+  words instead of 2,607 and 12 bands instead of 15. It shows the dashboard in its first screen,
+  says Pylota checks every booking with Slotlock, lists the industries it serves, and has a pricing
+  table: Free, Developer, Team and Self-host, each hosted plan's limits and monthly allowances read
+  from `src/plans.ts` and its price and the Custom contact from the Plans table in
+  `docs/hosted/README.md`, so the page cannot offer a plan the code does not sell. Running it
+  yourself now lives in Pricing, a Source band and the docs; the hero's install card moved to the
+  developers band. Copy lint fails the build above 1,300 words.
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.
 - README: about 160 lines that say what Slotlock is, how to run it and where each topic is
@@ -423,9 +435,6 @@ versioning.
 - Docs: the self-hosting page said `SLOTLOCK_TRUSTED_PROXY_HEADER` is ignored without
   `SLOTLOCK_TRUSTED_PROXY_SECRET`. The header is believed whenever no secret is set; the secret
   limits it to requests that carry the proof.
-
-### Fixed
-
 - Many agents racing for one slot no longer stall for seconds (RFC 0004 A7). Writers each inserted,
   then waited for one another at the exclusion constraint, and PostgreSQL broke each such deadlock
   only after `deadlock_timeout`: about one 100-client race in three took 4 to 20 seconds, though

@@ -40,6 +40,9 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
   endpoints; Webhooks, to add, delete and re-enable endpoints and see which are failing; and
   Settings. Everything on them is read from the tenant's own data. `SLOTLOCK_DASHBOARD_NAME` sets
   what the dashboard calls the deployment (Slotlock by default).
+- The sign-in page names the terms people accept when `SLOTLOCK_DASHBOARD_TERMS_URL` is an https
+  URL, and links the privacy notice from `SLOTLOCK_DASHBOARD_PRIVACY_URL`. Without them it names
+  no terms.
 - Keys for their agents (read only, read and write, or Full), which they can rotate or revoke. Keys
   made with `slotlock key create` act in `SLOTLOCK_TENANT` instead.
 - A person may add 500 resources, or as many as their plan allows on a hosted server. The

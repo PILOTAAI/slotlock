@@ -1,10 +1,7 @@
 // The landing page as Markdown, built from the same copy module as the HTML page.
 import type { APIRoute } from 'astro';
 import {
-  capabilities,
   closing,
-  cloud,
-  compare,
   dashboard,
   developers,
   facts,
@@ -13,120 +10,85 @@ import {
   hero,
   heroAria,
   heroLog,
-  legend,
-  legendCounts,
+  industries,
   meta,
-  model,
-  ruleCode,
-  openSource,
-  picker,
+  pricing,
   proof,
-  RACE_TEST_URL,
   REPO_URL,
   security,
   signIn,
-  specStrip,
-  steps,
+  source,
+  story,
+  strip,
 } from '../data/landing';
 
 const SITE = 'https://slotlock.pylota.io';
-const abs = (href: string) => (href.startsWith('/') ? `${SITE}${href}` : href);
+const abs = (href: string) => (href.startsWith('/') ? `${SITE}${href}` : href.startsWith('#') ? `${SITE}/${href}` : href);
 const heading = (h: { soft: string; strong: string }) => `## ${h.soft} ${h.strong}`;
 const list = (items: string[]) => items.map((item) => `- ${item}`).join('\n');
+const link = (l: { label: string; href: string }) => `[${l.label}](${abs(l.href)})`;
+const siteLinks = (text: string) => text.replace(/\]\(\//g, `](${SITE}/`);
 
 export const GET: APIRoute = () => {
-  const counts = legendCounts();
   const parts = [
     `# ${meta.title}`,
     `> ${meta.description}`,
-    `${hero.eyebrow}. ${hero.pill.label}: [release notes](${abs(hero.pill.href)}).`,
     `## ${hero.heading.soft} ${hero.heading.strong}`,
     hero.lede,
-    `[${signIn.long}](${signIn.href}) to use Slotlock Cloud, or self-host it. ${signIn.terms.replace(/\]\(\//g, `](${SITE}/`)}`,
-    list(hero.install.map((target) => `${target.label}: \`${target.command}\` (${target.note})`)),
-    `What the calendar at the top of the page shows: ${heroAria}`,
-    `The calls, in order, over MCP:\n\n${list(
-      heroLog.map(
-        (line) =>
-          `${line.time} agent ${line.agent}: \`${line.call}\` ${line.args} → ${line.result}`,
-      ),
+    `[${signIn.start}](${signIn.href}) · ${link(hero.docs)}. ${hero.note}`,
+    `What the dashboard at the top of the page shows: ${heroAria}`,
+    `The agents' activity, in order, over MCP:\n\n${list(
+      heroLog.map((line) => `Agent ${line.agent}: ${line.ask} (\`${line.call}\`) → ${line.result}`),
     )}`,
-    list(specStrip.map((item) => `${item.label}: ${item.value}`)),
-    heading(cloud.heading),
-    cloud.lede,
-    `### ${cloud.hosted.eyebrow}: ${cloud.hosted.title}`,
-    cloud.hosted.steps.map((step, index) => `${index + 1}. **${step.title}.** ${step.body}`).join('\n'),
-    `[${signIn.long}](${signIn.href}) · [${cloud.hosted.link.label}](${abs(cloud.hosted.link.href)})`,
-    `${cloud.endpoints.caption}:\n\n${list(cloud.endpoints.items.map((item) => `${item.label}: \`${item.value}\``))}`,
-    `${cloud.endpoints.commandCaption}:\n\n\`\`\`sh\n${cloud.endpoints.command}\n\`\`\``,
-    list(cloud.endpoints.links.map((link) => `[${link.label}](${abs(link.href)})`)),
-    `### ${cloud.self.eyebrow}: ${cloud.self.title}`,
-    `${cloud.self.body} \`${cloud.self.command}\` ${cloud.self.links.map((link) => `[${link.label}](${abs(link.href)})`).join(' · ')}`,
+    list(strip.items.map((item) => item.text)),
+    `[${strip.proof.name}](${strip.proof.href}), ${strip.proof.text}`,
+    heading(story.heading),
+    story.items
+      .map((step) => `${step.n}. **${step.title}.** ${siteLinks(step.body)} ${link(step.link)}`)
+      .join('\n'),
     heading(proof.heading),
     proof.lede,
-    `The constraint, from \`src/ddl.ts\`:\n\n\`\`\`sql\n${facts.excludeConstraint}\n\`\`\``,
-    `${proof.resultCaption}:\n\n\`\`\`ts\n${proof.storeResult}\n\`\`\`\n\nOver MCP, a tool result:\n\n\`\`\`json\n${proof.mcpResult}\n\`\`\`\n\n[${proof.testLink}](${RACE_TEST_URL})`,
-    heading(steps.heading),
-    steps.items
-      .map(
-        (step) =>
-          `${step.n}. **${step.title}.** ${step.body} [${step.link.label}](${abs(step.link.href)})`,
-      )
-      .join('\n'),
-    steps.diagram.aria,
-    heading(model.heading),
-    model.lede,
-    `Weekly rule for the van:\n\n\`\`\`ts\n${ruleCode()}\n\`\`\``,
-    `Legend of the calendar above: ${legend.map((item) => `${item.label} ${counts[item.kind]}`).join(', ')}.`,
-    heading(picker.heading),
-    picker.lede,
-    picker.aria,
-    list(picker.points),
-    `[${picker.link.label}](${abs(picker.link.href)})`,
+    `\`\`\`\n${proof.race.map((line) => `${line.who}  ${line.what}  ${line.result}`).join('\n')}\n\`\`\``,
+    proof.links.map(link).join(' · '),
+    `| | ${proof.compare.columns[1]} | ${proof.compare.columns[2]} |\n| --- | --- | --- |\n${proof.compare.rows
+      .map((row) => `| ${row.join(' | ')} |`)
+      .join('\n')}`,
     heading(dashboard.heading),
     dashboard.lede,
     dashboard.aria,
     list(dashboard.points.map((point) => `**${point.title}.** ${point.body}`)),
-    ...(dashboard.assistant
-      ? [
-          `### ${dashboard.assistant.heading}`,
-          dashboard.assistant.aria,
-          list(dashboard.assistant.statements),
-        ]
-      : []),
-    `[${dashboard.link.label}](${abs(dashboard.link.href)})`,
-    heading(capabilities.heading),
-    list(
-      [...capabilities.items, ...capabilities.more].map(
-        (item) => `[${item.title}](${abs(item.href)}): ${item.body}`,
-      ),
-    ),
+    link(dashboard.link),
+    heading(industries.heading),
+    list(industries.items.map((item) => `**${item.title}.** ${item.body}`)),
+    link(industries.link),
     heading(developers.heading),
     developers.lede,
-    `\`\`\`sh\n${facts.claudeMcpAdd}\n\`\`\``,
+    `\`\`\`sh\n${developers.cloudMcpAdd}\n\`\`\``,
+    `${developers.endpoints.caption}:\n\n${list(developers.endpoints.items.map((item) => `${item.label}: \`${item.value}\``))}`,
+    list(developers.rows.map((row) => `${link(row)}: ${row.body}`)),
+    list(developers.install.map((target) => `${target.label}: \`${target.command}\` (${siteLinks(target.note)})`)),
     `Tools:\n\n${list(facts.tools.map((tool) => `\`${tool.name}\`: ${tool.description}`))}`,
-    list(developers.rows.map((row) => `[${row.label}](${abs(row.href)}): ${row.body}`)),
+    list(developers.capabilities.map((item) => `[${item.title}](${abs(item.href)}): ${item.body}`)),
     heading(security.heading),
-    `An agent's write can wait for a person. The form reads: "${security.approval.message}" with one tick box, "${security.approval.checkbox}". ${security.approval.seal}.`,
     list(security.statements),
-    heading(compare.heading),
-    `| | ${compare.columns[1]} | ${compare.columns[2]} |\n| --- | --- | --- |\n${compare.rows
-      .map((row) => `| ${row.join(' | ')} |`)
-      .join('\n')}`,
-    heading(openSource.heading),
+    link(security.link),
+    heading(pricing.heading),
+    pricing.lede,
     list(
-      openSource.deploy.map(
-        (option) =>
-          `**${option.title}.** ${option.body}${option.command ? ` \`${option.command}\`` : ''} [${option.link.label}](${abs(option.link.href)})`,
+      pricing.plans.map(
+        (plan) =>
+          `**${plan.name}** (${plan.host.toLowerCase()}): ${plan.price}${plan.per ? `, ${plan.per}` : ''}. ${plan.tagline} ${plan.features.join('; ')}. ${link(plan.cta)}`,
       ),
     ),
-    `[${openSource.repo.name}](${REPO_URL}), ${facts.license}. Run it: \`${openSource.repo.run}\`.`,
-    list(openSource.statements),
+    `${siteLinks(signIn.terms)} ${pricing.note} [${pricing.contact.label}](${pricing.contact.href}) ${link(pricing.link)}`,
+    heading(source.heading),
+    `[${source.repo.name}](${REPO_URL}), ${facts.license}.`,
+    list(source.statements),
     heading(faq.heading),
-    faq.items.map((item) => `**${item.q}** ${item.a}`).join('\n\n'),
+    faq.items.map((item) => `**${item.q}** ${siteLinks(item.a)}`).join('\n\n'),
     heading(closing.heading),
-    `[${signIn.long}](${signIn.href}) · [Self-host it](${SITE}/docs/quickstart/) · [Read the specification](${SITE}/docs/specification/) · [llms.txt](${SITE}/llms.txt)`,
-    `${footer.legal}`,
+    `[${signIn.start}](${signIn.href}) · ${link(hero.docs)} · [llms.txt](${SITE}/llms.txt)`,
+    `${footer.version.label}. ${footer.legal}`,
   ];
   return new Response(`${parts.join('\n\n')}\n`, {
     headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
