@@ -1303,7 +1303,8 @@ function storeRefusal(error: unknown): unknown {
   if (
     code === 'resource_limit_reached' ||
     code === 'resource_visibility_conflict' ||
-    code === 'pool_rules_limit_reached'
+    code === 'pool_rules_limit_reached' ||
+    code === 'pool_order_limit_reached'
   ) {
     return new SlotlockAgentOperationError(code, 409);
   }

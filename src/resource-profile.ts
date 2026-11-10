@@ -307,4 +307,7 @@ export function slotlockGroupingRef(code: 'invalid_location' | 'invalid_group', 
  */
 export const SLOTLOCK_POOL_ORDERS = Object.freeze(['stable', 'least_booked', 'round_robin'] as const);
 
+/** Pools a tenant may set an order for (`pool_order_limit_reached` for one more). */
+export const SLOTLOCK_MAX_POOL_SETTINGS = 1_000;
+
 export type SlotlockPoolOrder = (typeof SLOTLOCK_POOL_ORDERS)[number];

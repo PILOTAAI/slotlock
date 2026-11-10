@@ -150,6 +150,31 @@ describe('monthly quotas', () => {
     }
   });
 
+  it('reads the database again before refusing a booking on attempts counted since the read', async () => {
+    const { state, quotas } = fixture({ used: { operations: 10, bookings: 998 } });
+    const book = () => quotas.check({ tenantRef: 'acme', operation: 'slotlock_put_reservation' });
+    // Two attempts let run: by the estimate, the next one reaches the stop.
+    expect((await book()).ok).toBe(true);
+    expect((await book()).ok).toBe(true);
+    expect(state.reads).toBe(1);
+    // Both were refused as overlaps, so the database still counts 998: the third runs, after a read.
+    expect((await book()).ok).toBe(true);
+    expect(state.reads).toBe(2);
+    // Once the database counts the stop, it is refused.
+    state.used = { operations: 10, bookings: 1_000 };
+    state.at += 30_000;
+    expect(await book()).toMatchObject({ ok: false, exceeded: { metric: 'bookings', used: 1_000 } });
+  });
+
+  it("counts every operation since the read when the meter's running total starts again", async () => {
+    const { state, quotas } = fixture({ used: { operations: 24_000, bookings: 0 } });
+    state.local = { unrecorded: 0, counted: 5_000 };
+    await check(quotas);
+    // The meter dropped its totals (MAX_TOTALS) and has counted 1,000 since.
+    state.local = { unrecorded: 0, counted: 1_000 };
+    expect(await check(quotas)).toMatchObject({ ok: false, exceeded: { metric: 'operations', used: 25_000 } });
+  });
+
   it('lets a Developer tenant go a tenth past its quota before refusing', async () => {
     const { state, quotas } = fixture({ plan: 'developer', used: { operations: 549_999, bookings: 0 } });
     expect(await check(quotas)).toMatchObject({

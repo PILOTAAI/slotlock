@@ -2201,10 +2201,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     const id = form.get('id') ?? '';
     const resource = await ownResource(session, id);
     if (!resource || !options.resources.setProfile) return notFound(session);
-    const text = (key: string) => {
-      const value = (form.get(key) ?? '').trim();
-      return value === '' ? null : value;
-    };
+    const text = (key: string) => optionalField(form, key);
     const capacity = text('capacity');
     if (capacity !== null && !/^\d{1,6}$/.test(capacity)) {
       return resourceDetailPage(session, id, 400, PROFILE_PROBLEMS.capacity);
@@ -2241,10 +2238,10 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
   }
 
   /** Text from a form, trimmed, or null when empty. */
-  const optionalField = (form: URLSearchParams, key: string) => {
+  function optionalField(form: URLSearchParams, key: string): string | null {
     const value = (form.get(key) ?? '').trim();
     return value === '' ? null : value;
-  };
+  }
 
   async function saveLocation(session: Session, form: URLSearchParams): Promise<Response> {
     const grouping = options.resources.grouping;

@@ -578,6 +578,64 @@ describe.skipIf(!url)('locations and groups (real Postgres, application role)', 
     ]);
   });
 
+  it('tells a filtered webhook of a resource deleted or moved out, and moves past what it does not take', async () => {
+    const acme = tenant('filter-leave');
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'north', name: 'North' }));
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'leeds', name: 'Leeds', parentRef: 'north' }));
+    await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'south', name: 'South' }));
+    await as(acme, (scoped) => scoped.putGroup({ tenantRef: acme, ref: 'team', name: 'Team' }));
+    await as(acme, (scoped) => scoped.putGroup({ tenantRef: acme, ref: 'rare', name: 'Rare' }));
+    const make = (externalRef: string, extra: Record<string, unknown> = {}) =>
+      as(acme, (scoped) => scoped.createResource({ tenantRef: acme, externalRef, timezone: 'UTC', ...extra }));
+    const doomed = await make('doomed', { location: 'leeds' });
+    await as(acme, (scoped) => scoped.setResourcePool({ tenantRef: acme, id: doomed.id, pool: 'vans' }));
+    await as(acme, (scoped) => scoped.addGroupMember({ tenantRef: acme, group: 'team', resourceId: doomed.id }));
+    const mover = await make('mover', { location: 'leeds' });
+    const endpoint = async (url: string, filter: Record<string, unknown>) => {
+      const created = await as(acme, (scoped) => scoped.createWebhookEndpoint({ tenantRef: acme, url, filter }));
+      if (!created.ok) throw new Error(created.code);
+      return created.endpoint;
+    };
+    const byLocation = await endpoint('https://example.com/north', { locations: ['north'] });
+    const byPool = await endpoint('https://example.com/vans', { pools: ['vans'] });
+    const byGroup = await endpoint('https://example.com/team', { groups: ['team'] });
+    const byRare = await endpoint('https://example.com/rare', { groups: ['rare'] });
+
+    // Deleted, and moved out of the North: each is still told.
+    expect(await as(acme, (scoped) => scoped.deleteResource({ tenantRef: acme, id: doomed.id }))).toMatchObject({ ok: true });
+    await as(acme, (scoped) => scoped.updateResourceProfile({ tenantRef: acme, id: mover.id, profile: {}, location: 'south' }));
+    const [deleted] = await admin<{ data: Record<string, unknown> }[]>`
+      SELECT data FROM slotlock.outbox WHERE tenant_ref = ${acme} AND type = 'resource.deleted'`;
+    expect(deleted?.data).toEqual({ id: doomed.id, reference: 'doomed', pool: 'vans', location: 'leeds', groups: ['team'] });
+    const claims = await as(acme, (scoped) => scoped.claimWebhookDeliveries({ tenantRef: acme, leaseMs: 30_000, batch: 100 }));
+    const delivered = (id: string) =>
+      claims.find((claim) => claim.endpoint.id === id)?.changes.map((change) => `${change.type} ${change.resourceId}`) ?? [];
+    expect(delivered(byLocation.id)).toEqual([`resource.deleted ${doomed.id}`, `resource.updated ${mover.id}`]);
+    expect(delivered(byPool.id)).toEqual([`resource.deleted ${doomed.id}`]);
+    expect(delivered(byGroup.id)).toEqual([`resource.deleted ${doomed.id}`]);
+
+    // The endpoint for a group nothing is in took none of them, and its cursor moved past them, so
+    // the feed behind it can be pruned and its next claim reads nothing again.
+    expect(delivered(byRare.id)).toEqual([]);
+    const [last] = await admin<{ txid: string; id: string }[]>`
+      SELECT txid::text, id::text FROM slotlock.outbox WHERE tenant_ref = ${acme} ORDER BY txid DESC, id DESC LIMIT 1`;
+    const [rare] = await admin<{ cursor_txid: string; cursor_id: string }[]>`
+      SELECT cursor_txid::text, cursor_id::text FROM slotlock.webhook_endpoints WHERE id = ${byRare.id}::uuid`;
+    expect(rare).toEqual({ cursor_txid: last?.txid, cursor_id: last?.id });
+  });
+
+  it('keeps an order for at most 1,000 pools a tenant', async () => {
+    const acme = tenant('pool-orders');
+    for (let n = 0; n < 1_000; n += 1) {
+      await as(acme, (scoped) => scoped.setPoolOrder({ tenantRef: acme, pool: `pool-${n}`, order: 'round_robin' }));
+    }
+    // Changing one it has is not one more.
+    expect(await as(acme, (scoped) => scoped.setPoolOrder({ tenantRef: acme, pool: 'pool-7', order: 'stable' }))).toBe('stable');
+    await expect(
+      as(acme, (scoped) => scoped.setPoolOrder({ tenantRef: acme, pool: 'pool-1000', order: 'stable' })),
+    ).rejects.toMatchObject({ code: 'pool_order_limit_reached' });
+  });
+
   it("erases a tenant's locations, groups and memberships with it, and keeps them from other tenants", async () => {
     const acme = tenant('erased');
     await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'site', name: 'Site' }));

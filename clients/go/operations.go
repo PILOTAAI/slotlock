@@ -1293,7 +1293,8 @@ func (in SetPoolOrderInput) values() map[string]any {
 
 // SetPoolOrder: Set a pool's order. The order slotlock_book_pool tries a pool's members in:
 // stable (by id, the default), least_booked (fewest bookings made on each in the last 30 days
-// first, to share them out) or round_robin (from the member after the one booked last).
+// first, to share them out) or round_robin (from the member after the one booked last). At most
+// 1,000 pools have one: one more is 409 pool_order_limit_reached.
 func (c *Client) SetPoolOrder(ctx context.Context, in SetPoolOrderInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_set_pool_order", in.values())
 }

@@ -35,7 +35,8 @@ versioning.
   A2A, REST, the application API, the dashboard assistant), reported by the agent server's new
   `onUsage` and the dispatch's, counted in memory by `createSlotlockUsageMeter` and recorded every
   15 seconds and on shutdown through `slotlock.record_usage`, once per batch id however often it is
-  sent; and the bookings (`reservation.created`, `event.created`, `hold.confirmed`) and holds
+  sent (a batch it refuses for good, such as a day it no longer takes after a long outage, is
+  dropped and reported rather than held in front of the batches after it); and the bookings (`reservation.created`, `event.created`, `hold.confirmed`) and holds
   (`hold.created`) committed on the tenant's feed, rolled up by maintenance
   (`slotlock.roll_up_usage`, the store's `rollUpUsage`) before the feed is pruned, in the feed's
   committed order, so nothing is counted twice and a rolled-back write never is; maintenance's own
@@ -129,14 +130,20 @@ versioning.
   (bounded by a CHECK added NOT VALID), and `slotlock.location_path(text, text)`. The store's
   `createWebhookEndpoint` takes a `filter` (`invalid_webhook_filter` past its bounds), an endpoint
   carries its `filter`, `webhook.created` on the feed records it, and the dashboard's webhooks page
-  shows it.
+  shows it. A change that says where its resource was also matches: `resource.deleted` (now with the
+  resource's `pool`, `location` and `groups`, recorded by a BEFORE DELETE trigger while its groups
+  are still there) and `resource.updated` by its `before`, so a filtered endpoint learns of a
+  resource deleted or moved out of what it follows. An endpoint that takes only some changes (by
+  type or filter) moves its cursor past those it does not take, up to the last change that has
+  ended, when none before it is for it: it no longer keeps the tenant's whole feed from being
+  pruned. This covers `event_types` filters too, which held it back the same way.
 - Pool order (RFC 0003 G7). `PUT /v1/pools/{pool}/order` (`slotlock_set_pool_order`,
   `setPoolOrder`) sets the order `slotlock_book_pool` tries a pool's members in: `stable` (by id, as
   before, and the default), `least_booked` (fewest confirmed bookings made in the last 30 days
   first) or `round_robin` (starting after the member it booked last). `GET /v1/pools` shows each
   pool's `order`. New tenant table `slotlock.pool_settings`, under the tenant's forced row-level
-  security and erased with it; an unknown order is refused `invalid_pool_order`. Run `slotlock
-  migrate`.
+  security and erased with it, for at most 1,000 pools a tenant (`pool_order_limit_reached`, 409,
+  for one more); an unknown order is refused `invalid_pool_order`. Run `slotlock migrate`.
 - Provider presets and a model list in the assistant's Settings (RFC 0003 A4). Anthropic, OpenAI,
   OpenRouter, Google, Mistral, Groq, Together and Custom each fill the API and base URL, saving
   nothing; **Load models** asks the provider for its models (`GET /v1/models` on the Anthropic API,
@@ -157,7 +164,8 @@ versioning.
   down to the stop), after the per-second bucket. `createSlotlockQuotas` reads the month so far
   through `slotlock.tenant_quota_usage` (bookings not yet rolled up included) at most every 30
   seconds, every 2 near a stop, and adds this server's unrecorded operations (the meter's new
-  `local`); a count it cannot read lets the operation run. At 80% and 100% of a quota the tenant's
+  `local`); a count it cannot read lets the operation run. Booking operations let run since a read
+  are counted as attempts, so before refusing one on that estimate a server reads the count again. At 80% and 100% of a quota the tenant's
   feed records the new `usage.threshold_reached` change once, bookings as the database counted them, (`slotlock.note_usage_threshold`,
   `slotlock.usage_notices`, erased with the tenant), which its webhooks deliver. The request limits
   take `quotas` and a `quota` check for `authorize`; the dashboard assistant is checked when an

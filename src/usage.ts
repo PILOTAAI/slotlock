@@ -32,6 +32,8 @@ export interface SlotlockUsageCount {
 const MAX_BATCH_ROWS = 10_000;
 /** Batches kept for another try while the database refuses them; older ones are dropped, and said so. */
 const MAX_HELD_BATCHES = 100;
+/** PostgreSQL's invalid_parameter_value: record_usage refusing a batch it will never take. */
+const REFUSED_FOR_GOOD = '22023';
 /** Tenants whose running totals one meter keeps (`local`); past this they start again from 0. */
 const MAX_TOTALS = 100_000;
 
@@ -105,12 +107,26 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
     }
   };
 
+  const dropped = (rows: number, why: string) =>
+    report(
+      Object.assign(new Error(`Slotlock usage: ${String(rows)} counts dropped ${why}`), {
+        code: 'usage_dropped' as const,
+      }),
+    );
+
+  // True when recorded, or when the database refused the batch for good (record_usage's
+  // invalid_parameter_value: a day it no longer takes, after an outage past the next day), which is
+  // then dropped rather than held in front of every batch after it. False to try again.
   async function send(batch: { flushId: string; rows: SlotlockUsageCount[] }): Promise<boolean> {
     try {
       await options.record(batch.flushId, batch.rows);
       return true;
     } catch (error) {
       report(error);
+      if ((error as { code?: unknown } | null)?.code === REFUSED_FOR_GOOD) {
+        dropped(batch.rows.length, 'that the database will not take');
+        return true;
+      }
       return false;
     }
   }
@@ -135,15 +151,8 @@ export function createSlotlockUsageMeter(options: SlotlockUsageMeterOptions): Sl
       sending = [];
     }
     while (held.length > MAX_HELD_BATCHES) {
-      const dropped = held.shift();
-      report(
-        Object.assign(
-          new Error(
-            `Slotlock usage: ${String(dropped?.rows.length ?? 0)} counts dropped after the database refused them ${String(MAX_HELD_BATCHES)} times`,
-          ),
-          { code: 'usage_dropped' as const },
-        ),
-      );
+      const oldest = held.shift();
+      dropped(oldest?.rows.length ?? 0, `after the database refused them ${String(MAX_HELD_BATCHES)} times`);
     }
   }
 

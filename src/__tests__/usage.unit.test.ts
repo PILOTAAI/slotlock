@@ -81,6 +81,34 @@ describe('the usage meter', () => {
     expect(errors).toHaveLength(2);
   });
 
+  it('drops a batch the database will never take, and records the ones behind it', async () => {
+    const errors: unknown[] = [];
+    const sent: string[] = [];
+    let refuse = 1;
+    const meter = createSlotlockUsageMeter({
+      intervalMs: 0,
+      onError: (error) => errors.push(error),
+      record: async (flushId) => {
+        sent.push(flushId);
+        if (refuse > 0) {
+          refuse -= 1;
+          // As record_usage refuses a day it no longer takes.
+          throw Object.assign(new Error('Slotlock usage rows must be within a day of today'), { code: '22023' });
+        }
+        return true;
+      },
+    });
+    meter.count({ principal: principal('acme'), operation: 'slotlock_list_resources', origin: 'rest' });
+    await meter.flush();
+    meter.count({ principal: principal('acme'), operation: 'slotlock_list_events', origin: 'rest' });
+    await meter.flush();
+    // Not tried again: the next batch went at once, under a new id.
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).not.toBe(sent[0]);
+    expect(meter.pending()).toBe(0);
+    expect(errors.map((error) => (error as { code?: string }).code)).toEqual(['22023', 'usage_dropped']);
+  });
+
   it('never lets counting change a call, and flushes one at a time', async () => {
     let concurrent = 0;
     let most = 0;

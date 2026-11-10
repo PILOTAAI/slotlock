@@ -192,11 +192,11 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
     if (!entry.plan) return [];
     const quotas = SLOTLOCK_PLAN_QUOTAS[entry.plan];
     const local = options.local?.(tenantRef, 'operations', entry.periodStart);
-    // The read's unrecorded operations, and every one this meter counted since.
+    // The read's unrecorded operations, and every one this meter counted since. A running total
+    // below the one at the read means the meter started its totals again: all of it is new.
+    const counted = local?.counted ?? entry.countedAtRead;
     const operations =
-      entry.used.operations +
-      entry.unrecorded +
-      Math.max(0, (local?.counted ?? entry.countedAtRead) - entry.countedAtRead);
+      entry.used.operations + entry.unrecorded + (counted >= entry.countedAtRead ? counted - entry.countedAtRead : counted);
     const bookings = entry.used.bookings + entry.bookingsSinceRead;
     const standing = (metric: SlotlockQuotaMetric, used: number): SlotlockQuotaStanding => ({
       metric,
@@ -268,12 +268,29 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
         else if (entry?.periodStart !== periodStart) return { ok: true, standings: [] };
       }
       if (!entry) return { ok: true, standings: [] };
-      const standings = standingsOf(tenantRef, entry, resetsAt);
+      let standings = standingsOf(tenantRef, entry, resetsAt);
+      // Booking operations let run since the read are attempts, and some were refused or failed:
+      // before refusing one on that estimate, read the database's count again.
+      const booking = SLOTLOCK_BOOKING_OPERATIONS.includes(operation);
+      const bookingStanding = standings[1];
+      if (booking && entry.bookingsSinceRead > 0 && bookingStanding && bookingStanding.used >= bookingStanding.stop) {
+        let pending = reading.get(tenantRef);
+        if (!pending) {
+          pending = read(tenantRef, periodStart).finally(() => reading.delete(tenantRef));
+          reading.set(tenantRef, pending);
+        }
+        const again = await pending;
+        if (again) {
+          entry = again;
+          standings = standingsOf(tenantRef, entry, resetsAt);
+        }
+      }
+      const current = entry;
       // Bookings are noticed as the database last counted them, never on the estimate since.
       notify(
         tenantRef,
         standings.map((standing) =>
-          standing.metric === 'bookings' ? { ...standing, used: entry.used.bookings } : standing,
+          standing.metric === 'bookings' ? { ...standing, used: current.used.bookings } : standing,
         ),
       );
       if ((SLOTLOCK_QUOTA_EXEMPT_OPERATIONS as readonly string[]).includes(operation)) {
@@ -283,11 +300,10 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
       if (operations && operations.used >= operations.stop) {
         return { ok: false, exceeded: operations, standings };
       }
-      const booking = SLOTLOCK_BOOKING_OPERATIONS.includes(operation);
       if (booking && bookings && bookings.used >= bookings.stop) {
         return { ok: false, exceeded: bookings, standings };
       }
-      if (booking && entry.plan) entry.bookingsSinceRead += 1;
+      if (booking && current.plan) current.bookingsSinceRead += 1;
       return { ok: true, standings };
     },
   };

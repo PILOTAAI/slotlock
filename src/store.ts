@@ -1897,6 +1897,7 @@ function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailability
 
 /** What the location and group guards (ddl.ts) refuse with, by their HINT. */
 const GROUPING_REFUSALS: ReadonlySet<string> = new Set([
+  'pool_order_limit_reached',
   'location_too_deep',
   'location_cycle',
   'location_limit_reached',
@@ -2553,7 +2554,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   /**
    * Set the order a pool booking tries a pool's members in (RFC 0003 G7): `stable` (by id, the
    * default), `least_booked` or `round_robin`: `invalid_pool` for a name that is not a pool's,
-   * `invalid_pool_order` for an order that is not one of these.
+   * `invalid_pool_order` for an order that is not one of these, `pool_order_limit_reached` past
+   * SLOTLOCK_MAX_POOL_SETTINGS pools a tenant.
    */
   setPoolOrder(params: { tenantRef: string; pool: string; order: SlotlockPoolOrder }): Promise<SlotlockPoolOrder>;
   /** Note the member a pool booking took, from which `round_robin` goes on. */
@@ -4600,11 +4602,12 @@ function buildSlotlockStore(
           code: 'invalid_pool_order' as const,
         });
       }
-      await sql`
+      // At most SLOTLOCK_MAX_POOL_SETTINGS pools a tenant (pool_settings_guard).
+      await guardedWrite(sql, (tx) => tx`
         INSERT INTO slotlock.pool_settings (tenant_ref, pool_ref, member_order)
         VALUES (${params.tenantRef}, ${params.pool}, ${params.order})
         ON CONFLICT (tenant_ref, pool_ref)
-        DO UPDATE SET member_order = EXCLUDED.member_order, updated_at = statement_timestamp()`;
+        DO UPDATE SET member_order = EXCLUDED.member_order, updated_at = statement_timestamp()`);
       return params.order;
     },
 

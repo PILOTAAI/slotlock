@@ -13,6 +13,7 @@ import {
   SLOTLOCK_MAX_LOCATION_DEPTH,
   SLOTLOCK_MAX_LOCATIONS,
   SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_MAX_POOL_SETTINGS,
   SLOTLOCK_POOL_ORDERS,
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
@@ -2338,6 +2339,29 @@ CREATE TABLE IF NOT EXISTS slotlock.pool_settings (
   )
 );
 
+-- At most SLOTLOCK_MAX_POOL_SETTINGS pools a tenant set an order for, under the tenant's lock.
+CREATE OR REPLACE FUNCTION slotlock.pool_settings_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_pool_settings_guard$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:pool-settings:' || NEW.tenant_ref, 0));
+  -- An upsert of a pool the tenant has set fires this before its conflict is found.
+  IF NOT EXISTS (SELECT 1 FROM slotlock.pool_settings kept
+                  WHERE kept.tenant_ref = NEW.tenant_ref AND kept.pool_ref = NEW.pool_ref)
+     AND (SELECT count(*) FROM slotlock.pool_settings kept WHERE kept.tenant_ref = NEW.tenant_ref)
+         >= ${SLOTLOCK_MAX_POOL_SETTINGS} THEN
+    RAISE EXCEPTION 'Slotlock keeps an order for at most ${SLOTLOCK_MAX_POOL_SETTINGS} pools a tenant'
+      USING ERRCODE = 'check_violation', HINT = 'pool_order_limit_reached';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_pool_settings_guard$;
+CREATE OR REPLACE TRIGGER slotlock_pool_settings_guard
+  BEFORE INSERT ON slotlock.pool_settings
+  FOR EACH ROW EXECUTE FUNCTION slotlock.pool_settings_guard();
+
 -- The model a tenant's dashboard assistant uses (dashboard.ts, assistant.ts), one row a tenant.
 -- The API key is stored only sealed (AES-256-GCM under the deployment's SLOTLOCK_ASSISTANT_SECRET,
 -- bound to the tenant), with its last four characters to show.
@@ -2593,9 +2617,11 @@ LANGUAGE sql
 STABLE
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_outbox_erasing$
-  SELECT owner = current_setting('slotlock.erasing', true)
+  -- Never null: the erasing setting is unset outside erasure, and a null here would read as neither
+  -- erasing nor not to a caller that writes NOT outbox_erasing(...).
+  SELECT COALESCE(owner = current_setting('slotlock.erasing', true)
      AND current_user = (SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace
-                          WHERE nspname = 'slotlock');
+                          WHERE nspname = 'slotlock'), false);
 $slotlock_outbox_erasing$;
 
 CREATE OR REPLACE FUNCTION slotlock.outbox_resource_change()
@@ -2754,9 +2780,41 @@ BEGIN
 END
 $slotlock_outbox_webhook$;
 
+-- A resource deleted: resource.deleted, recorded just before its row goes, while its groups are
+-- still there (a foreign key's cascade takes them before any AFTER trigger of the resource runs),
+-- with where it was: its pool, location and groups, so an endpoint filtered by them still receives
+-- it (event-feed.ts FILTER_MATCH). A delete that fails takes this row back with it.
+CREATE OR REPLACE FUNCTION slotlock.outbox_resource_deleting()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_resource_deleting$
+DECLARE
+  was_in text[];
+BEGIN
+  IF OLD.tenant_ref IS NULL OR slotlock.outbox_erasing(OLD.tenant_ref) THEN RETURN OLD; END IF;
+  was_in := ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
+                   WHERE member.tenant_ref = OLD.tenant_ref AND member.resource_id = OLD.id
+                   ORDER BY member.group_ref);
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  VALUES (
+    OLD.tenant_ref, OLD.id, 'resource.deleted', OLD.id::text,
+    jsonb_build_object('id', OLD.id, 'reference', OLD.external_ref)
+      || jsonb_strip_nulls(jsonb_build_object('pool', OLD.pool_ref, 'location', OLD.location_ref))
+      || CASE WHEN cardinality(was_in) > 0 THEN jsonb_build_object('groups', to_jsonb(was_in)) ELSE '{}'::jsonb END,
+    NULLIF(current_setting('slotlock.actor', true), '')
+  );
+  RETURN OLD;
+END
+$slotlock_outbox_resource_deleting$;
+
+-- Deletion has its own trigger, before the row goes (outbox_resource_deleting).
 CREATE OR REPLACE TRIGGER slotlock_outbox_resource_change
-  AFTER INSERT OR UPDATE OR DELETE ON slotlock.resources
+  AFTER INSERT OR UPDATE ON slotlock.resources
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_resource_change();
+CREATE OR REPLACE TRIGGER slotlock_outbox_resource_deleting
+  BEFORE DELETE ON slotlock.resources
+  FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_resource_deleting();
 CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_change
   AFTER INSERT OR DELETE ON slotlock.calendar_coverage
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_coverage_change();

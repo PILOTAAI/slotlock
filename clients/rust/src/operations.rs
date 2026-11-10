@@ -1623,7 +1623,8 @@ impl Client {
     ///
     /// The order slotlock_book_pool tries a pool's members in: stable (by id, the default),
     /// least_booked (fewest bookings made on each in the last 30 days first, to share them out)
-    /// or round_robin (from the member after the one booked last).
+    /// or round_robin (from the member after the one booked last). At most 1,000 pools have one:
+    /// one more is 409 pool_order_limit_reached.
     pub fn set_pool_order(&self, input: &SetPoolOrderInput) -> Result<Value, Error> {
         self.call("slotlock_set_pool_order", serde_json::to_value(input)?)
     }

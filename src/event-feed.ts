@@ -416,7 +416,9 @@ function parseWebhookFilter(filter: SlotlockWebhookFilter | undefined): {
 /**
  * Whether a change (`change`, a row of slotlock.outbox) passes an endpoint's filter (`due`, a row of
  * slotlock.webhook_endpoints): no filter, or a resource it names, or one in a pool, at a location
- * (or a location in it) or in a group it names, as the resource is now.
+ * (or a location in it) or in a group it names, as the resource is now; or a change to a resource
+ * that says it was in one (resource.created, resource.deleted, or resource.updated's `before`),
+ * so an endpoint also learns of a resource deleted, or moved out of what it follows.
  */
 const FILTER_MATCH = `(
   (due.filter_resource_ids IS NULL AND due.filter_pools IS NULL
@@ -430,7 +432,18 @@ const FILTER_MATCH = `(
                 AND slotlock.location_path(held.tenant_ref, held.location_ref) && due.filter_locations)
             OR EXISTS (SELECT 1 FROM slotlock.resource_group_members member
                         WHERE member.tenant_ref = held.tenant_ref AND member.resource_id = held.id
-                          AND member.group_ref = ANY (due.filter_groups)))))`;
+                          AND member.group_ref = ANY (due.filter_groups))))
+  OR (change.type LIKE 'resource.%' AND (
+       (change.data ->> 'pool') = ANY (due.filter_pools)
+    OR (change.data #>> '{before,pool}') = ANY (due.filter_pools)
+    OR EXISTS (
+         SELECT 1 FROM unnest(ARRAY[change.data ->> 'location', change.data #>> '{before,location}']) was(ref)
+          WHERE was.ref IS NOT NULL
+            AND (was.ref = ANY (due.filter_locations)
+                 OR slotlock.location_path(change.tenant_ref, was.ref) && due.filter_locations))
+    OR (jsonb_typeof(change.data -> 'groups') = 'array' AND (change.data -> 'groups') ?| due.filter_groups)
+    OR (jsonb_typeof(change.data #> '{before,groups}') = 'array'
+        AND (change.data #> '{before,groups}') ?| due.filter_groups))))`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -647,6 +660,32 @@ export function slotlockEventFeedMethods(
       if (!(Number.isSafeInteger(params.batch) && params.batch >= 1 && params.batch <= 100)) {
         throw new RangeError('Slotlock webhook batch must be 1-100 changes');
       }
+      // An endpoint that takes only some changes (by type or filter) moves past the ones it does
+      // not take, up to the last change that has ended, when none before it is for the endpoint:
+      // else its cursor would stay where it was made, keeping the whole feed from being pruned and
+      // every claim reading it all again. Not one being delivered (leased), nor one waiting to try
+      // again (it has a change for it).
+      await sql`
+        UPDATE slotlock.webhook_endpoints due
+           SET cursor_txid = head.txid, cursor_id = head.id
+          FROM (SELECT change.txid, change.id FROM slotlock.outbox change
+                 WHERE change.tenant_ref = ${params.tenantRef}
+                   AND change.txid < pg_snapshot_xmin(pg_current_snapshot())
+                 ORDER BY change.txid DESC, change.id DESC
+                 LIMIT 1) head
+         WHERE due.tenant_ref = ${params.tenantRef}
+           AND due.disabled_at IS NULL
+           AND (due.lease_until IS NULL OR due.lease_until <= now())
+           AND (due.event_types IS NOT NULL OR due.filter_resource_ids IS NOT NULL OR due.filter_pools IS NOT NULL
+                OR due.filter_locations IS NOT NULL OR due.filter_groups IS NOT NULL)
+           AND (head.txid, head.id) > (due.cursor_txid, due.cursor_id)
+           AND NOT EXISTS (
+             SELECT 1 FROM slotlock.outbox change
+              WHERE change.tenant_ref = due.tenant_ref
+                AND (change.txid, change.id) > (due.cursor_txid, due.cursor_id)
+                AND (change.txid, change.id) <= (head.txid, head.id)
+                AND (due.event_types IS NULL OR change.type = ANY (due.event_types))
+                AND ${sql.unsafe(FILTER_MATCH)})`;
       const endpoints = await sql<
         { id: string; url: string; secret: string; attempts: number; lease_token: string; event_types: string[] | null; cursor_txid: string; cursor_id: string }[]
       >`

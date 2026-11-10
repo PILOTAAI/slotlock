@@ -1101,7 +1101,8 @@ would keep, so a member it counts free may still refuse a booking that abuts ano
 search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names the
 members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity and `order`:
 which member `slotlock_book_pool` tries first, set with `PUT /v1/pools/{pool}/order`
-(`setPoolOrder`). `stable` (the default) tries them by id; `least_booked` the one with the fewest
+(`setPoolOrder`, for up to 1,000 pools a tenant: `pool_order_limit_reached`, 409, for one more).
+`stable` (the default) tries them by id; `least_booked` the one with the fewest
 confirmed bookings made in the last 30 days; `round_robin` the one after the member it booked last,
 to share bookings across vans, rooms or a team of people. The older names `calendar.<verb>` and `calendar_<verb>` still work and
 are no longer advertised.
@@ -1416,8 +1417,10 @@ webhook URLs or secrets.
   `webhook-id` to drop a repeat: delivery is at least once.
 - A webhook can also take only the changes about some resources: `resource_ids` (up to 100),
   `pools`, `locations` (each with every location in it) or `groups` (up to 20 of each), matched
-  against the resource as it is when the change is delivered. With any of them, a change about no
-  resource (a key, a webhook, a usage notice) is not sent to it.
+  against the resource as it is when the change is delivered, or as the change says it was: a
+  resource's deletion (`resource.deleted` names its pool, location and groups) and its move out of
+  them (`resource.updated`'s `before`) still reach it. With any of them, a change about no resource
+  (a key, a webhook, a usage notice) is not sent to it.
 - Changes go to each webhook in order, one at a time, until one fails; that one is retried after
   5 seconds, 5 minutes, 30 minutes, 2, 5, then every 10 hours. After a day of failures, or a `410`,
   the webhook is disabled and the feed records `webhook.disabled`; `POST /v1/webhooks/{id}/enable`
