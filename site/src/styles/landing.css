@@ -1502,8 +1502,18 @@ svg {
   }
 }
 
+/* As many columns as plans: Free and Self-host before hosted plans ship, up to four after. */
+@media (min-width: 640px) {
+  .plans[data-count='2'] {
+    max-width: 860px;
+  }
+}
+
 @media (min-width: 1100px) {
-  .plans {
+  .plans[data-count='3'] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .plans[data-count='4'] {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }

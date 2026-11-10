@@ -299,6 +299,62 @@ function boundedDefault(source, name) {
   return match ? Number(match[3].replace(/_/g, '')) : undefined;
 }
 
+/**
+ * Hosted Slotlock's plans, for the landing page's Pricing band: each plan's limits and monthly
+ * quotas from src/plans.ts, and its price from the Plans table in docs/hosted/README.md. Null while
+ * the release has no src/plans.ts, so the page offers only plans the code sells.
+ */
+async function readPlans() {
+  let source;
+  try {
+    source = await read('src/plans.ts');
+  } catch {
+    return null;
+  }
+  const perPlan = (name) => {
+    const block = new RegExp(`export const ${name}\\b[^=]*=\\s*Object\\.freeze\\(\\{([\\s\\S]*?)\\}\\);`).exec(
+      source,
+    )?.[1];
+    if (block === undefined) return undefined;
+    return Object.fromEntries(
+      [...block.matchAll(/(\w+): Object\.freeze\(\{([^}]*)\}\)/g)].map(([, plan, body]) => [
+        plan,
+        Object.fromEntries(
+          [...body.matchAll(/(\w+): ([0-9_]+)/g)].map(([, key, value]) => [key, Number(value.replace(/_/g, ''))]),
+        ),
+      ]),
+    );
+  };
+  const limits = must(perPlan('SLOTLOCK_PLAN_LIMITS'), 'SLOTLOCK_PLAN_LIMITS in src/plans.ts');
+  const quotas = perPlan('SLOTLOCK_PLAN_QUOTAS') ?? {};
+  const hosted = await read('docs/hosted/README.md');
+  const table = must(
+    /^## Plans\n\n(\|[^\n]+)\n\|[^\n]+\n((?:\|[^\n]+\n)+)/m.exec(hosted),
+    'the Plans table in docs/hosted/README.md',
+  );
+  const cells = (row) =>
+    row
+      .trim()
+      .replace(/^\||\|$/g, '')
+      .split('|')
+      .map((cell) => cell.trim());
+  const names = cells(table[1]).map((name) => name.toLowerCase());
+  const prices = cells(
+    must(
+      table[2].split('\n').find((row) => row.startsWith('| Price |')),
+      'the Price row of the Plans table in docs/hosted/README.md',
+    ),
+  );
+  return Object.keys(limits).map((plan) => {
+    const column = names.indexOf(plan);
+    const price = must(column > 0 ? prices[column] : undefined, `${plan}'s price in docs/hosted/README.md`);
+    const money = /\$([0-9,]+) a month, or \$([0-9,]+) a year/.exec(price);
+    const amount = (index) =>
+      plan === 'free' ? 0 : must(money && Number(money[index].replace(/,/g, '')), `${plan}'s price`);
+    return { id: plan, monthly: amount(1), yearly: amount(2), ...limits[plan], ...(quotas[plan] ?? {}) };
+  });
+}
+
 async function readFacts() {
   const [pkg, agentServer, store, ddl, rules, config, eventFeed, selfHost, dashboard, clientDirs] =
     await Promise.all([
@@ -560,6 +616,7 @@ async function readBenchmark() {
 
 async function main() {
   const facts = await readFacts();
+  facts.plans = await readPlans();
   facts.benchmarkResults = await readBenchmark();
   const { page: toolsPage, toolExamples } = await readToolsReference(facts);
   // The prompt for a coding agent: a docs page shows it and /slotlock-setup-prompt.md serves it.

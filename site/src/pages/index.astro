@@ -621,7 +621,7 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
             </h2>
             <p class="lede">{pricing.lede}</p>
           </div>
-          <ul class="plans">
+          <ul class="plans" data-count={pricing.plans.length}>
             {
               pricing.plans.map((plan) => (
                 <li class={plan.featured ? 'plan plan--featured' : 'plan'}>

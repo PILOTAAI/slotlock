@@ -12,8 +12,13 @@ treatment room, a technician's afternoon. Each section below says what to make a
 
 ## Car and van rental
 
-[Pylota](https://pylota.io), the AI fleet manager for independent car rental operators, runs on
-Slotlock.
+Slotlock started as the booking engine inside [Pylota](https://pylota.io), the AI fleet manager
+for independent car rental operators. Pylota runs it as a library in its own PostgreSQL: each
+vehicle is a resource, every booking also writes a Slotlock reservation in the same transaction, so
+the exclusion constraint is the database's check against double bookings, and a car an agent has
+quoted is held, with an expiry, while the renter pays.
+
+To model a rental fleet:
 
 - **Resources:** each vehicle, in its depot's time zone, and a pool per vehicle class, so a class
   sells out at its size.

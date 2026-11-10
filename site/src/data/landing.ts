@@ -61,7 +61,7 @@ export const hero = {
   } satisfies Heading,
   lede: 'Every resource gets its own calendar. Agents find a free time, hold it while a person picks, and book it. When two want the same slot, one wins and the other gets the next one.',
   docs: { label: 'Read the docs', href: '/docs/' },
-  note: 'Free while in preview.',
+  note: (facts as { plans?: unknown }).plans ? 'Free plan, no card needed.' : 'Free while in preview.',
 };
 
 /** Hours on the hero axis are local wall time of each resource, 08:00 to 18:00. */
@@ -165,7 +165,7 @@ export const strip = {
   ] as const,
   proof: {
     name: 'Pylota',
-    text: 'the AI fleet manager for independent car rental operators, runs on Slotlock.',
+    text: 'the AI fleet manager for independent car rental operators, checks every booking with Slotlock.',
     href: PYLOTA_URL,
   },
 };
@@ -259,7 +259,7 @@ export const proof = {
     soft: 'Two agents ask for the same van.',
     strong: 'One gets it. The other gets the next free time.',
   } satisfies Heading,
-  lede: 'An exclusion constraint in PostgreSQL checks every write, so a race has exactly one winner, and the other agent gets an answer it can act on.',
+  lede: 'A PostgreSQL exclusion constraint checks every write: a race has one winner, and the other agent gets an answer it can act on.',
   /** The race in agent terms; the integration suite runs it as two concurrent inserts. */
   race: [
     { who: 'agent-a', what: 'hold [10:00, 12:00)', result: 'held', tone: 'g' },
@@ -285,12 +285,12 @@ export const proof = {
 export const dashboard = {
   id: 'dashboard',
   heading: { soft: 'See what every agent booked.', strong: 'Step in when it matters.' } satisfies Heading,
-  lede: 'Sign in with GitHub, add resources, create keys, and see every change each key made.',
+  lede: 'Add resources, create keys, and see every change each key made.',
   view: {
     path: 'app.slotlock.pylota.io/dashboard',
     brand: 'Slotlock',
     workspace: 'acme-rentals',
-    nav: ['Overview', 'Resources', 'Waitlist', 'API keys', 'Webhooks', ...(facts.assistant ? ['Assistant'] : []), 'Settings'],
+    nav: ['Overview', 'Resources', 'Waitlist', 'API keys', ...(facts.assistant ? ['Assistant'] : []), 'Settings'],
     title: 'Overview',
     stats: [
       { label: `Booked, next ${facts.dashboardAgendaDays} days`, value: '18' },
@@ -317,12 +317,12 @@ export const dashboard = {
   link: { label: 'Dashboard', href: '/docs/dashboard/' },
 };
 
-/** Who books with Slotlock. Car rental first: Pylota runs on it. */
+/** Who books with Slotlock. Car rental first: Pylota checks every booking with it. */
 export const industries = {
   id: 'industries',
   heading: { soft: 'Anything booked by the hour or the day.', strong: 'Built first for car rental.' } satisfies Heading,
   items: [
-    { title: 'Car and van rental', body: 'Sell a vehicle class on every channel, never twice.', featured: true },
+    { title: 'Car and van rental', body: 'Each vehicle is a calendar; a second booking is refused.', featured: true },
     { title: 'Equipment hire', body: 'Diggers to drills, with inspection time kept between hires.' },
     { title: 'Clinics', body: 'Room, clinician and equipment booked together, or not at all.' },
     { title: 'Courts', body: 'Padel and tennis on fixed starts, with no-shows offered on.' },
@@ -487,52 +487,102 @@ export interface Plan {
   terms?: boolean;
 }
 
-const askAbout = (plan: string) => `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(`Slotlock Cloud ${plan}`)}`;
+/** A hosted plan as src/plans.ts and the hosted service page's Plans table define it (sync-content). */
+interface HostedPlan {
+  id: string;
+  monthly: number;
+  yearly: number;
+  resources: number;
+  apiKeys: number;
+  webhookEndpoints: number;
+  operations?: number;
+  bookings?: number;
+}
 
-/** Slotlock Cloud is free while in preview (docs/hosted/README.md); paid plans are announced, not sold. */
+/** Null on a release without hosted plans: the page then offers only what Slotlock Cloud is today. */
+const hostedPlans = (facts as { plans?: HostedPlan[] | null }).plans ?? null;
+const hostedPlan = (id: string) => hostedPlans?.find((plan) => plan.id === id);
+const count = (value: number) => value.toLocaleString('en-GB');
+const allows = (plan: HostedPlan) => [
+  `${count(plan.resources)} resources, ${count(plan.apiKeys)} API keys`,
+  ...(plan.bookings !== undefined ? [`${count(plan.bookings)} bookings a month`] : []),
+  ...(plan.operations !== undefined ? [`${count(plan.operations)} operations a month`] : []),
+  `${count(plan.webhookEndpoints)} webhooks`,
+];
+const freePlan = hostedPlan('free');
+const developerPlan = hostedPlan('developer');
+const teamPlan = hostedPlan('team');
+const upgrade = { label: 'Upgrade', href: `${SIGN_IN_URL}/plan` };
+const paid = (plan: HostedPlan) => ({ price: `$${plan.monthly}`, per: `a month, or $${plan.yearly} a year` });
+
 export const pricing = {
   id: 'pricing',
   eyebrow: 'Slotlock Cloud',
-  heading: { soft: 'Start free on Slotlock Cloud.', strong: 'Or run it on your own PostgreSQL.' } satisfies Heading,
-  lede: 'Paid plans add higher limits, support and a contract.',
+  heading: {
+    soft: 'Start free on Slotlock Cloud.',
+    strong: developerPlan ? 'Upgrade as you grow, or run it yourself.' : 'Or run it on your own PostgreSQL.',
+  } satisfies Heading,
+  lede: freePlan
+    ? 'Every account starts on Free; upgrade from the dashboard.'
+    : 'Slotlock Cloud is free while it is in preview.',
   plans: [
-    {
-      id: 'free',
-      name: 'Free',
-      host: 'We host',
-      price: '$0',
-      per: 'while in preview',
-      tagline: 'Connect an agent today.',
-      features: [
-        `${facts.dashboardMaxResources} resources in the dashboard`,
-        `${facts.eventQuota.toLocaleString('en-GB')} events per key`,
-        'MCP, A2A and REST',
-        'Best effort, no SLA',
-      ],
-      cta: { label: signIn.start, href: SIGN_IN_URL },
-      featured: true,
-      terms: true,
-    },
-    {
-      id: 'team',
-      name: 'Team',
-      host: 'We host',
-      price: 'Soon',
-      per: '',
-      tagline: 'For agents booking in production.',
-      features: ['Everything in Free', 'Higher limits', 'Email support'],
-      cta: { label: 'Hear first', href: askAbout('Team') },
-    },
-    {
-      id: 'business',
-      name: 'Business',
-      host: 'We host',
-      price: 'Soon',
-      per: '',
-      tagline: 'For companies that need a contract.',
-      features: ['Everything in Team', 'An uptime commitment', 'Priority support', 'Invoices and a contract'],
-      cta: { label: 'Talk to us', href: askAbout('Business') },
-    },
+    freePlan
+      ? {
+          id: 'free',
+          name: 'Free',
+          host: 'We host',
+          price: '$0',
+          per: '',
+          tagline: 'Connect an agent today.',
+          features: allows(freePlan),
+          cta: { label: signIn.start, href: SIGN_IN_URL },
+          featured: !developerPlan,
+          terms: true,
+        }
+      : {
+          id: 'free',
+          name: 'Free',
+          host: 'We host',
+          price: '$0',
+          per: 'while in preview',
+          tagline: 'Connect an agent today.',
+          features: [
+            `${facts.dashboardMaxResources} resources in the dashboard`,
+            `${count(facts.eventQuota)} events per key`,
+            'MCP, A2A and REST',
+            'Best effort, no SLA',
+          ],
+          cta: { label: signIn.start, href: SIGN_IN_URL },
+          featured: true,
+          terms: true,
+        },
+    ...(developerPlan
+      ? [
+          {
+            id: 'developer',
+            name: 'Developer',
+            host: 'We host',
+            ...paid(developerPlan),
+            tagline: 'For agents booking in production.',
+            features: allows(developerPlan),
+            cta: upgrade,
+            featured: true,
+          },
+        ]
+      : []),
+    ...(teamPlan
+      ? [
+          {
+            id: 'team',
+            name: 'Team',
+            host: 'We host',
+            ...paid(teamPlan),
+            tagline: 'One price for the whole team.',
+            features: allows(teamPlan),
+            cta: upgrade,
+          },
+        ]
+      : []),
     {
       id: 'self',
       name: 'Self-host',
@@ -540,13 +590,15 @@ export const pricing = {
       price: '$0',
       per: facts.license,
       tagline: 'Your servers, your data.',
-      features: [`Same server, ${facts.toolCount} tools`, 'PostgreSQL 16 to 18', 'Help on GitHub'],
+      features: [`Same server, ${facts.toolCount} tools`, 'PostgreSQL 16 to 18', 'No limits from us'],
       cta: { label: 'Self-hosting guide', href: '/docs/self-host/' },
       more: { label: 'GitHub', href: REPO_URL },
     },
   ] satisfies Plan[],
-  note: `Not on sale yet: write to ${SUPPORT_EMAIL} to hear first.`,
-  link: { label: 'Hosted Slotlock', href: '/docs/hosted/' },
+  note: `Your own servers, support and a contract: write to ${SUPPORT_EMAIL}.`,
+  link: freePlan
+    ? { label: 'Plans in detail', href: '/docs/hosted/#plans' }
+    : { label: 'Hosted Slotlock', href: '/docs/hosted/' },
 };
 
 export const source = {
@@ -577,7 +629,7 @@ export const faq = {
       q: 'Is it ready for production?',
       a: knownIssues
         ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/) first.`
-        : `${facts.version} is a 0.x release, so a minor release may change the API, as [versioning](/docs/versioning/) explains.`,
+        : `${facts.version} is a 0.x release: a minor release may change the API ([versioning](/docs/versioning/)).`,
     },
     {
       q: 'Where is my data?',

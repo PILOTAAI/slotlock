@@ -13,7 +13,7 @@ account can sign in. Self-hosting stays fully supported: see
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
-| Price | Free while it is a preview, best effort, with no service level agreement. Paid plans with higher limits, support and a contract are planned; ask at [support@pylota.io](mailto:support@pylota.io) |
+| Price | Free while it is a preview, best effort, with no service level agreement |
 
 ## Start
 

@@ -15,14 +15,14 @@ versioning.
 
 ### Changed
 
-- Site: the landing page leads with what agents can book and with Slotlock Cloud, in 1,277 words
-  instead of 2,607 and 12 bands instead of 15. It shows the dashboard in its first screen, names
-  Pylota as the first operator on Slotlock, lists the industries it serves, and has a pricing table:
-  Free while in preview, Team and Business announced without prices, and Self-host. Running it
-  yourself now lives in Pricing, a Source band and the docs; the hero's install card moved to the
-  developers band. Copy lint fails the build above 1,300 words.
-- Hosted Slotlock: the price row says paid plans with higher limits, support and a contract are
-  planned.
+- Site: the landing page leads with what agents can book and with Slotlock Cloud, in about 1,230
+  words instead of 2,607 and 12 bands instead of 15. It shows the dashboard in its first screen,
+  says Pylota checks every booking with Slotlock, lists the industries it serves, and has a pricing
+  table. The table reads each hosted plan's limits and monthly allowances from `src/plans.ts` and
+  its price from the Plans table in `docs/hosted/README.md`; while a release has no `src/plans.ts`
+  it offers Free (while in preview) and Self-host only. Running it yourself now lives in Pricing, a
+  Source band and the docs; the hero's install card moved to the developers band. Copy lint fails
+  the build above 1,300 words.
 - Privacy notice: email sent to support@, abuse@ or privacy@pylota.io is held in Google Workspace for
   two years; Google is listed as a recipient, with its transfers. The notice has no owner TODO left.
 - README: about 160 lines that say what Slotlock is, how to run it and where each topic is
