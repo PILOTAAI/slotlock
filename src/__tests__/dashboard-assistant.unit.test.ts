@@ -257,7 +257,9 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     const html = await page(target, bob);
     expect(html).toContain('What can we book?');
     expect(html).toContain('You have vehicle-1, in London.');
-    expect(html).toContain('Read: List calendar resources');
+    // The read is one step, folded under the reply, in words.
+    expect(html).toMatch(/<details class="steps"><summary>Read resources<\/summary>/);
+    expect(html).not.toContain('Read: List calendar resources');
   });
 
   it('proposes a write without running it, runs it once on approval, and never twice', async () => {
@@ -281,8 +283,10 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     expect(JSON.parse(told[0] as string)).toMatchObject({ status: 'proposed' });
 
     const proposed = await page(target, bob);
-    expect(proposed).toContain('Delete resource event');
-    expect(proposed).toContain('Waiting for you');
+    // A card to decide on, named by what it does: the verb approves it, Decline drops it.
+    expect(proposed).toContain('<div class="change">');
+    expect(proposed).toMatch(/<button class="danger" type="submit" data-busy="Deleting…">Delete booking<\/button>/);
+    expect(proposed).toContain('>Decline</button>');
     const actionId = /name="action" value="([A-Za-z0-9_-]{16})"/.exec(proposed)?.[1] as string;
     expect(actionId).toBeDefined();
 
@@ -305,7 +309,8 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
       expected_revision: 1,
       idempotency_key: `dashboard-assistant.${actionId}`,
     });
-    expect(await page(target, bob)).toContain('Done');
+    // Decided, the card folds into a receipt that says what happened.
+    expect(await page(target, bob)).toMatch(/<p class="receipt ok"><span>[^<]*<\/span><span class="why">Deleted<\/span><\/p>/);
 
     // Sent again, with a fresh form: already approved, nothing runs.
     const again = await post(target, '/dashboard/assistant/approve', { action: actionId }, bob);
@@ -332,7 +337,7 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     expect((await post(target, '/dashboard/assistant/dismiss', { action: actionId }, bob)).status).toBe(303);
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(409);
     expect(backend.deleteEvent).not.toHaveBeenCalled();
-    expect(await page(target, bob)).toContain('Dismissed');
+    expect(await page(target, bob)).toMatch(/<p class="receipt "><span>[^<]*<\/span><span class="why">Declined<\/span><\/p>/);
   });
 
   it('refuses a tool outside the list, whatever the model asks for', async () => {
@@ -398,7 +403,11 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] });
     const passed = await post(target, '/dashboard/settings/assistant/test', {}, alice);
     expect(passed.status).toBe(200);
-    expect(await passed.text()).toContain('called a tool correctly');
+    const passedPage = await passed.text();
+    expect(passedPage).toContain('called a tool correctly');
+    // A success is a status, never the red alert a failure is.
+    expect(passedPage).toMatch(/<p class="notice[^"]*" role="status">Connected: /);
+    expect(passedPage).not.toContain('role="alert">Connected');
     expect(model.requests).toHaveLength(1);
     expect(toolsOffered(format, model.requests[0])).toEqual(['slotlock_list_resources']);
     expect(backend.listResources).not.toHaveBeenCalled();
@@ -406,7 +415,175 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     model.script({ text: 'I would rather chat.' });
     const failed = await post(target, '/dashboard/settings/assistant/test', {}, alice);
     expect(failed.status).toBe(502);
-    expect(await failed.text()).toContain('did not call the tool');
+    expect(await failed.text()).toMatch(/role="alert">[^<]*did not call the tool/);
+  });
+});
+
+describe.each(['anthropic', 'openai'] as const)('the chat over %s', (format) => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel(format);
+  });
+  afterAll(() => model.close());
+  beforeEach(() => {
+    model.requests.length = 0;
+  });
+
+  it('renders a reply as Markdown, never as the raw asterisks it was written in', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'There are **no vans**.\n\n- Add one\n- Or rename one\n\n<b>not markup</b>' });
+    expect((await chat(target, alice, 'Find a van')).status).toBe(303);
+    const html = await page(target, alice);
+    expect(html).toContain('<li class="turn mine"><div class="bubble">Find a van</div></li>');
+    expect(html).toContain(
+      '<div class="prose"><p>There are <strong>no vans</strong>.</p><ul><li>Add one</li><li>Or rename one</li></ul><p>&lt;b&gt;not markup&lt;/b&gt;</p></div>',
+    );
+    expect(html).not.toContain('**no vans**');
+  });
+
+  it('lands a message sent twice on the conversation, run once, never on an error', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Hello.' });
+    const shown = await page(target, alice);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const send = () =>
+      target.fetch(
+        new Request(`${ORIGIN}/dashboard/assistant`, {
+          method: 'POST',
+          headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ csrf, once, message: 'hi' }).toString(),
+        }),
+      );
+    const first = await send();
+    const second = await send();
+    expect(first.status).toBe(303);
+    expect(second.status).toBe(303);
+    expect(second.headers.get('location')).toBe('/dashboard/assistant#latest');
+    expect(model.requests).toHaveLength(1);
+    expect((await page(target, alice)).match(/class="bubble">hi</g)).toHaveLength(1);
+  });
+
+  it('offers to send a failed message again, saying why it failed', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ status: 500, body: '{}' });
+    await chat(target, alice, 'Find a van tomorrow');
+    const html = await page(target, alice);
+    const failure = /<li class="turn error" role="alert"><span>([^<]+)<\/span><form method="post" action="\/dashboard\/assistant">.*?<\/form><\/li>/.exec(html);
+    expect(failure?.[1]).toContain('could not be reached');
+    expect(failure?.[0]).toContain('name="message" value="Find a van tomorrow"');
+    expect(failure?.[0]).toContain('>Retry</button>');
+    // A later reply ends the failure: only the last one offers to send again.
+    model.script({ text: 'Van 1 is free.' });
+    await chat(target, alice, 'Find a van tomorrow');
+    const after = await page(target, alice);
+    expect(after).not.toContain('>Retry</button>');
+    expect(after).toContain('<li class="turn note">');
+  });
+
+  it('streams a turn as it happens, one JSON line an event, ending with the turn as the page shows it', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Checking.', calls: [{ name: 'slotlock_list_resources', input: {} }] }, { text: 'You have **vehicle-1**.' });
+    const shown = await page(target, alice);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', accept: 'application/x-ndjson' },
+        body: new URLSearchParams({ csrf, once, message: 'What do I have?' }).toString(),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('application/x-ndjson; charset=utf-8');
+    expect(response.headers.get('content-security-policy')).toContain("connect-src 'self'");
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const events = (await response.text())
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, string>);
+    expect(events.map((event) => event.t)).toEqual(['text', 'step', 'step', 'text', 'done']);
+    expect(events[0]).toEqual({ t: 'text', d: 'Checking.' });
+    expect(events[1]).toMatchObject({ t: 'step', s: 'run', label: 'Reading resources…' });
+    expect(events[2]).toMatchObject({ t: 'step', s: 'ok', label: 'Read resources', id: events[1]?.id });
+    expect(events[3]).toEqual({ t: 'text', d: 'You have **vehicle-1**.' });
+    const done = events[4] as { html: string; once: string };
+    // The turn as a reload would render it, from the member's message on, with a fresh form value.
+    expect(done.html.startsWith('<li class="turn mine"><div class="bubble">What do I have?</div></li>')).toBe(true);
+    expect(done.html).toContain('<div class="prose"><p>You have <strong>vehicle-1</strong>.</p></div>');
+    expect(done.html).toContain('<summary>Read resources</summary>');
+    expect(done.once).toMatch(/^[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}$/);
+    expect(done.once).not.toBe(once);
+    // Kept, as the form's way keeps it.
+    expect(await page(target, alice)).toContain('<p>You have <strong>vehicle-1</strong>.</p>');
+  });
+
+  it('answers a refused stream with one error line and a fresh form value', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const shown = await page(target, alice);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ csrf, once, message: 'x'.repeat(2_001) }).toString(),
+      }),
+    );
+    const [event, ...rest] = (await response.text()).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+    expect(rest).toEqual([]);
+    expect(event?.t).toBe('error');
+    expect(event?.html).toContain('Write a message of 1 to 2,000 characters.');
+    expect(event?.once).toMatch(/\./);
+    expect(model.requests).toHaveLength(0);
+  });
+
+  it('starts with the box and a few things to ask; a write only fills the box', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const html = await page(target, alice);
+    expect(html).toMatch(/<div class="assistant" data-assistant data-stream="\/dashboard\/assistant\/stream" data-page="\/dashboard\/assistant" data-empty>/);
+    const chips = [...html.matchAll(/<button class="chip" type="submit" name="message" value="([^"]+)"( data-fill="[^"]+")?>([^<]+)<\/button>/g)];
+    expect(chips.map((chip) => chip[3])).toEqual(['What&#39;s on today', 'Find free time', 'Book', 'Move a booking', 'Cancel a booking']);
+    expect(chips.map((chip) => Boolean(chip[2]))).toEqual([false, false, true, true, true]);
+    // With no resource yet, it asks in general; with one, it asks by that resource's name.
+    expect(chips[1]?.[1]).toBe('What is free tomorrow morning?');
+    const named = dashboard({}, { list: async () => [{ id: RESOURCE.id, externalRef: RESOURCE.external_ref, timezone: RESOURCE.timezone } as never] });
+    const bob = await signIn(named, 'bob');
+    await connect(named, await signIn(named, 'alice'), model, format);
+    expect(await page(named, bob)).toContain('value="When is vehicle-1 free tomorrow morning?"');
+    // Each one its own form, so it works with no script.
+    expect(html.match(/<form method="post" action="\/dashboard\/assistant"><input type="hidden" name="csrf"/g)).toHaveLength(5);
+    expect(html).toContain('<form class="composer" method="post" action="/dashboard/assistant"><input type="hidden" name="csrf"');
+    expect(html).not.toContain('Ask about bookings and free time. Changes wait for your approval.');
+  });
+
+  it('folds a turn’s steps into one line, and says plainly which could not run and why', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script(
+      { calls: [{ name: 'slotlock_list_resources', input: {} }, { name: 'slotlock_find_available_slots', input: { nonsense: true } }] },
+      { text: 'Done.' },
+    );
+    await chat(target, alice, 'Find a slot');
+    const html = await page(target, alice);
+    const steps = /<details class="steps has-bad"><summary>([^<]+)<\/summary><ul class="step-list">(.*?)<\/ul><\/details>/.exec(html);
+    expect(steps?.[1]).toBe('Read resources, couldn&#39;t check availability');
+    expect(steps?.[2]).toContain('<li class="step ok">Read resources</li>');
+    expect(steps?.[2]).toMatch(/<li class="step bad">Couldn&#39;t check availability <span class="why">[^<]+<\/span><\/li>/);
+    expect(html).not.toContain('Could not run');
   });
 });
 
@@ -422,8 +599,9 @@ describe('assistant settings', () => {
     const alice = await signIn(target, 'alice');
     await connect(target, alice, model, 'openai');
     const settings = await (await get(target, '/dashboard/settings', alice)).text();
-    expect(settings).toContain('set, ending in <code>wxyz</code>');
-    expect(settings).toContain('are sent to this provider');
+    // The key's last four, masked, with Replace: never the key, never a placeholder that hides it.
+    expect(settings).toContain('<div class="key-set"><code>•••• wxyz</code><details><summary>Replace</summary>');
+    expect(settings).toMatch(/are sent to 127\.0\.0\.1:\d+\./);
     for (const path of ['/dashboard', '/dashboard/settings', '/dashboard/assistant']) {
       expect(await (await get(target, path, alice)).text()).not.toContain(API_KEY);
     }
@@ -450,7 +628,7 @@ describe('assistant settings', () => {
     expect(await assistantStore.getSettings('github-org:91')).toBeNull();
     const nav = await (await get(target, '/dashboard', bob)).text();
     expect(nav).toContain('href="/dashboard/assistant"');
-    expect(await page(target, bob)).toContain('An admin of this organization can connect one');
+    expect(await page(target, bob)).toContain('An admin of this organization connects a model in Settings.');
   });
 
   it('accepts an https base URL, or http on this machine only with private URLs allowed', () => {
@@ -602,17 +780,67 @@ describe('provider presets and model lists (RFC 0003 A4)', () => {
     const target = dashboard();
     const alice = await signIn(target, 'alice');
     const settings = await (await get(target, '/dashboard/settings', alice)).text();
-    expect(settings).toContain('<button type="submit" name="preset" value="openrouter">OpenRouter</button>');
+    // One tile a provider, in the form Save sends.
+    expect(settings).toContain('<label class="tile"><input type="radio" name="preset" value="openrouter">');
     const filled = await (await get(target, '/dashboard/settings?preset=openrouter', alice)).text();
-    expect(filled).toContain('name="base_url" required maxlength="2048" value="https://openrouter.ai/api/v1"');
-    expect(filled).toContain('<option value="openai" selected>');
+    expect(filled).toContain('<input type="radio" name="preset" value="openrouter" checked>');
+    expect(filled).toContain('name="base_url" maxlength="2048" value="https://openrouter.ai/api/v1"');
+    expect(filled).toContain('<input type="radio" name="provider" value="openai" checked>');
     const anthropic = await (await get(target, '/dashboard/settings?preset=anthropic', alice)).text();
     expect(anthropic).toContain('value="https://api.anthropic.com"');
-    expect(anthropic).toContain('<option value="anthropic" selected>');
+    expect(anthropic).toContain('<input type="radio" name="preset" value="anthropic" checked>');
     const unknown = await (await get(target, '/dashboard/settings?preset=%3Cscript%3E', alice)).text();
-    expect(unknown).toContain('name="base_url" required maxlength="2048" value=""');
+    expect(unknown).toContain('name="base_url" maxlength="2048" value=""');
     expect(unknown).not.toContain('<script>');
     expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it("saves a named provider's own URL and format, whatever a hidden Custom field still holds", async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    const saved = await post(
+      target,
+      '/dashboard/settings/assistant',
+      { preset: 'openrouter', provider: 'anthropic', base_url: 'https://elsewhere.example/v1', model: 'anthropic/claude-sonnet-4.6', api_key: API_KEY },
+      alice,
+    );
+    expect(saved.status).toBe(303);
+    expect(await assistantStore.getSettings('github-org:91')).toMatchObject({
+      provider: 'openai',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'anthropic/claude-sonnet-4.6',
+    });
+    const page = await (await get(target, '/dashboard/settings', alice)).text();
+    expect(page).toContain('<input type="radio" name="preset" value="openrouter" checked>');
+    expect(page).toMatch(/<div class="status-name"><strong>OpenRouter<\/strong><code>anthropic\/claude-sonnet-4\.6<\/code><\/div><span class="badge ok">Set up<\/span>/);
+    expect(page).toContain('are sent to OpenRouter.');
+  });
+
+  it('shows a connection test in the status card: Connected, or Failing with why', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, 'openai');
+    model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] });
+    const passed = await (await post(target, '/dashboard/settings/assistant/test', {}, alice)).text();
+    expect(passed).toMatch(/<span class="badge ok">Connected<\/span>.*?<p class="notice done" role="status">Connected: /s);
+    model.script({ status: 401, body: '{}' });
+    const failed = await (await post(target, '/dashboard/settings/assistant/test', {}, alice)).text();
+    expect(failed).toMatch(/<span class="badge bad">Failing<\/span>.*?<p class="notice" role="alert">[^<]*refused the API key/s);
+  });
+
+  it('gives each Settings section its own page, marked in the section list', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    for (const [path, label] of [
+      ['/dashboard/settings', 'Assistant'],
+      ['/dashboard/settings/endpoints', 'Endpoints'],
+      ['/dashboard/settings/hours', 'Hours'],
+      ['/dashboard/settings/account', 'Account'],
+    ] as const) {
+      const html = await (await get(target, path, alice)).text();
+      expect(html, path).toMatch(new RegExp(`<a href="${path}" aria-current="page">${label}`));
+      expect(html.match(/aria-current="page"/g)?.length, path).toBe(2);
+    }
   });
 
   it("lists the provider's models for the Model field, with the saved key only for its own provider and URL", async () => {
@@ -748,7 +976,7 @@ describe('the assistant across organizations', () => {
     const carol = await signIn(target, 'carol');
     const theirs = await page(target, carol);
     expect(theirs).not.toContain('acme');
-    expect(theirs).toContain('No model is connected');
+    expect(theirs).toContain('Connect a model to use the assistant.');
     expect((await chat(target, carol, 'hello')).status).toBe(409);
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, carol)).status).toBe(409);
     expect(backend.deleteEvent).not.toHaveBeenCalled();
@@ -926,7 +1154,10 @@ describe('security review fixes', () => {
       description: `Long notes ${'x'.repeat(5_000)} END-OF-DESCRIPTION`,
       attendees,
     });
-    expect(html).toContain('Waiting for you');
+    expect(html).toContain('<div class="change">');
+    expect(html).toContain('>Book</button>');
+    // When, in the time zone the change gives.
+    expect(html).toContain('<dt>When</dt><dd>Tue 2 Mar, 10:00–11:00 Europe/London</dd>');
     for (const { address } of attendees) expect(html, address).toContain(address);
     expect(html).toContain('END-OF-DESCRIPTION');
     expect(html).toContain('vehicle-1');
@@ -941,7 +1172,7 @@ describe('security review fixes', () => {
     await connect(target, await signIn(target, 'alice'), model, 'openai');
     const bob = await signIn(target, 'bob');
     const html = await proposeAndShow(target, bob, name, input);
-    const summary = /<p class="action-summary">([^<]+)<\/p>/.exec(html)?.[1] ?? '';
+    const summary = /<p class="change-title">([^<]+)<\/p>/.exec(html)?.[1] ?? '';
     expect(summary).toContain('vehicle-1');
     expect(summary).toContain('Ana pickup');
     expect(summary).toMatch(/10:00/);

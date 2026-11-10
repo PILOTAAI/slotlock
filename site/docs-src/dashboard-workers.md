@@ -56,7 +56,7 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 | Custom | Your servers | | | Talk to the founder |
 
 With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
-Developer prices' ids), the dashboard gains a **Plan** page: the tenant's plan and use, **Upgrade**
+Developer prices' ids), the dashboard's **Usage** page sells plans: **Upgrade**
 (a Stripe Checkout with Managed Payments, Stripe as merchant of record) and **Manage billing** (the
 Stripe customer portal). Point a Stripe webhook endpoint at `<SLOTLOCK_PUBLIC_URL>/stripe/webhook`
 with the `checkout.session.completed` and `customer.subscription.*` events and store its signing
@@ -74,7 +74,7 @@ what overage costs. With `SLOTLOCK_OVERAGE=on` (or a percent,
 111-1000; `on` is 300) on the server and the Worker, beside `SLOTLOCK_QUOTAS=on`, a paying Developer
 tenant is refused only past that share of its monthly operations; the Worker adds the metered price
 `SLOTLOCK_STRIPE_PRICE_OVERAGE` (on a Stripe Billing Meter) to a Developer checkout and shows
-`SLOTLOCK_PLAN_PRICE_OVERAGE` on the Plan page. The schema owner then runs, daily and on the 1st for
+`SLOTLOCK_PLAN_PRICE_OVERAGE` on the Usage page. The schema owner then runs, daily and on the 1st for
 the month before:
 
 ```sh
@@ -97,7 +97,10 @@ number of members. It is offered once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
 organization's owner then sees Upgrade to Team instead of Developer, and a subscription at a Team
 price gives Team, including one changed to it in the customer portal.
 
-Optional variables: `SLOTLOCK_PLAN_CONTACT` (where Custom enquiries go, an https or mailto URL),
+Without Stripe, **Usage** still shows each tenant's plan, limits and use (with `SLOTLOCK_USAGE` and
+`SLOTLOCK_QUOTAS`, as on the server), and an owner asks for another plan at `SLOTLOCK_PLAN_CONTACT`.
+
+Optional variables: `SLOTLOCK_PLAN_CONTACT` (where plan and Custom enquiries go, an https or mailto URL),
 `SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `$10` and `$100`
 by default) and `STRIPE_API_VERSION` (default `2026-04-22.dahlia`, a version that has Managed
 Payments).

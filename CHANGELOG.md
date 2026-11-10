@@ -3,6 +3,50 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- **Usage** in the dashboard's navigation on hosted Slotlock, with or without Stripe: the plan (or
+  the default it moves to, and when) against its limits, this month's operations, bookings and
+  holds against the quotas, and which key used what. Without Stripe, an owner asks for another plan
+  at `SLOTLOCK_PLAN_CONTACT`. `createSlotlockDashboard` takes `plans` (`plan`, `enrol`,
+  `planDefault`, `contact`); `billing` still brings its own.
+
+### Changed
+
+- The Overview leads with what needs a person (approvals waiting, a failed payment, a quota nearly
+  or fully used, a coming plan the workspace is over), then the week ahead and the activity as
+  sentences ("Booking agent booked room-3", passive for what Slotlock did, repeats counted on one
+  line), never a change's type. Get started walks a new workspace from its first resource to an
+  agent that has used a key, folds to one line half way and goes once done. The plan's use and the
+  MCP and A2A endpoints (with the Claude Code command) sit beside the activity.
+- The Plan page is Usage, and a limit refused says "see Usage".
+
+- The dashboard assistant is a chat. A reply streams into the page as the model writes it (the
+  dashboard's own script reads `POST <root>/assistant/stream`, one JSON object a line; the CSP
+  allows `connect-src 'self'` for it), with a Stop button. Without script, a message still posts
+  and the page shows the reply. Replies are Markdown, rendered by one renderer on the server and,
+  from its source, in the page as they stream: everything escaped first, links http(s) only. The
+  page is one centred column, with the box at the centre when the conversation is empty and five
+  things to ask beside it. Each run of reads folds into one line ("Read resources, checked
+  availability") that names, in words, a step that could not run and why. A proposed change is a
+  card that leads with when, which resource and its title, and keeps every other argument one click
+  away; its button says what it does ("Book", "Cancel booking"), and once decided it folds into
+  one line. A provider failure ends the conversation with Retry.
+- Settings is a page a section (Assistant, Endpoints, Hours, Account). The assistant's section
+  shows what is connected, with Test and its result in place, then one form: the provider as tiles
+  (a named one brings its own URL and API format; Custom takes both), the model with Load models,
+  and the key as its last four characters with Replace. Disconnect stands apart.
+
+### Fixed
+
+- A message sent twice (a double click, a reload) no longer ends on "That form was already
+  sent": the second lands on the conversation, and the turn runs once. The same holds for
+  approving, declining and New conversation.
+- A success notice (Saved, Connected) was shown in the error colour: notices are alerts only on
+  an error page, and a status otherwise.
+
 ## 0.7.0 - 2026-11-10
 
 ### Added

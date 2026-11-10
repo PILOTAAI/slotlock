@@ -376,8 +376,9 @@ async function readFacts() {
   const assistantSource = await read('src/assistant.ts');
   const conversationTtl = /conversationTtlMs \?\? ([0-9]+) \* 3_600_000/.exec(dashboard);
   const messageRate = /rate \?\? \{ perSecond: ([0-9]+) \/ 60,/.exec(dashboard);
+  // The two API formats a Custom provider chooses between (Settings, Assistant).
   const assistantProviders = [
-    ...dashboard.matchAll(/<option value="(?:anthropic|openai)"\$\{selected\('(?:anthropic|openai)'\)\}>([^<]+)<\/option>/g),
+    ...dashboard.matchAll(/format\(\s*'(?:anthropic|openai)',\s*'([^']+)',?\s*\)/g),
   ].map((match) => match[1]);
   const compatible = /`OpenAI-compatible`, which covers ([A-Za-z ,\n]+?)\),/.exec(
     await read('site/docs-src/dashboard.md'),
