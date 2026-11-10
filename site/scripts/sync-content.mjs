@@ -138,20 +138,9 @@ const SECTION_LINKS = {
   'docs/release/0.2.0-known-issues.md#the-known-issues': '/docs/known-issues/',
 };
 
-/** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
-const ANCHORS = {
-  '#application-api': '/docs/reference/#application-api',
-  '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
-  '#operations': '/docs/operations/',
-  '#rest-and-openapi': '/docs/reference/#rest-and-openapi',
-};
-
 /** Rewrite repository-relative links so they work on slotlock.pylota.io. */
 function rewriteLinks(markdown) {
-  const anchored = markdown.replace(/\]\((#[a-z0-9-]+)\)/g, (match, anchor) =>
-    ANCHORS[anchor] ? `](${ANCHORS[anchor]})` : match,
-  );
-  return anchored.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
+  return markdown.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
     if (/^(https?:|mailto:|#)/.test(target)) return match;
     // A repository-root file path (as GitHub reads /PRIVACY.md); any other /path, such as
     // /docs/hosted/, is the site's.

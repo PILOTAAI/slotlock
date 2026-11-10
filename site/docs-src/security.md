@@ -8,7 +8,27 @@ caller, and an agent's write can be made to wait for a person.
 
 ## Confirmation before writes
 
-<!-- include README.md#confirm-before-writing body -->
+With `confirmation`, a listed write first asks the person a yes/no question that says exactly what
+will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
+handover".` Only an explicit yes runs the write.
+
+- A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
+  the other fields it sets (`also description, attendees`) without quoting them.
+- Facts come first: the resource by its own reference, times in its own zone, and an event as it
+  stands now, read through your backend's `describeResource` and `getEvent` when the caller may
+  read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its
+  UTC offset. The agent's own text comes last, quoted.
+- A repeating booking says how many times it books, the first and the last, and each moved
+  occurrence, from the same expansion the store books with; a change to one says it covers every
+  repeat. Agents may send RFC 5545 rules that repeat daily or less often and can occur.
+- The pending question is sealed (HMAC-SHA256) to the caller, the tool and the exact arguments, and
+  expires after `ttlSeconds` (600).
+- Clients that cannot ask (MCP 2025 revisions, A2A) get `confirmation_required`; nothing is written.
+- The yes comes from the client: Slotlock relies on the MCP client to ask its person, and a key
+  holder's own client can answer for itself. Confirmation keeps an agent from writing unasked; it is
+  not an authorization boundary. Scopes and `authorize` decide who may write.
+- `secrets` holds 1 to 8 keys of 32+ bytes: list the new one first to rotate. `onEvent` reports each
+  outcome for audit.
 
 ## Tenant isolation
 

@@ -391,11 +391,15 @@ describe('the site', () => {
       ['versioning', 'VERSIONING.md'],
       ['clients', 'clients/python/README.md snippet'],
       ['clients', 'clients/dotnet/README.md snippet'],
-      ['operations', 'README.md#operations body promote'],
     ]) {
       expect(read(`site/docs-src/${page}.md`), page).toContain(`<!-- include ${include} -->`);
       expect(config, page).toContain(`'docs/${page}'`);
     }
+    // The operations page is written for the site, around the tested maintenance example.
+    expect(read('site/docs-src/operations.md')).toContain(
+      '<!-- code examples/maintenance.ts#maintenance -->',
+    );
+    expect(config).toContain("'docs/operations'");
   });
 
   it('no longer says there is no hosted service, and links the hosted pages from every page footer', () => {

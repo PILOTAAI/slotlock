@@ -164,6 +164,7 @@ const PAGES = [
   'docs/security/index.html',
   'docs/tools/index.html',
   'docs/reference/index.html',
+  'docs/operations/index.html',
   'docs/hosted/index.html',
   'docs/status/index.html',
   'docs/versioning/index.html',

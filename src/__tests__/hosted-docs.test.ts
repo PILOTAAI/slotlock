@@ -135,9 +135,9 @@ describe('hosted safety in the documentation', () => {
     const confirm = flat(section(readme, '### Confirm before writing'));
     expect(confirm).toContain('not an authorization boundary');
     expect(flat(security)).toContain('not an authorization boundary');
-    // The security page includes that README section and must not promise more in its summary.
-    const page = read('site/docs-src/security.md');
-    expect(page).toContain('<!-- include README.md#confirm-before-writing body -->');
+    // The security page says the same in its own section and must not promise more in its summary.
+    const page = flat(read('site/docs-src/security.md'));
+    expect(page).toContain('not an authorization boundary');
     expect(page).not.toMatch(/A person can confirm each one/);
   });
 
