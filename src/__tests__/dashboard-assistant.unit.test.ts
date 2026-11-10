@@ -700,6 +700,23 @@ describe('provider presets and model lists (RFC 0003 A4)', () => {
     } finally {
       await anthropic.close();
     }
+    // Together answers a bare array, not { data: [...] }; anything else is not a list.
+    const bare = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json([
+        { id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', object: 'model', type: 'chat' },
+        { id: 'mistralai/Mixtral-8x7B-Instruct-v0.1', object: 'model', type: 'chat' },
+      ]),
+    );
+    expect(
+      await listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.together.xyz/v1', apiKey: API_KEY, fetch: bare, timeoutMs: 5_000 }),
+    ).toEqual(['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'mistralai/Mixtral-8x7B-Instruct-v0.1']);
+    expect(bare.mock.calls[0]?.[0]).toBe('https://api.together.xyz/v1/models');
+    for (const answer of [{ models: [] }, 'models', null]) {
+      await expect(
+        listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: API_KEY, fetch: vi.fn(async () => Response.json(answer)), timeoutMs: 5_000 }),
+        JSON.stringify(answer),
+      ).rejects.toMatchObject({ reason: 'bad_answer' });
+    }
     const redirecting = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.example.com/' } }));
     await expect(
       listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: API_KEY, fetch: redirecting, timeoutMs: 5_000 }),

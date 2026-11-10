@@ -788,7 +788,8 @@ const MAX_LISTED_MODELS = 500;
 
 /**
  * The models a provider offers (`GET /v1/models` on the Anthropic API, `GET /models` on an
- * OpenAI-compatible one), by id, sorted, for the Settings form's Model field. Throws
+ * OpenAI-compatible one, listed under `data` or as a bare array), by id, sorted, for the Settings
+ * form's Model field. Throws
  * SlotlockAssistantProviderError as a model call does, never with the key in its message.
  */
 export async function listSlotlockAssistantModels(args: {
@@ -846,7 +847,9 @@ export async function listSlotlockAssistantModels(args: {
     if (error instanceof SlotlockAssistantProviderError) throw error;
     throw new SlotlockAssistantProviderError(signal.aborted ? 'timeout' : 'bad_answer');
   }
-  const listed = isRecord(body) && Array.isArray(body.data) ? body.data : null;
+  // `{ data: [...] }` as OpenAI and Anthropic answer, or the bare array some OpenAI-compatible
+  // providers (Together) answer instead.
+  const listed = Array.isArray(body) ? body : isRecord(body) && Array.isArray(body.data) ? body.data : null;
   if (!listed) throw new SlotlockAssistantProviderError('bad_answer');
   const ids = new Set<string>();
   for (const entry of listed) {
