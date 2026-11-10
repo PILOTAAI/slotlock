@@ -26,6 +26,37 @@ JSON Schemas.
 - **Failures are results** (`{"error":{"code":"…"}}`): read the code before retrying.
 - **Scope.** The tenant comes from the credentials. Event tools see only the caller's own events;
   every booking counts as busy time.
+- **Older names.** `calendar.<verb>` and `calendar_<verb>` still work and are no longer advertised.
+
+## Holds, bundles and pools
+
+An agent offering a person several times holds them first, so none is taken while the person
+decides: `slotlock_hold_slots` holds each free candidate in one group (and lists the taken ones in
+`refused`), and `slotlock_create_event` with one `hold_id` books that time and releases the rest in
+the same transaction. A hold belongs to the agent that took it: another agent can neither book nor
+release it. One agent may have 20 live holds at once, holding at most 2,160 hours together in
+`slotlock serve` (`SLOTLOCK_LIMITS`: `holder_holds`, `holder_held_hours`; `maxHoldsPerHolder` and
+`maxHeldHoursPerHolder` in `createSlotlockStore`); past either it is refused, `hold_limit_reached` or
+`held_time_limit_reached`. Unbooked holds expire by the database clock. Notice was judged when the
+time was held, so booking the hold does not judge it again.
+
+A booking that needs several resources at once (a van and its driver, a room and its projector)
+uses `slotlock_find_available_slots` with `require_free` (every resource, or any n of them, free
+together, each judged by its own hours and rules) and books with `slotlock_book_together`: one event
+per resource in one transaction, all or none. A refusal names the `resource_id` that refused, on
+MCP and A2A in the error beside its `code`, on REST in the problem. Bundles take their resources
+in one order, so two racing over the same ones end with one booked, never a deadlock.
+
+Rentals sell a class, not a plate. Put interchangeable resources in a pool
+(`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
+members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
+which takes the first member that is free and allows the booking, in one transaction: a class of
+five sells exactly five for a time, however many race (`pool_full` after that). To see how many are
+free, `slotlock_get_pool_availability` splits a window where that number changes (counting each
+member busy over its bookings' occupied time, buffers included, but not the buffers a new booking
+would keep, so a member it counts free may still refuse a booking that abuts another); to see which,
+search the members with `slotlock_find_available_slots` and `require_free: 1`: each slot names the
+members free in `resource_ids`. `GET /v1/pools` lists the pools with their capacity.
 
 ## What Slotlock tells the model
 

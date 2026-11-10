@@ -48,15 +48,21 @@ threat model, including what the role check does not read.
 
 ## Dashboard sign-in
 
-- Sign-in asks GitHub for no scope, uses `state` and PKCE, and keeps only the GitHub user id and
-  login. The GitHub token is used once and dropped.
+- Sign-in asks GitHub for no scope (`read:org` with [organizations](/docs/dashboard/#organizations)),
+  uses `state` and PKCE, and keeps only the GitHub user id and login (and, with organizations, the
+  served ones the person belongs to). The GitHub token is used once and dropped.
 - A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist
   (`SLOTLOCK_DASHBOARD_USERS`) is checked on every request, dashboard and API alike.
 - Every form carries a token bound to the session and must come from the server's own origin. The
   pages run no inline script, under a Content-Security-Policy that allows only their own files.
 - A callback works once, a signed-out cookie stays out, and a reloaded form does not create or
-  rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, so this holds on every
-  server sharing the database. The database's clock decides when anything has expired.
+  rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, kept until its cookie or
+  form expires (12 hours at most), so this holds on every server sharing the database, behind any
+  load balancer; a form record also carries a digest of the GitHub user id that sent it. The server
+  role reaches them only through two SECURITY DEFINER functions, and `serve` refuses to start the
+  dashboard until `migrate` has granted them.
+- The database's clock decides when a sign-in or session has expired, so servers whose clocks drift
+  from it or from each other cannot let a replay or a signed-out session through.
 
 ## Live updates
 

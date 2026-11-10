@@ -115,4 +115,4 @@ book without asking. Keep confirmation on for anything real.
 - [Connect an agent](/docs/connect/): Cursor, VS Code, the Claude API, A2A.
 - [TypeScript library](/docs/library/): the same engine in your code.
 - For a server beyond this machine, put a TLS proxy in front, set `SLOTLOCK_PUBLIC_URL`, and work
-  through the [production checklist](https://github.com/PILOTAAI/slotlock#production-checklist).
+  through the [production checklist](/docs/operations/#production-checklist).
