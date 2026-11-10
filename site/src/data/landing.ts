@@ -972,8 +972,8 @@ export const faq = {
     {
       q: 'Is it ready for production?',
       a: knownIssues
-        ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/), and use 0.3.0 once it is published; the README keeps the production checklist.`
-        : `${facts.version} is a 0.x release, so a minor release may change the API, as [versioning](/docs/versioning/) explains; the README keeps the production checklist.`,
+        ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/), and use 0.3.0 once it is published; the [production checklist](/docs/operations/#production-checklist) is in Operations.`
+        : `${facts.version} is a 0.x release, so a minor release may change the API, as [versioning](/docs/versioning/) explains; the [production checklist](/docs/operations/#production-checklist) is in Operations.`,
     },
     ...(facts.dashboardOrgs
       ? [

@@ -1,7 +1,7 @@
 # Slotlock clients
 
 Slotlock's REST API from Python, Go, Rust, Java and .NET: the agent tools (`/v1/events`,
-`/v1/free-busy`, ...) and the [application API](../README.md#application-api) (resources, bookable
+`/v1/free-busy`, ...) and the [application API](https://slotlock.pylota.io/docs/reference/#application-api) (resources, bookable
 hours, holds, reservations, coverage, maintenance). Each client has one method per operation, and
 each runs the same scenario against a real server in CI.
 

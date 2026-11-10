@@ -1,5 +1,5 @@
 // Maintenance: extend recurring events to the rolling horizon and prune what retention no longer
-// needs (README, Operations); every tenant needs it at least daily. startSlotlockMaintenance runs
+// needs (docs, Operations); every tenant needs it at least daily. startSlotlockMaintenance runs
 // passes one tenant at a time with a per-tenant advisory lock, so servers never repeat each other's
 // work. RLS hides other tenants from a server's role, so it finds them through the database's list
 // of tenants with data (names only, `discover`) and maintains each in its own tenant context.

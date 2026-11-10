@@ -68,7 +68,9 @@ behind.
   `slotlock serve` writes each call as a JSON line with `trace_id`.
 - **Metrics:** with `SLOTLOCK_METRICS_TOKEN`, `slotlock serve` answers Prometheus at `/metrics`:
   `slotlock_calls_total` and `slotlock_call_duration_seconds` by protocol, operation and outcome,
-  refusals, maintenance and webhook deliveries. Labels never name a tenant.
+  confirmations, subscriptions, refusals, maintenance and webhook deliveries. No label names a
+  tenant, key or client. `createSlotlockMetrics` builds them for a server of your own, from its
+  hooks.
 - **SLOs worth publishing:** availability of `/healthz`; p99 latency of `slotlock_create_event`
   and free/busy; the share of webhook deliveries within a minute; maintenance passes that finish.
 - **Signals to alert on:** `server_busy` (503) rising, `coverage.stale` on the change feed,

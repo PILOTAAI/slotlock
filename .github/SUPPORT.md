@@ -11,5 +11,6 @@
 | A code of conduct concern | The contact in [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md#reporting) |
 
 Hosted Slotlock is free and best effort, with no service level agreement
-([Terms of Service](../TERMS.md)). For Slotlock you run yourself, the README's
-[production checklist](../README.md#production-checklist) and [SECURITY.md](../SECURITY.md) come first.
+([Terms of Service](../TERMS.md)). For Slotlock you run yourself, the
+[production checklist](https://slotlock.pylota.io/docs/operations/#production-checklist)
+and [SECURITY.md](../SECURITY.md) come first.

@@ -138,20 +138,9 @@ const SECTION_LINKS = {
   'docs/release/0.2.0-known-issues.md#the-known-issues': '/docs/known-issues/',
 };
 
-/** README in-page anchors whose section lives on another docs page (postbuild checks every link). */
-const ANCHORS = {
-  '#application-api': '/docs/reference/#application-api',
-  '#confirm-before-writing': '/docs/security/#confirmation-before-writes',
-  '#operations': '/docs/operations/',
-  '#rest-and-openapi': '/docs/reference/#rest-and-openapi',
-};
-
 /** Rewrite repository-relative links so they work on slotlock.pylota.io. */
 function rewriteLinks(markdown) {
-  const anchored = markdown.replace(/\]\((#[a-z0-9-]+)\)/g, (match, anchor) =>
-    ANCHORS[anchor] ? `](${ANCHORS[anchor]})` : match,
-  );
-  return anchored.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
+  return markdown.replace(/\]\((?:\.\/)?([A-Za-z0-9_./-]+?)(#[^)]*)?\)/g, (match, target, hash) => {
     if (/^(https?:|mailto:|#)/.test(target)) return match;
     // A repository-root file path (as GitHub reads /PRIVACY.md); any other /path, such as
     // /docs/hosted/, is the site's.
@@ -330,7 +319,9 @@ async function readFacts() {
   const assistantProviders = [
     ...dashboard.matchAll(/<option value="(?:anthropic|openai)"\$\{selected\('(?:anthropic|openai)'\)\}>([^<]+)<\/option>/g),
   ].map((match) => match[1]);
-  const compatible = /`OpenAI-compatible`, which covers ([A-Za-z ,\n]+?)\),/.exec(await read('README.md'));
+  const compatible = /`OpenAI-compatible`, which covers ([A-Za-z ,\n]+?)\),/.exec(
+    await read('site/docs-src/dashboard.md'),
+  );
   // slotlock_hold_slots' input: how many candidates one call holds, and for how long.
   const holdInput =
     /\.max\(([0-9]+)\),\n\s+ttl_seconds: z\.number\(\)\.int\(\)\.min\(([0-9]+)\)\.max\(([0-9]+)\)/.exec(
@@ -441,7 +432,7 @@ async function readFacts() {
     ),
     assistantCompatible: must(
       compatible?.[1].replace(/\s+/g, ' ').split(/, | and /),
-      'the OpenAI-compatible list in the README',
+      'the OpenAI-compatible list on the dashboard page (site/docs-src/dashboard.md)',
     ),
     dashboardAgendaDays: must(numberConst(dashboard, 'AGENDA_DAYS'), 'AGENDA_DAYS in src/dashboard.ts'),
     // How many resources one tenant may add in the dashboard (the landing page's Cloud steps).
