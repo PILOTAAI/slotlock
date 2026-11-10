@@ -166,7 +166,7 @@ it is not an authorization boundary. Scopes and `authorize` decide who may write
 
 ## API keys and the application API
 
-An API key is `slk_`, 40 base62 characters from the operating system's random source (about 238
+An API key is `slk_` (`slk_test_` in a test environment, `<tenant>~test`), 40 base62 characters from the operating system's random source (about 238
 bits) and a 6-character checksum, and the database keeps only its SHA-256. A slow password hash
 (bcrypt, scrypt, Argon2) defends a secret a person chose against offline guessing; nobody can guess
 238 random bits, so a fast hash

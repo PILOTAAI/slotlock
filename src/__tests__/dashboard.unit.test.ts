@@ -2348,6 +2348,38 @@ describe('the plan page', () => {
     expect(html).toContain('href="mailto:founder@example.com">Talk to the founder');
   });
 
+  it('switches to the test environment: its own tenant, never billed, and back to Live', async () => {
+    const { target, calls } = billed(null);
+    const { session } = await signIn(target);
+    expect(await (await get(target, '/base/dashboard', session)).text()).toContain('name="environment" value="live" aria-pressed="true"');
+    const refused = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, session), environment: 'staging' }, session);
+    expect(refused.status).toBe(400);
+    const switched = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, session), environment: 'test' }, session);
+    expect(switched.status).toBe(303);
+    const test = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const page = await (await get(target, '/base/dashboard', test)).text();
+    expect(page).toContain('name="environment" value="test" aria-pressed="true"');
+    expect(page).toContain('class="test-banner"');
+    await post(
+      target,
+      '/base/dashboard/keys',
+      { csrf: await csrf(target, test), name: 'Test agent', access: 'read', expires: '30' },
+      test,
+    );
+    expect(keys.store.create).toHaveBeenLastCalledWith(expect.objectContaining({ tenantRef: 'github:4242~test' }));
+    // Plans and billing are Live's: the Test plan page says so, and changes nothing.
+    const plan = await (await get(target, '/base/dashboard/plan', test)).text();
+    expect(plan).toContain('never billed');
+    expect(plan).not.toContain('action="/base/dashboard/plan/upgrade"');
+    for (const path of ['/base/dashboard/plan/upgrade', '/base/dashboard/plan/manage']) {
+      expect((await post(target, path, { csrf: await csrf(target, test), interval: 'month' }, test)).status).toBe(400);
+    }
+    expect(calls).toEqual([]);
+    const back = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, test), environment: 'live' }, test);
+    const live = cookie(back, '__Host-slotlock-session')?.pair as string;
+    expect(await (await get(target, '/base/dashboard', live)).text()).not.toContain('class="test-banner"');
+  });
+
   it('sends Upgrade to a checkout page tagged with the tenant, and back to the plan page', async () => {
     const { target, calls } = billed(null);
     const { session } = await signIn(target);

@@ -234,6 +234,12 @@ slotlock key revoke <id>
   write to them. A limited key reads and writes only (no `admin`), and keeps its limit for good.
 - A tenant may hold 100 active keys. The last six characters are a checksum secret scanners can
   verify offline.
+- Every tenant has a test environment, `<tenant>~test`: a tenant of its own (its own resources,
+  keys, webhooks and history), on its live tenant's plan limits and quotas and never billed. Its
+  keys start `slk_test_`, and only its keys do (the database holds that). Make one with
+  `SLOTLOCK_TENANT=<tenant>~test slotlock key create …` or the dashboard's Live/Test switch. It is
+  suspended with its live tenant and erased with it, and a server that refuses a person's keys
+  refuses their test keys too.
 
 ### Partner accounts
 

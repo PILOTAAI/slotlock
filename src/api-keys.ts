@@ -38,9 +38,7 @@ const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 const RANDOM_CHARACTERS = 40;
 /** A 32-bit checksum fits in 6 base62 digits (62^6 > 2^32). */
 const CHECKSUM_CHARACTERS = 6;
-/** What lists show: the prefix and 8 random characters, enough to recognise a key, not to use it. */
-const DISPLAY_CHARACTERS = SLOTLOCK_API_KEY_PREFIX.length + 8;
-const KEY_PATTERN = /^slk_[0-9A-Za-z]{46}$/;
+const KEY_PATTERN = /^slk_(test_)?[0-9A-Za-z]{46}$/;
 /** The largest byte below 256 that is a multiple of 62, so `byte % 62` is unbiased below it. */
 const UNBIASED_BYTE_LIMIT = 248;
 const MAX_NAME_CHARACTERS = 100;
@@ -61,7 +59,7 @@ export interface SlotlockApiKey {
   id: string;
   tenantRef: string;
   name: string;
-  /** `slk_` and the next 8 characters of the key. */
+  /** `slk_` (`slk_test_` in a test environment) and the next 8 characters of the key. */
   prefix: string;
   scopes: SlotlockApiKeyScope[];
   /** Who created it, as the caller recorded it (`cli`, `github:<id>`), or null. */
@@ -216,16 +214,40 @@ export function slotlockApiKeyDigest(key: string): Buffer {
  */
 export function isSlotlockApiKey(value: string): boolean {
   if (typeof value !== 'string' || !KEY_PATTERN.test(value)) return false;
-  const start = SLOTLOCK_API_KEY_PREFIX.length;
+  const start = value.startsWith(SLOTLOCK_TEST_API_KEY_PREFIX)
+    ? SLOTLOCK_TEST_API_KEY_PREFIX.length
+    : SLOTLOCK_API_KEY_PREFIX.length;
   const random = value.slice(start, start + RANDOM_CHARACTERS);
   return value.slice(start + RANDOM_CHARACTERS) === checksum(random);
 }
 
-/** A new key with the prefix lists show and the digest the database keeps. */
-export function generateSlotlockApiKey(): { key: string; prefix: string; digest: Buffer } {
+/**
+ * A new key with the prefix lists show and the digest the database keeps; a test environment's
+ * (`test`) starts `slk_test_`.
+ */
+export function generateSlotlockApiKey(test = false): { key: string; prefix: string; digest: Buffer } {
   const random = randomBase62(RANDOM_CHARACTERS);
-  const key = `${SLOTLOCK_API_KEY_PREFIX}${random}${checksum(random)}`;
-  return { key, prefix: key.slice(0, DISPLAY_CHARACTERS), digest: slotlockApiKeyDigest(key) };
+  const start = test ? SLOTLOCK_TEST_API_KEY_PREFIX : SLOTLOCK_API_KEY_PREFIX;
+  const key = `${start}${random}${checksum(random)}`;
+  return { key, prefix: key.slice(0, start.length + 8), digest: slotlockApiKeyDigest(key) };
+}
+
+/**
+ * What a test environment's key starts with (RFC 0003 G9): it acts in `<tenant>~test`, a tenant of
+ * its own on its live tenant's plan, never billed.
+ */
+export const SLOTLOCK_TEST_API_KEY_PREFIX = 'slk_test_';
+/** What ends a test environment's tenant reference: `<tenant>~test`. */
+export const SLOTLOCK_TEST_TENANT_SUFFIX = '~test';
+
+/** Whether the tenant is a test environment (`<tenant>~test`). */
+export function isSlotlockTestTenant(tenantRef: string): boolean {
+  return tenantRef.endsWith(SLOTLOCK_TEST_TENANT_SUFFIX);
+}
+
+/** The live tenant of a test environment, or the tenant itself. */
+export function slotlockLiveTenant(tenantRef: string): string {
+  return isSlotlockTestTenant(tenantRef) ? tenantRef.slice(0, -SLOTLOCK_TEST_TENANT_SUFFIX.length) : tenantRef;
 }
 
 /** What a partner key (RFC 0003 P1) starts with: never a tenant's key, which `slk_` and base62 follow. */
@@ -398,7 +420,7 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
           `Slotlock API key creator must be 1-${MAX_CREATOR_BYTES} bytes without control characters`,
         );
       }
-      const { key, prefix, digest } = generateSlotlockApiKey();
+      const { key, prefix, digest } = generateSlotlockApiKey(isSlotlockTestTenant(input.tenantRef));
       // Scopes travel as one string: postgres.js binds `sql.array` as text[] only once the pool
       // has fetched the server's array types, which the first query on a new pool precedes.
       const [row] = await asChange(
@@ -456,7 +478,7 @@ export function createSlotlockApiKeyStore(sql: SlotlockSql): SlotlockApiKeyStore
     async rotate({ tenantRef, id, ...change }) {
       assertTenantRef(tenantRef);
       if (typeof id !== 'string' || !UUID_PATTERN.test(id)) return null;
-      const { key, prefix, digest } = generateSlotlockApiKey();
+      const { key, prefix, digest } = generateSlotlockApiKey(isSlotlockTestTenant(tenantRef));
       const [row] = await asChange(sql, change, (tx) => tx<ApiKeyRow[]>`
         SELECT * FROM slotlock.rotate_api_key(
           ${tenantRef}::text, ${id}::uuid, ${prefix}::text, ${digest}::bytea

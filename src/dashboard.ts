@@ -15,7 +15,12 @@
 // is held in the database too.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
-import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
+import {
+  SLOTLOCK_TEST_TENANT_SUFFIX,
+  type SlotlockApiKey,
+  type SlotlockApiKeyScope,
+  type SlotlockApiKeyStore,
+} from './api-keys.js';
 import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentOperation,
@@ -141,6 +146,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/waitlist/leave',
   '/hours',
   '/organization',
+  '/environment',
   '/assistant',
   '/assistant/approve',
   '/assistant/dismiss',
@@ -832,6 +838,8 @@ interface Session {
   /** With organizations: the served ones the person belongs to, read at sign-in, and the one in use. */
   orgs?: Organization[];
   org?: string;
+  /** The test environment (RFC 0003 G9): the workspace's `<tenant>~test`. Live when absent. */
+  env?: 'test';
 }
 
 interface Organization {
@@ -1469,6 +1477,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.sid !== 'string' ||
       !allowed(payload.uid) ||
       !organizationsHold(payload) ||
+      (payload.env !== undefined && payload.env !== 'test') ||
       (await options.state.sessionEnded(payload.sid, payload.exp as number))
     ) {
       return null;
@@ -1494,8 +1503,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     createHmac('sha256', secret)
       .update(`slotlock-dashboard-csrf-v1.${session.sid}`)
       .digest('base64url');
+  /** The tenant the session acts in: the workspace's, or its test environment's (`~test`). */
   const tenantOf = (session: Session) =>
-    served ? `github-org:${session.org as string}` : `github:${session.uid}`;
+    `${served ? `github-org:${session.org as string}` : `github:${session.uid}`}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
   const personOf = (session: Session) => `github:${session.uid}`;
 
@@ -1556,6 +1566,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
 
+  /** Live or Test (RFC 0003 G9): the same workspace, a tenant of its own for trying things. */
+  function environmentSwitch(session: Session): Html {
+    const choice = (value: 'live' | 'test', label: string) =>
+      html`<button type="submit" name="environment" value="${value}"${(session.env === 'test') === (value === 'test') ? html` aria-pressed="true"` : html` aria-pressed="false"`}>${label}</button>`;
+    return html`<form class="environment" method="post" action="${root}/environment" aria-label="Environment"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">${choice('live', 'Live')}${choice('test', 'Test')}</form>`;
+  }
+
   /** The workspace the session acts in: its organization, or the person themselves. */
   function workspace(session: Session): Html {
     const current = session.orgs?.find((org) => org.id === session.org);
@@ -1604,11 +1621,15 @@ ${live}
 ${skip}
 <div class="app">
 <header class="side">
-<div class="side-top">${brand}${workspace(session)}</div>
+<div class="side-top">${brand}${workspace(session)}${environmentSwitch(session)}</div>
 <nav class="nav" aria-label="Dashboard">${links}</nav>
 <div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="@${session.login}">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
 </header>
-<main class="page" id="main">${content}</main>
+<main class="page" id="main">${
+      session.env === 'test'
+        ? html`<p class="test-banner">Test environment: its own resources, keys, webhooks and history, on your plan's limits and never billed. Its keys start <code>slk_test_</code>.</p>`
+        : html``
+    }${content}</main>
 </div>
 ${live}
 </body>
@@ -3325,6 +3346,17 @@ ${
   ): Promise<Response> {
     const billing = options.billing;
     if (!billing) return notFound(session);
+    if (session.env === 'test') {
+      return respond(
+        status,
+        layout(
+          'Plan',
+          html`${pageHead('Plan')}${noticeOf(notice)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan and usage, or to change them.</p>`,
+          session,
+          'plan',
+        ),
+      );
+    }
     const tenantRef = tenantOf(session);
     const [plan, resourceCount, keys, webhooks] = await Promise.all([
       billing.plan(tenantRef),
@@ -3446,6 +3478,7 @@ ${upgrade}
   async function upgradePlan(session: Session, form: URLSearchParams): Promise<Response> {
     const billing = options.billing;
     if (!billing) return notFound(session);
+    if (session.env === 'test') return planPage(session, 400, 'Plans are changed in Live.');
     if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can change its plan.');
     const interval = form.get('interval') === 'year' ? 'year' : 'month';
     const tenantRef = tenantOf(session);
@@ -3479,6 +3512,7 @@ ${upgrade}
   async function manageBilling(session: Session): Promise<Response> {
     const billing = options.billing;
     if (!billing) return notFound(session);
+    if (session.env === 'test') return planPage(session, 400, 'Billing is managed in Live.');
     if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can manage its billing.');
     const plan = await billing.plan(tenantOf(session));
     if (!plan?.stripeCustomer) return planPage(session, 409, 'There is no billing to manage yet.');
@@ -3681,6 +3715,17 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   }
 
   /** Act in another of the session's organizations: the same session, sealed again. */
+  function switchEnvironment(session: Session, form: URLSearchParams): Response {
+    const wanted = form.get('environment');
+    if (wanted !== 'live' && wanted !== 'test') {
+      return respond(400, layout('Refused', html`<p class="notice">Choose Live or Test.</p>`, session));
+    }
+    const { env: _, ...rest } = session;
+    const sealed = seal('slotlock-dashboard-session-v1', wanted === 'test' ? { ...rest, env: 'test' } : rest);
+    const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+    return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+  }
+
   function switchOrganization(session: Session, form: URLSearchParams): Response {
     const wanted = form.get('organization') ?? '';
     const org = session.orgs?.find(
@@ -4170,6 +4215,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         return saveHours(session, form);
       case '/organization':
         return switchOrganization(session, form);
+      case '/environment':
+        return switchEnvironment(session, form);
       case '/resources/rules':
         return saveRules(session, form);
       case '/resources/pool':
@@ -4459,6 +4506,12 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 .workspace select { flex: 1; min-width: 0; height: 26px; border: 0; padding: 0 18px 0 2px; font-weight: 600; font-size: var(--text-md); background-color: transparent; box-shadow: none; text-overflow: ellipsis; }
 .workspace select:focus { box-shadow: none; }
 .workspace:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.environment { display: flex; gap: 2px; margin: calc(-1 * var(--space-2)) 0 0; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.environment button { flex: 1; height: 26px; padding: 0 var(--space-2); border: 0; border-radius: calc(var(--radius) - 2px); background: none; box-shadow: none; color: var(--muted); font-size: var(--text-sm); font-weight: 600; }
+.environment button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.environment button[aria-pressed="true"][value="test"] { background: var(--warn-wash); color: var(--warn); box-shadow: 0 0 0 1px var(--warn-line); }
+.test-banner { margin: 0 0 var(--space-4); padding: var(--space-2) var(--space-3); border: 1px dashed var(--warn-line); border-radius: var(--radius); background: var(--warn-wash); color: var(--warn); font-size: var(--text-md); }
+.test-banner code { background: none; padding: 0; }
 .avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none; border-radius: var(--radius-sm); background: var(--ink); color: var(--surface); font-size: 11px; font-weight: 700; }
 .nav { display: grid; gap: 1px; }
 .nav a { position: relative; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: var(--radius); color: var(--ink-2); font-weight: 500; font-size: var(--text-md); transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease); }
@@ -4715,6 +4768,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .side-top .brand .name { display: none; }
   .workspace { flex: 1; min-width: 0; padding: 3px 4px; }
   .workspace .avatar { display: none; }
+  .environment { margin: 0; flex: none; }
   .me { grid-column: 2; grid-row: 1; margin: 0; padding: 0; border: 0; }
   .me-avatar, .me .login { display: none; }
   .sign-out { width: 36px; height: 36px; padding: 0; }

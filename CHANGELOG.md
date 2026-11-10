@@ -122,6 +122,16 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Test environments (RFC 0003 G9, T2). A tenant reference ending `~test` is the test environment of
+  the tenant before it: a tenant of its own, on its live tenant's plan and quotas, never billed
+  (`tenant_plan` returns no Stripe ids for it), suspended with its live tenant and erased with it
+  (`erase_tenant` reports its rows as `test.<table>`). Its keys start `slk_test_` and only its keys
+  do: `slotlock_api_keys_environment_valid` (added NOT VALID) and a widened prefix check.
+  `isSlotlockApiKey` takes both forms; `generateSlotlockApiKey(test)`, `isSlotlockTestTenant`,
+  `slotlockLiveTenant`, `SLOTLOCK_TEST_API_KEY_PREFIX`. The dashboard has a Live/Test switch
+  (`POST /environment`, kept in the session) with a banner in Test, where plan and billing actions
+  are refused. `slotlockServeAllowsTenant` judges a test environment as its live tenant, so a
+  person removed from `SLOTLOCK_DASHBOARD_USERS` loses their test keys too. Run `slotlock migrate`.
 - Closing a partner's month (RFC 0003 P5, P6): `slotlock partner close <id> [--month YYYY-MM]`,
   as the schema owner, closes an ended month: it prices each account's usage with the contract
   (`priceSlotlockPartnerMonth`), records the lines once in `slotlock.partner_invoices`, sends the

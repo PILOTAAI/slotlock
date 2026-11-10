@@ -453,7 +453,8 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
     CHECK (octet_length(tenant_ref) BETWEEN 1 AND 500 AND tenant_ref !~ '[[:cntrl:]]'),
   CONSTRAINT slotlock_api_keys_name_valid
     CHECK (char_length(name) BETWEEN 1 AND 100 AND name !~ '[[:cntrl:]]'),
-  CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_[0-9A-Za-z]{8}$'),
+  -- A test environment's key (RFC 0003 G9) says so: slk_test_, and only there (the DO block below).
+  CONSTRAINT slotlock_api_keys_prefix_valid CHECK (prefix ~ '^slk_(test_)?[0-9A-Za-z]{8}$'),
   -- A non-empty list of read, write and admin, each once, in that order (api-keys.ts).
   CONSTRAINT slotlock_api_keys_scopes_known
     CHECK (scopes IN (
@@ -472,6 +473,23 @@ CREATE TABLE IF NOT EXISTS slotlock.api_keys (
 CREATE INDEX IF NOT EXISTS slotlock_api_keys_tenant_idx
   ON slotlock.api_keys (tenant_ref, created_at DESC, id DESC);
 ALTER TABLE slotlock.api_keys ENABLE ROW LEVEL SECURITY;
+-- A tenant reference ending in ~test is the test environment of the one before it (RFC 0003 G9):
+-- its keys start slk_test_, and no other tenant's do, so a key says where it acts. Added NOT VALID
+-- (DEPLOYMENT_VALIDATE_CONSTRAINTS); the prefix check it widens is replaced with it.
+DO $slotlock_api_keys_environment$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.api_keys'::regclass AND conname = 'slotlock_api_keys_environment_valid'
+  ) THEN
+    ALTER TABLE slotlock.api_keys DROP CONSTRAINT IF EXISTS slotlock_api_keys_prefix_valid;
+    ALTER TABLE slotlock.api_keys ADD CONSTRAINT slotlock_api_keys_prefix_valid
+      CHECK (prefix ~ '^slk_(test_)?[0-9A-Za-z]{8}$') NOT VALID;
+    ALTER TABLE slotlock.api_keys ADD CONSTRAINT slotlock_api_keys_environment_valid
+      CHECK ((prefix ~ '^slk_test_') = (tenant_ref ~ '~test$')) NOT VALID;
+  END IF;
+END
+$slotlock_api_keys_environment$;
 
 -- Schemas from 0.1 allow only read and write. The CHECK with admin admits every row the old one
 -- did, so it is added NOT VALID (no table scan under the lock) and the old one dropped in the same
@@ -1010,10 +1028,11 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_suspended$
-  -- Its own suspension, or its partner's (a partner's account, RFC 0003 P2).
+  -- Its own suspension, its live tenant's (a test environment, RFC 0003 G9), or its partner's (a
+  -- partner's account, RFC 0003 P2).
   SELECT EXISTS (
     SELECT 1 FROM slotlock.tenant_suspensions suspended
-     WHERE suspended.tenant_ref = requested_tenant_ref
+     WHERE suspended.tenant_ref IN (requested_tenant_ref, regexp_replace(requested_tenant_ref, '~test$', ''))
   ) OR slotlock.partner_tenant_blocked(requested_tenant_ref);
 $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
@@ -1109,18 +1128,24 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_plan$
+  -- A test environment (<tenant>~test, RFC 0003 G9) is on its live tenant's plan, with no billing.
+  WITH live AS (
+    SELECT regexp_replace(requested_tenant_ref, '~test$', '') AS tenant_ref,
+           requested_tenant_ref ~ '~test$' AS test
+  )
   SELECT current.plan, current.status, current.max_resources, current.max_api_keys,
-         current.max_webhook_endpoints, current.stripe_customer, current.stripe_subscription,
-         current.current_period_end
-    FROM slotlock.tenant_plans current
-   WHERE current.tenant_ref = requested_tenant_ref
+         current.max_webhook_endpoints,
+         CASE WHEN live.test THEN NULL ELSE current.stripe_customer END,
+         CASE WHEN live.test THEN NULL ELSE current.stripe_subscription END,
+         CASE WHEN live.test THEN NULL ELSE current.current_period_end END
+    FROM live JOIN slotlock.tenant_plans current ON current.tenant_ref = live.tenant_ref
   UNION ALL
   SELECT fallback.plan, 'active', fallback.max_resources, fallback.max_api_keys,
          fallback.max_webhook_endpoints, NULL, NULL, NULL
-    FROM slotlock.plan_defaults fallback
+    FROM live, slotlock.plan_defaults fallback
    WHERE fallback.applies_from <= statement_timestamp()
      AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current
-                      WHERE current.tenant_ref = requested_tenant_ref);
+                      WHERE current.tenant_ref = live.tenant_ref);
 $slotlock_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[10]} FROM PUBLIC;
 
@@ -1151,7 +1176,8 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_plan_quotas$
   SELECT given.plan, own.quota_operations, own.quota_bookings, own.quota_stop_percent
     FROM slotlock.tenant_plan(requested_tenant_ref) given
-    LEFT JOIN slotlock.tenant_plans own ON own.tenant_ref = requested_tenant_ref;
+    LEFT JOIN slotlock.tenant_plans own
+           ON own.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '');
 $slotlock_tenant_plan_quotas$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[19]} FROM PUBLIC;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[12]} FROM PUBLIC;
@@ -1168,6 +1194,8 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_enrol_tenant_plan$
 BEGIN
+  -- A test environment's plan is its live tenant's (RFC 0003 G9): that is the one enrolled.
+  requested_tenant_ref := regexp_replace(requested_tenant_ref, '~test$', '');
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
   INSERT INTO slotlock.tenant_plans (
     tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints
@@ -1715,6 +1743,7 @@ AS $slotlock_erase_tenant$
 DECLARE
   setting text;
   previous jsonb := '{}'::jsonb;
+  tested record;
 BEGIN
   IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500 THEN
     RAISE EXCEPTION 'Slotlock tenant reference must be 1-500 UTF-8 bytes'
@@ -1902,6 +1931,20 @@ BEGIN
     GET DIAGNOSTICS erased_rows = ROW_COUNT;
   END IF;
   RETURN NEXT;
+
+  -- A live tenant goes with its test environment (RFC 0003 G9), reported as test.<table>.
+  IF requested_tenant_ref !~ '~test$' AND octet_length(requested_tenant_ref) <= 495 THEN
+    FOR tested IN
+      SELECT inner_erased.erased_table AS name, inner_erased.erased_rows AS count
+        FROM slotlock.erase_tenant(requested_tenant_ref || '~test') inner_erased
+    LOOP
+      IF tested.count > 0 THEN
+        erased_table := 'test.' || tested.name;
+        erased_rows := tested.count;
+        RETURN NEXT;
+      END IF;
+    END LOOP;
+  END IF;
 
   FOR setting IN SELECT jsonb_object_keys(previous) LOOP
     PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
@@ -3186,7 +3229,8 @@ AS $slotlock_partner_tenant_blocked$
   SELECT EXISTS (
     SELECT 1 FROM slotlock.partner_accounts owned
       JOIN slotlock.partners partner ON partner.id = owned.partner_id
-     WHERE owned.tenant_ref = requested_tenant_ref AND partner.status <> 'active'
+     WHERE owned.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '')
+       AND partner.status <> 'active'
   );
 $slotlock_partner_tenant_blocked$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[0]} FROM PUBLIC;

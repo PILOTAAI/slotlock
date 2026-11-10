@@ -322,7 +322,13 @@ two different parts never conflict, and the guarantee is still PostgreSQL's. A c
 adds the parent's rows whose span covers it. Existing rows get the full span, so nothing changes for
 a resource without children.
 
-**G9. Test environments (T2, later).** A `slk_test_` key acts in `<tenant>~test`, a tenant of its
+**G9. Test environments (T2, later).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as
+below: the database refuses a `slk_test_` prefix outside a `~test` tenant and a live one inside it
+(`slotlock_api_keys_environment_valid`, NOT VALID then validated); `tenant_plan`,
+`tenant_plan_quotas`, `tenant_suspended`, `partner_tenant_blocked` and `enrol_tenant_plan` read the
+live tenant; `erase_tenant` takes the test environment with its live tenant (reported as
+`test.<table>`); the dashboard keeps the choice in its session and shows the Plan page's actions in
+Live only. A `slk_test_` key acts in `<tenant>~test`, a tenant of its
 own with the same plan limits and no billing; the dashboard switches between Live and Test.
 `slotlockServeAllowsTenant` must learn the suffix: today it lets through any reference that is not
 `github:<id>` or `github-org:<id>`, whatever `SLOTLOCK_DASHBOARD_USERS` says, so a removed person's

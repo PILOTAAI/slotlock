@@ -33,6 +33,7 @@ import {
   createSlotlockApiKeyAuthenticator,
   createSlotlockApiKeyStore,
   slotlockBearerCredential,
+  slotlockLiveTenant,
 } from './api-keys.js';
 import {
   createSlotlockDashboard,
@@ -818,11 +819,13 @@ export function slotlockServeAllowsTenant(
   config: Pick<SlotlockServeConfig, 'organizations' | 'allowedUsers'>,
   tenantRef: string,
 ): boolean {
-  const orgId = /^github-org:(\d+)$/.exec(tenantRef)?.[1];
+  // A test environment (RFC 0003 G9) is let through exactly as its live tenant.
+  const live = slotlockLiveTenant(tenantRef);
+  const orgId = /^github-org:(\d+)$/.exec(live)?.[1];
   if (orgId !== undefined) return config.organizations?.includes(orgId) === true;
   const users = config.allowedUsers;
   if (users === undefined || users === '*') return true;
-  const githubId = /^github:(\d+)$/.exec(tenantRef)?.[1];
+  const githubId = /^github:(\d+)$/.exec(live)?.[1];
   return githubId === undefined || users.includes(githubId);
 }
 

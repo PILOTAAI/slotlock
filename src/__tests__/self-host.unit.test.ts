@@ -524,6 +524,11 @@ describe('slotlock serve configuration', () => {
       expect(slotlockServeAllowsTenant(config, 'github:999')).toBe(false);
       // Tenants that are not a GitHub person's (a CLI-made key's) are not the list's to refuse.
       expect(slotlockServeAllowsTenant(config, 'pylota-deploy-smoke')).toBe(true);
+      // A test environment is let through as its live tenant, so a removed person's stops too.
+      expect(slotlockServeAllowsTenant(config, 'github:4242~test')).toBe(true);
+      expect(slotlockServeAllowsTenant(config, 'github:999~test')).toBe(false);
+      expect(slotlockServeAllowsTenant({ organizations: ['7'] }, 'github-org:8~test')).toBe(false);
+      expect(slotlockServeAllowsTenant({ organizations: ['7'] }, 'github-org:7~test')).toBe(true);
       const open = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '*' }));
       expect(open.allowedUsers).toBe('*');
       expect(slotlockServeAllowsTenant(open, 'github:999')).toBe(true);

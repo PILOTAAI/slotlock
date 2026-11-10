@@ -467,7 +467,7 @@ export function slotlockOpenApiDocument(args: {
           type: 'http',
           scheme: 'bearer',
           description:
-            'A Slotlock API key (`slk_…`), a partner key (`slk_partner_…`) or the server token. `x-slotlock-scope` on each operation names the scope it needs.',
+            'A Slotlock API key (`slk_…`, or `slk_test_…` for a test environment), a partner key (`slk_partner_…`) or the server token. `x-slotlock-scope` on each operation names the scope it needs.',
         },
       },
       schemas: {
