@@ -430,6 +430,166 @@ exclusion constraint, not short slots. B3 adds the search that range booking nee
 | 17 | C3 payment holds | T2 | 0.9.0 |
 | 18 | C4 two-way sync | T2 | after 0.9.0 |
 
+## Decisions under discussion (researched 2026-11-10)
+
+The owner asked for research on five open questions before deciding. Each gives a recommendation
+and the evidence for it; none is built until the owner agrees.
+
+### D1. Notifications and calendar sync: in core, or packages?
+
+**Recommendation: keep both out of core, as packages on the feed, but put four primitives in core
+first.**
+
+What other products do:
+- Cal.com moved its main code private in April 2026 and kept calendar sync in the MIT edition.
+  Reminders, SMS and WhatsApp became commercial
+  ([Cal.com](https://cal.com/blog/cal-diy-open-source-to-closed-source)).
+- Nylas makes sending an optional layer that can be turned off
+  ([Nylas](https://developer.nylas.com/docs/v3/scheduler/customize-scheduler.md)).
+- Cronofy leaves sending to the application
+  ([Cronofy](https://docs.cronofy.com/developers/smart-invites/)).
+- Stored provider tokens are the target: in the Salesloft Drift breach, stolen OAuth tokens were
+  the way in
+  ([Google](https://cloud.google.com/blog/topics/threat-intelligence/data-theft-salesforce-instances-via-salesloft-drift)).
+  Core keeps three runtime dependencies and no secrets that a self-hoster never uses.
+
+What core adds first:
+- a `reminder.due` change when a stored reminder falls due;
+- the feed's change id documented as the send key;
+- a reference to the recipient's channel and consent, erased with the person;
+- a per-booking "do not notify" flag.
+
+The order, each a separate process with its own schema, role and secrets (core's role cannot read
+tokens):
+1. An ICS URL poller, guarded against SSRF.
+2. Read-only Google and Microsoft adapters on the narrowest scopes: `calendar.freebusy`, and
+   `Calendars.ReadBasic` for `getSchedule`
+   ([Graph](https://learn.microsoft.com/en-us/graph/permissions-reference)). Calendar scopes are
+   Google "sensitive" (app verification, no CASA assessment).
+3. Email: the self-hoster's own SMTP, SES, Postmark or Resend. On Cloud, only from a domain the
+   tenant has verified, with SES tenant isolation.
+4. SMS through the tenant's own Twilio or Vonage first, so the tenant is the sender of record
+   (A2P 10DLC registers a brand and campaign per sender:
+   [Twilio](https://www.twilio.com/docs/messaging/compliance/a2p-10dlc/onboarding-isv.md)).
+5. WhatsApp through the tenant's own WhatsApp Business account.
+6. Two-way write-back last.
+
+Every send is recorded first under a unique key (change id, channel, recipient), so an outbox
+replay never sends twice.
+
+### D2. OAuth for MCP clients: build, or a provider?
+
+**Recommendation: build the authorization server into `slotlock serve`, on panva's `oidc-provider`
+(OpenID Certified, MIT) and PostgreSQL, and keep `slk_` keys for headless agents.**
+
+Why build:
+- Self-hosters cannot depend on a SaaS.
+- Every peer probed (Stripe, Linear, Notion, Sentry, Cal.com, Atlassian, Calendly) issues MCP
+  tokens from its own domain.
+
+How it works:
+- Each grant becomes a delegated key: the same scopes, location and group limits, row-level
+  security and history.
+- Clients register by CIMD and DCR, and air-gapped installs can pre-register. Claude and ChatGPT
+  prefer CIMD, Cursor has only DCR, and MCP 2026-07-28 deprecates DCR. DCR is therefore
+  rate-limited, and a client unused for 90 days expires. This reverses A5's "no open DCR".
+- Tokens are opaque and stored hashed. Access tokens last an hour; refresh tokens rotate and
+  expire after 30 days idle or 90 days in all.
+- Grants can be revoked (RFC 7009), and the dashboard gets a "Connected apps" page.
+- `slotlock:write` comes by step-up; `admin` stays for keys only.
+
+Cost and stopgap:
+- About 4–6 engineer-weeks and an external security review: running an authorization server is
+  security-critical, and `workers-oauth-provider` had a PKCE bypass in 2025.
+- If Cloud needs OAuth sooner, WorkOS AuthKit (free up to 1M monthly active users) can stand in
+  behind the same protected-resource metadata.
+
+### D3. How long an approval may wait
+
+**Decision (owner): it depends on the rules and the business, not a fixed 24 hours.**
+
+A4 builds it this way:
+- Each policy sets its own wait (`approval_ttl_minutes`).
+- A tenant may set a default.
+- The wait is always bounded:
+  - by the booking's start, less the policy's lead time, so an approval cannot outlive the time
+    it holds;
+  - by the server's maximum, `SLOTLOCK_MAX_APPROVAL_DAYS`, 30 by default.
+- A pending approval holds its time, so a long wait is a business choice the policy makes
+  explicit.
+
+### D4. Seats for large venues
+
+**Recommendation: not N unit resources. One resource whose bookings each claim a span of seat
+indices, under `EXCLUDE (resource_id =, occupied &&, seat_span &&)`.** This is the mechanism
+composites already use.
+
+Measured on PostgreSQL 16, with 32 clients and 2,000 seats, N unit resources fail three ways:
+- Pool booking tries members one by one, so contention made 7 bookings in 60 s, with 97
+  deadlocks.
+- Pools stop at 100 members.
+- Seat-level rows refuse bookings that fit: at capacity 2, after 9–10 and 11–12, a 9:30–11:30
+  booking is refused although the peak is 2.
+
+Span claims:
+- One row per booking, however many seats.
+- General admission is any free span; a named seat is a fixed index; "4 together" is a contiguous
+  span; the whole venue is `[0,∞)`.
+- 425–880 bookings a second, with a per-resource lock for throughput only.
+- The guarantee stays declarative: the constraint, a CHECK that a span lies inside
+  `[0, capacity)` and a generated `seats` column prove that the seats in use at any instant never
+  exceed capacity.
+
+Risks:
+- The new constraint cannot be added `NOT VALID`, so the migration takes an exclusive lock and
+  needs a window on Cloud.
+- A three-column index costs every insert; to be benchmarked.
+- Fragmentation can under-admit. A booking can be split into fragments under one group.
+- An exact counted mode can come later if under-admission matters.
+
+Cal.com counts seats in application code; ticketing and hotels count at sale and assign later. No
+competitor publishes a database guarantee.
+
+### D5. Prices for notifications and sandbox features
+
+**Recommendation:**
+
+Email:
+- Included: Free 500 a month, Developer 10,000, Team 50,000 pooled, sent through SES with each
+  tenant isolated.
+- Then $1 per 1,000 from a prepaid balance.
+
+SMS and WhatsApp:
+- A prepaid balance only, with a $25 minimum top-up, never billed afterwards.
+- A per-country rate card at Twilio's list price × 1.75, rounded: US SMS $0.025, UK $0.10; US
+  WhatsApp utility $0.015. That is about 35% net after Managed Payments (3.5%) and card fees.
+- US 10DLC fees are passed on ($25 once, about $3 a month).
+- Developer $1 and Team $5 of credit a month, after a first top-up.
+- At zero balance, email instead. Rates change with 30 days' notice.
+- Benchmarks:
+  - Cal.com charges Twilio cost + 80%
+    ([Cal.com](https://cal.com/help/billing-and-usage/messaging-credits)).
+  - Calendly bundles credits.
+  - Fresha sells $0.02 a text after 100.
+  - Meta has charged utility templates inside the 24-hour window since 2026-10-01.
+
+Sandbox:
+- Free on every plan: test keys, seeded scenarios, the simulated clock, and a race of 10 agents
+  (20 runs a day). In Test, SMS and WhatsApp never deliver: they go to a capture inbox.
+- Larger by plan, at no extra charge in the first version: Developer 100 agents and runs from CI,
+  Team 1,000 agents.
+- Stripe, Twilio, Plaid and Clerk all make simulation free with caps.
+
+Caveats:
+- Stripe must confirm whether SMS credits are an eligible digital product under Managed Payments.
+  If they are not, Cloud offers only the tenant's own provider (D1 step 4) until a second
+  processor is set up.
+- Top-ups are one-time Checkout payments recorded in Slotlock's own ledger. Stripe credit grants
+  apply only to invoices.
+- SMS pumping (fraud by triggering sends to premium numbers) is the main fraud risk. Controls:
+  sending only to the tenant's own country by default, mobile numbers only, a per-tenant rate,
+  built-in templates for new accounts, and top-ups capped at $50 for the first 30 days.
+
 ## Open questions
 
 1. Part 3 reverses RFC 0002's non-goals as packages outside core. Is that the line: core never
