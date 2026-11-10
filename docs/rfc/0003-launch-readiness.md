@@ -272,7 +272,8 @@ tenant; deleting one is refused while a resource or child uses it. A resource ha
 locations below it.
 
 **G3. Groups (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, with `DELETE
-/v1/groups/{ref}` too; membership changes are not on the feed yet. The dashboard's Locations and
+/v1/groups/{ref}` too. A resource joining or leaving a group (its deletion included) is a
+`resource.updated` on the feed with its `groups` before and after. The dashboard's Locations and
 groups page edits groups, and a resource's page sets its groups. `slotlock.resource_groups (tenant_ref, ref, name, description)` and
 `slotlock.resource_group_members (tenant_ref, group_ref, resource_id)`; 500 groups a tenant, 20
 groups a resource. API: `GET/POST /v1/groups`, `PUT` and `DELETE

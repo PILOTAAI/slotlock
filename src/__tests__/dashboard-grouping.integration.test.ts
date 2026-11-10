@@ -154,13 +154,18 @@ describe.skipIf(!url)('dashboard locations and groups (real Postgres)', () => {
     expect(shown).toContain('<dt>Location</dt><dd>London › Floor 3</dd><dt>Groups</dt><dd>Quiet, Rooms with video</dd>');
     expect(shown).toContain('<option value="floor-3" selected>');
     expect(shown).toContain('value="quiet" checked>');
-    // Recorded as the person, on the feed.
+    // Recorded as the person, on the feed: the move, then each group it joined, newest first.
     const changes = await read((tenant) => tenant.listRecentChanges({ tenantRef, limit: 20 }));
-    expect(changes.find((change) => change.type === 'resource.updated')).toMatchObject({
-      actor: tenantRef,
-      origin: 'dashboard',
-      data: { after: { location: 'floor-3' } },
-    });
+    expect(
+      changes
+        .filter((change) => change.type === 'resource.updated' && change.resourceId === id)
+        .slice(0, 3)
+        .map(({ actor, origin, data }) => ({ actor, origin, after: data.after })),
+    ).toEqual([
+      { actor: tenantRef, origin: 'dashboard', after: { groups: ['quiet', 'video-rooms'] } },
+      { actor: tenantRef, origin: 'dashboard', after: { groups: ['video-rooms'] } },
+      { actor: tenantRef, origin: 'dashboard', after: { location: 'floor-3' } },
+    ]);
 
     // A group that is not the tenant's refuses the whole form: the location stays.
     const unknown = await post(

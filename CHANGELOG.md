@@ -101,6 +101,13 @@ versioning.
   resource's location (with its name) and groups, and narrows by `location` and `group`, with or
   without a pool. `resource.created` and `resource.updated` carry the location. Run `slotlock
   migrate`.
+- Group membership changes are on the feed. A resource joining or leaving a group, a group's
+  deletion included, appends `resource.updated` with the groups it was in `before` and is in
+  `after`, by reference, sorted: one change for each resource a statement touched (a statement
+  trigger over its transition table on `slotlock.resource_group_members`), none for adding it to a
+  group it is in, for the deletion of the resource itself (`resource.deleted` says so) or for
+  erasure. Webhooks deliver it, and a webhook filtered by a group matches the resource as it is when
+  the change is delivered, as every filter does. Run `slotlock migrate`.
 - The dashboard edits locations and groups. Its new Locations and groups page, linked from
   Resources, adds a location (with where it is and a time zone), moves, renames and deletes one, and
   adds, renames and deletes a group, each refusal said in a person's words. A resource's page puts

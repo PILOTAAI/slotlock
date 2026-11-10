@@ -2786,6 +2786,50 @@ CREATE OR REPLACE TRIGGER slotlock_outbox_coverage_in_shape
   BEFORE INSERT ON slotlock.outbox
   FOR EACH ROW WHEN (NEW.type LIKE 'coverage.%')
   EXECUTE FUNCTION slotlock.outbox_coverage_in_shape();
+-- A resource put in a group or taken out of one (RFC 0003 G3): resource.updated, with the groups
+-- it was in before and is in after, by reference, sorted. Once per statement, from the rows the
+-- statement changed, so each resource it touched has one change, whatever its other groups; adding
+-- a resource to a group it is in changes no row and appends none. Taken out because its group was
+-- deleted is a change; because the resource was deleted (resource.deleted says so) or its tenant
+-- erased is not.
+CREATE OR REPLACE FUNCTION slotlock.outbox_group_membership_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_outbox_group_membership$
+BEGIN
+  INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+  SELECT resource.tenant_ref, resource.id, 'resource.updated', resource.id::text,
+         jsonb_build_object(
+           'id', resource.id, 'reference', resource.external_ref,
+           'before', jsonb_build_object('groups', to_jsonb(CASE WHEN TG_OP = 'INSERT'
+             THEN ARRAY(SELECT kept FROM unnest(now_in.refs) kept WHERE kept <> ALL (touched.groups) ORDER BY kept)
+             ELSE ARRAY(SELECT DISTINCT was FROM unnest(now_in.refs || touched.groups) was ORDER BY was) END)),
+           'after', jsonb_build_object('groups', to_jsonb(now_in.refs))),
+         NULLIF(current_setting('slotlock.actor', true), '')
+    FROM (SELECT changed.tenant_ref, changed.resource_id, array_agg(changed.group_ref) AS groups
+            FROM changed_members changed
+           GROUP BY changed.tenant_ref, changed.resource_id) touched
+    JOIN slotlock.resources resource
+      ON resource.id = touched.resource_id AND resource.tenant_ref = touched.tenant_ref
+   CROSS JOIN LATERAL (
+     SELECT ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
+                   WHERE member.tenant_ref = touched.tenant_ref AND member.resource_id = touched.resource_id
+                   ORDER BY member.group_ref) AS refs) now_in
+   WHERE NOT slotlock.outbox_erasing(touched.tenant_ref)
+   ORDER BY resource.id;
+  RETURN NULL;
+END
+$slotlock_outbox_group_membership$;
+-- A trigger with a transition table takes one event; both name it changed_members for the function.
+CREATE OR REPLACE TRIGGER slotlock_outbox_group_member_added
+  AFTER INSERT ON slotlock.resource_group_members
+  REFERENCING NEW TABLE AS changed_members
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_group_membership_change();
+CREATE OR REPLACE TRIGGER slotlock_outbox_group_member_removed
+  AFTER DELETE ON slotlock.resource_group_members
+  REFERENCING OLD TABLE AS changed_members
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.outbox_group_membership_change();
 CREATE OR REPLACE TRIGGER slotlock_outbox_webhook_change
   AFTER INSERT OR DELETE ON slotlock.webhook_endpoints
   FOR EACH ROW EXECUTE FUNCTION slotlock.outbox_webhook_change();

@@ -1078,7 +1078,9 @@ Where a resource is, and the sets it is in, are kept apart from its pool, which 
   itself (`location_cycle`) or past 5 levels (`location_too_deep`).
 - A **group** is any set the tenant wants: a team, a department, a contract, "Saturday clinic"
   (`POST /v1/groups`, then `PUT /v1/groups/{ref}/members/{resource_id}`). A resource is in up to
-  20 of the tenant's 500 groups. Deleting a group leaves its resources as they were.
+  20 of the tenant's 500 groups. Deleting a group leaves its resources as they were. A resource
+  joining or leaving a group, its group's deletion included, is a `resource.updated` on the feed
+  with its `groups` before and after, by reference.
 - `slotlock_list_resources` shows agents each resource's `location` (with its name) and `groups`,
   and narrows by `location` and `group`, with or without a `pool`.
 - The searches (`slotlock_get_free_busy`, `slotlock_find_next_available`,
@@ -1375,8 +1377,8 @@ webhook URLs or secrets.
   `reservation.created`, `.updated`, `.cancelled`, `.checked_in`, `.no_show`; `event.created`,
   `.updated`, `.cancelled`, `.timezone_shifted`, `.timezone_conflict`; `waitlist.offered`,
   `.expired`; `coverage.stale`; and configuration: `resource.created`, `resource.updated` (booking
-  and check-in rules, pool, bookable hours, time zone or reference, with `before` and `after` of
-  only the fields that changed), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
+  and check-in rules, pool, location, groups, bookable hours, time zone or reference, with `before`
+  and `after` of only the fields that changed, and the profile fields' names in `profile_changed`), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
   (a source's first read; reading it again is not a change) and `coverage.deleted`. A `coverage.*`
   change names its source by `source_id` (also its `subject`), never the source itself, which can
   be an iCalendar URL with a token or an address: `src_` and 32 random hex digits, made when the

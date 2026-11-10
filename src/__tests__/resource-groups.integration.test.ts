@@ -495,6 +495,79 @@ describe.skipIf(!url)('locations and groups (real Postgres, application role)', 
     }
   });
 
+  it('records a resource joining or leaving a group on the feed, with its groups before and after', async () => {
+    const acme = tenant('membership');
+    for (const ref of ['quiet', 'team', 'video']) {
+      await as(acme, (scoped) => scoped.putGroup({ tenantRef: acme, ref, name: ref }));
+    }
+    const make = (externalRef: string) =>
+      as(acme, (scoped) => scoped.createResource({ tenantRef: acme, externalRef, timezone: 'UTC' }));
+    const room = await make('room-1');
+    const other = await make('room-2');
+    const quietOnly = await as(acme, (scoped) =>
+      scoped.createWebhookEndpoint({ tenantRef: acme, url: 'https://example.com/quiet', filter: { groups: ['quiet'] } }),
+    );
+    if (!quietOnly.ok) throw new Error(quietOnly.code);
+    // As an API key would, so the change names who made it.
+    const member = (change: 'add' | 'remove', group: string, resourceId: string) =>
+      store.withTenant(
+        acme,
+        (scoped) =>
+          change === 'add'
+            ? scoped.addGroupMember({ tenantRef: acme, group, resourceId })
+            : scoped.removeGroupMember({ tenantRef: acme, group, resourceId }),
+        { origin: 'application', actor: 'key:membership' },
+      );
+    const changes = async () =>
+      (
+        await admin<{ resource_id: string; data: { reference: string; before: unknown; after: unknown }; actor: string | null; origin: string }[]>`
+          SELECT resource_id::text, data, actor, origin FROM slotlock.outbox
+           WHERE tenant_ref = ${acme} AND type = 'resource.updated' ORDER BY id`
+      ).map((row) => ({ ...row.data, resource: row.resource_id, actor: row.actor, origin: row.origin }));
+
+    expect(await member('add', 'team', room.id)).toBe(true);
+    expect(await member('add', 'video', room.id)).toBe(true);
+    // Already in it: no row changes, and nothing is recorded.
+    expect(await member('add', 'team', room.id)).toBe(false);
+    await member('add', 'team', other.id);
+    await member('add', 'video', other.id);
+    expect(await member('remove', 'team', room.id)).toBe(true);
+    expect(await member('remove', 'team', room.id)).toBe(false);
+    expect(await changes()).toEqual([
+      { id: room.id, reference: 'room-1', before: { groups: [] }, after: { groups: ['team'] }, resource: room.id, actor: 'key:membership', origin: 'application' },
+      { id: room.id, reference: 'room-1', before: { groups: ['team'] }, after: { groups: ['team', 'video'] }, resource: room.id, actor: 'key:membership', origin: 'application' },
+      { id: other.id, reference: 'room-2', before: { groups: [] }, after: { groups: ['team'] }, resource: other.id, actor: 'key:membership', origin: 'application' },
+      { id: other.id, reference: 'room-2', before: { groups: ['team'] }, after: { groups: ['team', 'video'] }, resource: other.id, actor: 'key:membership', origin: 'application' },
+      { id: room.id, reference: 'room-1', before: { groups: ['team', 'video'] }, after: { groups: ['video'] }, resource: room.id, actor: 'key:membership', origin: 'application' },
+    ]);
+
+    // A group deleted takes each of its resources out of it: one change for each, in one statement.
+    const seen = (await changes()).length;
+    expect(await as(acme, (scoped) => scoped.deleteGroup({ tenantRef: acme, ref: 'video' }))).toBe(true);
+    const afterDelete = (await changes()).slice(seen);
+    expect(afterDelete.map(({ resource, before, after }) => ({ resource, before, after }))).toEqual(
+      [
+        { resource: room.id, before: { groups: ['video'] }, after: { groups: [] } },
+        { resource: other.id, before: { groups: ['team', 'video'] }, after: { groups: ['team'] } },
+      ].sort((a, b) => (a.resource < b.resource ? -1 : 1)),
+    );
+    // A resource deleted leaves its groups without a change of its own: resource.deleted says it.
+    const before = (await changes()).length;
+    expect(await as(acme, (scoped) => scoped.deleteResource({ tenantRef: acme, id: other.id }))).toMatchObject({ ok: true });
+    expect(await changes()).toHaveLength(before);
+
+    // A webhook filtered by a group gets a resource joining it, delivered while it is in it. (A
+    // filter matches a resource as it is when the change is delivered, so a resource that has left
+    // the group by then is not sent its leaving, or a joining it has since undone.)
+    await member('add', 'quiet', room.id);
+    const claims = await as(acme, (scoped) => scoped.claimWebhookDeliveries({ tenantRef: acme, leaseMs: 30_000, batch: 100 }));
+    const delivered = claims.find((claim) => claim.endpoint.id === quietOnly.endpoint.id)?.changes ?? [];
+    // Every change about the room since the endpoint was made, the room being in the group now;
+    // none about the deleted resource, which is in no group.
+    expect(delivered.every((change) => change.resourceId === room.id)).toBe(true);
+    expect(delivered.at(-1)?.data).toMatchObject({ before: { groups: [] }, after: { groups: ['quiet'] } });
+  });
+
   it("erases a tenant's locations, groups and memberships with it, and keeps them from other tenants", async () => {
     const acme = tenant('erased');
     await as(acme, (scoped) => scoped.putLocation({ tenantRef: acme, ref: 'site', name: 'Site' }));
