@@ -320,4 +320,51 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
       code: 'partner_not_found',
     });
   });
+
+  it('acts for one of its accounts with Slotlock-Account, only where the contract allows it', async () => {
+    const actor = `actor-${suffix}`;
+    await putSlotlockPartner(admin, { id: actor, name: 'Actor', contract: CONTRACT });
+    const partners = createSlotlockPartnerStore(admin, {
+      keys: createSlotlockApiKeyStore(admin),
+      eraseTenant: async () => ({ erased: true, total: 0 }) as never,
+    });
+    await partners.putAccount(actor, 'user-9', 'partner_free');
+    await partners.putAccount(rival, 'theirs', 'partner_free');
+    const { key } = await createSlotlockPartnerKey(admin, actor, 'Forwarder');
+    const authenticate = createSlotlockPartnerKeyAuthenticator(application);
+    const as = (account?: string) =>
+      authenticate(
+        new Request('https://example.com', {
+          headers: { authorization: `Bearer ${key}`, ...(account !== undefined ? { 'slotlock-account': account } : {}) },
+        }),
+      );
+    // Not in the contract: refused.
+    expect(await as('user-9')).toBeNull();
+    expect(await as()).toMatchObject({ partnerId: actor, scopes: ['partner'] });
+    await putSlotlockPartner(admin, { id: actor, name: 'Actor', contract: { ...CONTRACT, act_on_behalf: true } });
+    const principal = await as('user-9');
+    expect(principal).toEqual({
+      subject: expect.stringMatching(/^partner_key:/),
+      tenantRef: `partner:${actor}:user-9`,
+      scopes: ['read', 'write'],
+      onBehalfOf: actor,
+    });
+    // As the account: its own data, through the store as any key of it would.
+    const store = createSlotlockStore(application);
+    await store.withTenant(principal?.tenantRef as string, (scoped) =>
+      scoped.createResource({ tenantRef: principal?.tenantRef as string, externalRef: 'forwarded', timezone: 'UTC' }),
+    );
+    // An account it does not have, another partner's, or a malformed name: nothing.
+    expect(await as('user-10')).toBeNull();
+    expect(await as('theirs')).toBeNull();
+    expect(await as('../user-9')).toBeNull();
+    // Suspended with the partner, like every key of its accounts.
+    await setSlotlockPartnerStatus(admin, actor, 'suspended');
+    expect(await as('user-9')).toBeNull();
+    await setSlotlockPartnerStatus(admin, actor, 'active');
+    await admin`SELECT * FROM slotlock.erase_tenant(${`partner:${actor}:user-9`}::text)`;
+    await admin`DELETE FROM slotlock.partner_accounts WHERE partner_id = ${actor}`;
+    await admin`DELETE FROM slotlock.partner_keys WHERE partner_id = ${actor}`;
+    await admin`DELETE FROM slotlock.partners WHERE id = ${actor}`;
+  });
 });

@@ -68,6 +68,7 @@ import {
   slotlockApplicationScope,
 } from './application-api.js';
 import {
+  SLOTLOCK_ACCOUNT_FIELD,
   createSlotlockPartnerKey,
   createSlotlockPartnerKeyAuthenticator,
   createSlotlockPartnerStore,
@@ -1090,6 +1091,9 @@ export async function startSlotlockServer(
           (await authenticatePartner(request)) ??
           (await authenticateKey(request));
         if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
+        // Slotlock-Account is a partner key's alone (RFC 0003 P3): with any other credential, or one
+        // that could not act for that account, the request is refused rather than run elsewhere.
+        if (request.headers.has(SLOTLOCK_ACCOUNT_FIELD) && principal.onBehalfOf === undefined) return null;
         // A partner key's own tenant holds nothing to maintain; its accounts' keys are as any key.
         if (principal.partnerId === undefined) maintenance?.touch(principal.tenantRef);
         metrics?.client(slotlockClientLabel(request.headers.get('slotlock-client'), knownClients));

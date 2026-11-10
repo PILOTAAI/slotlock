@@ -519,6 +519,9 @@ stackapi stores each user's Slotlock key (encrypted, its side) and forwards the 
 it. Every existing path then works unchanged, per key, with no new way to act as a tenant. Acting
 on behalf with one partner key and a `Slotlock-Account` field, shaped like Stripe Connect's
 `Stripe-Account` header, is possible later (T2), and only if stackapi cannot keep a key per user.
+Status: built on `claude/inspiring-dijkstra-bfvqif`, off unless the partner's contract says
+`"act_on_behalf": true`; the principal is the account's tenant with the contract's key scopes, its
+actor in the history is the partner key, and `serve` refuses the field with any other credential.
 The likeness is in the API only: Slotlock's billing does not use Connect, which Managed Payments
 does not support.
 

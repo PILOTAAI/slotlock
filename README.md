@@ -270,6 +270,11 @@ slotlock partner suspend stackapi        # every account with it; its keys stop
 - An account is an ordinary tenant: forced row-level security keeps each from every other, and its
   keys work over MCP, A2A and REST as any key. A suspended partner suspends its accounts and their
   keys stop authenticating.
+- A partner that cannot keep a key per account may act for one with its own key and a
+  `Slotlock-Account: <account>` field, where its contract says `"act_on_behalf": true`: the
+  request then runs as that account, with the contract's key scopes, and never reaches the partner
+  API. An account it does not have, a contract without it, or the field with any other credential
+  is refused (401).
 
 Each month is closed once it has ended, by the schema owner (the 1st is a good day):
 

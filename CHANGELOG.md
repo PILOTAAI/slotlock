@@ -122,6 +122,11 @@ versioning.
   returns quota numbers). A suspended partner suspends every account (`tenant_suspended`) and
   their keys stop authenticating (`authenticate_scoped_api_key`); erasing an account removes the
   partner's record of it. Run `slotlock migrate`.
+- Acting for a partner's account (RFC 0003 P3, T2): a partner key with a `Slotlock-Account` field
+  runs the request as that account, with the contract's key scopes, where the contract allows it
+  (`act_on_behalf`, off by default). The principal carries `onBehalfOf`, the history records the
+  partner key as the actor, and serve refuses the field with any other credential.
+  `SLOTLOCK_ACCOUNT_FIELD` in `partners.ts`.
 - Test environments (RFC 0003 G9, T2). A tenant reference ending `~test` is the test environment of
   the tenant before it: a tenant of its own, on its live tenant's plan and quotas, never billed
   (`tenant_plan` returns no Stripe ids for it), suspended with its live tenant and erased with it

@@ -805,6 +805,19 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
 
       expect(await resourcesOf(reader.key as string)).toEqual(['vehicle-42']);
       expect(await resourcesOf(writer.key as string)).toEqual(['vehicle-42']);
+      // Slotlock-Account is a partner key's alone: with a tenant's key the request is refused.
+      const elsewhere = await fetch(`${origin}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${writer.key as string}`,
+          'Slotlock-Account': 'someone-else',
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          ...versioned,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'slotlock_list_resources', arguments: { limit: 1 } } }),
+      });
+      expect(elsewhere.status).toBe(401);
       // A read key cannot write; a write key reaches the confirmation every write needs here.
       expect(await toolError(await call(reader.key as string, 'slotlock_create_event', write))).toBe(
         'forbidden',

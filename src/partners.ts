@@ -69,6 +69,11 @@ export interface SlotlockPartnerContract {
   /** The scopes an account's key may carry; `read` and `write` unless the contract says. */
   keyScopes: readonly SlotlockApiKeyScope[];
   pricing?: SlotlockPartnerPricing;
+  /**
+   * Whether the partner's keys may act for its accounts with `Slotlock-Account` (`act_on_behalf`,
+   * RFC 0003 P3), instead of a key per account. Off unless the contract says.
+   */
+  actOnBehalf?: boolean;
 }
 
 function contractError(message: string): Error & { code: 'invalid_partner_contract' } {
@@ -131,6 +136,10 @@ export function parseSlotlockPartnerContract(value: unknown): SlotlockPartnerCon
     plans,
     keyScopes: SLOTLOCK_API_KEY_SCOPES.filter((scope) => scopesGiven.includes(scope)),
   };
+  if (given.act_on_behalf !== undefined) {
+    if (typeof given.act_on_behalf !== 'boolean') throw contractError('act_on_behalf must be true or false');
+    if (given.act_on_behalf) contract.actOnBehalf = true;
+  }
   if (given.pricing !== undefined) {
     const pricing = (given.pricing ?? {}) as Record<string, unknown>;
     const parsed = {
@@ -321,17 +330,39 @@ export function createSlotlockPartnerKeyAuthenticator(
   return async (request) => {
     const presented = slotlockBearerCredential(request);
     if (presented === undefined || !isSlotlockPartnerKey(presented)) return null;
+    const account = request.headers.get(SLOTLOCK_ACCOUNT_FIELD);
+    // A malformed account is refused before the key is looked up, as a malformed key is.
+    if (account !== null && !SLOTLOCK_PARTNER_ACCOUNT.test(account)) return null;
     const [row] = await sql<{ key_id: string; partner_id: string }[]>`
       SELECT key_id::text, partner_id FROM slotlock.authenticate_partner_key(${slotlockApiKeyDigest(presented)}::bytea)`;
     if (!row) return null;
+    if (account === null) {
+      return {
+        subject: `partner_key:${row.key_id}`,
+        tenantRef: `partner:${row.partner_id}`,
+        scopes: [SLOTLOCK_PARTNER_SCOPE],
+        partnerId: row.partner_id,
+      };
+    }
+    // Acting for one of its accounts (RFC 0003 P3): only where the contract allows it, only for an
+    // account the partner has, and with no more than the contract lets its accounts' keys carry.
+    const [found] = await sql<{ contract: unknown; tenant_ref: string | null }[]>`
+      SELECT slotlock.partner_contract(${row.partner_id}::text) AS contract,
+             (SELECT owned.tenant_ref FROM slotlock.get_partner_account(${row.partner_id}::text, ${account}::text) owned) AS tenant_ref`;
+    if (!found?.contract || !found.tenant_ref) return null;
+    const contract = parseSlotlockPartnerContract(found.contract);
+    if (!contract.actOnBehalf) return null;
     return {
       subject: `partner_key:${row.key_id}`,
-      tenantRef: `partner:${row.partner_id}`,
-      scopes: [SLOTLOCK_PARTNER_SCOPE],
-      partnerId: row.partner_id,
+      tenantRef: found.tenant_ref,
+      scopes: [...contract.keyScopes],
+      onBehalfOf: row.partner_id,
     };
   };
 }
+
+/** The request field a partner key names one of its accounts in, to act for it (RFC 0003 P3). */
+export const SLOTLOCK_ACCOUNT_FIELD = 'slotlock-account';
 
 // The schema owner's side (`slotlock partner …`): partners, their keys and status, as the owner
 // role, which the partner tables' row-level security does not bind (it is enabled, not forced).
@@ -383,6 +414,7 @@ export function slotlockPartnerContractJson(contract: SlotlockPartnerContract): 
       ]),
     ),
     key_scopes: [...contract.keyScopes],
+    ...(contract.actOnBehalf ? { act_on_behalf: true } : {}),
     ...(contract.pricing
       ? {
           pricing: {

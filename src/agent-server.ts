@@ -538,6 +538,12 @@ export interface SlotlockAgentPrincipal {
    * for this partner's accounts and no other (partners.ts).
    */
   partnerId?: string;
+  /**
+   * For a partner key acting for one of its accounts with `Slotlock-Account` (RFC 0003 P3, where the
+   * contract allows it), the partner: the principal is the account's tenant with the contract's key
+   * scopes, and never reaches the partner API.
+   */
+  onBehalfOf?: string;
 }
 
 /** Whether a principal's scopes, if it carries any, cover an operation. */
