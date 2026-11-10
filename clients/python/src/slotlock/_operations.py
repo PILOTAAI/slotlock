@@ -447,7 +447,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/reservations/{reservation_ref}",
         ("reservation_ref",),
-        ("revision", "dry_run"),
+        ("revision", "override_reason", "dry_run"),
     ),
     "slotlock_list_reservations": Operation(
         "slotlock_list_reservations",
@@ -531,7 +531,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/tenant/events/{event_id}",
         ("event_id",),
-        ("expected_revision", "expected_resource_id", "idempotency_key", "dry_run"),
+        ("expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"),
     ),
     "slotlock_export_tenant_event": Operation(
         "slotlock_export_tenant_event",
@@ -2401,6 +2401,7 @@ class Operations(Transport):
         revision: int,
         buffer_after_minutes: int | None = None,
         source: str | None = None,
+        override_reason: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book or move a reservation.
@@ -2408,7 +2409,9 @@ class Operations(Transport):
         Book the reservation with this reference (revision 1), or move it (the next revision: the
         current one plus 1). Sending the same reservation at its current revision again changes
         nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
-        reservation where it was. buffer_after_minutes keeps the time after it busy as well.
+        reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
+        move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+        unless override_reason says why, which the feed keeps.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2427,6 +2430,8 @@ class Operations(Transport):
             values["buffer_after_minutes"] = buffer_after_minutes
         if source is not None:
             values["source"] = source
+        if override_reason is not None:
+            values["override_reason"] = override_reason
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_reservation", values)
@@ -2436,13 +2441,18 @@ class Operations(Transport):
         reservation_ref: str,
         *,
         revision: int,
+        override_reason: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Cancel a reservation.
 
         Cancel the reservation with this reference at the next revision (the current one plus 1).
         Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the
-        cancel answers cancelled: false. Use a new reference for a new reservation.
+        cancel answers cancelled: false. Use a new reference for a new reservation. Past the
+        resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason
+        says why, which the tombstone and the feed keep. A late cancellation's fee (the resource's
+        cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge:
+        Slotlock moves no money.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2451,6 +2461,8 @@ class Operations(Transport):
             refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"reservation_ref": reservation_ref, "revision": revision}
+        if override_reason is not None:
+            values["override_reason"] = override_reason
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_cancel_reservation", values)
@@ -2727,6 +2739,7 @@ class Operations(Transport):
         expected_revision: int,
         idempotency_key: str,
         expected_resource_id: str | None = None,
+        override_reason: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Cancel any event of the tenant.
@@ -2754,6 +2767,8 @@ class Operations(Transport):
         }
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
+        if override_reason is not None:
+            values["override_reason"] = override_reason
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_cancel_tenant_event", values)

@@ -434,14 +434,14 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   getReservation: { reservation: RESERVATION },
   listReservations: { reservations: [RESERVATION], next_cursor: 'eyJzdGFydCI6IjIwMjcifQ' },
   putReservation: { reservation: RESERVATION, replayed: false },
-  cancelReservation: { cancelled: true, revision: 2 },
+  cancelReservation: { cancelled: true, revision: 2, cancellation_fee: null },
   recordCoverage: { revision: 7, replayed: false },
   listTenantEvents: { events: [TENANT_EVENT], next_cursor: null },
   getTenantEvent: { event: TENANT_EVENT },
-  cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
+  cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false, cancellation_fee: null },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
-  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, capped: false },
+  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, bookings_completed: 0, capped: false },
   listChanges: {
     changes: [
       {

@@ -447,7 +447,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/reservations/{reservation_ref}",
         path_params: &["reservation_ref"],
-        query: &["revision", "dry_run"],
+        query: &["revision", "override_reason", "dry_run"],
     },
     Operation {
         name: "slotlock_list_reservations",
@@ -531,7 +531,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/tenant/events/{event_id}",
         path_params: &["event_id"],
-        query: &["expected_revision", "expected_resource_id", "idempotency_key", "dry_run"],
+        query: &["expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"],
     },
     Operation {
         name: "slotlock_export_tenant_event",
@@ -1675,6 +1675,8 @@ pub struct PutReservationInput {
     pub buffer_after_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1688,6 +1690,8 @@ pub struct PutReservationInput {
 pub struct CancelReservationInput {
     pub reservation_ref: String,
     pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1846,6 +1850,8 @@ pub struct CancelTenantEventInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2766,7 +2772,9 @@ impl Client {
     /// Book the reservation with this reference (revision 1), or move it (the next revision: the
     /// current one plus 1). Sending the same reservation at its current revision again changes
     /// nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
-    /// reservation where it was. buffer_after_minutes keeps the time after it busy as well.
+    /// reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
+    /// move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+    /// unless override_reason says why, which the feed keeps.
     pub fn put_reservation(&self, input: &PutReservationInput) -> Result<Value, Error> {
         self.call("slotlock_put_reservation", serde_json::to_value(input)?)
     }
@@ -2775,7 +2783,11 @@ impl Client {
     ///
     /// Cancel the reservation with this reference at the next revision (the current one plus 1).
     /// Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the
-    /// cancel answers cancelled: false. Use a new reference for a new reservation.
+    /// cancel answers cancelled: false. Use a new reference for a new reservation. Past the
+    /// resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason
+    /// says why, which the tombstone and the feed keep. A late cancellation's fee (the resource's
+    /// cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge:
+    /// Slotlock moves no money.
     pub fn cancel_reservation(&self, input: &CancelReservationInput) -> Result<Value, Error> {
         self.call("slotlock_cancel_reservation", serde_json::to_value(input)?)
     }

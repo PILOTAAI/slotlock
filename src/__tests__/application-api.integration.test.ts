@@ -253,7 +253,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
     // It is cancelled by that reference like any booking, after which its window books again.
     expect(await call('a', 'DELETE', `/v1/reservations/${holdId}?revision=2`)).toEqual({
       status: 200,
-      body: { cancelled: true, revision: 2 },
+      body: { cancelled: true, revision: 2, cancellation_fee: null },
     });
     expect(
       (await call('a', 'PUT', `/v1/reservations/after-hold-${randomUUID()}`, { ...window, revision: 1 }))
@@ -368,13 +368,13 @@ describe.skipIf(!url)('the application API on the real store', () => {
         .status,
     ).toBe(200);
 
-    expect(await call('a', 'DELETE', `${path}?revision=3`)).toEqual({ status: 200, body: { cancelled: true, revision: 3 } });
+    expect(await call('a', 'DELETE', `${path}?revision=3`)).toEqual({ status: 200, body: { cancelled: true, revision: 3, cancellation_fee: null } });
     expect(await call('a', 'DELETE', `${path}?revision=4`)).toMatchObject({ status: 409 });
     // The tombstone keeps a delayed booking from bringing it back.
     expect(await call('a', 'PUT', path, booking)).toMatchObject({ status: 409 });
     // A reference that never booked can be cancelled ahead of a booking that arrives late.
     const early = `/v1/reservations/never-${randomUUID()}`;
-    expect(await call('a', 'DELETE', `${early}?revision=2`)).toEqual({ status: 200, body: { cancelled: false, revision: 2 } });
+    expect(await call('a', 'DELETE', `${early}?revision=2`)).toEqual({ status: 200, body: { cancelled: false, revision: 2, cancellation_fee: null } });
     expect(await call('a', 'PUT', early, { ...booking, start: day(30, '09:00:00'), end: day(30, '10:00:00') })).toMatchObject({
       status: 409,
     });
@@ -405,7 +405,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
   it("runs maintenance for the caller's tenant", async () => {
     expect(await call('a', 'POST', '/v1/maintenance', {})).toEqual({
       status: 200,
-      body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, capped: false },
+      body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, bookings_completed: 0, capped: false },
     });
     expect(await call('agent', 'POST', '/v1/maintenance', {})).toEqual(refused(403, 'forbidden'));
   });
@@ -539,7 +539,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
       refused(404, 'resource_not_found'),
     );
 
-    expect((await call('a', 'DELETE', `/v1/reservations/${holdId}?revision=2`)).body).toEqual({ cancelled: true, revision: 2 });
+    expect((await call('a', 'DELETE', `/v1/reservations/${holdId}?revision=2`)).body).toEqual({ cancelled: true, revision: 2, cancellation_fee: null });
     expect(await call('a', 'GET', `/v1/reservations/${holdId}`)).toEqual(refused(404, 'reservation_not_found'));
   });
 
@@ -744,7 +744,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
       undefined,
       key,
     );
-    expect(cancelled).toEqual({ status: 200, body: { event_id: eventId, revision: 3, cancelled: true, replayed: false } });
+    expect(cancelled).toEqual({ status: 200, body: { event_id: eventId, revision: 3, cancelled: true, replayed: false, cancellation_fee: null } });
     expect(
       await call('a', 'DELETE', `/v1/tenant/events/${eventId}?expected_revision=2&expected_resource_id=${resource.id}`, undefined, key),
     ).toEqual({ status: 200, body: { ...cancelled.body, replayed: true } });

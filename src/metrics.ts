@@ -27,6 +27,7 @@ const MAINTENANCE_COUNTS = [
   'noShows',
   'waitlistOffers',
   'approvalsExpired',
+  'bookingsCompleted',
 ] as const;
 /** A label value: an operation, protocol or outcome code. Anything else is counted as `other`. */
 const LABEL = /^[a-z0-9_.]{1,64}$/;

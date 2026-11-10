@@ -172,6 +172,17 @@ export interface ExternalReservationCommand {
   bufferAfterMs: number;
   revision: number;
   source?: string;
+  /**
+   * An admin's reason for moving the booking past its reschedule cutoff (RFC 0004 B5), kept on the
+   * feed. Without it, a move past the cutoff is refused.
+   */
+  overrideReason?: string;
+}
+
+/** What a cancellation records for the integrator to charge (RFC 0004 B5). Slotlock moves no money. */
+export interface SlotlockRecordedFee {
+  amountMinor: number;
+  currency: string;
 }
 
 export type ExternalReservationResult =
@@ -200,7 +211,9 @@ export type ExternalReservationResult =
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type CancelExternalReservationResult =
-  | { ok: true; cancelled: boolean; revision: number }
+  | { ok: true; cancelled: boolean; revision: number; cancellationFee?: SlotlockRecordedFee }
+  /** The booking's cancel cutoff has passed (RFC 0004 B5): an admin may override with a reason. */
+  | { ok: false; code: 'booking_rule_violated'; rule: 'cancel_cutoff' }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
   | { ok: false; code: 'reservation_cancelled' }
@@ -488,13 +501,17 @@ export type CancelCalendarEventResult =
       externalRef: string;
       revision: number;
       idempotent: boolean;
+      /** What a late cancellation costs, recorded for the integrator to charge (RFC 0004 B5). */
+      cancellationFee?: SlotlockRecordedFee;
     }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
   | { ok: false; code: 'idempotency_conflict' }
   | { ok: false; code: 'event_not_found' }
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
-  | { ok: false; code: 'revision_conflict'; currentRevision: number };
+  | { ok: false; code: 'revision_conflict'; currentRevision: number }
+  /** The event's cancel cutoff has passed (RFC 0004 B5). */
+  | { ok: false; code: 'booking_rule_violated'; rule: 'cancel_cutoff' };
 
 /** A place in the roll's order of due masters: the last one a batch examined. */
 export interface CalendarHorizonRollCursor {

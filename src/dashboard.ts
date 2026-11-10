@@ -1141,6 +1141,8 @@ const RULE_NAMES = Object.freeze({
   minDurationMinutes: 'Shortest booking',
   maxDurationMinutes: 'Longest booking',
   defaultDurationMinutes: 'Usual length',
+  cancelCutoffMinutes: 'Cancel cutoff',
+  rescheduleCutoffMinutes: 'Move cutoff',
 } as const);
 /** The booking rules form's fields, by rule. */
 const RULE_FIELDS = Object.freeze({
@@ -1154,6 +1156,8 @@ const RULE_FIELDS = Object.freeze({
   minDurationMinutes: 'min_duration_minutes',
   maxDurationMinutes: 'max_duration_minutes',
   defaultDurationMinutes: 'default_duration_minutes',
+  cancelCutoffMinutes: 'cancel_cutoff_minutes',
+  rescheduleCutoffMinutes: 'reschedule_cutoff_minutes',
 } as const);
 
 /** How the inherited-rules note names each rule, with its unit. */
@@ -1165,16 +1169,26 @@ const INHERITED_NAMES: Readonly<Record<keyof SlotlockBookingRules, string>> = Ob
   allowedDurations: 'Lengths (min)',
   pickupTimes: 'Pick-up times',
   returnTimes: 'Return times',
+  cancellationFee: 'Cancellation fee',
 });
 
-type RuleValue = number | boolean | readonly number[] | readonly { startMinutes: number; durationMinutes: number }[];
+type RuleValue =
+  | number
+  | boolean
+  | readonly number[]
+  | readonly { startMinutes: number; durationMinutes: number }[]
+  | { amountMinor: number; currency: string; withinMinutes?: number };
 type InheritedRules = Map<keyof SlotlockBookingRules, { value: RuleValue; from: string }>;
 
 /** A rule's value as the dashboard shows it. */
 function ruleValueText(value: RuleValue): string {
   if (typeof value === 'number') return value.toLocaleString('en');
   if (typeof value === 'boolean') return value ? 'on' : 'off';
-  return value
+  if (!Array.isArray(value)) {
+    const fee = value as { amountMinor: number; currency: string; withinMinutes?: number };
+    return `${(fee.amountMinor / 100).toFixed(2)} ${fee.currency}${fee.withinMinutes !== undefined ? ` within ${fee.withinMinutes.toLocaleString('en')} min` : ''}`;
+  }
+  return (value as readonly (number | { startMinutes: number; durationMinutes: number })[])
     .map((item) => (typeof item === 'number' ? item.toLocaleString('en') : hoursOf(item.startMinutes, item.durationMinutes)))
     .join(', ');
 }
@@ -2546,11 +2560,14 @@ ${field('checkInMinutes', 'Release if not checked in after', 'min')}
 ${field('minDurationMinutes', 'Shortest booking', 'min')}
 ${field('maxDurationMinutes', 'Longest booking', 'min')}
 ${field('defaultDurationMinutes', 'Usual length, offered when none is asked', 'min')}
+${field('cancelCutoffMinutes', 'Cancel up to, before the start', 'min')}
+${field('rescheduleCutoffMinutes', 'Move up to, before the start', 'min')}
 </div>
-${resource.bookingRules?.allowedDurations || resource.bookingRules?.pickupTimes || resource.bookingRules?.returnTimes ? html`<p class="fine">Set through the API, and kept when you save: ${[
+${resource.bookingRules?.allowedDurations || resource.bookingRules?.pickupTimes || resource.bookingRules?.returnTimes || resource.bookingRules?.cancellationFee ? html`<p class="fine">Set through the API, and kept when you save: ${[
       resource.bookingRules.allowedDurations ? `lengths ${ruleValueText(resource.bookingRules.allowedDurations)} min` : '',
       resource.bookingRules.pickupTimes ? `pick-up ${ruleValueText(resource.bookingRules.pickupTimes)}` : '',
       resource.bookingRules.returnTimes ? `return ${ruleValueText(resource.bookingRules.returnTimes)}` : '',
+      resource.bookingRules.cancellationFee ? `cancellation fee ${ruleValueText(resource.bookingRules.cancellationFee)}` : '',
     ].filter(Boolean).join('; ')}.</p>` : html``}
 ${toggle('enforceHours', 'enforce_hours', 'Only inside bookable hours')}
 ${toggle('requireCertain', 'require_certain', 'Only in time its calendar syncs have read today')}
@@ -2690,7 +2707,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     const requireCertain = choice('require_certain');
     if (requireCertain !== undefined) rules.requireCertain = requireCertain;
     // Rules the form does not edit (set through the API) are kept.
-    for (const name of ['allowedDurations', 'pickupTimes', 'returnTimes'] as const) {
+    for (const name of ['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee'] as const) {
       const kept = resource.bookingRules?.[name];
       if (kept !== undefined) (rules as Record<string, unknown>)[name] = kept;
     }

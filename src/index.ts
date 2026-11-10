@@ -119,6 +119,18 @@ export {
   SLOTLOCK_MAX_HOLIDAY_DAYS,
 } from './holidays.js';
 export type { ParsedHolidayCalendar, SlotlockHoliday } from './holidays.js';
+// The booking lifecycle, written down (RFC 0004 B4).
+export {
+  SLOTLOCK_BOOKING_ACTIONS,
+  SLOTLOCK_BOOKING_ENDS,
+  SLOTLOCK_BOOKING_STATUSES,
+  SLOTLOCK_BOOKING_TRANSITIONS,
+  slotlockBookingNext,
+  slotlockBookingRefusal,
+} from './lifecycle.js';
+export type { SlotlockBookingAction, SlotlockBookingStatus, SlotlockEndReason } from './lifecycle.js';
+export { findEarliestRange, sameTimeDaysLater } from './ranges.js';
+export type { SlotlockRangeSearch } from './ranges.js';
 export type {
   EmitVAvailabilityOptions,
   JSCalendarAlert,

@@ -3049,8 +3049,8 @@ BEGIN
     END;
   END IF;
   INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
-  VALUES (
-    owner, changed.resource_id, kind,
+  SELECT
+    owner, changed.resource_id, written.change_type,
     COALESCE(changed.external_ref, changed.id::text),
     jsonb_strip_nulls(jsonb_build_object(
       'id', changed.id,
@@ -3059,6 +3059,10 @@ BEGIN
       'start', changed.starts_at,
       'end', changed.ends_at,
       'buffer_after_ms', changed.buffer_after_ms,
+      -- A cancellation's fee and an admin's reason for going past a cutoff (RFC 0004 B5).
+      'cancellation_fee', CASE WHEN kind = 'reservation.cancelled'
+                               THEN NULLIF(current_setting('slotlock.cancellation_fee', true), '')::jsonb END,
+      'override_reason', NULLIF(current_setting('slotlock.override_reason', true), ''),
       -- A no-show carries the revision its reference is retired at, and the check-in window.
       'revision', CASE WHEN changed.status = 'held' THEN NULL
                        WHEN kind = 'reservation.no_show' THEN changed.revision + 1
@@ -3072,7 +3076,13 @@ BEGIN
         'revision', OLD.revision) END
     )),
     NULLIF(current_setting('slotlock.actor', true), '')
-  );
+    -- A booking moved in time or to another resource is also reservation.rescheduled (RFC 0004
+    -- B4); reservation.updated stays for those who read it.
+    FROM (VALUES (kind), (CASE WHEN kind = 'reservation.updated'
+                                AND (OLD.starts_at, OLD.ends_at, OLD.resource_id)
+                                    IS DISTINCT FROM (NEW.starts_at, NEW.ends_at, NEW.resource_id)
+                               THEN 'reservation.rescheduled' END)) AS written(change_type)
+   WHERE written.change_type IS NOT NULL;
   RETURN NULL;
 END
 $slotlock_outbox_reservation$;
@@ -3116,6 +3126,10 @@ BEGIN
       'transparency', changed.transparency,
       'recurring', changed.recurrence_rule IS NOT NULL,
       'revision', changed.revision,
+      -- A cancellation's fee and an admin's reason for going past a cutoff (RFC 0004 B5).
+      'cancellation_fee', CASE WHEN kind = 'event.cancelled'
+                               THEN NULLIF(current_setting('slotlock.cancellation_fee', true), '')::jsonb END,
+      'override_reason', NULLIF(current_setting('slotlock.override_reason', true), ''),
       'before', CASE WHEN TG_OP = 'UPDATE' THEN jsonb_build_object(
         'resource_id', OLD.resource_id, 'start', OLD.starts_at, 'end', OLD.ends_at,
         'status', OLD.status, 'transparency', OLD.transparency, 'revision', OLD.revision) END
@@ -4054,6 +4068,12 @@ CREATE INDEX IF NOT EXISTS slotlock_resources_labels_idx ON slotlock.resources U
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS tenant_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS external_ref text;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS buffer_after_ms bigint NOT NULL DEFAULT 0;
+-- When maintenance said the booking ended (reservation.completed, RFC 0004 B4): it changes nothing
+-- anyone wrote, so the feed's trigger ignores it.
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+CREATE INDEX IF NOT EXISTS slotlock_reservations_uncompleted_idx
+  ON slotlock.reservations (tenant_ref, ends_at)
+  WHERE status = 'confirmed' AND completed_at IS NULL;
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS occupied_ends_at timestamptz;
 -- The leading buffer a booking keeps before its start (its resource's bufferBeforeMinutes when it
 -- was made), and where its occupied time starts: its start less that buffer. A row written before
@@ -4149,6 +4169,31 @@ ALTER TABLE slotlock.reservation_tombstones ALTER COLUMN cancelled_at SET DEFAUL
 -- are kept too.
 ALTER TABLE slotlock.reservation_tombstones
   ADD COLUMN IF NOT EXISTS stray boolean NOT NULL DEFAULT false;
+-- Why the booking ended (RFC 0004 B4): cancelled or no_show (a hold leaves no tombstone; released
+-- and expired are on the feed). Rows from before keep 'cancelled', as every one of them was. A late
+-- cancellation's fee (B5), recorded for the integrator to charge, and an admin's reason for going
+-- past a cutoff.
+ALTER TABLE slotlock.reservation_tombstones
+  ADD COLUMN IF NOT EXISTS end_reason text NOT NULL DEFAULT 'cancelled';
+ALTER TABLE slotlock.reservation_tombstones ADD COLUMN IF NOT EXISTS cancellation_fee jsonb;
+ALTER TABLE slotlock.reservation_tombstones ADD COLUMN IF NOT EXISTS override_reason text;
+DO $slotlock_tombstone_end_reason$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.reservation_tombstones'::regclass
+       AND conname = 'slotlock_reservation_tombstones_end_valid'
+  ) THEN
+    ALTER TABLE slotlock.reservation_tombstones
+      ADD CONSTRAINT slotlock_reservation_tombstones_end_valid CHECK (
+        end_reason IN ('cancelled', 'no_show', 'released', 'expired', 'erased')
+        AND (cancellation_fee IS NULL OR (jsonb_typeof(cancellation_fee) = 'object'
+                                          AND octet_length(cancellation_fee::text) <= 200))
+        AND (override_reason IS NULL OR char_length(override_reason) BETWEEN 1 AND 500)
+      );
+  END IF;
+END
+$slotlock_tombstone_end_reason$;
 -- Resource identity: one resource per tenant/external_ref namespace (plus one isolated NULL-tenant
 -- legacy namespace). Dedupe first (repoint reservations to the keeper, drop the rest) so the
 -- unique indexes also bind on DBs poisoned by the pre-index

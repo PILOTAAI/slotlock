@@ -391,7 +391,7 @@ As built:
 - Building B3 found a bug: a tenant's store judged enforced hours against no hours for resources
   on the server's default, and refused every such write. Fixed.
 
-**B4. A written lifecycle (T2).**
+**B4. A written lifecycle (T2).** Status: built.
 - Each status and transition is documented, with a table test of every allowed move and a
   refusal for each other.
 - The tombstone keeps why the booking ended: `cancelled`, `no_show`, `released`, `expired` or
@@ -400,12 +400,26 @@ As built:
   maintenance when a confirmed booking ends; it holds no row.
 - `reservation.updated` stays for compatibility.
 
-**B5. Cancellation and reschedule policies (T2).**
+As built: `src/lifecycle.ts` holds the table. It was written from what the store does, not from
+what it might do. A booking that has ended may still be moved (a system of record's correction) or
+cancelled (a void), and only check-in and no-show refuse it (`reservation_ended`). Holds leave no
+tombstone, so `released` and `expired` live on the feed. Erasure removes the tombstones with
+everything else. `reservation.completed` covers bookings that ended in the last week, so the first
+pass after an upgrade does not flood the feed with old ones.
+
+**B5. Cancellation and reschedule policies (T2).** Status: built.
 - Rules `cancelCutoffMinutes` and `rescheduleCutoffMinutes`, enforced on writes
   (`booking_rule_cancel_cutoff`). An admin key may override with a reason, which goes into
   history.
 - `cancellationFee` is recorded on the cancellation for the integrator to charge. Slotlock never
   moves money for it.
+
+As built:
+- The application API is admin-only, so its cancel and move take `override_reason`. Agents' cancels
+  and moves of their own events are held to the cutoffs with no override.
+- The fee is `{ amountMinor, currency, withinMinutes? }`. A late cancellation answers it, and its
+  tombstone and feed change keep it.
+- A recurring series is not held to the cutoffs: cancelling it cancels what is still to come.
 
 **B6. Waitlists that match (T1).**
 - An entry matches any slot of its length within its window, on a resource or a pool.

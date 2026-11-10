@@ -277,6 +277,7 @@ fn books_holds_and_reservations_without_double_booking() {
         keys,
         [
             "approvals_expired",
+            "bookings_completed",
             "capped",
             "conflicts",
             "extended",

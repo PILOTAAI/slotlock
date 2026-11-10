@@ -454,6 +454,18 @@ const BOOKING_RULES = z
     pickup_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
     /** And ends in one of these. */
     return_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
+    /** Cancelling, or moving, is refused this many minutes before the start (RFC 0004 B5). */
+    cancel_cutoff_minutes: z.number().int().min(0).max(525_600).optional(),
+    reschedule_cutoff_minutes: z.number().int().min(0).max(525_600).optional(),
+    /** What a cancellation costs (within within_minutes of the start, when given), for you to charge. */
+    cancellation_fee: z
+      .object({
+        amount_minor: z.number().int().min(0).max(1_000_000_000_000),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        within_minutes: z.number().int().min(0).max(525_600).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -616,6 +628,11 @@ const RESOURCE = z
       .nullable(),
   })
   .strict();
+
+/** An admin's reason for going past a cancel or reschedule cutoff (RFC 0004 B5), kept on the feed. */
+const OVERRIDE_REASON = z.string().trim().min(1).max(500);
+/** A cancellation's fee as recorded: an amount in the currency's minor unit, ISO 4217 currency. */
+const RECORDED_FEE = z.object({ amount_minor: z.number().int().min(0), currency: z.string().regex(/^[A-Z]{3}$/) }).strict();
 
 /** A day in the scope's calendar, YYYY-MM-DD. */
 const LOCAL_DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -1503,7 +1520,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_put_reservation',
       title: 'Book or move a reservation',
       description:
-        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well.',
+        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource\'s reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps.',
       method: 'PUT',
       path: '/v1/reservations/{reservation_ref}',
       input: z
@@ -1515,6 +1532,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           buffer_after_minutes: BUFFER_AFTER_MINUTES.default(0),
           revision: REVISION,
           source: SOURCE.optional(),
+          /** An admin's reason for moving it past its reschedule cutoff (RFC 0004 B5). */
+          override_reason: OVERRIDE_REASON.optional(),
         })
         .strict()
         .refine(boundedSpan, SPAN_MESSAGE),
@@ -1534,11 +1553,13 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_cancel_reservation',
       title: 'Cancel a reservation',
       description:
-        'Cancel the reservation with this reference at the next revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new reservation.',
+        'Cancel the reservation with this reference at the next revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new reservation. Past the resource\'s cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason says why, which the tombstone and the feed keep. A late cancellation\'s fee (the resource\'s cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge: Slotlock moves no money.',
       method: 'DELETE',
       path: '/v1/reservations/{reservation_ref}',
-      input: z.object({ reservation_ref: IDENTITY, revision: REVISION }).strict(),
-      output: z.object({ cancelled: z.boolean(), revision: REVISION }).strict(),
+      input: z
+        .object({ reservation_ref: IDENTITY, revision: REVISION, override_reason: OVERRIDE_REASON.optional() })
+        .strict(),
+      output: z.object({ cancelled: z.boolean(), revision: REVISION, cancellation_fee: RECORDED_FEE.nullable() }).strict(),
       risk: { readOnly: false, destructive: true, idempotent: true },
       invoke: 'cancelReservation',
       example: { reservation_ref: 'booking-BK-42', revision: 2 },
@@ -1775,6 +1796,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           // Required, so clients always send it; the Idempotency-Key header may stand in, since the
           // server copies it in before validation.
           idempotency_key: IDEMPOTENCY_KEY,
+          /** An admin's reason for cancelling a one-off event past its cancel cutoff (RFC 0004 B5). */
+          override_reason: OVERRIDE_REASON.optional(),
         })
         .strict(),
       output: z
@@ -1783,6 +1806,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           revision: REVISION,
           cancelled: z.literal(true),
           replayed: z.boolean(),
+          /** A late cancellation's fee, for you to charge (RFC 0004 B5); null when none. */
+          cancellation_fee: RECORDED_FEE.nullable(),
         })
         .strict(),
       risk: { readOnly: false, destructive: true, idempotent: true },
@@ -1846,6 +1871,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           no_shows: z.number().int().min(0),
           waitlist_offers: z.number().int().min(0),
           approvals_expired: z.number().int().min(0),
+          bookings_completed: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),

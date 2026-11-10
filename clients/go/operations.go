@@ -72,7 +72,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_confirm_hold", method: "POST", path: "/v1/holds/{hold_id}/confirm", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_get_reservation", method: "GET", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_put_reservation", method: "PUT", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: nil},
-		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision", "dry_run"}},
+		{name: "slotlock_cancel_reservation", method: "DELETE", path: "/v1/reservations/{reservation_ref}", pathParams: []string{"reservation_ref"}, query: []string{"revision", "override_reason", "dry_run"}},
 		{name: "slotlock_list_reservations", method: "GET", path: "/v1/resources/{resource_id}/reservations", pathParams: []string{"resource_id"}, query: []string{"start", "end", "limit", "cursor"}},
 		{name: "slotlock_check_in_reservation", method: "POST", path: "/v1/reservations/{reservation_ref}/check-in", pathParams: []string{"reservation_ref"}, query: nil},
 		{name: "slotlock_list_waitlist", method: "GET", path: "/v1/waitlist", pathParams: nil, query: []string{"resource_id", "pool", "holder_ref", "limit"}},
@@ -84,7 +84,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_record_coverage_failure", method: "POST", path: "/v1/resources/{resource_id}/coverage/{source}/failure", pathParams: []string{"resource_id", "source"}, query: nil},
 		{name: "slotlock_list_tenant_events", method: "GET", path: "/v1/tenant/events", pathParams: nil, query: []string{"resource_id", "start", "end", "limit", "cursor"}},
 		{name: "slotlock_get_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: nil},
-		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key", "dry_run"}},
+		{name: "slotlock_cancel_tenant_event", method: "DELETE", path: "/v1/tenant/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"}},
 		{name: "slotlock_export_tenant_event", method: "GET", path: "/v1/tenant/events/{event_id}/jscalendar", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_get_tenant", method: "GET", path: "/v1/tenant", pathParams: nil, query: nil},
 		{name: "slotlock_erase_tenant", method: "POST", path: "/v1/tenant/erase", pathParams: nil, query: nil},
@@ -2429,6 +2429,8 @@ type PutReservationInput struct {
 
 	Source *string
 
+	OverrideReason *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2449,6 +2451,9 @@ func (in PutReservationInput) values() map[string]any {
 	if in.Source != nil {
 		values["source"] = *in.Source
 	}
+	if in.OverrideReason != nil {
+		values["override_reason"] = *in.OverrideReason
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -2459,7 +2464,8 @@ func (in PutReservationInput) values() map[string]any {
 // 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its
 // current revision again changes nothing (replayed: true). A taken window answers 409 overlap and
 // leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
-// well.
+// well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+// unless override_reason says why, which the feed keeps.
 func (c *Client) PutReservation(ctx context.Context, in PutReservationInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_put_reservation", in.values())
 }
@@ -2469,6 +2475,8 @@ type CancelReservationInput struct {
 	ReservationRef string
 
 	Revision int64
+
+	OverrideReason *string
 
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
@@ -2481,6 +2489,9 @@ func (in CancelReservationInput) values() map[string]any {
 	values := map[string]any{}
 	values["reservation_ref"] = in.ReservationRef
 	values["revision"] = in.Revision
+	if in.OverrideReason != nil {
+		values["override_reason"] = *in.OverrideReason
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -2490,7 +2501,10 @@ func (in CancelReservationInput) values() map[string]any {
 // CancelReservation: Cancel a reservation. Cancel the reservation with this reference at the next
 // revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot
 // bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new
-// reservation.
+// reservation. Past the resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless
+// override_reason says why, which the tombstone and the feed keep. A late cancellation's fee (the
+// resource's cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to
+// charge: Slotlock moves no money.
 func (c *Client) CancelReservation(ctx context.Context, in CancelReservationInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_cancel_reservation", in.values())
 }
@@ -2875,6 +2889,8 @@ type CancelTenantEventInput struct {
 
 	ExpectedResourceID *string
 
+	OverrideReason *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2889,6 +2905,9 @@ func (in CancelTenantEventInput) values() map[string]any {
 	values["idempotency_key"] = in.IdempotencyKey
 	if in.ExpectedResourceID != nil {
 		values["expected_resource_id"] = *in.ExpectedResourceID
+	}
+	if in.OverrideReason != nil {
+		values["override_reason"] = *in.OverrideReason
 	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun

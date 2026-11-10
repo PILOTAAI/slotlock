@@ -596,6 +596,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -725,6 +759,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -6622,6 +6690,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -6751,6 +6853,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -7246,6 +7382,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -7375,6 +7545,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -8930,6 +9134,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -9059,6 +9297,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -9574,6 +9846,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -9703,6 +10009,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -10356,6 +10696,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -10485,6 +10859,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -11075,6 +11483,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -11204,6 +11646,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -11627,6 +12103,40 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "cancel_cutoff_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "reschedule_cutoff_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "cancellation_fee": {
+                            "type": "object",
+                            "properties": {
+                              "amount_minor": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000000000000
+                              },
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              },
+                              "within_minutes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 525600
+                              }
+                            },
+                            "required": [
+                              "amount_minor",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
@@ -11850,6 +12360,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -11979,6 +12523,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -12507,6 +13085,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -12636,6 +13248,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -13165,6 +13811,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -13294,6 +13974,40 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "cancel_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "reschedule_cutoff_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                },
+                                "cancellation_fee": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    },
+                                    "within_minutes": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -13899,6 +14613,40 @@
                                 ],
                                 "additionalProperties": false
                               }
+                            },
+                            "cancel_cutoff_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 525600
+                            },
+                            "reschedule_cutoff_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 525600
+                            },
+                            "cancellation_fee": {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                },
+                                "within_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "additionalProperties": false
@@ -14031,6 +14779,40 @@
                                   ],
                                   "additionalProperties": false
                                 }
+                              },
+                              "cancel_cutoff_minutes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 525600
+                              },
+                              "reschedule_cutoff_minutes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 525600
+                              },
+                              "cancellation_fee": {
+                                "type": "object",
+                                "properties": {
+                                  "amount_minor": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1000000000000
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "pattern": "^[A-Z]{3}$"
+                                  },
+                                  "within_minutes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 525600
+                                  }
+                                },
+                                "required": [
+                                  "amount_minor",
+                                  "currency"
+                                ],
+                                "additionalProperties": false
                               }
                             },
                             "additionalProperties": false
@@ -14203,6 +14985,40 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "cancel_cutoff_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "reschedule_cutoff_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "cancellation_fee": {
+                            "type": "object",
+                            "properties": {
+                              "amount_minor": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000000000000
+                              },
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              },
+                              "within_minutes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 525600
+                              }
+                            },
+                            "required": [
+                              "amount_minor",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
@@ -14348,6 +15164,40 @@
                                 ],
                                 "additionalProperties": false
                               }
+                            },
+                            "cancel_cutoff_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 525600
+                            },
+                            "reschedule_cutoff_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 525600
+                            },
+                            "cancellation_fee": {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                },
+                                "within_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "additionalProperties": false
@@ -14526,6 +15376,40 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "cancel_cutoff_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "reschedule_cutoff_minutes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 525600
+                          },
+                          "cancellation_fee": {
+                            "type": "object",
+                            "properties": {
+                              "amount_minor": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000000000000
+                              },
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              },
+                              "within_minutes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 525600
+                              }
+                            },
+                            "required": [
+                              "amount_minor",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
@@ -14686,6 +15570,40 @@
                                 ],
                                 "additionalProperties": false
                               }
+                            },
+                            "cancel_cutoff_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 525600
+                            },
+                            "reschedule_cutoff_minutes": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 525600
+                            },
+                            "cancellation_fee": {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                },
+                                "within_minutes": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 525600
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "additionalProperties": false
@@ -17066,7 +17984,7 @@
       "put": {
         "operationId": "slotlock_put_reservation",
         "summary": "Book or move a reservation",
-        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well.",
+        "description": "Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps.",
         "tags": [
           "Application"
         ],
@@ -17106,6 +18024,11 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "override_reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -17252,7 +18175,7 @@
       "delete": {
         "operationId": "slotlock_cancel_reservation",
         "summary": "Cancel a reservation",
-        "description": "Cancel the reservation with this reference at the next revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new reservation.",
+        "description": "Cancel the reservation with this reference at the next revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new reservation. Past the resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason says why, which the tombstone and the feed keep. A late cancellation's fee (the resource's cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge: Slotlock moves no money.",
         "tags": [
           "Application"
         ],
@@ -17276,6 +18199,16 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "override_reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
             }
           },
           {
@@ -17304,6 +18237,32 @@
                       "exclusiveMinimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "cancellation_fee": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "amount_minor": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "currency": {
+                              "type": "string",
+                              "pattern": "^[A-Z]{3}$"
+                            }
+                          },
+                          "required": [
+                            "amount_minor",
+                            "currency"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "dry_run": {
                       "type": "boolean",
                       "const": true,
@@ -17312,7 +18271,8 @@
                   },
                   "required": [
                     "cancelled",
-                    "revision"
+                    "revision",
+                    "cancellation_fee"
                   ],
                   "additionalProperties": false
                 }
@@ -19403,6 +20363,16 @@
             }
           },
           {
+            "name": "override_reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
             "name": "dry_run",
             "in": "query",
             "required": false,
@@ -19448,6 +20418,32 @@
                     "replayed": {
                       "type": "boolean"
                     },
+                    "cancellation_fee": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "amount_minor": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "currency": {
+                              "type": "string",
+                              "pattern": "^[A-Z]{3}$"
+                            }
+                          },
+                          "required": [
+                            "amount_minor",
+                            "currency"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "dry_run": {
                       "type": "boolean",
                       "const": true,
@@ -19458,7 +20454,8 @@
                     "event_id",
                     "revision",
                     "cancelled",
-                    "replayed"
+                    "replayed",
+                    "cancellation_fee"
                   ],
                   "additionalProperties": false
                 }
@@ -19843,6 +20840,11 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "bookings_completed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "capped": {
                       "type": "boolean"
                     }
@@ -19857,6 +20859,7 @@
                     "no_shows",
                     "waitlist_offers",
                     "approvals_expired",
+                    "bookings_completed",
                     "capped"
                   ],
                   "additionalProperties": false
@@ -20061,7 +21064,7 @@
                   },
                   "event_types": {
                     "minItems": 1,
-                    "maxItems": 37,
+                    "maxItems": 39,
                     "type": "array",
                     "items": {
                       "type": "string",
@@ -20076,6 +21079,8 @@
                         "reservation.cancelled",
                         "reservation.checked_in",
                         "reservation.no_show",
+                        "reservation.rescheduled",
+                        "reservation.completed",
                         "event.created",
                         "event.updated",
                         "event.cancelled",
@@ -20210,6 +21215,8 @@
                                   "reservation.cancelled",
                                   "reservation.checked_in",
                                   "reservation.no_show",
+                                  "reservation.rescheduled",
+                                  "reservation.completed",
                                   "event.created",
                                   "event.updated",
                                   "event.cancelled",
@@ -20470,6 +21477,8 @@
                                     "reservation.cancelled",
                                     "reservation.checked_in",
                                     "reservation.no_show",
+                                    "reservation.rescheduled",
+                                    "reservation.completed",
                                     "event.created",
                                     "event.updated",
                                     "event.cancelled",
@@ -20817,6 +21826,8 @@
                                   "reservation.cancelled",
                                   "reservation.checked_in",
                                   "reservation.no_show",
+                                  "reservation.rescheduled",
+                                  "reservation.completed",
                                   "event.created",
                                   "event.updated",
                                   "event.cancelled",

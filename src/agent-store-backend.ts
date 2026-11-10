@@ -518,6 +518,8 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
   duration_not_allowed: 'booking_rule_duration_not_allowed',
   pickup_time: 'booking_rule_pickup_time',
   return_time: 'booking_rule_return_time',
+  cancel_cutoff: 'booking_rule_cancel_cutoff',
+  reschedule_cutoff: 'booking_rule_reschedule_cutoff',
 });
 
 function operationError(
@@ -1663,6 +1665,8 @@ export function createSlotlockStoreAgentBackend(
           ...(current ? { expectedResourceId: current.resourceId } : {}),
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
+          // An agent is held to the resource's cancel cutoff (RFC 0004 B5).
+          enforceBookingRules: true,
         });
         if (!result.ok) throw operationError(result);
         return {
@@ -1861,6 +1865,18 @@ function approvalOutput(approval: SlotlockApproval) {
     reason: approval.reason,
     created_at: approval.createdAt.toISOString(),
   };
+}
+
+/** A store refusal as the application API answers it, a broken booking rule by its own code. */
+function applicationRuleRefusal(result: { code: string; rule?: string }): SlotlockAgentOperationError {
+  return result.code === 'booking_rule_violated' && result.rule
+    ? new SlotlockAgentOperationError(`booking_rule_${result.rule}`, 409)
+    : applicationRefusal(result.code);
+}
+
+/** A recorded cancellation fee as the API answers it (RFC 0004 B5). */
+function feeOutput(fee: { amountMinor: number; currency: string } | undefined) {
+  return fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null;
 }
 
 function applicationRefusal(code: string): SlotlockAgentOperationError {
@@ -2414,6 +2430,17 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.defaultDurationMinutes !== undefined ? { default_duration_minutes: rules.defaultDurationMinutes } : {}),
     ...(rules.pickupTimes !== undefined ? { pickup_times: dayWindowsOutput(rules.pickupTimes) } : {}),
     ...(rules.returnTimes !== undefined ? { return_times: dayWindowsOutput(rules.returnTimes) } : {}),
+    ...(rules.cancelCutoffMinutes !== undefined ? { cancel_cutoff_minutes: rules.cancelCutoffMinutes } : {}),
+    ...(rules.rescheduleCutoffMinutes !== undefined ? { reschedule_cutoff_minutes: rules.rescheduleCutoffMinutes } : {}),
+    ...(rules.cancellationFee !== undefined
+      ? {
+          cancellation_fee: {
+            amount_minor: rules.cancellationFee.amountMinor,
+            currency: rules.cancellationFee.currency,
+            ...(rules.cancellationFee.withinMinutes !== undefined ? { within_minutes: rules.cancellationFee.withinMinutes } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -2448,6 +2475,18 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   }
   if (input.pickup_times !== undefined) rules.pickupTimes = dayWindowsInput(input.pickup_times);
   if (input.return_times !== undefined) rules.returnTimes = dayWindowsInput(input.return_times);
+  if (input.cancel_cutoff_minutes !== undefined) rules.cancelCutoffMinutes = input.cancel_cutoff_minutes as number;
+  if (input.reschedule_cutoff_minutes !== undefined) {
+    rules.rescheduleCutoffMinutes = input.reschedule_cutoff_minutes as number;
+  }
+  if (input.cancellation_fee !== undefined) {
+    const fee = input.cancellation_fee as { amount_minor: number; currency: string; within_minutes?: number };
+    rules.cancellationFee = {
+      amountMinor: fee.amount_minor,
+      currency: fee.currency,
+      ...(fee.within_minutes !== undefined ? { withinMinutes: fee.within_minutes } : {}),
+    };
+  }
   return rules;
 }
 
@@ -3360,12 +3399,13 @@ export function createSlotlockStoreApplicationBackend(
           bufferAfterMs: (input.buffer_after_minutes as number) * 60_000,
           revision: input.revision as number,
           ...(input.source !== undefined ? { source: input.source as string } : {}),
+          ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
         };
         const result =
           command.revision === 1
             ? await tenant.createExternalReservation(command)
             : await tenant.rescheduleExternalReservation(command);
-        if (!result.ok) throw applicationRefusal(result.code);
+        if (!result.ok) throw applicationRuleRefusal(result);
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
       }, WRITE);
       if ((input.revision as number) > 1 && !put.replayed) {
@@ -3380,9 +3420,10 @@ export function createSlotlockStoreApplicationBackend(
           tenantRef: tenantOf(context),
           externalRef: input.reservation_ref as string,
           revision: input.revision as number,
+          ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
         });
-        if (!result.ok) throw applicationRefusal(result.code);
-        return { cancelled: result.cancelled, revision: result.revision };
+        if (!result.ok) throw applicationRuleRefusal(result);
+        return { cancelled: result.cancelled, revision: result.revision, cancellation_fee: feeOutput(result.cancellationFee) };
       }, WRITE);
       if (cancelled.cancelled) await offerFreedTime(store, context);
       return cancelled;
@@ -3557,13 +3598,15 @@ export function createSlotlockStoreApplicationBackend(
           idempotencyKey: applicationCommandKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
           ...(expectedResourceId !== undefined ? { expectedResourceId } : {}),
+          ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
         });
-        if (!result.ok) throw applicationRefusal(result.code);
+        if (!result.ok) throw applicationRuleRefusal(result);
         return {
           event_id: result.eventId,
           revision: result.revision,
           cancelled: true,
           replayed: result.idempotent,
+          cancellation_fee: feeOutput(result.cancellationFee),
         };
       }, WRITE);
       if (!cancelled.replayed) await offerFreedTime(store, context);
@@ -4011,7 +4054,7 @@ export function createSlotlockStoreApplicationBackend(
     async runMaintenance(context) {
       assertActive(context);
       try {
-        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, bookingsCompleted, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
         });
@@ -4022,6 +4065,7 @@ export function createSlotlockStoreApplicationBackend(
           no_shows: noShows,
           waitlist_offers: waitlistOffers,
           approvals_expired: approvalsExpired,
+          bookings_completed: bookingsCompleted,
         };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);

@@ -173,6 +173,8 @@ const expectedFiles = new Set([
   'hours.d.ts',
   'ranges.js',
   'ranges.d.ts',
+  'lifecycle.js',
+  'lifecycle.d.ts',
   'holidays.js',
   'holidays.d.ts',
   'self-host.js',

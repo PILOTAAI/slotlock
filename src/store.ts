@@ -30,6 +30,9 @@ import {
   slotlockEventFeedMethods,
 } from './event-feed.js';
 import {
+  type SlotlockCancellationFee,
+  cancellationFeeDue,
+  cutoffRuleBroken,
   type SlotlockBookingRule,
   type SlotlockBookingRules,
   bookingBufferBeforeMs,
@@ -1009,6 +1012,9 @@ function validateExternalCommand(
   if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.externalRef)) {
     return { ok: false, code: 'invalid_identity' };
   }
+  if (params.overrideReason !== undefined && !isValidOverrideReason(params.overrideReason)) {
+    return { ok: false, code: 'invalid_identity' };
+  }
   if (
     !Number.isSafeInteger(params.bufferAfterMs) ||
     params.bufferAfterMs < 0 ||
@@ -1660,6 +1666,67 @@ async function bookingRuling(
     turnaroundMs: judge.turnaroundMs,
     bufferBeforeMs: judge.bufferBeforeMs,
   };
+}
+
+/** An admin's reason for going past a cutoff (RFC 0004 B5): 1-500 characters, no control characters. */
+function isValidOverrideReason(value: unknown): value is string {
+  return typeof value === 'string' && /^[^\u0000-\u001f\u007f]{1,500}$/u.test(value) && value.trim() !== '';
+}
+
+/**
+ * A resource's effective booking rules and the database clock: what a cancellation or a move is
+ * judged by (RFC 0004 B5). Rules that do not read refuse nothing here.
+ */
+async function rulesNow(tx: StoreSql, resourceId: string): Promise<{ rules: SlotlockBookingRules | undefined; now: Date }> {
+  const [row] = await tx<{ effective_booking_rules: unknown; now: Date }[]>`
+    SELECT ${tx.unsafe(EFFECTIVE_BOOKING_RULES)}, statement_timestamp() AS now
+      FROM slotlock.resources WHERE id = ${resourceId}`;
+  if (!row) return { rules: undefined, now: new Date() };
+  if (row.effective_booking_rules === null || row.effective_booking_rules === undefined) return { rules: undefined, now: row.now };
+  return { rules: parseEffectiveBookingRules(row.effective_booking_rules).rules, now: row.now };
+}
+
+/**
+ * Mark what the next change of a booking records on the feed (RFC 0004 B5): a cancellation's fee
+ * and an admin's reason for going past a cutoff. Cleared with nulls.
+ */
+async function noteEnding(
+  tx: StoreSql,
+  fee: { amount_minor: number; currency: string } | null,
+  overrideReason: string | null,
+): Promise<void> {
+  await tx`
+    SELECT set_config('slotlock.cancellation_fee', ${fee ? JSON.stringify(fee) : ''}, true),
+           set_config('slotlock.override_reason', ${overrideReason ?? ''}, true)`;
+}
+
+/**
+ * Whether a one-off event may be cancelled now under its resource's cancel cutoff (RFC 0004 B5),
+ * and the fee a late cancellation records, marked for the feed. A series is not held to the cutoff:
+ * cancelling it cancels what is still to come.
+ */
+async function eventEnding(
+  tx: StoreSql,
+  event: { resource_id: string; starts_at: Date; recurring: boolean },
+  enforce: boolean,
+  overrideReason: string | undefined,
+): Promise<
+  | { ok: true; fee: { amountMinor: number; currency: string } | null }
+  | { ok: false; refusal: { ok: false; code: 'booking_rule_violated'; rule: 'cancel_cutoff' } }
+> {
+  if (event.recurring) return { ok: true, fee: null };
+  const judged = await rulesNow(tx, event.resource_id);
+  let note: string | null = null;
+  if (enforce && cutoffRuleBroken(judged.rules, 'cancel', event.starts_at, judged.now)) {
+    if (overrideReason === undefined) {
+      return { ok: false, refusal: { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' } };
+    }
+    note = overrideReason;
+  }
+  const due = cancellationFeeDue(judged.rules, event.starts_at, judged.now);
+  const fee = due ? { amountMinor: due.amountMinor, currency: due.currency } : null;
+  await noteEnding(tx, fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null, note);
+  return { ok: true, fee };
 }
 
 /** How recently a sync must have read a resource whose booking rules require certainty. */
@@ -2870,6 +2937,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
     tenantRef: string;
     externalRef: string;
     revision: number;
+    /**
+     * An admin's reason for cancelling past the booking's cancel cutoff (RFC 0004 B5), 1-500
+     * characters, kept on its tombstone and the feed. Without it, a cancellation past the cutoff is
+     * refused.
+     */
+    overrideReason?: string;
   }): Promise<CancelExternalReservationResult>;
   /**
    * Occupy a window without committing: the hold blocks rivals under the same EXCLUDE arbiter until
@@ -3119,6 +3192,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
      * another, checked under the event's lock.
      */
     expectedResourceId?: string;
+    /** Hold a one-off event to its resource's cancel cutoff (RFC 0004 B5), as agents' cancels are. */
+    enforceBookingRules?: boolean;
   }): Promise<CancelCalendarEventResult>;
   /**
    * The tenant's cancellation of one of its events by id, whichever owner wrote it: an agent key's
@@ -3134,6 +3209,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
     expectedRevision: number;
     /** As for cancelCalendarEvent: `event_not_found` when the event is on another resource. */
     expectedResourceId?: string;
+    /**
+     * An admin's reason for cancelling a one-off event past its cancel cutoff (RFC 0004 B5), kept on
+     * the feed; without it, that cancellation is refused.
+     */
+    overrideReason?: string;
   }): Promise<CancelCalendarEventResult>;
   /**
    * Rematerialize due recurring masters into one rolling window without changing their revision. A
@@ -3217,6 +3297,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * no live booking is `reservation_not_found`. The feed says so (`reservation.checked_in`).
    */
   checkInReservation(params: { tenantRef: string; externalRef: string }): Promise<CheckInReservationResult>;
+  /**
+   * Say on the feed that bookings have ended (RFC 0004 B4): each confirmed booking whose end passed
+   * within the last week and was not said yet gets one `reservation.completed`, its row unchanged
+   * but for when it was said. Up to `limit` (default 500); returns how many.
+   */
+  completeEndedBookings(params: { tenantRef: string; limit?: number }): Promise<number>;
   /**
    * Release up to `limit` (default 100) bookings left unclaimed: on a resource whose booking rules
    * ask for check-in, made since they did, not checked in `checkInMinutes` after the start, and not
@@ -5562,10 +5648,27 @@ function buildSlotlockStore(
             if (params.revision !== currentRevision + 1) {
               return { ok: false, code: 'revision_conflict' };
             }
+            // A move in time or to another resource, past the booking's reschedule cutoff (RFC 0004
+            // B5), only with an admin's reason.
+            const moved =
+              found.starts_at.getTime() !== params.start.getTime() ||
+              found.ends_at.getTime() !== params.end.getTime() ||
+              found.resource_id !== params.resourceId;
+            let overrideNote: string | null = null;
+            if (moved) {
+              const judged = await rulesNow(tx, found.resource_id);
+              if (cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
+                if (params.overrideReason === undefined) {
+                  return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
+                }
+                overrideNote = params.overrideReason;
+              }
+            }
             const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
+            if (overrideNote !== null) await noteEnding(tx, null, overrideNote);
             bufferAfterMs = Math.max(params.bufferAfterMs, ruling.turnaroundMs);
             bufferBeforeMs = ruling.bufferBeforeMs;
             const occupied = occupiedTime({ ...params, bufferBeforeMs, bufferAfterMs });
@@ -5636,6 +5739,9 @@ function buildSlotlockStore(
       if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.externalRef)) {
         return { ok: false, code: 'invalid_identity' };
       }
+      if (params.overrideReason !== undefined && !isValidOverrideReason(params.overrideReason)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
       if (!Number.isSafeInteger(params.revision) || params.revision <= 0) {
         return { ok: false, code: 'invalid_revision' };
       }
@@ -5656,18 +5762,30 @@ function buildSlotlockStore(
             : { ok: false, code: 'reservation_cancelled' };
         }
 
-        const existing = await tx<{ id: string; revision: string | number }[]>`
-          SELECT id, revision FROM slotlock.reservations
+        const existing = await tx<{ id: string; revision: string | number; resource_id: string; starts_at: Date }[]>`
+          SELECT id, revision, resource_id, starts_at FROM slotlock.reservations
            WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
              AND calendar_event_id IS NULL
            FOR UPDATE`;
         const found = existing[0];
+        // Past its cancel cutoff a booking is cancelled only with an admin's reason, and a late
+        // cancellation records its fee (RFC 0004 B5).
+        let fee: SlotlockCancellationFee | null = null;
+        let overrideNote: string | null = null;
         if (found) {
           const currentRevision = Number(found.revision);
           if (params.revision <= currentRevision) return { ok: false, code: 'stale_revision' };
           if (params.revision !== currentRevision + 1) {
             return { ok: false, code: 'revision_conflict' };
           }
+          const judged = await rulesNow(tx, found.resource_id);
+          if (cutoffRuleBroken(judged.rules, 'cancel', found.starts_at, judged.now)) {
+            if (params.overrideReason === undefined) {
+              return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
+            }
+            overrideNote = params.overrideReason;
+          }
+          fee = cancellationFeeDue(judged.rules, found.starts_at, judged.now);
         }
 
         if (!found) {
@@ -5685,13 +5803,24 @@ function buildSlotlockStore(
         }
         // A reference no booking holds yet is retired too, so a create delivered after its cancel
         // cannot bring it back.
+        const recorded = fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null;
         await tx`
-          INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray)
-          VALUES (${params.tenantRef}, ${params.externalRef}, ${params.revision}, ${!found})`;
+          INSERT INTO slotlock.reservation_tombstones (
+            tenant_ref, external_ref, revision, stray, end_reason, cancellation_fee, override_reason
+          )
+          VALUES (${params.tenantRef}, ${params.externalRef}, ${params.revision}, ${!found}, 'cancelled',
+                  ${recorded ? tx.json(recorded) : null}::jsonb, ${overrideNote})`;
         if (!found) return { ok: true, cancelled: false, revision: params.revision };
+        await noteEnding(tx, recorded, overrideNote);
         const deleted = await tx<{ id: string }[]>`
           DELETE FROM slotlock.reservations WHERE id = ${found.id} RETURNING id`;
-        return { ok: true, cancelled: deleted.length === 1, revision: params.revision };
+        await noteEnding(tx, null, null);
+        return {
+          ok: true,
+          cancelled: deleted.length === 1,
+          revision: params.revision,
+          ...(fee ? { cancellationFee: { amountMinor: fee.amountMinor, currency: fee.currency } } : {}),
+        };
       });
     },
 
@@ -6599,6 +6728,21 @@ function buildSlotlockStore(
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
             }
+            // A one-off event moved in time or to another resource, past its reschedule cutoff
+            // (RFC 0004 B5), is refused to a writer held to the booking rules.
+            if (
+              found &&
+              params.enforceBookingRules === true &&
+              found.recurrence_rule === null &&
+              (found.starts_at.getTime() !== event.start.getTime() ||
+                found.ends_at.getTime() !== event.end.getTime() ||
+                found.resource_id !== params.resourceId)
+            ) {
+              const judged = await rulesNow(tx, found.resource_id);
+              if (cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
+                return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
+              }
+            }
             const series = expanded ?? resumeStoredSeries(event, materializationWindow, found);
             if (!series) return { ok: false, code: 'invalid_event' };
             const { occurrences } = series;
@@ -7104,8 +7248,9 @@ function buildSlotlockStore(
             currentRevision: Number(tombstones[0].revision),
           };
         }
-        const events = await tx<{ id: string; resource_id: string; revision: string | number }[]>`
-          SELECT id, resource_id, revision FROM slotlock.calendar_events
+        const events = await tx<{ id: string; resource_id: string; revision: string | number; starts_at: Date; recurring: boolean }[]>`
+          SELECT id, resource_id, revision, starts_at, recurrence_rule IS NOT NULL AS recurring
+            FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef}
              AND owner_ref = ${ownerRef}
              AND external_ref = ${params.externalRef}
@@ -7124,7 +7269,9 @@ function buildSlotlockStore(
         if (params.expectedRevision !== currentRevision) {
           return { ok: false, code: 'revision_conflict', currentRevision };
         }
-        return finishCalendarCancel(tx, {
+        const ending = found ? await eventEnding(tx, found, params.enforceBookingRules === true, undefined) : null;
+        if (ending && !ending.ok) return ending.refusal;
+        const cancelled = await finishCalendarCancel(tx, {
           tenantRef: params.tenantRef,
           ownerRef,
           externalRef: params.externalRef,
@@ -7134,10 +7281,15 @@ function buildSlotlockStore(
           idempotencyKey: params.idempotencyKey,
           payloadHash,
         });
+        if (ending) await noteEnding(tx, null, null);
+        return cancelled.ok && ending?.fee ? { ...cancelled, cancellationFee: ending.fee } : cancelled;
       });
     },
 
     async cancelCalendarEventById(params) {
+      if (params.overrideReason !== undefined && !isValidOverrideReason(params.overrideReason)) {
+        return { ok: false, code: 'invalid_identity' };
+      }
       if (
         !isValidIdentity(params.tenantRef) ||
         !isValidResourceId(params.eventId) ||
@@ -7193,8 +7345,9 @@ function buildSlotlockStore(
           identity.owner_ref,
           identity.external_ref,
         );
-        const [found] = await tx<{ id: string; resource_id: string; revision: string | number }[]>`
-          SELECT id, resource_id, revision FROM slotlock.calendar_events
+        const [found] = await tx<{ id: string; resource_id: string; revision: string | number; starts_at: Date; recurring: boolean }[]>`
+          SELECT id, resource_id, revision, starts_at, recurrence_rule IS NOT NULL AS recurring
+            FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}
            FOR UPDATE`;
         if (!found) return { ok: false, code: 'event_not_found' };
@@ -7208,7 +7361,10 @@ function buildSlotlockStore(
         if (params.expectedRevision !== currentRevision) {
           return { ok: false, code: 'revision_conflict', currentRevision };
         }
-        return finishCalendarCancel(tx, {
+        // The tenant's own cancellation is held to the cutoff too, unless an admin gives a reason.
+        const ending = await eventEnding(tx, found, true, params.overrideReason);
+        if (!ending.ok) return ending.refusal;
+        const cancelled = await finishCalendarCancel(tx, {
           tenantRef: params.tenantRef,
           ownerRef: identity.owner_ref,
           externalRef: identity.external_ref,
@@ -7218,6 +7374,8 @@ function buildSlotlockStore(
           idempotencyKey: params.idempotencyKey,
           payloadHash,
         });
+        await noteEnding(tx, null, null);
+        return cancelled.ok && ending.fee ? { ...cancelled, cancellationFee: ending.fee } : cancelled;
       });
     },
 
@@ -7716,6 +7874,45 @@ function buildSlotlockStore(
       });
     },
 
+    async completeEndedBookings(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const limit = params.limit ?? 500;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) {
+        throw invalidIdentityError('Slotlock completion limit must be 1-5,000');
+      }
+      // A suspended tenant's bookings stay as they are.
+      if (refusal) return 0;
+      const rows = await sql<{ id: string }[]>`
+        WITH done AS (
+          UPDATE slotlock.reservations booking
+             SET completed_at = statement_timestamp()
+           WHERE booking.id IN (
+             SELECT id FROM slotlock.reservations
+              WHERE tenant_ref = ${params.tenantRef} AND status = 'confirmed'
+                AND calendar_event_id IS NULL AND completed_at IS NULL
+                AND ends_at <= statement_timestamp()
+                AND ends_at > statement_timestamp() - interval '7 days'
+              ORDER BY ends_at, id
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED)
+          RETURNING booking.id, booking.resource_id, booking.external_ref, booking.starts_at,
+                    booking.ends_at, booking.revision, booking.checked_in_at
+        )
+        INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
+        SELECT ${params.tenantRef}, done.resource_id, 'reservation.completed',
+               COALESCE(done.external_ref, done.id::text),
+               jsonb_strip_nulls(jsonb_build_object(
+                 'id', done.id, 'reference', done.external_ref, 'resource_id', done.resource_id,
+                 'start', done.starts_at, 'end', done.ends_at, 'revision', done.revision,
+                 'checked_in_at', done.checked_in_at)),
+               'slotlock:maintenance'
+          FROM done
+        RETURNING id`;
+      return rows.length;
+    },
+
     async releaseNoShows(params) {
       if (!isValidIdentity(params.tenantRef)) {
         throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
@@ -7757,8 +7954,8 @@ function buildSlotlockStore(
           if (!row || row.id !== candidate.id) return false;
           const revision = Number(row.revision) + 1;
           await tx`
-            INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray)
-            VALUES (${tenantRef}, ${row.external_ref}, ${revision}, false)`;
+            INSERT INTO slotlock.reservation_tombstones (tenant_ref, external_ref, revision, stray, end_reason)
+            VALUES (${tenantRef}, ${row.external_ref}, ${revision}, false, 'no_show')`;
           // The deletion is the change: the feed's trigger names it reservation.no_show (one change,
           // not a cancellation too), by maintenance, with the check-in window it missed.
           await tx`

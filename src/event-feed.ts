@@ -24,6 +24,9 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'reservation.cancelled',
   'reservation.checked_in',
   'reservation.no_show',
+  // A booking moved (also reservation.updated), and one whose end has passed (RFC 0004 B4).
+  'reservation.rescheduled',
+  'reservation.completed',
   'event.created',
   'event.updated',
   'event.cancelled',

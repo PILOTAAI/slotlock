@@ -77,7 +77,7 @@ public sealed partial class SlotlockClient
         ["slotlock_confirm_hold"] = new("POST", "/v1/holds/{hold_id}/confirm", ["hold_id"], []),
         ["slotlock_get_reservation"] = new("GET", "/v1/reservations/{reservation_ref}", ["reservation_ref"], []),
         ["slotlock_put_reservation"] = new("PUT", "/v1/reservations/{reservation_ref}", ["reservation_ref"], []),
-        ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision", "dry_run"]),
+        ["slotlock_cancel_reservation"] = new("DELETE", "/v1/reservations/{reservation_ref}", ["reservation_ref"], ["revision", "override_reason", "dry_run"]),
         ["slotlock_list_reservations"] = new("GET", "/v1/resources/{resource_id}/reservations", ["resource_id"], ["start", "end", "limit", "cursor"]),
         ["slotlock_check_in_reservation"] = new("POST", "/v1/reservations/{reservation_ref}/check-in", ["reservation_ref"], []),
         ["slotlock_list_waitlist"] = new("GET", "/v1/waitlist", [], ["resource_id", "pool", "holder_ref", "limit"]),
@@ -89,7 +89,7 @@ public sealed partial class SlotlockClient
         ["slotlock_record_coverage_failure"] = new("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", ["resource_id", "source"], []),
         ["slotlock_list_tenant_events"] = new("GET", "/v1/tenant/events", [], ["resource_id", "start", "end", "limit", "cursor"]),
         ["slotlock_get_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}", ["event_id"], []),
-        ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key", "dry_run"]),
+        ["slotlock_cancel_tenant_event"] = new("DELETE", "/v1/tenant/events/{event_id}", ["event_id"], ["expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"]),
         ["slotlock_export_tenant_event"] = new("GET", "/v1/tenant/events/{event_id}/jscalendar", ["event_id"], []),
         ["slotlock_get_tenant"] = new("GET", "/v1/tenant", [], []),
         ["slotlock_erase_tenant"] = new("POST", "/v1/tenant/erase", [], []),
@@ -2324,7 +2324,9 @@ public sealed partial class SlotlockClient
     /// Book the reservation with this reference (revision 1), or move it (the next revision: the
     /// current one plus 1). Sending the same reservation at its current revision again changes
     /// nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
-    /// reservation where it was. buffer_after_minutes keeps the time after it busy as well.
+    /// reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
+    /// move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+    /// unless override_reason says why, which the feed keeps.
     /// </remarks>
     /// <param name="reservationRef">reservation_ref</param>
     /// <param name="resourceId">resource_id</param>
@@ -2333,6 +2335,7 @@ public sealed partial class SlotlockClient
     /// <param name="revision">revision</param>
     /// <param name="bufferAfterMinutes">buffer_after_minutes</param>
     /// <param name="source">source</param>
+    /// <param name="overrideReason">override_reason</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -2348,6 +2351,7 @@ public sealed partial class SlotlockClient
         long revision,
         Optional<long> bufferAfterMinutes = default,
         Optional<string> source = default,
+        Optional<string> overrideReason = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -2359,6 +2363,7 @@ public sealed partial class SlotlockClient
         values["revision"] = Json.ToNode(revision);
         if (bufferAfterMinutes.HasValue) values["buffer_after_minutes"] = Json.ToNode(bufferAfterMinutes.Value);
         if (source.HasValue) values["source"] = Json.ToNode(source.Value);
+        if (overrideReason.HasValue) values["override_reason"] = Json.ToNode(overrideReason.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_put_reservation", values, cancellationToken);
     }
@@ -2384,16 +2389,22 @@ public sealed partial class SlotlockClient
             bufferAfterMinutes: bufferAfterMinutes,
             source: source,
             cancellationToken: cancellationToken,
+            overrideReason: default,
             dryRun: default);
 
     /// <summary>Cancel a reservation.</summary>
     /// <remarks>
     /// Cancel the reservation with this reference at the next revision (the current one plus 1).
     /// Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the
-    /// cancel answers cancelled: false. Use a new reference for a new reservation.
+    /// cancel answers cancelled: false. Use a new reference for a new reservation. Past the
+    /// resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason
+    /// says why, which the tombstone and the feed keep. A late cancellation's fee (the resource's
+    /// cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge:
+    /// Slotlock moves no money.
     /// </remarks>
     /// <param name="reservationRef">reservation_ref</param>
     /// <param name="revision">revision</param>
+    /// <param name="overrideReason">override_reason</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -2404,12 +2415,14 @@ public sealed partial class SlotlockClient
     public Task<JsonObject> CancelReservationAsync(
         string reservationRef,
         long revision,
+        Optional<string> overrideReason = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["reservation_ref"] = Json.ToNode(reservationRef);
         values["revision"] = Json.ToNode(revision);
+        if (overrideReason.HasValue) values["override_reason"] = Json.ToNode(overrideReason.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_cancel_reservation", values, cancellationToken);
     }
@@ -2425,6 +2438,7 @@ public sealed partial class SlotlockClient
             reservationRef: reservationRef,
             revision: revision,
             cancellationToken: cancellationToken,
+            overrideReason: default,
             dryRun: default);
 
     /// <summary>List a resource's reservations.</summary>
@@ -2793,6 +2807,7 @@ public sealed partial class SlotlockClient
     /// header: the same key with the same request answers what the first did; with another
     /// request, 422 idempotency_conflict.</param>
     /// <param name="expectedResourceId">expected_resource_id</param>
+    /// <param name="overrideReason">override_reason</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -2805,6 +2820,7 @@ public sealed partial class SlotlockClient
         long expectedRevision,
         string idempotencyKey,
         Optional<string> expectedResourceId = default,
+        Optional<string> overrideReason = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -2813,6 +2829,7 @@ public sealed partial class SlotlockClient
         values["expected_revision"] = Json.ToNode(expectedRevision);
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
+        if (overrideReason.HasValue) values["override_reason"] = Json.ToNode(overrideReason.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_cancel_tenant_event", values, cancellationToken);
     }

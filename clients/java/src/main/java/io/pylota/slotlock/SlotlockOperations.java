@@ -74,7 +74,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_confirm_hold", new Operation("POST", "/v1/holds/{hold_id}/confirm", List.of("hold_id"), List.of())),
           Map.entry("slotlock_get_reservation", new Operation("GET", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_put_reservation", new Operation("PUT", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of())),
-          Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision", "dry_run"))),
+          Map.entry("slotlock_cancel_reservation", new Operation("DELETE", "/v1/reservations/{reservation_ref}", List.of("reservation_ref"), List.of("revision", "override_reason", "dry_run"))),
           Map.entry("slotlock_list_reservations", new Operation("GET", "/v1/resources/{resource_id}/reservations", List.of("resource_id"), List.of("start", "end", "limit", "cursor"))),
           Map.entry("slotlock_check_in_reservation", new Operation("POST", "/v1/reservations/{reservation_ref}/check-in", List.of("reservation_ref"), List.of())),
           Map.entry("slotlock_list_waitlist", new Operation("GET", "/v1/waitlist", List.of(), List.of("resource_id", "pool", "holder_ref", "limit"))),
@@ -86,7 +86,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_record_coverage_failure", new Operation("POST", "/v1/resources/{resource_id}/coverage/{source}/failure", List.of("resource_id", "source"), List.of())),
           Map.entry("slotlock_list_tenant_events", new Operation("GET", "/v1/tenant/events", List.of(), List.of("resource_id", "start", "end", "limit", "cursor"))),
           Map.entry("slotlock_get_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of())),
-          Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key", "dry_run"))),
+          Map.entry("slotlock_cancel_tenant_event", new Operation("DELETE", "/v1/tenant/events/{event_id}", List.of("event_id"), List.of("expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"))),
           Map.entry("slotlock_export_tenant_event", new Operation("GET", "/v1/tenant/events/{event_id}/jscalendar", List.of("event_id"), List.of())),
           Map.entry("slotlock_get_tenant", new Operation("GET", "/v1/tenant", List.of(), List.of())),
           Map.entry("slotlock_erase_tenant", new Operation("POST", "/v1/tenant/erase", List.of(), List.of())),
@@ -2214,7 +2214,8 @@ public abstract class SlotlockOperations {
    * (the next revision: the current one plus 1). Sending the same reservation at its current
    * revision again changes nothing (replayed: true). A taken window answers 409 overlap and
    * leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
-   * well.
+   * well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+   * unless override_reason says why, which the feed keeps.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param resourceId {@code resource_id}, string
@@ -2222,7 +2223,7 @@ public abstract class SlotlockOperations {
    * @param end {@code end}, string
    * @param revision {@code revision}, integer
    * @param optional the optional arguments, or null: {@code buffer_after_minutes} (integer),
-   * {@code source} (string), {@code dry_run} (boolean)
+   * {@code source} (string), {@code override_reason} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2233,7 +2234,7 @@ public abstract class SlotlockOperations {
     values.put("start", start);
     values.put("end", end);
     values.put("revision", revision);
-    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "dry_run"), "slotlock_put_reservation");
+    putOptional(values, optional, Set.of("buffer_after_minutes", "source", "override_reason", "dry_run"), "slotlock_put_reservation");
     return call("slotlock_put_reservation", values);
   }
 
@@ -2242,7 +2243,8 @@ public abstract class SlotlockOperations {
    * (the next revision: the current one plus 1). Sending the same reservation at its current
    * revision again changes nothing (replayed: true). A taken window answers 409 overlap and
    * leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as
-   * well.
+   * well. A move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+   * unless override_reason says why, which the feed keeps.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param resourceId {@code resource_id}, string
@@ -2260,11 +2262,15 @@ public abstract class SlotlockOperations {
    * Cancel a reservation. Cancel the reservation with this reference at the next revision (the
    * current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it
    * back; repeating the cancel answers cancelled: false. Use a new reference for a new
-   * reservation.
+   * reservation. Past the resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff
+   * unless override_reason says why, which the tombstone and the feed keep. A late cancellation's
+   * fee (the resource's cancellation_fee) is answered in cancellation_fee and kept on the feed,
+   * for you to charge: Slotlock moves no money.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param revision {@code revision}, integer
-   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @param optional the optional arguments, or null: {@code override_reason} (string), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2272,7 +2278,7 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("reservation_ref", reservationRef);
     values.put("revision", revision);
-    putOptional(values, optional, Set.of("dry_run"), "slotlock_cancel_reservation");
+    putOptional(values, optional, Set.of("override_reason", "dry_run"), "slotlock_cancel_reservation");
     return call("slotlock_cancel_reservation", values);
   }
 
@@ -2280,7 +2286,10 @@ public abstract class SlotlockOperations {
    * Cancel a reservation. Cancel the reservation with this reference at the next revision (the
    * current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it
    * back; repeating the cancel answers cancelled: false. Use a new reference for a new
-   * reservation.
+   * reservation. Past the resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff
+   * unless override_reason says why, which the tombstone and the feed keep. A late cancellation's
+   * fee (the resource's cancellation_fee) is answered in cancellation_fee and kept on the feed,
+   * for you to charge: Slotlock moves no money.
    *
    * @param reservationRef {@code reservation_ref}, string
    * @param revision {@code revision}, integer
@@ -2675,7 +2684,7 @@ public abstract class SlotlockOperations {
    * key with the same request answers what the first did; with another request, 422
    * idempotency_conflict.
    * @param optional the optional arguments, or null: {@code expected_resource_id} (string),
-   * {@code dry_run} (boolean)
+   * {@code override_reason} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2684,7 +2693,7 @@ public abstract class SlotlockOperations {
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("expected_resource_id", "dry_run"), "slotlock_cancel_tenant_event");
+    putOptional(values, optional, Set.of("expected_resource_id", "override_reason", "dry_run"), "slotlock_cancel_tenant_event");
     return call("slotlock_cancel_tenant_event", values);
   }
 

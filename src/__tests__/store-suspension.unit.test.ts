@@ -63,6 +63,7 @@ const UPKEEP = [
   'followZoneRules',
   'reportStaleCoverage',
   'releaseNoShows',
+  'completeEndedBookings',
   'expireApprovals',
   'offerWaitlist',
   'pruneAssistantConversations',

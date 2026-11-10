@@ -47,6 +47,18 @@ export interface SlotlockBookingRules {
   pickupTimes?: SlotlockDayWindow[];
   /** Such a booking ends inside one of these windows of the day, alike. */
   returnTimes?: SlotlockDayWindow[];
+  /**
+   * A booking is cancelled at least this many minutes before it starts (RFC 0004 B5): 0-525,600.
+   * Later, cancelling it is refused (`cancel_cutoff`) unless an admin overrides with a reason.
+   */
+  cancelCutoffMinutes?: number;
+  /** A booking is moved at least this many minutes before it starts, alike (`reschedule_cutoff`). */
+  rescheduleCutoffMinutes?: number;
+  /**
+   * What a cancellation costs, recorded on it for the integrator to charge: Slotlock never moves
+   * money. With `withinMinutes`, only a cancellation that late before the start.
+   */
+  cancellationFee?: SlotlockCancellationFee;
   /** A booking lies inside the resource's bookable hours. */
   enforceHours?: boolean;
   /**
@@ -61,6 +73,14 @@ export interface SlotlockBookingRules {
    * (`uncertain`). A resource no sync covers is certain.
    */
   requireCertain?: boolean;
+}
+
+/** A cancellation's fee: an amount in the currency's minor unit (cents), ISO 4217 currency. */
+export interface SlotlockCancellationFee {
+  amountMinor: number;
+  currency: string;
+  /** Only a cancellation this many minutes or fewer before the start: 0-525,600. */
+  withinMinutes?: number;
 }
 
 /** A window of a day: minutes after local midnight, and how long (it may run past midnight). */
@@ -80,7 +100,9 @@ export type SlotlockBookingRule =
   | 'max_duration'
   | 'duration_not_allowed'
   | 'pickup_time'
-  | 'return_time';
+  | 'return_time'
+  | 'cancel_cutoff'
+  | 'reschedule_cutoff';
 
 const MINUTE_MS = 60_000;
 const DAY_MINUTES = 24 * 60;
@@ -97,13 +119,69 @@ export const SLOTLOCK_BOOKING_RULE_LIMITS = Object.freeze({
   minDurationMinutes: [1, 525_600],
   maxDurationMinutes: [1, 525_600],
   defaultDurationMinutes: [1, 525_600],
+  cancelCutoffMinutes: [0, 525_600],
+  rescheduleCutoffMinutes: [0, 525_600],
 } as const);
 const LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
 /** Lengths `allowedDurations` may list. */
 export const SLOTLOCK_MAX_ALLOWED_DURATIONS = 20;
 /** Windows `pickupTimes` and `returnTimes` may each hold. */
 export const SLOTLOCK_MAX_DAY_WINDOWS = 4;
-const LIST_RULES = new Set(['allowedDurations', 'pickupTimes', 'returnTimes']);
+const LIST_RULES = new Set(['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee']);
+
+/** `cancellationFee` from untrusted input, or a TypeError. */
+function parseCancellationFee(value: unknown): SlotlockCancellationFee {
+  const fee = value as Record<string, unknown> | null;
+  if (
+    typeof fee !== 'object' ||
+    fee === null ||
+    Array.isArray(fee) ||
+    Object.keys(fee).some((key) => !['amountMinor', 'currency', 'withinMinutes'].includes(key)) ||
+    !Number.isSafeInteger(fee.amountMinor) ||
+    (fee.amountMinor as number) < 0 ||
+    (fee.amountMinor as number) > 1_000_000_000_000 ||
+    typeof fee.currency !== 'string' ||
+    !/^[A-Z]{3}$/.test(fee.currency) ||
+    (fee.withinMinutes !== undefined &&
+      (!Number.isSafeInteger(fee.withinMinutes) || (fee.withinMinutes as number) < 0 || (fee.withinMinutes as number) > 525_600))
+  ) {
+    throw new TypeError(
+      'Slotlock booking rule cancellationFee needs amountMinor (a whole 0-1,000,000,000,000), currency (ISO 4217, like EUR) and optionally withinMinutes (0-525600)',
+    );
+  }
+  return {
+    amountMinor: fee.amountMinor as number,
+    currency: fee.currency,
+    ...(fee.withinMinutes !== undefined ? { withinMinutes: fee.withinMinutes as number } : {}),
+  };
+}
+
+/**
+ * The cutoff rule a cancellation or move of a booking starting at `start`, made at `now`, breaks,
+ * or null (RFC 0004 B5).
+ */
+export function cutoffRuleBroken(
+  rules: SlotlockBookingRules | undefined,
+  kind: 'cancel' | 'reschedule',
+  start: Date,
+  now: Date,
+): 'cancel_cutoff' | 'reschedule_cutoff' | null {
+  const minutes = kind === 'cancel' ? rules?.cancelCutoffMinutes : rules?.rescheduleCutoffMinutes;
+  if (minutes === undefined) return null;
+  return now.getTime() > start.getTime() - minutes * MINUTE_MS ? (kind === 'cancel' ? 'cancel_cutoff' : 'reschedule_cutoff') : null;
+}
+
+/** The fee a cancellation of a booking starting at `start`, made at `now`, records, or null. */
+export function cancellationFeeDue(
+  rules: SlotlockBookingRules | undefined,
+  start: Date,
+  now: Date,
+): SlotlockCancellationFee | null {
+  const fee = rules?.cancellationFee;
+  if (!fee) return null;
+  if (fee.withinMinutes !== undefined && now.getTime() < start.getTime() - fee.withinMinutes * MINUTE_MS) return null;
+  return fee;
+}
 
 /** `allowedDurations` from untrusted input, or a TypeError. */
 function parseAllowedDurations(value: unknown): number[] {
@@ -189,6 +267,7 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
     }
   }
   if (input.allowedDurations !== undefined) rules.allowedDurations = parseAllowedDurations(input.allowedDurations);
+  if (input.cancellationFee !== undefined) rules.cancellationFee = parseCancellationFee(input.cancellationFee);
   if (input.pickupTimes !== undefined) rules.pickupTimes = parseDayWindows('pickupTimes', input.pickupTimes);
   if (input.returnTimes !== undefined) rules.returnTimes = parseDayWindows('returnTimes', input.returnTimes);
   for (const [key, [min, max]] of Object.entries(LIMITS) as [keyof typeof LIMITS, readonly [number, number]][]) {
@@ -243,6 +322,7 @@ export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBoo
     if (LIST_RULES.has(key)) {
       try {
         if (key === 'allowedDurations') rules.allowedDurations = parseAllowedDurations(field);
+        else if (key === 'cancellationFee') rules.cancellationFee = parseCancellationFee(field);
         else rules[key as 'pickupTimes' | 'returnTimes'] = parseDayWindows(key, field);
       } catch {
         dropped.push(key);
