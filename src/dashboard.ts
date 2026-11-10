@@ -3502,11 +3502,23 @@ ${
     const billing = options.billing;
     if (!billing) return notFound(session);
     if (session.env === 'test') {
+      // Its own use, counted apart from Live's and never billed.
+      const range = slotlockUsageMonthToDate(now());
+      const tested =
+        options.usage && options.resources.usage
+          ? summarizeSlotlockUsage(await options.resources.usage(tenantOf(session), range.from, range.to))
+          : null;
+      const stat = (label: string, value: number) =>
+        html`<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value.toLocaleString('en-GB')}</span></div>`;
       return respond(
         status,
         layout(
           'Plan',
-          html`${pageHead('Plan')}${noticeOf(notice)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan and usage, or to change them.</p>`,
+          html`${pageHead('Plan')}${noticeOf(notice)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
+            tested
+              ? html`<section class="panel" id="usage"><h2>Test usage this month</h2><div class="stats">${stat('Operations', tested.totals.operations)}${stat('Bookings', tested.totals.bookings)}${stat('Holds', tested.totals.holds)}</div><p class="fine">Since ${range.from}, in UTC, counted apart from Live, against the same monthly quotas.</p></section>`
+              : html``
+          }`,
           session,
           'plan',
         ),

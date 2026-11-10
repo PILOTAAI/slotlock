@@ -88,10 +88,10 @@ var operations = func() map[string]operation {
 		{name: "slotlock_partner_get_account", method: "GET", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_put_account", method: "PUT", path: "/v1/partner/accounts/{account}", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_list_accounts", method: "GET", path: "/v1/partner/accounts", pathParams: nil, query: nil},
-		{name: "slotlock_partner_list_keys", method: "GET", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: nil},
+		{name: "slotlock_partner_list_keys", method: "GET", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: []string{"environment"}},
 		{name: "slotlock_partner_create_key", method: "POST", path: "/v1/partner/accounts/{account}/keys", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_rotate_key", method: "POST", path: "/v1/partner/accounts/{account}/keys/{key_id}/rotate", pathParams: []string{"account", "key_id"}, query: nil},
-		{name: "slotlock_partner_revoke_key", method: "DELETE", path: "/v1/partner/accounts/{account}/keys/{key_id}", pathParams: []string{"account", "key_id"}, query: nil},
+		{name: "slotlock_partner_revoke_key", method: "DELETE", path: "/v1/partner/accounts/{account}/keys/{key_id}", pathParams: []string{"account", "key_id"}, query: []string{"environment"}},
 		{name: "slotlock_partner_suspend_account", method: "POST", path: "/v1/partner/accounts/{account}/suspend", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_unsuspend_account", method: "POST", path: "/v1/partner/accounts/{account}/unsuspend", pathParams: []string{"account"}, query: nil},
 		{name: "slotlock_partner_erase_account", method: "POST", path: "/v1/partner/accounts/{account}/erase", pathParams: []string{"account"}, query: nil},
@@ -2351,11 +2351,16 @@ func (c *Client) PartnerListAccounts(ctx context.Context, in PartnerListAccounts
 // PartnerListKeysInput holds the arguments of [Client.PartnerListKeys].
 type PartnerListKeysInput struct {
 	Account string
+
+	Environment *string
 }
 
 func (in PartnerListKeysInput) values() map[string]any {
 	values := map[string]any{}
 	values["account"] = in.Account
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
 	return values
 }
 
@@ -2374,6 +2379,8 @@ type PartnerCreateKeyInput struct {
 	Scopes []string
 
 	ExpiresInDays *int64
+
+	Environment *string
 }
 
 func (in PartnerCreateKeyInput) values() map[string]any {
@@ -2386,15 +2393,19 @@ func (in PartnerCreateKeyInput) values() map[string]any {
 	if in.ExpiresInDays != nil {
 		values["expires_in_days"] = *in.ExpiresInDays
 	}
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
 	return values
 }
 
 // PartnerCreateKey: Create a key for an account. An API key for the account, shown once in key
 // and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the
-// account's tenant, over MCP, A2A and REST, as any key. scopes: some of the ones your contract
-// allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or
-// none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account
-// plan's keys.
+// account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the
+// account's test environment instead (a tenant of its own, on the same plan, never billed; its
+// keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it
+// says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
+// another scope; 409 api_key_limit_reached past the account plan's keys.
 func (c *Client) PartnerCreateKey(ctx context.Context, in PartnerCreateKeyInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_partner_create_key", in.values())
 }
@@ -2404,12 +2415,17 @@ type PartnerRotateKeyInput struct {
 	Account string
 
 	KeyID string
+
+	Environment *string
 }
 
 func (in PartnerRotateKeyInput) values() map[string]any {
 	values := map[string]any{}
 	values["account"] = in.Account
 	values["key_id"] = in.KeyID
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
 	return values
 }
 
@@ -2425,12 +2441,17 @@ type PartnerRevokeKeyInput struct {
 	Account string
 
 	KeyID string
+
+	Environment *string
 }
 
 func (in PartnerRevokeKeyInput) values() map[string]any {
 	values := map[string]any{}
 	values["account"] = in.Account
 	values["key_id"] = in.KeyID
+	if in.Environment != nil {
+		values["environment"] = *in.Environment
+	}
 	return values
 }
 

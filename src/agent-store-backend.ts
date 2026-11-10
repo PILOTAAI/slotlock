@@ -58,7 +58,7 @@ import type {
   WeeklyAvailabilityRule,
 } from './types.js';
 import { maintainSlotlockTenant } from './maintenance.js';
-import type { SlotlockApiKeyScope } from './api-keys.js';
+import { SLOTLOCK_TEST_TENANT_SUFFIX, type SlotlockApiKeyScope } from './api-keys.js';
 import {
   type SlotlockPartnerAccount,
   type SlotlockPartnerStore,
@@ -1658,7 +1658,8 @@ export function createSlotlockStoreApplicationBackend(
     const { partners, partner } = partnerOf(context);
     const tenantRef = await partners.tenantOf(partner, input.account as string);
     if (!tenantRef) throw new SlotlockAgentOperationError('account_not_found', 404);
-    return { partners, partner, tenantRef };
+    // Its test environment (RFC 0003 G9): a tenant of its own, on the same plan, never billed.
+    return { partners, partner, tenantRef: input.environment === 'test' ? `${tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}` : tenantRef };
   }
 
   return {

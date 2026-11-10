@@ -93,10 +93,10 @@ public sealed partial class SlotlockClient
         ["slotlock_partner_get_account"] = new("GET", "/v1/partner/accounts/{account}", ["account"], []),
         ["slotlock_partner_put_account"] = new("PUT", "/v1/partner/accounts/{account}", ["account"], []),
         ["slotlock_partner_list_accounts"] = new("GET", "/v1/partner/accounts", [], []),
-        ["slotlock_partner_list_keys"] = new("GET", "/v1/partner/accounts/{account}/keys", ["account"], []),
+        ["slotlock_partner_list_keys"] = new("GET", "/v1/partner/accounts/{account}/keys", ["account"], ["environment"]),
         ["slotlock_partner_create_key"] = new("POST", "/v1/partner/accounts/{account}/keys", ["account"], []),
         ["slotlock_partner_rotate_key"] = new("POST", "/v1/partner/accounts/{account}/keys/{key_id}/rotate", ["account", "key_id"], []),
-        ["slotlock_partner_revoke_key"] = new("DELETE", "/v1/partner/accounts/{account}/keys/{key_id}", ["account", "key_id"], []),
+        ["slotlock_partner_revoke_key"] = new("DELETE", "/v1/partner/accounts/{account}/keys/{key_id}", ["account", "key_id"], ["environment"]),
         ["slotlock_partner_suspend_account"] = new("POST", "/v1/partner/accounts/{account}/suspend", ["account"], []),
         ["slotlock_partner_unsuspend_account"] = new("POST", "/v1/partner/accounts/{account}/unsuspend", ["account"], []),
         ["slotlock_partner_erase_account"] = new("POST", "/v1/partner/accounts/{account}/erase", ["account"], []),
@@ -2337,15 +2337,18 @@ public sealed partial class SlotlockClient
     /// themselves.
     /// </remarks>
     /// <param name="account">account</param>
+    /// <param name="environment">environment</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> PartnerListKeysAsync(
         string account,
+        Optional<string> environment = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["account"] = Json.ToNode(account);
+        if (environment.HasValue) values["environment"] = Json.ToNode(environment.Value);
         return CallAsync("slotlock_partner_list_keys", values, cancellationToken);
     }
 
@@ -2353,14 +2356,17 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// An API key for the account, shown once in key and never again; only its SHA-256 is kept.
     /// Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
-    /// any key. scopes: some of the ones your contract allows (read and write unless it says), by
-    /// default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
-    /// another scope; 409 api_key_limit_reached past the account plan's keys.
+    /// any key. environment: test makes it in the account's test environment instead (a tenant of
+    /// its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
+    /// ones your contract allows (read and write unless it says), by default all of them;
+    /// expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
+    /// api_key_limit_reached past the account plan's keys.
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="name">name</param>
     /// <param name="scopes">scopes</param>
     /// <param name="expiresInDays">expires_in_days</param>
+    /// <param name="environment">environment</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -2369,6 +2375,7 @@ public sealed partial class SlotlockClient
         string name,
         Optional<IEnumerable<string>> scopes = default,
         Optional<long> expiresInDays = default,
+        Optional<string> environment = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -2376,6 +2383,7 @@ public sealed partial class SlotlockClient
         values["name"] = Json.ToNode(name);
         if (scopes.HasValue) values["scopes"] = Json.ToNode(scopes.Value);
         if (expiresInDays.HasValue) values["expires_in_days"] = Json.ToNode(expiresInDays.Value);
+        if (environment.HasValue) values["environment"] = Json.ToNode(environment.Value);
         return CallAsync("slotlock_partner_create_key", values, cancellationToken);
     }
 
@@ -2386,17 +2394,20 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="keyId">key_id</param>
+    /// <param name="environment">environment</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> PartnerRotateKeyAsync(
         string account,
         string keyId,
+        Optional<string> environment = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["account"] = Json.ToNode(account);
         values["key_id"] = Json.ToNode(keyId);
+        if (environment.HasValue) values["environment"] = Json.ToNode(environment.Value);
         return CallAsync("slotlock_partner_rotate_key", values, cancellationToken);
     }
 
@@ -2407,17 +2418,20 @@ public sealed partial class SlotlockClient
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="keyId">key_id</param>
+    /// <param name="environment">environment</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> PartnerRevokeKeyAsync(
         string account,
         string keyId,
+        Optional<string> environment = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
         values["account"] = Json.ToNode(account);
         values["key_id"] = Json.ToNode(keyId);
+        if (environment.HasValue) values["environment"] = Json.ToNode(environment.Value);
         return CallAsync("slotlock_partner_revoke_key", values, cancellationToken);
     }
 

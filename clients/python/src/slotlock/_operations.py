@@ -559,7 +559,7 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/partner/accounts/{account}/keys",
         ("account",),
-        (),
+        ("environment",),
     ),
     "slotlock_partner_create_key": Operation(
         "slotlock_partner_create_key",
@@ -580,7 +580,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/partner/accounts/{account}/keys/{key_id}",
         ("account", "key_id"),
-        (),
+        ("environment",),
     ),
     "slotlock_partner_suspend_account": Operation(
         "slotlock_partner_suspend_account",
@@ -2037,13 +2037,15 @@ class Operations(Transport):
         values: dict[str, Any] = {}
         return self.call("slotlock_partner_list_accounts", values)
 
-    def partner_list_keys(self, account: str) -> dict[str, Any]:
+    def partner_list_keys(self, account: str, *, environment: str | None = None) -> dict[str, Any]:
         """List an account's keys.
 
         The account's API keys, revoked and expired ones included, newest first; never the keys
         themselves.
         """
         values: dict[str, Any] = {"account": account}
+        if environment is not None:
+            values["environment"] = environment
         return self.call("slotlock_partner_list_keys", values)
 
     def partner_create_key(
@@ -2053,38 +2055,59 @@ class Operations(Transport):
         name: str,
         scopes: list[str] | None = None,
         expires_in_days: int | None = None,
+        environment: str | None = None,
     ) -> dict[str, Any]:
         """Create a key for an account.
 
         An API key for the account, shown once in key and never again; only its SHA-256 is kept.
         Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
-        any key. scopes: some of the ones your contract allows (read and write unless it says), by
-        default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
-        another scope; 409 api_key_limit_reached past the account plan's keys.
+        any key. environment: test makes it in the account's test environment instead (a tenant of
+        its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
+        ones your contract allows (read and write unless it says), by default all of them;
+        expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
+        api_key_limit_reached past the account plan's keys.
         """
         values: dict[str, Any] = {"account": account, "name": name}
         if scopes is not None:
             values["scopes"] = scopes
         if expires_in_days is not None:
             values["expires_in_days"] = expires_in_days
+        if environment is not None:
+            values["environment"] = environment
         return self.call("slotlock_partner_create_key", values)
 
-    def partner_rotate_key(self, account: str, key_id: str) -> dict[str, Any]:
+    def partner_rotate_key(
+        self,
+        account: str,
+        key_id: str,
+        *,
+        environment: str | None = None,
+    ) -> dict[str, Any]:
         """Rotate an account's key.
 
         A new secret for one of the account's active keys, shown once; the old one stops at once.
         The key keeps its id and what it booked. 404 key_not_found otherwise.
         """
         values: dict[str, Any] = {"account": account, "key_id": key_id}
+        if environment is not None:
+            values["environment"] = environment
         return self.call("slotlock_partner_rotate_key", values)
 
-    def partner_revoke_key(self, account: str, key_id: str) -> dict[str, Any]:
+    def partner_revoke_key(
+        self,
+        account: str,
+        key_id: str,
+        *,
+        environment: str | None = None,
+    ) -> dict[str, Any]:
         """Revoke an account's key.
 
         Revoke one of the account's keys at once; revoking it again changes nothing. 404
         key_not_found otherwise.
         """
         values: dict[str, Any] = {"account": account, "key_id": key_id}
+        if environment is not None:
+            values["environment"] = environment
         return self.call("slotlock_partner_revoke_key", values)
 
     def partner_suspend_account(self, account: str, *, reason: str | None = None) -> dict[str, Any]:

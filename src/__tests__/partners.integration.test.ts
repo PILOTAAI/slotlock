@@ -159,6 +159,18 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
     });
     expect(((await call('partnerListKeys', { account: 'user-1' })) as { keys: unknown[] }).keys).toHaveLength(2);
     const rotated = (await call('partnerRotateKey', { account: 'user-1', key_id: first.api_key.id })) as { key: string };
+    // Its test environment: a key that acts in the account's ~test tenant, apart from its live keys.
+    const testKey = (await call('partnerCreateKey', { account: 'user-1', name: 'Trial', environment: 'test' })) as {
+      key: string;
+      api_key: { id: string };
+    };
+    expect(testKey.key).toMatch(/^slk_test_/);
+    expect(await authenticateKey(bearer(testKey.key))).toMatchObject({ tenantRef: `${tenantRef}~test` });
+    expect(((await call('partnerListKeys', { account: 'user-1', environment: 'test' })) as { keys: unknown[] }).keys).toHaveLength(1);
+    await expect(call('partnerRevokeKey', { account: 'user-1', key_id: testKey.api_key.id })).rejects.toMatchObject({ code: 'key_not_found' });
+    expect(await call('partnerRevokeKey', { account: 'user-1', key_id: testKey.api_key.id, environment: 'test' })).toMatchObject({
+      api_key: { revoked_at: expect.any(String) },
+    });
     expect(await authenticateKey(bearer(first.key))).toBeNull();
     expect(await authenticateKey(bearer(rotated.key))).toMatchObject({ tenantRef });
 

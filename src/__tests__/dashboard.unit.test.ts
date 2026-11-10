@@ -2482,6 +2482,13 @@ describe('the plan page', () => {
     // Plans and billing are Live's: the Test plan page says so, and changes nothing.
     const plan = await (await get(target, '/base/dashboard/plan', test)).text();
     expect(plan).toContain('never billed');
+    expect(plan).not.toContain('Test usage this month'); // this dashboard does not meter
+    // With metering, the test environment's own use, read from its own tenant.
+    const usage = vi.fn(async () => [{ day: '2026-10-10', metric: 'operations' as const, keyId: null, origin: 'rest', count: 7 }]);
+    const metered = dashboard({ usage: true, resources: { ...resources.store, usage }, billing: { ...(target as unknown as { billing?: never }).billing, plan: async () => null, checkout: vi.fn(), portal: vi.fn(), prices: { month: '$10', year: '$100' }, contact: 'mailto:founder@example.com', formOrigins: ['https://checkout.stripe.com'] } as never });
+    const testPage = await (await get(metered, '/base/dashboard/plan', test)).text();
+    expect(testPage).toContain('Test usage this month');
+    expect(usage).toHaveBeenCalledWith('github:4242~test', expect.any(String), expect.any(String));
     expect(plan).not.toContain('action="/base/dashboard/plan/upgrade"');
     for (const path of ['/base/dashboard/plan/upgrade', '/base/dashboard/plan/manage']) {
       expect((await post(target, path, { csrf: await csrf(target, test), interval: 'month' }, test)).status).toBe(400);

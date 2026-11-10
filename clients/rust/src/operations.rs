@@ -559,7 +559,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/partner/accounts/{account}/keys",
         path_params: &["account"],
-        query: &[],
+        query: &["environment"],
     },
     Operation {
         name: "slotlock_partner_create_key",
@@ -580,7 +580,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/partner/accounts/{account}/keys/{key_id}",
         path_params: &["account", "key_id"],
-        query: &[],
+        query: &["environment"],
     },
     Operation {
         name: "slotlock_partner_suspend_account",
@@ -1387,6 +1387,8 @@ pub struct PartnerListAccountsInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PartnerListKeysInput {
     pub account: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// The arguments of [`Client::partner_create_key`].
@@ -1398,6 +1400,8 @@ pub struct PartnerCreateKeyInput {
     pub scopes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in_days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// The arguments of [`Client::partner_rotate_key`].
@@ -1405,6 +1409,8 @@ pub struct PartnerCreateKeyInput {
 pub struct PartnerRotateKeyInput {
     pub account: String,
     pub key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// The arguments of [`Client::partner_revoke_key`].
@@ -1412,6 +1418,8 @@ pub struct PartnerRotateKeyInput {
 pub struct PartnerRevokeKeyInput {
     pub account: String,
     pub key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// The arguments of [`Client::partner_suspend_account`].
@@ -2227,9 +2235,11 @@ impl Client {
     ///
     /// An API key for the account, shown once in key and never again; only its SHA-256 is kept.
     /// Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as
-    /// any key. scopes: some of the ones your contract allows (read and write unless it says), by
-    /// default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for
-    /// another scope; 409 api_key_limit_reached past the account plan's keys.
+    /// any key. environment: test makes it in the account's test environment instead (a tenant of
+    /// its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the
+    /// ones your contract allows (read and write unless it says), by default all of them;
+    /// expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
+    /// api_key_limit_reached past the account plan's keys.
     pub fn partner_create_key(&self, input: &PartnerCreateKeyInput) -> Result<Value, Error> {
         self.call("slotlock_partner_create_key", serde_json::to_value(input)?)
     }

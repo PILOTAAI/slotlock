@@ -16292,6 +16292,18 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9._-]{1,128}$"
             }
+          },
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "live",
+                "test"
+              ]
+            }
           }
         ],
         "responses": {
@@ -16416,7 +16428,7 @@
       "post": {
         "operationId": "slotlock_partner_create_key",
         "summary": "Create a key for an account",
-        "description": "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
+        "description": "An API key for the account, shown once in key and never again; only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over MCP, A2A and REST, as any key. environment: test makes it in the account's test environment instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_). scopes: some of the ones your contract allows (read and write unless it says), by default all of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's keys.",
         "tags": [
           "Partner"
         ],
@@ -16450,6 +16462,13 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 3650
+                  },
+                  "environment": {
+                    "type": "string",
+                    "enum": [
+                      "live",
+                      "test"
+                    ]
                   }
                 },
                 "required": [
@@ -16481,7 +16500,7 @@
                   "properties": {
                     "key": {
                       "type": "string",
-                      "pattern": "^slk_[0-9A-Za-z]{46}$"
+                      "pattern": "^slk_(test_)?[0-9A-Za-z]{46}$"
                     },
                     "api_key": {
                       "type": "object",
@@ -16610,7 +16629,15 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                  "environment": {
+                    "type": "string",
+                    "enum": [
+                      "live",
+                      "test"
+                    ]
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
@@ -16647,7 +16674,7 @@
                   "properties": {
                     "key": {
                       "type": "string",
-                      "pattern": "^slk_[0-9A-Za-z]{46}$"
+                      "pattern": "^slk_(test_)?[0-9A-Za-z]{46}$"
                     },
                     "api_key": {
                       "type": "object",
@@ -16787,6 +16814,18 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "live",
+                "test"
+              ]
             }
           }
         ],

@@ -90,10 +90,10 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_partner_get_account", new Operation("GET", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
           Map.entry("slotlock_partner_put_account", new Operation("PUT", "/v1/partner/accounts/{account}", List.of("account"), List.of())),
           Map.entry("slotlock_partner_list_accounts", new Operation("GET", "/v1/partner/accounts", List.of(), List.of())),
-          Map.entry("slotlock_partner_list_keys", new Operation("GET", "/v1/partner/accounts/{account}/keys", List.of("account"), List.of())),
+          Map.entry("slotlock_partner_list_keys", new Operation("GET", "/v1/partner/accounts/{account}/keys", List.of("account"), List.of("environment"))),
           Map.entry("slotlock_partner_create_key", new Operation("POST", "/v1/partner/accounts/{account}/keys", List.of("account"), List.of())),
           Map.entry("slotlock_partner_rotate_key", new Operation("POST", "/v1/partner/accounts/{account}/keys/{key_id}/rotate", List.of("account", "key_id"), List.of())),
-          Map.entry("slotlock_partner_revoke_key", new Operation("DELETE", "/v1/partner/accounts/{account}/keys/{key_id}", List.of("account", "key_id"), List.of())),
+          Map.entry("slotlock_partner_revoke_key", new Operation("DELETE", "/v1/partner/accounts/{account}/keys/{key_id}", List.of("account", "key_id"), List.of("environment"))),
           Map.entry("slotlock_partner_suspend_account", new Operation("POST", "/v1/partner/accounts/{account}/suspend", List.of("account"), List.of())),
           Map.entry("slotlock_partner_unsuspend_account", new Operation("POST", "/v1/partner/accounts/{account}/unsuspend", List.of("account"), List.of())),
           Map.entry("slotlock_partner_erase_account", new Operation("POST", "/v1/partner/accounts/{account}/erase", List.of("account"), List.of())),
@@ -2147,27 +2147,42 @@ public abstract class SlotlockOperations {
    * first; never the keys themselves.
    *
    * @param account {@code account}, string
+   * @param optional the optional arguments, or null: {@code environment} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerListKeys(String account, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    putOptional(values, optional, Set.of("environment"), "slotlock_partner_list_keys");
+    return call("slotlock_partner_list_keys", values);
+  }
+
+  /**
+   * List an account's keys. The account's API keys, revoked and expired ones included, newest
+   * first; never the keys themselves.
+   *
+   * @param account {@code account}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> partnerListKeys(String account) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("account", account);
-    return call("slotlock_partner_list_keys", values);
+    return partnerListKeys(account, null);
   }
 
   /**
    * Create a key for an account. An API key for the account, shown once in key and never again;
    * only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over
-   * MCP, A2A and REST, as any key. scopes: some of the ones your contract allows (read and write
-   * unless it says), by default all of them; expires_in_days: 1-3650, or none. 403
-   * scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's
-   * keys.
+   * MCP, A2A and REST, as any key. environment: test makes it in the account's test environment
+   * instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_).
+   * scopes: some of the ones your contract allows (read and write unless it says), by default all
+   * of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
+   * api_key_limit_reached past the account plan's keys.
    *
    * @param account {@code account}, string
    * @param name {@code name}, string
    * @param optional the optional arguments, or null: {@code scopes} (list of string), {@code
-   * expires_in_days} (integer)
+   * expires_in_days} (integer), {@code environment} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -2175,17 +2190,18 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("account", account);
     values.put("name", name);
-    putOptional(values, optional, Set.of("scopes", "expires_in_days"), "slotlock_partner_create_key");
+    putOptional(values, optional, Set.of("scopes", "expires_in_days", "environment"), "slotlock_partner_create_key");
     return call("slotlock_partner_create_key", values);
   }
 
   /**
    * Create a key for an account. An API key for the account, shown once in key and never again;
    * only its SHA-256 is kept. Give it to your user's calls: it acts in the account's tenant, over
-   * MCP, A2A and REST, as any key. scopes: some of the ones your contract allows (read and write
-   * unless it says), by default all of them; expires_in_days: 1-3650, or none. 403
-   * scope_not_in_contract for another scope; 409 api_key_limit_reached past the account plan's
-   * keys.
+   * MCP, A2A and REST, as any key. environment: test makes it in the account's test environment
+   * instead (a tenant of its own, on the same plan, never billed; its keys start slk_test_).
+   * scopes: some of the ones your contract allows (read and write unless it says), by default all
+   * of them; expires_in_days: 1-3650, or none. 403 scope_not_in_contract for another scope; 409
+   * api_key_limit_reached past the account plan's keys.
    *
    * @param account {@code account}, string
    * @param name {@code name}, string
@@ -2202,14 +2218,47 @@ public abstract class SlotlockOperations {
    *
    * @param account {@code account}, string
    * @param keyId {@code key_id}, string
+   * @param optional the optional arguments, or null: {@code environment} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerRotateKey(String account, String keyId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("account", account);
+    values.put("key_id", keyId);
+    putOptional(values, optional, Set.of("environment"), "slotlock_partner_rotate_key");
+    return call("slotlock_partner_rotate_key", values);
+  }
+
+  /**
+   * Rotate an account's key. A new secret for one of the account's active keys, shown once; the
+   * old one stops at once. The key keeps its id and what it booked. 404 key_not_found otherwise.
+   *
+   * @param account {@code account}, string
+   * @param keyId {@code key_id}, string
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> partnerRotateKey(String account, String keyId) {
+    return partnerRotateKey(account, keyId, null);
+  }
+
+  /**
+   * Revoke an account's key. Revoke one of the account's keys at once; revoking it again changes
+   * nothing. 404 key_not_found otherwise.
+   *
+   * @param account {@code account}, string
+   * @param keyId {@code key_id}, string
+   * @param optional the optional arguments, or null: {@code environment} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> partnerRevokeKey(String account, String keyId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("account", account);
     values.put("key_id", keyId);
-    return call("slotlock_partner_rotate_key", values);
+    putOptional(values, optional, Set.of("environment"), "slotlock_partner_revoke_key");
+    return call("slotlock_partner_revoke_key", values);
   }
 
   /**
@@ -2222,10 +2271,7 @@ public abstract class SlotlockOperations {
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> partnerRevokeKey(String account, String keyId) {
-    Map<String, Object> values = new LinkedHashMap<>();
-    values.put("account", account);
-    values.put("key_id", keyId);
-    return call("slotlock_partner_revoke_key", values);
+    return partnerRevokeKey(account, keyId, null);
   }
 
   /**
