@@ -81,6 +81,26 @@ versioning.
   their values. The dashboard's resource page edits the profile and shows the name in place of the
   reference. The privacy notice lists names, descriptions, labels and attributes as calendar
   content. In the OpenAPI document and the five clients. Run `slotlock migrate`.
+- Locations and groups (RFC 0003 G2, G3). A location is a place in a tree of the tenant's own
+  (`slotlock.locations`: at most 5 levels and 1,000 a tenant, held by a guard trigger under the
+  tenant's lock, which also refuses a location under itself), and a resource is at one at most
+  (`slotlock.resources.location_ref`, a foreign key added NOT VALID). A group is any set of the
+  tenant's resources (`slotlock.resource_groups` and `resource_group_members`: 500 a tenant, 20 a
+  resource), with no booking rule; a pool stays how resources are booked as a class. All three are
+  tenant tables under forced row-level security, erased with the tenant. A resource created at a
+  location without a time zone takes the nearest one its location, or one above it, has. The store
+  gains `listLocations`, `putLocation`, `updateLocation`, `deleteLocation` (`location_in_use` while
+  a resource is at it or a location is in it), `listGroups`, `putGroup`, `deleteGroup`,
+  `addGroupMember` and `removeGroupMember`; `createResource` and `updateResourceProfile` take a
+  `location`, and `listResources` narrows by `location` (with every location under it) and
+  `group`. The application API gains `GET`/`POST /v1/locations`, `PATCH`/`DELETE
+  /v1/locations/{location_ref}`, `GET`/`POST /v1/groups`, `DELETE /v1/groups/{group_ref}` and
+  `PUT`/`DELETE /v1/groups/{group_ref}/members/{resource_id}`; a resource carries its `location` and
+  `groups`, `POST /v1/resources` no longer defaults `timezone` in its schema (the store still gives
+  UTC), and `PATCH /v1/resources/{resource_id}` moves it. `slotlock_list_resources` shows agents each
+  resource's location (with its name) and groups, and narrows by `location` and `group`, with or
+  without a pool. `resource.created` and `resource.updated` carry the location. The dashboard's
+  resource page shows them. Run `slotlock migrate`.
 - Monthly quotas, off unless `SLOTLOCK_QUOTAS=on` (which needs `SLOTLOCK_USAGE=on`; RFC 0003
   part 3). A tenant on a plan may run so many operations and make so many bookings a UTC calendar
   month (`SLOTLOCK_PLAN_QUOTAS`): Free 25,000 and 1,000, refused at 100%; Developer 500,000 and

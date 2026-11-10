@@ -15,7 +15,7 @@ public sealed partial class SlotlockClient
     /// <summary>Every operation, by name: its method, path, path parameters and query parameters.</summary>
     internal static readonly IReadOnlyDictionary<string, Operation> Operations = new Dictionary<string, Operation>
     {
-        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool", "kind", "labels"]),
+        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool", "kind", "labels", "location", "group"]),
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "start", "end", "duration_minutes"]),
@@ -33,6 +33,15 @@ public sealed partial class SlotlockClient
         ["slotlock_get_resource"] = new("GET", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_update_resource"] = new("PATCH", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_delete_resource"] = new("DELETE", "/v1/resources/{resource_id}", ["resource_id"], []),
+        ["slotlock_list_locations"] = new("GET", "/v1/locations", [], []),
+        ["slotlock_create_location"] = new("POST", "/v1/locations", [], []),
+        ["slotlock_update_location"] = new("PATCH", "/v1/locations/{location_ref}", ["location_ref"], []),
+        ["slotlock_delete_location"] = new("DELETE", "/v1/locations/{location_ref}", ["location_ref"], []),
+        ["slotlock_list_groups"] = new("GET", "/v1/groups", [], []),
+        ["slotlock_create_group"] = new("POST", "/v1/groups", [], []),
+        ["slotlock_delete_group"] = new("DELETE", "/v1/groups/{group_ref}", ["group_ref"], []),
+        ["slotlock_add_group_member"] = new("PUT", "/v1/groups/{group_ref}/members/{resource_id}", ["group_ref", "resource_id"], []),
+        ["slotlock_remove_group_member"] = new("DELETE", "/v1/groups/{group_ref}/members/{resource_id}", ["group_ref", "resource_id"], []),
         ["slotlock_archive_resource"] = new("POST", "/v1/resources/{resource_id}/archive", ["resource_id"], []),
         ["slotlock_restore_resource"] = new("POST", "/v1/resources/{resource_id}/restore", ["resource_id"], []),
         ["slotlock_list_busy"] = new("GET", "/v1/resources/{resource_id}/busy", ["resource_id"], ["start", "end"]),
@@ -85,15 +94,19 @@ public sealed partial class SlotlockClient
     /// <remarks>
     /// List resources visible to the authenticated tenant principal, with what each says about
     /// itself: its name (show it rather than the reference), description, kind, capacity and
-    /// labels, and the pool it belongs to (a vehicle class, a room type). With kind, only
-    /// resources of that kind; with labels, only those with every label given. With pool, only
-    /// that pool's members, in the order slotlock_book_pool tries them.
+    /// labels, where it is (location), the groups it is in (a team, a department), and the pool
+    /// it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with
+    /// labels, only those with every label given; with location, only those there or at a
+    /// location in it; with group, only that group's. With pool, only that pool's members, in the
+    /// order slotlock_book_pool tries them.
     /// </remarks>
     /// <param name="cursor">cursor</param>
     /// <param name="limit">limit</param>
     /// <param name="pool">pool</param>
     /// <param name="kind">kind</param>
     /// <param name="labels">labels</param>
+    /// <param name="location">location</param>
+    /// <param name="group">group</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -103,6 +116,8 @@ public sealed partial class SlotlockClient
         Optional<string> pool = default,
         Optional<string> kind = default,
         Optional<IEnumerable<string>> labels = default,
+        Optional<string> location = default,
+        Optional<string> group = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -111,6 +126,8 @@ public sealed partial class SlotlockClient
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
+        if (group.HasValue) values["group"] = Json.ToNode(group.Value);
         return CallAsync("slotlock_list_resources", values, cancellationToken);
     }
 
@@ -127,18 +144,22 @@ public sealed partial class SlotlockClient
             cancellationToken: cancellationToken,
             pool: default,
             kind: default,
-            labels: default);
+            labels: default,
+            location: default,
+            group: default);
 
     /// <summary>Create or update a resource.</summary>
     /// <remarks>
     /// Create the resource with this external reference, or update its time zone, and the profile
-    /// fields given, if the tenant already has it. Repeating the call changes nothing more.
-    /// visibility is shared (the default: agents list and book it) or private (agents never see
-    /// it), fixed at creation: naming another for an existing resource answers 409
-    /// resource_visibility_conflict. Its profile is optional: a name agents and people see
-    /// instead of the reference, a description, its kind (person, room, desk, space, vehicle,
-    /// machine, equipment, service or other: a hint, never a rule), its capacity (informational),
-    /// up to 20 labels to find it by, and attributes you want back.
+    /// fields and location given, if the tenant already has it. Without a time zone, a new
+    /// resource takes the nearest one its location, or a location above it, has, else UTC; a
+    /// location the tenant does not have answers 404 location_not_found. Repeating the call
+    /// changes nothing more. visibility is shared (the default: agents list and book it) or
+    /// private (agents never see it), fixed at creation: naming another for an existing resource
+    /// answers 409 resource_visibility_conflict. Its profile is optional: a name agents and
+    /// people see instead of the reference, a description, its kind (person, room, desk, space,
+    /// vehicle, machine, equipment, service or other: a hint, never a rule), its capacity
+    /// (informational), up to 20 labels to find it by, and attributes you want back.
     /// </remarks>
     /// <param name="externalRef">external_ref</param>
     /// <param name="timezone">timezone</param>
@@ -149,6 +170,7 @@ public sealed partial class SlotlockClient
     /// <param name="capacity">capacity Null clears it; leave it out to keep it.</param>
     /// <param name="labels">labels</param>
     /// <param name="attributes">attributes</param>
+    /// <param name="location">location</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -162,6 +184,7 @@ public sealed partial class SlotlockClient
         Optional<long?> capacity = default,
         Optional<IEnumerable<string>> labels = default,
         Optional<JsonObject> attributes = default,
+        Optional<string> location = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -174,6 +197,7 @@ public sealed partial class SlotlockClient
         if (capacity.HasValue) values["capacity"] = Json.ToNode(capacity.Value);
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         if (attributes.HasValue) values["attributes"] = Json.ToNode(attributes.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         return CallAsync("slotlock_create_resource", values, cancellationToken);
     }
 
@@ -194,7 +218,8 @@ public sealed partial class SlotlockClient
             kind: default,
             capacity: default,
             labels: default,
-            attributes: default);
+            attributes: default,
+            location: default);
 
     /// <summary>Get free-busy.</summary>
     /// <remarks>
@@ -730,9 +755,10 @@ public sealed partial class SlotlockClient
 
     /// <summary>Change a resource's profile.</summary>
     /// <remarks>
-    /// Change a resource's name, description, kind, capacity, labels or attributes: the fields
-    /// given, keeping the rest. null clears a name, description or capacity; [] and {} clear
-    /// labels and attributes. The feed's resource.updated names the fields that changed
+    /// Change a resource's name, description, kind, capacity, labels, attributes or location: the
+    /// fields given, keeping the rest. null clears a name, description, capacity or location; []
+    /// and {} clear labels and attributes. A location the tenant does not have answers 404
+    /// location_not_found. The feed's resource.updated names the fields that changed
     /// (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
     /// naming the field.
     /// </remarks>
@@ -743,6 +769,7 @@ public sealed partial class SlotlockClient
     /// <param name="capacity">capacity Null clears it; leave it out to keep it.</param>
     /// <param name="labels">labels</param>
     /// <param name="attributes">attributes</param>
+    /// <param name="location">location Null clears it; leave it out to keep it.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
     /// <exception cref="SlotlockException">The server refused the call.</exception>
@@ -754,6 +781,7 @@ public sealed partial class SlotlockClient
         Optional<long?> capacity = default,
         Optional<IEnumerable<string>> labels = default,
         Optional<JsonObject> attributes = default,
+        Optional<string?> location = default,
         CancellationToken cancellationToken = default)
     {
         var values = new JsonObject();
@@ -764,6 +792,7 @@ public sealed partial class SlotlockClient
         if (capacity.HasValue) values["capacity"] = Json.ToNode(capacity.Value);
         if (labels.HasValue) values["labels"] = Json.ToNode(labels.Value);
         if (attributes.HasValue) values["attributes"] = Json.ToNode(attributes.Value);
+        if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         return CallAsync("slotlock_update_resource", values, cancellationToken);
     }
 
@@ -786,6 +815,195 @@ public sealed partial class SlotlockClient
         var values = new JsonObject();
         values["resource_id"] = Json.ToNode(resourceId);
         return CallAsync("slotlock_delete_resource", values, cancellationToken);
+    }
+
+    /// <summary>List locations.</summary>
+    /// <remarks>
+    /// The tenant's locations, each after the one it is in (depth first), with how many resources
+    /// are at each. A tree of at most 5 levels and 1000 locations: a region, a site, a building,
+    /// a floor, a zone, or whatever yours are.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListLocationsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_locations", values, cancellationToken);
+    }
+
+    /// <summary>Create or update a location.</summary>
+    /// <remarks>
+    /// Create the location with this reference, or change its name, and the parent and time zone
+    /// given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep
+    /// past 5 levels, location_cycle under itself, location_limit_reached past 1000.
+    /// </remarks>
+    /// <param name="ref">ref</param>
+    /// <param name="name">name</param>
+    /// <param name="parentRef">parent_ref Null clears it; leave it out to keep it.</param>
+    /// <param name="timezone">timezone Null clears it; leave it out to keep it.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CreateLocationAsync(
+        string @ref,
+        string name,
+        Optional<string?> parentRef = default,
+        Optional<string?> timezone = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["ref"] = Json.ToNode(@ref);
+        values["name"] = Json.ToNode(name);
+        if (parentRef.HasValue) values["parent_ref"] = Json.ToNode(parentRef.Value);
+        if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
+        return CallAsync("slotlock_create_location", values, cancellationToken);
+    }
+
+    /// <summary>Change a location.</summary>
+    /// <remarks>
+    /// Change a location's name, parent or time zone: the fields given. Refused as creating one
+    /// is.
+    /// </remarks>
+    /// <param name="locationRef">location_ref</param>
+    /// <param name="name">name</param>
+    /// <param name="parentRef">parent_ref Null clears it; leave it out to keep it.</param>
+    /// <param name="timezone">timezone Null clears it; leave it out to keep it.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> UpdateLocationAsync(
+        string locationRef,
+        Optional<string> name = default,
+        Optional<string?> parentRef = default,
+        Optional<string?> timezone = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["location_ref"] = Json.ToNode(locationRef);
+        if (name.HasValue) values["name"] = Json.ToNode(name.Value);
+        if (parentRef.HasValue) values["parent_ref"] = Json.ToNode(parentRef.Value);
+        if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
+        return CallAsync("slotlock_update_location", values, cancellationToken);
+    }
+
+    /// <summary>Delete a location.</summary>
+    /// <remarks>
+    /// Delete a location. Refused with 409 location_in_use while a resource is at it or a
+    /// location is in it: move them first. deleted is false when the tenant has no such location.
+    /// </remarks>
+    /// <param name="locationRef">location_ref</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteLocationAsync(
+        string locationRef,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["location_ref"] = Json.ToNode(locationRef);
+        return CallAsync("slotlock_delete_location", values, cancellationToken);
+    }
+
+    /// <summary>List groups.</summary>
+    /// <remarks>
+    /// The tenant's groups, by reference, with how many resources are in each: any sets you want
+    /// (a team, a department, a contract), at most 500. A group changes nothing about how its
+    /// resources are booked; a pool does that.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListGroupsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_groups", values, cancellationToken);
+    }
+
+    /// <summary>Create or update a group.</summary>
+    /// <remarks>
+    /// Create the group with this reference, or change its name, and its description when given.
+    /// 409 group_limit_reached past 500.
+    /// </remarks>
+    /// <param name="ref">ref</param>
+    /// <param name="name">name</param>
+    /// <param name="description">description Null clears it; leave it out to keep it.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CreateGroupAsync(
+        string @ref,
+        string name,
+        Optional<string?> description = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["ref"] = Json.ToNode(@ref);
+        values["name"] = Json.ToNode(name);
+        if (description.HasValue) values["description"] = Json.ToNode(description.Value);
+        return CallAsync("slotlock_create_group", values, cancellationToken);
+    }
+
+    /// <summary>Delete a group.</summary>
+    /// <remarks>
+    /// Delete a group; its resources stay as they are. deleted is false when the tenant has no
+    /// such group.
+    /// </remarks>
+    /// <param name="groupRef">group_ref</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteGroupAsync(
+        string groupRef,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["group_ref"] = Json.ToNode(groupRef);
+        return CallAsync("slotlock_delete_group", values, cancellationToken);
+    }
+
+    /// <summary>Put a resource in a group.</summary>
+    /// <remarks>
+    /// Put one of the tenant's resources in a group. added is false when it was in it already.
+    /// 404 group_not_found or resource_not_found; 409 resource_group_limit_reached past 20 groups
+    /// a resource.
+    /// </remarks>
+    /// <param name="groupRef">group_ref</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> AddGroupMemberAsync(
+        string groupRef,
+        string resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["group_ref"] = Json.ToNode(groupRef);
+        values["resource_id"] = Json.ToNode(resourceId);
+        return CallAsync("slotlock_add_group_member", values, cancellationToken);
+    }
+
+    /// <summary>Take a resource out of a group.</summary>
+    /// <remarks>
+    /// Take a resource out of a group. removed is false when it was not in it.
+    /// </remarks>
+    /// <param name="groupRef">group_ref</param>
+    /// <param name="resourceId">resource_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> RemoveGroupMemberAsync(
+        string groupRef,
+        string resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["group_ref"] = Json.ToNode(groupRef);
+        values["resource_id"] = Json.ToNode(resourceId);
+        return CallAsync("slotlock_remove_group_member", values, cancellationToken);
     }
 
     /// <summary>Archive a resource.</summary>

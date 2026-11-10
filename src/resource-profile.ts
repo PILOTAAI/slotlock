@@ -184,3 +184,118 @@ export function parseSlotlockResourceProfile(input: SlotlockResourceProfileInput
 export function slotlockResourceHasLabels(labels: readonly string[] | undefined, wanted: readonly string[]): boolean {
   return wanted.every((label) => labels?.includes(label) === true);
 }
+
+// Where a resource is, and the sets it is in (RFC 0003 G2, G3): a location is a place in a tree of
+// the tenant's own (one a resource), a group any set the tenant wants (many a resource). Neither
+// changes how a resource is booked; a pool does that.
+
+/** Locations a tenant may have. */
+export const SLOTLOCK_MAX_LOCATIONS = 1_000;
+/** Levels a location tree may have: a region, a site, a building, a floor, a zone. */
+export const SLOTLOCK_MAX_LOCATION_DEPTH = 5;
+/** Groups a tenant may have. */
+export const SLOTLOCK_MAX_RESOURCE_GROUPS = 500;
+/** Groups one resource may be in. */
+export const SLOTLOCK_MAX_GROUPS_PER_RESOURCE = 20;
+/** A location's or a group's reference, as a pool's: 1-100 of a-z, 0-9, `.`, `_` and `-`. */
+export const SLOTLOCK_GROUPING_REF = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
+/** A place a tenant's resources are at. */
+export interface SlotlockLocation {
+  ref: string;
+  name: string;
+  /** The location it is in; null at the top. */
+  parentRef: string | null;
+  /** The time zone a resource created here without its own takes; null to take its parent's. */
+  timezone: string | null;
+  /** How many resources are at it (not counting those below it). */
+  resources: number;
+}
+
+/** A set of a tenant's resources. */
+export interface SlotlockResourceGroup {
+  ref: string;
+  name: string;
+  description: string | null;
+  /** How many resources are in it. */
+  members: number;
+}
+
+function invalidGrouping(code: 'invalid_location' | 'invalid_group', field: string, message: string) {
+  return Object.assign(new Error(`Slotlock ${code === 'invalid_location' ? 'location' : 'group'} ${field} ${message}`), {
+    code,
+    field,
+  });
+}
+
+function groupingRef(code: 'invalid_location' | 'invalid_group', field: string, value: unknown): string {
+  if (typeof value !== 'string' || !SLOTLOCK_GROUPING_REF.test(value)) {
+    throw invalidGrouping(code, field, 'must be 1-100 of a-z, 0-9, ".", "_" and "-", starting with a letter or digit');
+  }
+  return value;
+}
+
+function groupingName(code: 'invalid_location' | 'invalid_group', value: unknown): string {
+  try {
+    const name = text('name', value, SLOTLOCK_RESOURCE_PROFILE_LIMITS.name, false);
+    if (name === null) throw invalid('name', 'must be given');
+    return name;
+  } catch (error) {
+    throw invalidGrouping(code, 'name', (error as Error).message.replace(/^Slotlock resource name /, ''));
+  }
+}
+
+/** Check a location as it is to be stored: refused with `invalid_location`, naming the field. */
+export function parseSlotlockLocation(input: {
+  ref: string;
+  name?: string;
+  parentRef?: string | null;
+  timezone?: string | null;
+}): { ref: string; name?: string; parentRef?: string | null; timezone?: string | null } {
+  const location: { ref: string; name?: string; parentRef?: string | null; timezone?: string | null } = {
+    ref: groupingRef('invalid_location', 'ref', input.ref),
+  };
+  if (input.name !== undefined) location.name = groupingName('invalid_location', input.name);
+  if (input.parentRef !== undefined) {
+    location.parentRef = input.parentRef === null ? null : groupingRef('invalid_location', 'parent', input.parentRef);
+    if (location.parentRef === location.ref) throw invalidGrouping('invalid_location', 'parent', 'must not be itself');
+  }
+  if (input.timezone !== undefined) {
+    if (input.timezone !== null) {
+      try {
+        if (typeof input.timezone !== 'string' || input.timezone.length > 100) throw new Error('no');
+        new Intl.DateTimeFormat('en-GB', { timeZone: input.timezone }).format(0);
+      } catch {
+        throw invalidGrouping('invalid_location', 'timezone', 'must be an IANA time zone, or null');
+      }
+    }
+    location.timezone = input.timezone;
+  }
+  return location;
+}
+
+/** Check a group as it is to be stored: refused with `invalid_group`, naming the field. */
+export function parseSlotlockResourceGroup(input: {
+  ref: string;
+  name: string;
+  description?: string | null;
+}): { ref: string; name: string; description: string | null } {
+  let description: string | null = null;
+  if (input.description !== undefined && input.description !== null) {
+    try {
+      description = text('description', input.description, SLOTLOCK_RESOURCE_PROFILE_LIMITS.description, true);
+    } catch (error) {
+      throw invalidGrouping('invalid_group', 'description', (error as Error).message.replace(/^Slotlock resource description /, ''));
+    }
+  }
+  return {
+    ref: groupingRef('invalid_group', 'ref', input.ref),
+    name: groupingName('invalid_group', input.name),
+    description,
+  };
+}
+
+/** Check a location or group reference given to find one: refused as its own kind's. */
+export function slotlockGroupingRef(code: 'invalid_location' | 'invalid_group', value: unknown): string {
+  return groupingRef(code, 'ref', value);
+}

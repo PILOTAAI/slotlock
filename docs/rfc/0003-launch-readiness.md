@@ -239,7 +239,7 @@ Three concepts, kept apart because they mean different things:
 
 **G1. Resource profile (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, except
 that the dashboard edits name, description, kind, capacity and labels while attributes are set over
-the API, and `location` and `groups` wait for G2 and G3. Columns on `slotlock.resources`, each
+the API. Columns on `slotlock.resources`, each
 optional:
 
 | Field | Bound | Use |
@@ -259,14 +259,18 @@ optional:
   rule is "ids, times and states, never titles", and a name may name a person.
 - The privacy notice lists resource names and descriptions under calendar content.
 
-**G2. Locations (T1).** `slotlock.locations (tenant_ref, ref, name, parent_ref, timezone)`, forced
+**G2. Locations (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below; `POST
+/v1/locations` creates or updates by reference, and the dashboard shows a resource's location but
+does not edit locations yet. `slotlock.locations (tenant_ref, ref, name, parent_ref, timezone)`, forced
 RLS like every tenant table; depth at most 5 (region, site, building, floor, zone); 1,000 per
 tenant; deleting one is refused while a resource or child uses it. A resource has at most one
 `location_ref`; a new resource takes its location's time zone when none is given. API:
 `GET/POST /v1/locations`, `PATCH` and `DELETE /v1/locations/{ref}`. A location filter includes the
 locations below it.
 
-**G3. Groups (T1).** `slotlock.resource_groups (tenant_ref, ref, name, description)` and
+**G3. Groups (T1).** Status: built on `claude/inspiring-dijkstra-bfvqif`, as below, with `DELETE
+/v1/groups/{ref}` too; membership changes are not on the feed yet, and the dashboard shows a
+resource's groups but does not edit them. `slotlock.resource_groups (tenant_ref, ref, name, description)` and
 `slotlock.resource_group_members (tenant_ref, group_ref, resource_id)`; 500 groups a tenant, 20
 groups a resource. API: `GET/POST /v1/groups`, `PUT` and `DELETE
 /v1/groups/{ref}/members/{resource_id}`. Pools stay as they are; a pool is not a group.

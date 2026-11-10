@@ -1,5 +1,7 @@
 import {
   SLOTLOCK_RESOURCE_PROFILE_FIELDS,
+  type SlotlockLocation,
+  type SlotlockResourceGroup,
   type SlotlockResourceProfileInput,
   slotlockResourceHasLabels,
 } from './resource-profile.js';
@@ -805,6 +807,8 @@ export function createSlotlockStoreAgentBackend(
       const cursor = parseResourceCursor(input.cursor);
       const kind = input.kind as SlotlockResource['kind'] | 'other' | undefined;
       const labels = input.labels as string[] | undefined;
+      const location = input.location as string | undefined;
+      const group = input.group as string | undefined;
       // What a resource says about itself, for an agent to show and choose by; its attributes are
       // the integrator's, and stay on the application API.
       const output = (resource: SlotlockResource) => ({
@@ -824,24 +828,37 @@ export function createSlotlockStoreAgentBackend(
         ...(resource.kind !== undefined ? { kind: resource.kind } : {}),
         ...(resource.capacity !== undefined ? { capacity: resource.capacity } : {}),
         ...(resource.labels !== undefined ? { labels: resource.labels } : {}),
+        ...(resource.location !== undefined
+          ? { location: { ref: resource.location, name: resource.locationName ?? resource.location } }
+          : {}),
+        ...(resource.groups !== undefined ? { groups: resource.groups } : {}),
       });
       if (typeof input.pool === 'string') {
-        return withTenant(store, context, async (tenantStore) => ({
-          resources: (
-            await tenantStore.listPoolMembers({
-              tenantRef: context.principal.tenantRef,
-              pool: input.pool as string,
-              visibility: 'shared',
-            })
-          )
-            .filter(
-              (resource) =>
-                (kind === undefined || (resource.kind ?? 'other') === kind) &&
-                (labels === undefined || slotlockResourceHasLabels(resource.labels, labels)),
+        return withTenant(store, context, async (tenantStore) => {
+          // A pool's members are filtered here: a location filter takes the locations under it.
+          const places =
+            location === undefined
+              ? null
+              : locationAndBelow(await tenantStore.listLocations({ tenantRef: context.principal.tenantRef }), location);
+          return {
+            resources: (
+              await tenantStore.listPoolMembers({
+                tenantRef: context.principal.tenantRef,
+                pool: input.pool as string,
+                visibility: 'shared',
+              })
             )
-            .map(output),
-          next_cursor: null,
-        }));
+              .filter(
+                (resource) =>
+                  (kind === undefined || (resource.kind ?? 'other') === kind) &&
+                  (labels === undefined || slotlockResourceHasLabels(resource.labels, labels)) &&
+                  (places === null || (resource.location !== undefined && places.has(resource.location))) &&
+                  (group === undefined || resource.groups?.includes(group) === true),
+              )
+              .map(output),
+            next_cursor: null,
+          };
+        });
       }
       return withTenant(store, context, async (tenantStore) => {
         const limit = input.limit as number;
@@ -852,6 +869,8 @@ export function createSlotlockStoreAgentBackend(
           ...(cursor !== undefined ? { after: cursor } : {}),
           ...(kind !== undefined ? { kind } : {}),
           ...(labels !== undefined ? { labels } : {}),
+          ...(location !== undefined ? { location } : {}),
+          ...(group !== undefined ? { group } : {}),
         });
         const page = resources.slice(0, limit);
         return {
@@ -1227,10 +1246,23 @@ export interface SlotlockStoreApplicationBackendOptions {
 function storeRefusal(error: unknown): unknown {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code !== 'string') return error;
-  if (code === 'invalid_resource_profile') {
+  if (code === 'invalid_resource_profile' || code === 'invalid_location' || code === 'invalid_group') {
     // Which field, so a client can say what to change.
     const field = (error as { field?: unknown }).field;
     return new SlotlockAgentOperationError(code, 400, typeof field === 'string' ? { field } : undefined);
+  }
+  if (code === 'location_not_found' || code === 'group_not_found' || code === 'resource_not_found') {
+    return new SlotlockAgentOperationError(code, 404);
+  }
+  if (
+    code === 'location_in_use' ||
+    code === 'location_too_deep' ||
+    code === 'location_cycle' ||
+    code === 'location_limit_reached' ||
+    code === 'group_limit_reached' ||
+    code === 'resource_group_limit_reached'
+  ) {
+    return new SlotlockAgentOperationError(code, 409);
   }
   if (
     code === 'resource_limit_reached' ||
@@ -1375,7 +1407,38 @@ function resourceOutput(resource: SlotlockResource) {
     capacity: resource.capacity ?? null,
     labels: resource.labels ?? [],
     attributes: resource.attributes ?? {},
+    location: resource.location ?? null,
+    groups: resource.groups ?? [],
   };
+}
+
+function locationOutput(location: SlotlockLocation) {
+  return {
+    ref: location.ref,
+    name: location.name,
+    parent_ref: location.parentRef,
+    timezone: location.timezone,
+    resources: location.resources,
+  };
+}
+
+function groupOutput(group: SlotlockResourceGroup) {
+  return { ref: group.ref, name: group.name, description: group.description, members: group.members };
+}
+
+/** The references of a location and every location under it, from the tenant's whole tree. */
+function locationAndBelow(locations: readonly SlotlockLocation[], ref: string): Set<string> {
+  const found = new Set([ref]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const location of locations) {
+      if (location.parentRef !== null && found.has(location.parentRef) && !found.has(location.ref)) {
+        found.add(location.ref);
+        grew = true;
+      }
+    }
+  }
+  return found;
 }
 
 /** The profile fields of an operation's input, as the store takes them; absent ones left out. */
@@ -1510,7 +1573,8 @@ export function createSlotlockStoreApplicationBackend(
             const resource = await tenant.createResource({
               tenantRef: tenantOf(context),
               externalRef: input.external_ref as string,
-              timezone: input.timezone as string,
+              ...(input.timezone !== undefined ? { timezone: input.timezone as string } : {}),
+              ...(input.location !== undefined ? { location: input.location as string } : {}),
               ...(input.visibility !== undefined
                 ? { visibility: input.visibility as 'shared' | 'private' }
                 : {}),
@@ -1538,12 +1602,135 @@ export function createSlotlockStoreApplicationBackend(
             tenantRef: tenantOf(context),
             id,
             profile: profileInput(input),
+            ...(input.location !== undefined ? { location: input.location as string | null } : {}),
           });
         } catch (error) {
           throw storeRefusal(error);
         }
         if (!resource) throw new SlotlockAgentOperationError('resource_not_found', 404);
         return { resource: resourceOutput(resource) };
+      }, WRITE);
+    },
+
+    async listLocations(context) {
+      return withTenant(store, context, async (tenant) => ({
+        locations: (await tenant.listLocations({ tenantRef: tenantOf(context) })).map(locationOutput),
+      }));
+    },
+
+    async createLocation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const location = await tenant.putLocation({
+            tenantRef: tenantOf(context),
+            ref: input.ref as string,
+            name: input.name as string,
+            ...(input.parent_ref !== undefined ? { parentRef: input.parent_ref as string | null } : {}),
+            ...(input.timezone !== undefined ? { timezone: input.timezone as string | null } : {}),
+          });
+          return { location: locationOutput(location) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async updateLocation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        let location: SlotlockLocation | null;
+        try {
+          location = await tenant.updateLocation({
+            tenantRef: tenantOf(context),
+            ref: input.location_ref as string,
+            ...(input.name !== undefined ? { name: input.name as string } : {}),
+            ...(input.parent_ref !== undefined ? { parentRef: input.parent_ref as string | null } : {}),
+            ...(input.timezone !== undefined ? { timezone: input.timezone as string | null } : {}),
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!location) throw new SlotlockAgentOperationError('location_not_found', 404);
+        return { location: locationOutput(location) };
+      }, WRITE);
+    },
+
+    async deleteLocation(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return {
+            deleted: await tenant.deleteLocation({ tenantRef: tenantOf(context), ref: input.location_ref as string }),
+          };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async listGroups(context) {
+      return withTenant(store, context, async (tenant) => ({
+        groups: (await tenant.listGroups({ tenantRef: tenantOf(context) })).map(groupOutput),
+      }));
+    },
+
+    async createGroup(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const group = await tenant.putGroup({
+            tenantRef: tenantOf(context),
+            ref: input.ref as string,
+            name: input.name as string,
+            ...(input.description !== undefined ? { description: input.description as string | null } : {}),
+          });
+          return { group: groupOutput(group) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async deleteGroup(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return { deleted: await tenant.deleteGroup({ tenantRef: tenantOf(context), ref: input.group_ref as string }) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async addGroupMember(context, input) {
+      const resourceId = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(resourceId)) throw new SlotlockAgentOperationError('resource_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return {
+            added: await tenant.addGroupMember({
+              tenantRef: tenantOf(context),
+              group: input.group_ref as string,
+              resourceId,
+            }),
+          };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      }, WRITE);
+    },
+
+    async removeGroupMember(context, input) {
+      const resourceId = input.resource_id as string;
+      if (!STORE_ID_PATTERN.test(resourceId)) return { removed: false };
+      return withTenant(store, context, async (tenant) => {
+        try {
+          return {
+            removed: await tenant.removeGroupMember({
+              tenantRef: tenantOf(context),
+              group: input.group_ref as string,
+              resourceId,
+            }),
+          };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
       }, WRITE);
     },
 

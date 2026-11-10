@@ -152,12 +152,17 @@ const RESOURCE_KIND = z.enum([
 const RESOURCE_LABEL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
 const MAX_RESOURCE_LABELS = 20;
 const MAX_RESOURCE_NAME = 200;
+/** A location's or a group's reference, as a pool's; a resource is in at most 20 groups. */
+const GROUPING_REF = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+const MAX_RESOURCE_GROUPS = 20;
 /** The tools' copy of the profile's kinds and bounds, for the test that holds it to resource-profile.ts. */
 export const SLOTLOCK_AGENT_RESOURCE_PROFILE = Object.freeze({
   kinds: RESOURCE_KIND.options,
   label: RESOURCE_LABEL,
   labels: MAX_RESOURCE_LABELS,
   name: MAX_RESOURCE_NAME,
+  groupingRef: GROUPING_REF,
+  groups: MAX_RESOURCE_GROUPS,
 });
 const IDEMPOTENCY_KEY = z.string().trim().min(1).max(200);
 const REVISION = z.number().int().positive();
@@ -1040,7 +1045,7 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_list_resources',
     title: 'List calendar resources',
     description:
-      'List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given. With pool, only that pool\'s members, in the order slotlock_book_pool tries them.',
+      'List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group\'s. With pool, only that pool\'s members, in the order slotlock_book_pool tries them.',
     input: z
       .object({
         cursor: z.string().max(500).optional(),
@@ -1048,6 +1053,8 @@ const OPERATION_DEFINITIONS = [
         pool: POOL.optional(),
         kind: RESOURCE_KIND.optional(),
         labels: z.array(RESOURCE_LABEL).min(1).max(MAX_RESOURCE_LABELS).optional(),
+        location: GROUPING_REF.optional(),
+        group: GROUPING_REF.optional(),
       })
       .strict(),
     output: z
@@ -1066,6 +1073,8 @@ const OPERATION_DEFINITIONS = [
                 kind: RESOURCE_KIND.optional(),
                 capacity: z.number().int().min(1).optional(),
                 labels: z.array(RESOURCE_LABEL).max(MAX_RESOURCE_LABELS).optional(),
+                location: z.object({ ref: GROUPING_REF, name: z.string().max(MAX_RESOURCE_NAME) }).strict().optional(),
+                groups: z.array(GROUPING_REF).max(MAX_RESOURCE_GROUPS).optional(),
               })
               .strict(),
           )

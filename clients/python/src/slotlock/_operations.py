@@ -13,7 +13,7 @@ OPERATIONS: dict[str, Operation] = {
         "GET",
         "/v1/resources",
         (),
-        ("cursor", "limit", "pool", "kind", "labels"),
+        ("cursor", "limit", "pool", "kind", "labels", "location", "group"),
     ),
     "slotlock_create_resource": Operation(
         "slotlock_create_resource",
@@ -132,6 +132,69 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/resources/{resource_id}",
         ("resource_id",),
+        (),
+    ),
+    "slotlock_list_locations": Operation(
+        "slotlock_list_locations",
+        "GET",
+        "/v1/locations",
+        (),
+        (),
+    ),
+    "slotlock_create_location": Operation(
+        "slotlock_create_location",
+        "POST",
+        "/v1/locations",
+        (),
+        (),
+    ),
+    "slotlock_update_location": Operation(
+        "slotlock_update_location",
+        "PATCH",
+        "/v1/locations/{location_ref}",
+        ("location_ref",),
+        (),
+    ),
+    "slotlock_delete_location": Operation(
+        "slotlock_delete_location",
+        "DELETE",
+        "/v1/locations/{location_ref}",
+        ("location_ref",),
+        (),
+    ),
+    "slotlock_list_groups": Operation(
+        "slotlock_list_groups",
+        "GET",
+        "/v1/groups",
+        (),
+        (),
+    ),
+    "slotlock_create_group": Operation(
+        "slotlock_create_group",
+        "POST",
+        "/v1/groups",
+        (),
+        (),
+    ),
+    "slotlock_delete_group": Operation(
+        "slotlock_delete_group",
+        "DELETE",
+        "/v1/groups/{group_ref}",
+        ("group_ref",),
+        (),
+    ),
+    "slotlock_add_group_member": Operation(
+        "slotlock_add_group_member",
+        "PUT",
+        "/v1/groups/{group_ref}/members/{resource_id}",
+        ("group_ref", "resource_id"),
+        (),
+    ),
+    "slotlock_remove_group_member": Operation(
+        "slotlock_remove_group_member",
+        "DELETE",
+        "/v1/groups/{group_ref}/members/{resource_id}",
+        ("group_ref", "resource_id"),
         (),
     ),
     "slotlock_archive_resource": Operation(
@@ -470,14 +533,18 @@ class Operations(Transport):
         pool: str | None = None,
         kind: str | None = None,
         labels: list[str] | None = None,
+        location: str | None = None,
+        group: str | None = None,
     ) -> dict[str, Any]:
         """List calendar resources.
 
         List resources visible to the authenticated tenant principal, with what each says about
         itself: its name (show it rather than the reference), description, kind, capacity and
-        labels, and the pool it belongs to (a vehicle class, a room type). With kind, only
-        resources of that kind; with labels, only those with every label given. With pool, only
-        that pool's members, in the order slotlock_book_pool tries them.
+        labels, where it is (location), the groups it is in (a team, a department), and the pool
+        it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with
+        labels, only those with every label given; with location, only those there or at a
+        location in it; with group, only that group's. With pool, only that pool's members, in the
+        order slotlock_book_pool tries them.
         """
         values: dict[str, Any] = {}
         if cursor is not None:
@@ -490,6 +557,10 @@ class Operations(Transport):
             values["kind"] = kind
         if labels is not None:
             values["labels"] = labels
+        if location is not None:
+            values["location"] = location
+        if group is not None:
+            values["group"] = group
         return self.call("slotlock_list_resources", values)
 
     def create_resource(
@@ -504,17 +575,20 @@ class Operations(Transport):
         capacity: int | None | Unset = UNSET,
         labels: list[str] | None = None,
         attributes: dict[str, Any] | None = None,
+        location: str | None = None,
     ) -> dict[str, Any]:
         """Create or update a resource.
 
         Create the resource with this external reference, or update its time zone, and the profile
-        fields given, if the tenant already has it. Repeating the call changes nothing more.
-        visibility is shared (the default: agents list and book it) or private (agents never see
-        it), fixed at creation: naming another for an existing resource answers 409
-        resource_visibility_conflict. Its profile is optional: a name agents and people see
-        instead of the reference, a description, its kind (person, room, desk, space, vehicle,
-        machine, equipment, service or other: a hint, never a rule), its capacity (informational),
-        up to 20 labels to find it by, and attributes you want back.
+        fields and location given, if the tenant already has it. Without a time zone, a new
+        resource takes the nearest one its location, or a location above it, has, else UTC; a
+        location the tenant does not have answers 404 location_not_found. Repeating the call
+        changes nothing more. visibility is shared (the default: agents list and book it) or
+        private (agents never see it), fixed at creation: naming another for an existing resource
+        answers 409 resource_visibility_conflict. Its profile is optional: a name agents and
+        people see instead of the reference, a description, its kind (person, room, desk, space,
+        vehicle, machine, equipment, service or other: a hint, never a rule), its capacity
+        (informational), up to 20 labels to find it by, and attributes you want back.
         """
         values: dict[str, Any] = {"external_ref": external_ref}
         if timezone is not None:
@@ -533,6 +607,8 @@ class Operations(Transport):
             values["labels"] = labels
         if attributes is not None:
             values["attributes"] = attributes
+        if location is not None:
+            values["location"] = location
         return self.call("slotlock_create_resource", values)
 
     def get_free_busy(self, *, resource_ids: list[str], start: str, end: str) -> dict[str, Any]:
@@ -878,12 +954,14 @@ class Operations(Transport):
         capacity: int | None | Unset = UNSET,
         labels: list[str] | None = None,
         attributes: dict[str, Any] | None = None,
+        location: str | None | Unset = UNSET,
     ) -> dict[str, Any]:
         """Change a resource's profile.
 
-        Change a resource's name, description, kind, capacity, labels or attributes: the fields
-        given, keeping the rest. null clears a name, description or capacity; [] and {} clear
-        labels and attributes. The feed's resource.updated names the fields that changed
+        Change a resource's name, description, kind, capacity, labels, attributes or location: the
+        fields given, keeping the rest. null clears a name, description, capacity or location; []
+        and {} clear labels and attributes. A location the tenant does not have answers 404
+        location_not_found. The feed's resource.updated names the fields that changed
         (profile_changed), never their values. 400 invalid_resource_profile outside the bounds,
         naming the field.
         """
@@ -900,6 +978,8 @@ class Operations(Transport):
             values["labels"] = labels
         if attributes is not None:
             values["attributes"] = attributes
+        if not isinstance(location, Unset):
+            values["location"] = location
         return self.call("slotlock_update_resource", values)
 
     def delete_resource(self, resource_id: str) -> dict[str, Any]:
@@ -913,6 +993,122 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"resource_id": resource_id}
         return self.call("slotlock_delete_resource", values)
+
+    def list_locations(self) -> dict[str, Any]:
+        """List locations.
+
+        The tenant's locations, each after the one it is in (depth first), with how many resources
+        are at each. A tree of at most 5 levels and 1000 locations: a region, a site, a building,
+        a floor, a zone, or whatever yours are.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_locations", values)
+
+    def create_location(
+        self,
+        *,
+        ref: str,
+        name: str,
+        parent_ref: str | None | Unset = UNSET,
+        timezone: str | None | Unset = UNSET,
+    ) -> dict[str, Any]:
+        """Create or update a location.
+
+        Create the location with this reference, or change its name, and the parent and time zone
+        given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep
+        past 5 levels, location_cycle under itself, location_limit_reached past 1000.
+        """
+        values: dict[str, Any] = {"ref": ref, "name": name}
+        if not isinstance(parent_ref, Unset):
+            values["parent_ref"] = parent_ref
+        if not isinstance(timezone, Unset):
+            values["timezone"] = timezone
+        return self.call("slotlock_create_location", values)
+
+    def update_location(
+        self,
+        location_ref: str,
+        *,
+        name: str | None = None,
+        parent_ref: str | None | Unset = UNSET,
+        timezone: str | None | Unset = UNSET,
+    ) -> dict[str, Any]:
+        """Change a location.
+
+        Change a location's name, parent or time zone: the fields given. Refused as creating one
+        is.
+        """
+        values: dict[str, Any] = {"location_ref": location_ref}
+        if name is not None:
+            values["name"] = name
+        if not isinstance(parent_ref, Unset):
+            values["parent_ref"] = parent_ref
+        if not isinstance(timezone, Unset):
+            values["timezone"] = timezone
+        return self.call("slotlock_update_location", values)
+
+    def delete_location(self, location_ref: str) -> dict[str, Any]:
+        """Delete a location.
+
+        Delete a location. Refused with 409 location_in_use while a resource is at it or a
+        location is in it: move them first. deleted is false when the tenant has no such location.
+        """
+        values: dict[str, Any] = {"location_ref": location_ref}
+        return self.call("slotlock_delete_location", values)
+
+    def list_groups(self) -> dict[str, Any]:
+        """List groups.
+
+        The tenant's groups, by reference, with how many resources are in each: any sets you want
+        (a team, a department, a contract), at most 500. A group changes nothing about how its
+        resources are booked; a pool does that.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_groups", values)
+
+    def create_group(
+        self,
+        *,
+        ref: str,
+        name: str,
+        description: str | None | Unset = UNSET,
+    ) -> dict[str, Any]:
+        """Create or update a group.
+
+        Create the group with this reference, or change its name, and its description when given.
+        409 group_limit_reached past 500.
+        """
+        values: dict[str, Any] = {"ref": ref, "name": name}
+        if not isinstance(description, Unset):
+            values["description"] = description
+        return self.call("slotlock_create_group", values)
+
+    def delete_group(self, group_ref: str) -> dict[str, Any]:
+        """Delete a group.
+
+        Delete a group; its resources stay as they are. deleted is false when the tenant has no
+        such group.
+        """
+        values: dict[str, Any] = {"group_ref": group_ref}
+        return self.call("slotlock_delete_group", values)
+
+    def add_group_member(self, group_ref: str, resource_id: str) -> dict[str, Any]:
+        """Put a resource in a group.
+
+        Put one of the tenant's resources in a group. added is false when it was in it already.
+        404 group_not_found or resource_not_found; 409 resource_group_limit_reached past 20 groups
+        a resource.
+        """
+        values: dict[str, Any] = {"group_ref": group_ref, "resource_id": resource_id}
+        return self.call("slotlock_add_group_member", values)
+
+    def remove_group_member(self, group_ref: str, resource_id: str) -> dict[str, Any]:
+        """Take a resource out of a group.
+
+        Take a resource out of a group. removed is false when it was not in it.
+        """
+        values: dict[str, Any] = {"group_ref": group_ref, "resource_id": resource_id}
+        return self.call("slotlock_remove_group_member", values)
 
     def archive_resource(self, resource_id: str) -> dict[str, Any]:
         """Archive a resource.

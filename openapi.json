@@ -36,7 +36,7 @@
       "get": {
         "operationId": "slotlock_list_resources",
         "summary": "List calendar resources",
-        "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
+        "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group's. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
         "tags": [
           "Agent tools"
         ],
@@ -102,6 +102,24 @@
                 "type": "string",
                 "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
               }
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
             }
           }
         ],
@@ -178,6 +196,32 @@
                               "type": "string",
                               "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
                             }
+                          },
+                          "location": {
+                            "type": "object",
+                            "properties": {
+                              "ref": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                              },
+                              "name": {
+                                "type": "string",
+                                "maxLength": 200
+                              }
+                            },
+                            "required": [
+                              "ref",
+                              "name"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "groups": {
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            }
                           }
                         },
                         "required": [
@@ -229,7 +273,7 @@
       "post": {
         "operationId": "slotlock_create_resource",
         "summary": "Create or update a resource",
-        "description": "Create the resource with this external reference, or update its time zone, and the profile fields given, if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.",
+        "description": "Create the resource with this external reference, or update its time zone, and the profile fields and location given, if the tenant already has it. Without a time zone, a new resource takes the nearest one its location, or a location above it, has, else UTC; a location the tenant does not have answers 404 location_not_found. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.",
         "tags": [
           "Application"
         ],
@@ -247,7 +291,6 @@
                     "maxLength": 500
                   },
                   "timezone": {
-                    "default": "UTC",
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 100
@@ -338,6 +381,10 @@
                         }
                       ]
                     }
+                  },
+                  "location": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                   }
                 },
                 "required": [
@@ -631,6 +678,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -648,7 +714,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -4482,7 +4550,7 @@
       "patch": {
         "operationId": "slotlock_update_resource",
         "summary": "Change a resource's profile",
-        "description": "Change a resource's name, description, kind, capacity, labels or attributes: the fields given, keeping the rest. null clears a name, description or capacity; [] and {} clear labels and attributes. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
+        "description": "Change a resource's name, description, kind, capacity, labels, attributes or location: the fields given, keeping the rest. null clears a name, description, capacity or location; [] and {} clear labels and attributes. A location the tenant does not have answers 404 location_not_found. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
         "tags": [
           "Application"
         ],
@@ -4573,6 +4641,17 @@
                         }
                       ]
                     }
+                  },
+                  "location": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [],
@@ -4876,6 +4955,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -4893,7 +4991,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -5232,6 +5332,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -5249,7 +5368,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -5316,6 +5437,898 @@
                   },
                   "required": [
                     "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/locations": {
+      "get": {
+        "operationId": "slotlock_list_locations",
+        "summary": "List locations",
+        "description": "The tenant's locations, each after the one it is in (depth first), with how many resources are at each. A tree of at most 5 levels and 1000 locations: a region, a site, a building, a floor, a zone, or whatever yours are.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "locations": {
+                      "maxItems": 1000,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ref": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          "parent_ref": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "timezone": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 100
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "resources": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "ref",
+                          "name",
+                          "parent_ref",
+                          "timezone",
+                          "resources"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "locations"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "slotlock_create_location",
+        "summary": "Create or update a location",
+        "description": "Create the location with this reference, or change its name, and the parent and time zone given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep past 5 levels, location_cycle under itself, location_limit_reached past 1000.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "parent_ref": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "timezone": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "ref",
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "object",
+                      "properties": {
+                        "ref": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "parent_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timezone": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resources": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "ref",
+                        "name",
+                        "parent_ref",
+                        "timezone",
+                        "resources"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/locations/{location_ref}": {
+      "patch": {
+        "operationId": "slotlock_update_location",
+        "summary": "Change a location",
+        "description": "Change a location's name, parent or time zone: the fields given. Refused as creating one is.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "parent_ref": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "timezone": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "location_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "object",
+                      "properties": {
+                        "ref": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "parent_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timezone": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resources": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "ref",
+                        "name",
+                        "parent_ref",
+                        "timezone",
+                        "resources"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "slotlock_delete_location",
+        "summary": "Delete a location",
+        "description": "Delete a location. Refused with 409 location_in_use while a resource is at it or a location is in it: move them first. deleted is false when the tenant has no such location.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "location_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/groups": {
+      "get": {
+        "operationId": "slotlock_list_groups",
+        "summary": "List groups",
+        "description": "The tenant's groups, by reference, with how many resources are in each: any sets you want (a team, a department, a contract), at most 500. A group changes nothing about how its resources are booked; a pool does that.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "groups": {
+                      "maxItems": 500,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ref": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 2000
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "members": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "ref",
+                          "name",
+                          "description",
+                          "members"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "groups"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "slotlock_create_group",
+        "summary": "Create or update a group",
+        "description": "Create the group with this reference, or change its name, and its description when given. 409 group_limit_reached past 500.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "ref",
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "group": {
+                      "type": "object",
+                      "properties": {
+                        "ref": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "members": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "ref",
+                        "name",
+                        "description",
+                        "members"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "group"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/groups/{group_ref}": {
+      "delete": {
+        "operationId": "slotlock_delete_group",
+        "summary": "Delete a group",
+        "description": "Delete a group; its resources stay as they are. deleted is false when the tenant has no such group.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "group_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/groups/{group_ref}/members/{resource_id}": {
+      "put": {
+        "operationId": "slotlock_add_group_member",
+        "summary": "Put a resource in a group",
+        "description": "Put one of the tenant's resources in a group. added is false when it was in it already. 404 group_not_found or resource_not_found; 409 resource_group_limit_reached past 20 groups a resource.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "group_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "added": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "added"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "slotlock_remove_group_member",
+        "summary": "Take a resource out of a group",
+        "description": "Take a resource out of a group. removed is false when it was not in it.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "group_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+            }
+          },
+          {
+            "name": "resource_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "removed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "removed"
                   ],
                   "additionalProperties": false
                 }
@@ -5663,6 +6676,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -5680,7 +6712,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -6034,6 +7068,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -6051,7 +7104,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -6544,6 +7599,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -6561,7 +7635,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -6991,6 +8067,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -7008,7 +8103,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -7419,6 +8516,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -7436,7 +8552,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }
@@ -7804,6 +8922,25 @@
                               }
                             ]
                           }
+                        },
+                        "location": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "groups": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                          }
                         }
                       },
                       "required": [
@@ -7821,7 +8958,9 @@
                         "kind",
                         "capacity",
                         "labels",
-                        "attributes"
+                        "attributes",
+                        "location",
+                        "groups"
                       ],
                       "additionalProperties": false
                     }

@@ -4,8 +4,16 @@ import {
   type SlotlockResourceKind,
   type SlotlockResourceProfileChange,
   type SlotlockResourceProfileInput,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
   SLOTLOCK_RESOURCE_KINDS,
+  type SlotlockLocation,
+  type SlotlockResourceGroup,
+  parseSlotlockLocation,
+  parseSlotlockResourceGroup,
   parseSlotlockResourceProfile,
+  slotlockGroupingRef,
 } from './resource-profile.js';
 import { type SlotlockUsageRow, readSlotlockTenantUsage } from './usage.js';
 import { slotlockPlanReadRefusal } from './plans.js';
@@ -1771,13 +1779,22 @@ type ResourceRow = {
   capacity?: number | null;
   labels?: string[];
   attributes?: unknown;
+  /** Where it is, and the groups it is in; absent when the query did not read them. */
+  location_ref?: string | null;
+  location_name?: string | null;
+  group_refs?: string[];
   /** The rules that apply (EFFECTIVE_BOOKING_RULES); absent when the query did not read them. */
   effective_booking_rules?: unknown;
 };
 
 /** A resource's own columns, as toResource reads them. */
-const RESOURCE_COLUMNS =
-  'id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref, visibility, archived_at, name, description, kind, capacity, labels, attributes';
+const RESOURCE_COLUMNS = `id, external_ref, tenant_ref, timezone, availability_rules, booking_rules, pool_ref,
+  visibility, archived_at, name, description, kind, capacity, labels, attributes, location_ref,
+  (SELECT place.name FROM slotlock.locations place
+    WHERE place.tenant_ref = resources.tenant_ref AND place.ref = resources.location_ref) AS location_name,
+  ARRAY(SELECT member.group_ref FROM slotlock.resource_group_members member
+         WHERE member.tenant_ref = resources.tenant_ref AND member.resource_id = resources.id
+         ORDER BY member.group_ref) AS group_refs`;
 
 /**
  * A resource row's effective booking rules (jsonb; NULL for none): tenant defaults, overlaid by its
@@ -1831,6 +1848,11 @@ function toResource(row: ResourceRow): SlotlockResource {
   ) {
     resource.attributes = { ...(row.attributes as SlotlockResourceAttributes) };
   }
+  if (typeof row.location_ref === 'string') {
+    resource.location = row.location_ref;
+    if (typeof row.location_name === 'string') resource.locationName = row.location_name;
+  }
+  if (Array.isArray(row.group_refs) && row.group_refs.length > 0) resource.groups = [...row.group_refs];
   if (row.availability_rules !== null && row.availability_rules !== undefined) {
     // Written validated; anything else reads as closed.
     try {
@@ -1871,6 +1893,98 @@ function availabilityParameter(sql: StoreSql, rules: readonly WeeklyAvailability
   );
 }
 
+/** What the location and group guards (ddl.ts) refuse with, by their HINT. */
+const GROUPING_REFUSALS: ReadonlySet<string> = new Set([
+  'location_too_deep',
+  'location_cycle',
+  'location_limit_reached',
+  'group_limit_reached',
+  'resource_group_limit_reached',
+]);
+
+/**
+ * A location or group write PostgreSQL refused, as the store's code: a guard's HINT, or the code
+ * `foreignKeys` gives a foreign key that failed. Anything else as it was.
+ */
+function groupingRefusal(error: unknown, foreignKeys: Readonly<Record<string, string>> = {}): unknown {
+  const failure = error as { code?: unknown; hint?: unknown; constraint_name?: unknown; message?: unknown } | null;
+  const coded = (code: string) =>
+    Object.assign(new Error(typeof failure?.message === 'string' ? failure.message : code, { cause: error }), { code });
+  if (failure?.code === '23514' && typeof failure.hint === 'string' && GROUPING_REFUSALS.has(failure.hint)) {
+    return coded(failure.hint);
+  }
+  if (failure?.code === '23503' && typeof failure.constraint_name === 'string') {
+    const code = foreignKeys[failure.constraint_name];
+    if (code !== undefined) return coded(code);
+  }
+  return error;
+}
+
+/**
+ * Run a location or group write in a savepoint of its own (a transaction when there is none), and
+ * map what PostgreSQL refuses (groupingRefusal). A failed statement leaves the caller's transaction
+ * usable, and postgres.js reports the mapped error rather than the statement's.
+ */
+async function guardedWrite<T>(
+  executor: StoreSql,
+  write: (tx: TransactionSql) => Promise<T>,
+  foreignKeys: Readonly<Record<string, string>> = {},
+): Promise<T> {
+  try {
+    return await inTransaction(executor, write);
+  } catch (error) {
+    throw groupingRefusal(error, foreignKeys);
+  }
+}
+
+/** A resource's location that the tenant does not have. */
+const RESOURCE_LOCATION_MISSING = Object.freeze({ slotlock_resources_location_fkey: 'location_not_found' });
+
+/** The nearest time zone a location, or one above it, has; null when none has one. */
+async function locationTimezone(executor: StoreSql, tenantRef: string, location: string): Promise<string | null> {
+  const [row] = await executor<{ timezone: string }[]>`
+    WITH RECURSIVE up(ref, parent_ref, timezone, steps) AS (
+      SELECT place.ref, place.parent_ref, place.timezone, 1 FROM slotlock.locations place
+       WHERE place.tenant_ref = ${tenantRef} AND place.ref = ${location}
+      UNION ALL
+      SELECT place.ref, place.parent_ref, place.timezone, up.steps + 1
+        FROM slotlock.locations place JOIN up ON place.tenant_ref = ${tenantRef} AND place.ref = up.parent_ref
+       WHERE up.timezone IS NULL AND up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+    )
+    SELECT timezone FROM up WHERE timezone IS NOT NULL ORDER BY steps LIMIT 1`;
+  return row?.timezone ?? null;
+}
+
+interface LocationRow {
+  ref: string;
+  name: string;
+  parent_ref: string | null;
+  timezone: string | null;
+  resources: number;
+}
+
+const toLocation = (row: LocationRow): SlotlockLocation => ({
+  ref: row.ref,
+  name: row.name,
+  parentRef: row.parent_ref,
+  timezone: row.timezone,
+  resources: Number(row.resources),
+});
+
+interface GroupRow {
+  ref: string;
+  name: string;
+  description: string | null;
+  members: number;
+}
+
+const toGroup = (row: GroupRow): SlotlockResourceGroup => ({
+  ref: row.ref,
+  name: row.name,
+  description: row.description,
+  members: Number(row.members),
+});
+
 /**
  * A checked profile change as statement parameters: each field's value (null when not given or
  * cleared) and whether it was given. Labels travel as one comma-joined string, which a label never
@@ -1901,6 +2015,7 @@ async function upsertResource(
     timezone?: string;
     visibility?: SlotlockResource['visibility'];
     profile?: SlotlockResourceProfileChange;
+    location?: string;
   },
 ): Promise<SlotlockResource> {
   type ResourceIdentityRow = ResourceRow;
@@ -1913,14 +2028,16 @@ async function upsertResource(
   if (params.tenantRef !== undefined && params.externalRef !== undefined) {
     rows = await executor<ResourceIdentityRow[]>`
       INSERT INTO slotlock.resources (
-        external_ref, tenant_ref, timezone, visibility, name, description, kind, capacity, labels, attributes
+        external_ref, tenant_ref, timezone, visibility, name, description, kind, capacity, labels, attributes,
+        location_ref
       )
       VALUES (
         ${params.externalRef}, ${params.tenantRef}, ${params.timezone ?? 'UTC'}, ${visibility},
         ${profile.name}::text, ${profile.description}::text, COALESCE(${profile.kind}::text, 'other'),
         ${profile.capacity}::integer,
         COALESCE(pg_catalog.string_to_array(${profile.labels}::text, ','), '{}'::text[]),
-        COALESCE(${profile.attributes}::text::jsonb, '{}'::jsonb)
+        COALESCE(${profile.attributes}::text::jsonb, '{}'::jsonb),
+        ${params.location ?? null}::text
       )
       ON CONFLICT (tenant_ref, external_ref)
         WHERE tenant_ref IS NOT NULL AND external_ref IS NOT NULL
@@ -1932,7 +2049,9 @@ async function upsertResource(
         capacity = CASE WHEN ${profile.setCapacity}::boolean THEN EXCLUDED.capacity ELSE slotlock.resources.capacity END,
         labels = CASE WHEN ${profile.setLabels}::boolean THEN EXCLUDED.labels ELSE slotlock.resources.labels END,
         attributes = CASE WHEN ${profile.setAttributes}::boolean THEN EXCLUDED.attributes
-                          ELSE slotlock.resources.attributes END
+                          ELSE slotlock.resources.attributes END,
+        location_ref = CASE WHEN ${params.location !== undefined}::boolean THEN EXCLUDED.location_ref
+                            ELSE slotlock.resources.location_ref END
       WHERE ${asked}::text IS NULL OR slotlock.resources.visibility = ${asked}::text
       RETURNING ${executor.unsafe(RESOURCE_COLUMNS)}, ${executor.unsafe(EFFECTIVE_BOOKING_RULES)}`;
   } else if (params.externalRef !== undefined) {
@@ -2266,6 +2385,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
      * Refused (`invalid_resource_profile`) outside its bounds, or for a resource with no tenant.
      */
     profile?: SlotlockResourceProfileInput;
+    /**
+     * The reference of the location it is at (`location_not_found` when the tenant has none such).
+     * Without a `timezone`, a new resource takes the nearest time zone its location, or one above
+     * it, has, else UTC.
+     */
+    location?: string;
   }): Promise<SlotlockResource>;
   /**
    * Change one of the tenant's resources' profile: the fields given, keeping the rest (`null`
@@ -2277,7 +2402,62 @@ export interface SlotlockStore extends SlotlockEventFeed {
     tenantRef: string;
     id: string;
     profile: SlotlockResourceProfileInput;
+    /** Move it to this location, or to none (`null`); left out, it stays (`location_not_found`). */
+    location?: string | null;
   }): Promise<SlotlockResource | null>;
+  /**
+   * The tenant's locations, each under its parent, depth first (RFC 0003 G2), with how many
+   * resources are at each.
+   */
+  listLocations(params: { tenantRef: string }): Promise<SlotlockLocation[]>;
+  /**
+   * Create the location with this reference, or change its name, and the parent and time zone
+   * given. Refused: `invalid_location` (naming the field), `location_not_found` (no such parent),
+   * `location_too_deep` (past SLOTLOCK_MAX_LOCATION_DEPTH levels), `location_cycle` (under itself),
+   * `location_limit_reached` (SLOTLOCK_MAX_LOCATIONS).
+   */
+  putLocation(params: {
+    tenantRef: string;
+    ref: string;
+    name: string;
+    parentRef?: string | null;
+    timezone?: string | null;
+  }): Promise<SlotlockLocation>;
+  /** Change a location's name, parent or time zone, as putLocation; null when it has none such. */
+  updateLocation(params: {
+    tenantRef: string;
+    ref: string;
+    name?: string;
+    parentRef?: string | null;
+    timezone?: string | null;
+  }): Promise<SlotlockLocation | null>;
+  /**
+   * Delete a location: false when it has none such; refused (`location_in_use`) while a resource is
+   * at it or a location is under it.
+   */
+  deleteLocation(params: { tenantRef: string; ref: string }): Promise<boolean>;
+  /** The tenant's groups (RFC 0003 G3), by reference, with how many resources are in each. */
+  listGroups(params: { tenantRef: string }): Promise<SlotlockResourceGroup[]>;
+  /**
+   * Create the group with this reference, or change its name, and its description when given.
+   * Refused: `invalid_group` (naming the field), `group_limit_reached` (SLOTLOCK_MAX_RESOURCE_GROUPS).
+   */
+  putGroup(params: {
+    tenantRef: string;
+    ref: string;
+    name: string;
+    description?: string | null;
+  }): Promise<SlotlockResourceGroup>;
+  /** Delete a group, its resources left as they are: false when it has none such. */
+  deleteGroup(params: { tenantRef: string; ref: string }): Promise<boolean>;
+  /**
+   * Put one of the tenant's resources in a group: true when it was not in it. Refused:
+   * `group_not_found`, `resource_not_found`, `resource_group_limit_reached`
+   * (SLOTLOCK_MAX_GROUPS_PER_RESOURCE).
+   */
+  addGroupMember(params: { tenantRef: string; group: string; resourceId: string }): Promise<boolean>;
+  /** Take a resource out of a group: true when it was in it. */
+  removeGroupMember(params: { tenantRef: string; group: string; resourceId: string }): Promise<boolean>;
   /**
    * Resolve one tenant-owned resource without revealing another tenant's matching id. An archived
    * one is returned (with `archivedAt`); with `visibility`, only one of that visibility.
@@ -2378,6 +2558,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
     kind?: SlotlockResourceKind;
     /** Only resources with every one of these labels (at most 20). */
     labels?: readonly string[];
+    /** Only resources at this location or a location under it. */
+    location?: string;
+    /** Only resources in this group. */
+    group?: string;
   }): Promise<SlotlockResource[]>;
   /**
    * How many resources the tenant has, archived ones included: the count a resource limit (a hosted
@@ -3382,6 +3566,13 @@ export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions
 export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'createResource',
   'updateResourceProfile',
+  'putLocation',
+  'updateLocation',
+  'deleteLocation',
+  'putGroup',
+  'deleteGroup',
+  'addGroupMember',
+  'removeGroupMember',
   'archiveResource',
   'restoreResource',
   'deleteResource',
@@ -3878,10 +4069,25 @@ function buildSlotlockStore(
           code: 'invalid_resource_profile' as const,
         });
       }
-      const { profile: given, maxTenantResources: _limit, ...identity } = params;
+      const { profile: given, maxTenantResources: _limit, location, ...identity } = params;
+      if (location !== undefined) {
+        if (params.tenantRef === undefined) {
+          throw Object.assign(new Error('Slotlock gives a location only to a resource with a tenant'), {
+            code: 'invalid_location' as const,
+            field: 'location',
+          });
+        }
+        slotlockGroupingRef('invalid_location', location);
+        // Without a time zone of its own, it takes its location's.
+        if (identity.timezone === undefined) {
+          const zone = await locationTimezone(sql, params.tenantRef, location);
+          if (zone !== null) identity.timezone = zone;
+        }
+      }
       const upsert = {
         ...identity,
         ...(given !== undefined ? { profile: parseSlotlockResourceProfile(given) } : {}),
+        ...(location !== undefined ? { location } : {}),
       };
       const requested = params.maxTenantResources;
       // The lower of the store's own limit and the tenant's plan (plans.ts), when it has one.
@@ -3903,7 +4109,10 @@ function buildSlotlockStore(
           : storeLimit === undefined
             ? planned
             : Math.min(planned, storeLimit);
-      if (requested === undefined && configured === undefined) return upsertResource(sql, upsert);
+      if (requested === undefined && configured === undefined) {
+        if (location === undefined) return upsertResource(sql, upsert);
+        return guardedWrite(sql, (tx) => upsertResource(tx, upsert), RESOURCE_LOCATION_MISSING);
+      }
       if (
         requested !== undefined &&
         (!Number.isSafeInteger(requested) ||
@@ -3951,7 +4160,8 @@ function buildSlotlockStore(
               );
             }
           }
-          return upsertResource(tx, upsert);
+          if (location === undefined) return upsertResource(tx, upsert);
+          return guardedWrite(tx, (inner) => upsertResource(inner, upsert), RESOURCE_LOCATION_MISSING);
         },
         'read committed',
       );
@@ -3980,7 +4190,11 @@ function buildSlotlockStore(
         });
       }
       const profile = profileParameters(parseSlotlockResourceProfile(params.profile));
-      const rows = await sql<ResourceRow[]>`
+      const location =
+        params.location === undefined || params.location === null
+          ? null
+          : slotlockGroupingRef('invalid_location', params.location);
+      const rows = await guardedWrite(sql, (tx) => tx<ResourceRow[]>`
         UPDATE slotlock.resources
            SET name = CASE WHEN ${profile.setName}::boolean THEN ${profile.name}::text ELSE name END,
                description = CASE WHEN ${profile.setDescription}::boolean
@@ -3991,11 +4205,184 @@ function buildSlotlockStore(
                labels = CASE WHEN ${profile.setLabels}::boolean
                              THEN pg_catalog.string_to_array(${profile.labels}::text, ',') ELSE labels END,
                attributes = CASE WHEN ${profile.setAttributes}::boolean
-                                 THEN ${profile.attributes}::text::jsonb ELSE attributes END
+                                 THEN ${profile.attributes}::text::jsonb ELSE attributes END,
+               location_ref = CASE WHEN ${params.location !== undefined}::boolean
+                                   THEN ${location}::text ELSE location_ref END
          WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}
-        RETURNING ${sql.unsafe(RESOURCE_COLUMNS)}, ${sql.unsafe(EFFECTIVE_BOOKING_RULES)}`;
+        RETURNING ${tx.unsafe(RESOURCE_COLUMNS)}, ${tx.unsafe(EFFECTIVE_BOOKING_RULES)}`, RESOURCE_LOCATION_MISSING);
       const row = rows[0];
       return row ? toResource(row) : null;
+    },
+
+    async listLocations(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const rows = await sql<LocationRow[]>`
+        WITH RECURSIVE tree(ref, name, parent_ref, timezone, path) AS (
+          SELECT place.ref, place.name, place.parent_ref, place.timezone, ARRAY[place.ref]
+            FROM slotlock.locations place
+           WHERE place.tenant_ref = ${params.tenantRef} AND place.parent_ref IS NULL
+          UNION ALL
+          SELECT place.ref, place.name, place.parent_ref, place.timezone, tree.path || place.ref
+            FROM slotlock.locations place
+            JOIN tree ON place.tenant_ref = ${params.tenantRef} AND place.parent_ref = tree.ref
+           WHERE cardinality(tree.path) <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+        )
+        SELECT tree.ref, tree.name, tree.parent_ref, tree.timezone,
+               (SELECT count(*) FROM slotlock.resources held
+                 WHERE held.tenant_ref = ${params.tenantRef} AND held.location_ref = tree.ref)::int AS resources
+          FROM tree
+         ORDER BY tree.path
+         LIMIT ${SLOTLOCK_MAX_LOCATIONS}`;
+      return rows.map(toLocation);
+    },
+
+    async putLocation(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const location = parseSlotlockLocation(params);
+      const [row] = await guardedWrite(sql, (tx) => tx<LocationRow[]>`
+        INSERT INTO slotlock.locations AS kept (tenant_ref, ref, name, parent_ref, timezone)
+        VALUES (${params.tenantRef}, ${location.ref}, ${location.name ?? ''}, ${location.parentRef ?? null},
+                ${location.timezone ?? null})
+        ON CONFLICT (tenant_ref, ref) DO UPDATE
+        SET name = EXCLUDED.name,
+            parent_ref = CASE WHEN ${location.parentRef !== undefined}::boolean
+                              THEN EXCLUDED.parent_ref ELSE kept.parent_ref END,
+            timezone = CASE WHEN ${location.timezone !== undefined}::boolean
+                            THEN EXCLUDED.timezone ELSE kept.timezone END
+        RETURNING kept.ref, kept.name, kept.parent_ref, kept.timezone,
+                  (SELECT count(*) FROM slotlock.resources held
+                    WHERE held.tenant_ref = kept.tenant_ref AND held.location_ref = kept.ref)::int AS resources`,
+        { slotlock_locations_parent_fkey: 'location_not_found' },
+      );
+      return toLocation(row as LocationRow);
+    },
+
+    async updateLocation(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const location = parseSlotlockLocation(params);
+      const [row] = await guardedWrite(sql, (tx) => tx<LocationRow[]>`
+        UPDATE slotlock.locations AS kept
+           SET name = COALESCE(${location.name ?? null}::text, kept.name),
+               parent_ref = CASE WHEN ${location.parentRef !== undefined}::boolean
+                                 THEN ${location.parentRef ?? null}::text ELSE kept.parent_ref END,
+               timezone = CASE WHEN ${location.timezone !== undefined}::boolean
+                               THEN ${location.timezone ?? null}::text ELSE kept.timezone END
+         WHERE kept.tenant_ref = ${params.tenantRef} AND kept.ref = ${location.ref}
+        RETURNING kept.ref, kept.name, kept.parent_ref, kept.timezone,
+                  (SELECT count(*) FROM slotlock.resources held
+                    WHERE held.tenant_ref = kept.tenant_ref AND held.location_ref = kept.ref)::int AS resources`,
+        { slotlock_locations_parent_fkey: 'location_not_found' },
+      );
+      return row ? toLocation(row) : null;
+    },
+
+    async deleteLocation(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const ref = slotlockGroupingRef('invalid_location', params.ref);
+      const rows = await guardedWrite(
+        sql,
+        (tx) => tx<{ ref: string }[]>`
+          DELETE FROM slotlock.locations
+           WHERE tenant_ref = ${params.tenantRef} AND ref = ${ref}
+          RETURNING ref`,
+        {
+          slotlock_locations_parent_fkey: 'location_in_use',
+          slotlock_resources_location_fkey: 'location_in_use',
+        },
+      );
+      return rows.length > 0;
+    },
+
+    async listGroups(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const rows = await sql<GroupRow[]>`
+        SELECT kept.ref, kept.name, kept.description,
+               (SELECT count(*) FROM slotlock.resource_group_members member
+                 WHERE member.tenant_ref = kept.tenant_ref AND member.group_ref = kept.ref)::int AS members
+          FROM slotlock.resource_groups kept
+         WHERE kept.tenant_ref = ${params.tenantRef}
+         ORDER BY kept.ref
+         LIMIT ${SLOTLOCK_MAX_RESOURCE_GROUPS}`;
+      return rows.map(toGroup);
+    },
+
+    async putGroup(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const group = parseSlotlockResourceGroup(params);
+      const [row] = await guardedWrite(sql, (tx) => tx<GroupRow[]>`
+        INSERT INTO slotlock.resource_groups AS kept (tenant_ref, ref, name, description)
+        VALUES (${params.tenantRef}, ${group.ref}, ${group.name}, ${group.description})
+        ON CONFLICT (tenant_ref, ref) DO UPDATE
+        SET name = EXCLUDED.name,
+            description = CASE WHEN ${params.description !== undefined}::boolean
+                               THEN EXCLUDED.description ELSE kept.description END
+        RETURNING kept.ref, kept.name, kept.description,
+                  (SELECT count(*) FROM slotlock.resource_group_members member
+                    WHERE member.tenant_ref = kept.tenant_ref AND member.group_ref = kept.ref)::int AS members`);
+      return toGroup(row as GroupRow);
+    },
+
+    async deleteGroup(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const ref = slotlockGroupingRef('invalid_group', params.ref);
+      const rows = await sql<{ ref: string }[]>`
+        DELETE FROM slotlock.resource_groups
+         WHERE tenant_ref = ${params.tenantRef} AND ref = ${ref}
+        RETURNING ref`;
+      return rows.length > 0;
+    },
+
+    async addGroupMember(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const group = slotlockGroupingRef('invalid_group', params.group);
+      if (!isValidResourceId(params.resourceId)) {
+        throw Object.assign(new Error('Slotlock resource not found in this tenant'), {
+          code: 'resource_not_found' as const,
+        });
+      }
+      const rows = await guardedWrite(
+        sql,
+        (tx) => tx<{ added: boolean }[]>`
+          INSERT INTO slotlock.resource_group_members (tenant_ref, group_ref, resource_id)
+          VALUES (${params.tenantRef}, ${group}, ${params.resourceId}::uuid)
+          ON CONFLICT DO NOTHING
+          RETURNING true AS added`,
+        {
+          slotlock_resource_group_members_group_fkey: 'group_not_found',
+          slotlock_resource_group_members_resource_fkey: 'resource_not_found',
+        },
+      );
+      return rows.length > 0;
+    },
+
+    async removeGroupMember(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const group = slotlockGroupingRef('invalid_group', params.group);
+      if (!isValidResourceId(params.resourceId)) return false;
+      const rows = await sql<{ group_ref: string }[]>`
+        DELETE FROM slotlock.resource_group_members
+         WHERE tenant_ref = ${params.tenantRef} AND group_ref = ${group}
+           AND resource_id = ${params.resourceId}::uuid
+        RETURNING group_ref`;
+      return rows.length > 0;
     },
 
     async setResourceAvailability(params) {
@@ -4184,6 +4571,8 @@ function buildSlotlockStore(
         });
       }
       // The filters are checked as a profile is, so a bad one is refused rather than matching none.
+      const place = params.location === undefined ? null : slotlockGroupingRef('invalid_location', params.location);
+      const group = params.group === undefined ? null : slotlockGroupingRef('invalid_group', params.group);
       const filter = parseSlotlockResourceProfile({
         ...(params.kind !== undefined ? { kind: params.kind } : {}),
         ...(params.labels !== undefined ? { labels: params.labels } : {}),
@@ -4198,6 +4587,21 @@ function buildSlotlockStore(
            AND (${filter.kind ?? null}::text IS NULL OR kind = ${filter.kind ?? null}::text)
            AND (${filter.labels === undefined || filter.labels.length === 0 ? null : filter.labels.join(',')}::text IS NULL
                 OR labels @> pg_catalog.string_to_array(${filter.labels?.join(',') ?? ''}::text, ','))
+           AND (${place}::text IS NULL OR location_ref IN (
+                 WITH RECURSIVE below(ref, steps) AS (
+                   SELECT place.ref, 1 FROM slotlock.locations place
+                    WHERE place.tenant_ref = ${params.tenantRef} AND place.ref = ${place}::text
+                   UNION ALL
+                   SELECT place.ref, below.steps + 1
+                     FROM slotlock.locations place
+                     JOIN below ON place.tenant_ref = ${params.tenantRef} AND place.parent_ref = below.ref
+                    WHERE below.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+                 )
+                 SELECT ref FROM below))
+           AND (${group}::text IS NULL OR EXISTS (
+                 SELECT 1 FROM slotlock.resource_group_members member
+                  WHERE member.tenant_ref = resources.tenant_ref AND member.resource_id = resources.id
+                    AND member.group_ref = ${group}::text))
          ORDER BY id
          LIMIT ${limit}`;
       return rows.map(toResource);

@@ -41,7 +41,11 @@ const RESOURCE = {
   capacity: null,
   labels: [],
   attributes: {},
+  location: null,
+  groups: [],
 };
+const LOCATION = { ref: 'leeds', name: 'Leeds clinic', parent_ref: null, timezone: 'Europe/London', resources: 2 };
+const GROUP = { ref: 'physio', name: 'Physiotherapy team', description: null, members: 3 };
 const HOLD = {
   id: HOLD_ID,
   resource_id: RESOURCE_ID,
@@ -97,6 +101,15 @@ const agentBackend = {
 const backend = {
   createResource: vi.fn(),
   updateResource: vi.fn(),
+  listLocations: vi.fn(),
+  createLocation: vi.fn(),
+  updateLocation: vi.fn(),
+  deleteLocation: vi.fn(),
+  listGroups: vi.fn(),
+  createGroup: vi.fn(),
+  deleteGroup: vi.fn(),
+  addGroupMember: vi.fn(),
+  removeGroupMember: vi.fn(),
   getResource: vi.fn(),
   archiveResource: vi.fn(),
   restoreResource: vi.fn(),
@@ -275,7 +288,16 @@ const WAITLIST_ENTRY = {
 
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
-  updateResource: { resource: { ...RESOURCE, name: 'Van 42', labels: ['ev'] } },
+  updateResource: { resource: { ...RESOURCE, name: 'Van 42', labels: ['ev'], location: 'leeds', groups: ['physio'] } },
+  listLocations: { locations: [LOCATION] },
+  createLocation: { location: LOCATION },
+  updateLocation: { location: { ...LOCATION, name: 'Leeds city clinic' } },
+  deleteLocation: { deleted: true },
+  listGroups: { groups: [GROUP] },
+  createGroup: { group: GROUP },
+  deleteGroup: { deleted: true },
+  addGroupMember: { added: true },
+  removeGroupMember: { removed: false },
   getResource: { resource: RESOURCE },
   archiveResource: { resource: { ...RESOURCE, archived_at: '2027-03-01T00:00:00.000Z' } },
   restoreResource: { resource: RESOURCE },
@@ -446,7 +468,8 @@ describe('the application operations', () => {
       buffer_after_minutes: 0,
     });
     const create = slotlockApplicationOperation('slotlock_create_resource');
-    expect(create.input.parse({ external_ref: 'van-1' })).toEqual({ external_ref: 'van-1', timezone: 'UTC' });
+    // No time zone given: the store gives it UTC, or its location's.
+    expect(create.input.parse({ external_ref: 'van-1' })).toEqual({ external_ref: 'van-1' });
     expect(create.input.safeParse({ external_ref: 'van-1', tenant_ref: 'other' }).success).toBe(false);
   });
 });
@@ -657,7 +680,6 @@ describe('the application API over REST', () => {
     const create = slotlockApplicationOperation('slotlock_create_resource');
     expect(create.input.parse({ external_ref: 'van-1', visibility: 'private' })).toEqual({
       external_ref: 'van-1',
-      timezone: 'UTC',
       visibility: 'private',
     });
     // Left out, it is not defaulted: an existing resource is then answered as it is.

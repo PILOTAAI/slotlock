@@ -27,6 +27,20 @@ export const GROUPS = [
     ],
   },
   {
+    name: 'Locations and groups',
+    operations: [
+      'slotlock_list_locations',
+      'slotlock_create_location',
+      'slotlock_update_location',
+      'slotlock_delete_location',
+      'slotlock_list_groups',
+      'slotlock_create_group',
+      'slotlock_add_group_member',
+      'slotlock_remove_group_member',
+      'slotlock_delete_group',
+    ],
+  },
+  {
     name: 'Availability',
     operations: [
       'slotlock_get_free_busy',

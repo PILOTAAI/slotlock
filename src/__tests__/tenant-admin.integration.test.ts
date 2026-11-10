@@ -345,12 +345,17 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
     /** A tenant with a row in every table it can own rows in. */
     async function populate(tenantRef: string, uid: string) {
       await app.withTenant(tenantRef, async (tenant) => {
+        // Where it is and a group it is in (RFC 0003 G2, G3).
+        await tenant.putLocation({ tenantRef, ref: 'depot', name: 'Depot' });
+        await tenant.putGroup({ tenantRef, ref: 'fleet', name: 'Fleet' });
         const resource = await tenant.createResource({
           tenantRef,
           externalRef: 'van-1',
           timezone: 'UTC',
+          location: 'depot',
         });
         const resourceId = resource.id;
+        await tenant.addGroupMember({ tenantRef, group: 'fleet', resourceId });
         const hold = await tenant.acquireHold({
           tenantRef,
           resourceId,

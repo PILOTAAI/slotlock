@@ -95,6 +95,7 @@ describe.skipIf(!url)('configuration changes and provenance on the feed (real Po
           timezone: 'UTC',
           visibility: 'shared',
           pool: null,
+          location: null,
           availability: null,
           booking_rules: null,
         },

@@ -8,7 +8,14 @@
 // role can write to ("$user", public) would run with that ownership. The DDL pins search_path to
 // pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
 // transaction: under autocommit the pin ends with its own statement.
-import { SLOTLOCK_RESOURCE_KINDS, SLOTLOCK_RESOURCE_PROFILE_LIMITS } from './resource-profile.js';
+import {
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+} from './resource-profile.js';
 import { SLOTLOCK_CHANGE_ORIGINS, legacyCoverageSourceDigestSql } from './event-feed.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
@@ -1638,8 +1645,22 @@ BEGIN
   DELETE FROM slotlock.assistant_settings WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  -- A resource's group memberships, then the resource; its location after it, as resources and
+  -- locations under it name it.
+  erased_table := 'resource_group_members';
+  DELETE FROM slotlock.resource_group_members WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'resources';
   DELETE FROM slotlock.resources WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'resource_groups';
+  DELETE FROM slotlock.resource_groups WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'locations';
+  DELETE FROM slotlock.locations WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   -- After every booking table: what their deletion just appended goes with the rest.
@@ -2525,7 +2546,7 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     kind := 'resource.created';
     details := jsonb_build_object(
-      'timezone', NEW.timezone, 'visibility', NEW.visibility, 'pool', NEW.pool_ref,
+      'timezone', NEW.timezone, 'visibility', NEW.visibility, 'pool', NEW.pool_ref, 'location', NEW.location_ref,
       'availability', NEW.availability_rules, 'booking_rules', NEW.booking_rules);
   ELSIF TG_OP = 'DELETE' THEN
     kind := 'resource.deleted';
@@ -2546,6 +2567,10 @@ BEGIN
     IF OLD.pool_ref IS DISTINCT FROM NEW.pool_ref THEN
       before := before || jsonb_build_object('pool', OLD.pool_ref);
       after := after || jsonb_build_object('pool', NEW.pool_ref);
+    END IF;
+    IF OLD.location_ref IS DISTINCT FROM NEW.location_ref THEN
+      before := before || jsonb_build_object('location', OLD.location_ref);
+      after := after || jsonb_build_object('location', NEW.location_ref);
     END IF;
     IF OLD.availability_rules IS DISTINCT FROM NEW.availability_rules THEN
       before := before || jsonb_build_object('availability', OLD.availability_rules);
@@ -3230,6 +3255,183 @@ BEGIN
       ) NOT VALID;
   END IF;
 END $$;
+
+-- Where a tenant's resources are (RFC 0003 G2, resource-profile.ts): a tree of at most
+-- ${SLOTLOCK_MAX_LOCATION_DEPTH} levels (a region, a site, a building, a floor, a zone, or whatever the
+-- tenant's are), at most ${SLOTLOCK_MAX_LOCATIONS} a tenant, each named by a reference of the tenant's own.
+-- A location something is in (a resource, or a location under it) cannot be deleted: the foreign
+-- keys are NO ACTION, checked at the end of the statement, so erasing a whole tenant's tree in one
+-- statement passes. Its time zone, when it has one, is the one a resource created there without
+-- its own takes (the nearest location above that has one).
+CREATE TABLE IF NOT EXISTS slotlock.locations (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text NOT NULL,
+  parent_ref text,
+  timezone text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_locations_pkey PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_locations_parent_fkey FOREIGN KEY (tenant_ref, parent_ref)
+    REFERENCES slotlock.locations (tenant_ref, ref),
+  CONSTRAINT slotlock_locations_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$'
+    AND char_length(name) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} AND btrim(name) <> ''
+    AND (parent_ref IS NULL OR parent_ref <> ref)
+    AND (timezone IS NULL OR char_length(timezone) BETWEEN 1 AND 100)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_locations_parent_idx
+  ON slotlock.locations (tenant_ref, parent_ref) WHERE parent_ref IS NOT NULL;
+
+-- A location's depth, a loop through its parents, and the tenant's count, under the tenant's
+-- location lock, so two writers never each pass a check the other then breaks.
+CREATE OR REPLACE FUNCTION slotlock.locations_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_locations_guard$
+DECLARE
+  above integer := 0;
+  below integer := 0;
+  looped boolean := false;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:locations:' || NEW.tenant_ref, 0));
+  -- An upsert of a location the tenant has fires this before its conflict is found: not a new one.
+  IF TG_OP = 'INSERT'
+     AND NOT EXISTS (SELECT 1 FROM slotlock.locations kept
+                      WHERE kept.tenant_ref = NEW.tenant_ref AND kept.ref = NEW.ref)
+     AND (SELECT count(*) FROM slotlock.locations kept WHERE kept.tenant_ref = NEW.tenant_ref)
+         >= ${SLOTLOCK_MAX_LOCATIONS} THEN
+    RAISE EXCEPTION 'Slotlock keeps at most ${SLOTLOCK_MAX_LOCATIONS} locations a tenant'
+      USING ERRCODE = 'check_violation', HINT = 'location_limit_reached';
+  END IF;
+  IF NEW.parent_ref IS NOT NULL THEN
+    WITH RECURSIVE up(at, parent, steps) AS (
+      SELECT kept.ref, kept.parent_ref, 1 FROM slotlock.locations kept
+       WHERE kept.tenant_ref = NEW.tenant_ref AND kept.ref = NEW.parent_ref
+      UNION ALL
+      SELECT kept.ref, kept.parent_ref, up.steps + 1
+        FROM slotlock.locations kept JOIN up ON kept.tenant_ref = NEW.tenant_ref AND kept.ref = up.parent
+       WHERE up.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+    )
+    SELECT coalesce(max(up.steps), 0), coalesce(bool_or(up.at = NEW.ref), false)
+      INTO above, looped FROM up;
+    IF looped THEN
+      RAISE EXCEPTION 'Slotlock location cannot be under itself'
+        USING ERRCODE = 'check_violation', HINT = 'location_cycle';
+    END IF;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    WITH RECURSIVE down(at, steps) AS (
+      SELECT kept.ref, 1 FROM slotlock.locations kept
+       WHERE kept.tenant_ref = NEW.tenant_ref AND kept.parent_ref = NEW.ref
+      UNION ALL
+      SELECT kept.ref, down.steps + 1
+        FROM slotlock.locations kept JOIN down ON kept.tenant_ref = NEW.tenant_ref AND kept.parent_ref = down.at
+       WHERE down.steps <= ${SLOTLOCK_MAX_LOCATION_DEPTH}
+    )
+    SELECT coalesce(max(down.steps), 0) INTO below FROM down;
+  END IF;
+  IF above + 1 + below > ${SLOTLOCK_MAX_LOCATION_DEPTH} THEN
+    RAISE EXCEPTION 'Slotlock locations are at most ${SLOTLOCK_MAX_LOCATION_DEPTH} levels deep'
+      USING ERRCODE = 'check_violation', HINT = 'location_too_deep';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_locations_guard$;
+CREATE OR REPLACE TRIGGER slotlock_locations_guard
+  BEFORE INSERT OR UPDATE OF parent_ref ON slotlock.locations
+  FOR EACH ROW EXECUTE FUNCTION slotlock.locations_guard();
+
+-- The location a resource is at, one at most; null when not said.
+ALTER TABLE slotlock.resources ADD COLUMN IF NOT EXISTS location_ref text;
+CREATE INDEX IF NOT EXISTS slotlock_resources_location_idx
+  ON slotlock.resources (tenant_ref, location_ref) WHERE location_ref IS NOT NULL;
+DO $slotlock_resources_location$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_resources_location_fkey'
+       AND conrelid = 'slotlock.resources'::regclass
+  ) THEN
+    -- NOT VALID: the column is new, and DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after.
+    ALTER TABLE slotlock.resources
+      ADD CONSTRAINT slotlock_resources_location_fkey FOREIGN KEY (tenant_ref, location_ref)
+      REFERENCES slotlock.locations (tenant_ref, ref) NOT VALID;
+  END IF;
+END
+$slotlock_resources_location$;
+
+-- Any set of resources a tenant wants (RFC 0003 G3): a team, a department, a contract, "Saturday
+-- clinic", "airport vans". Many a resource, at most ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE}, and at most
+-- ${SLOTLOCK_MAX_RESOURCE_GROUPS} a tenant. No booking rule reads them: a pool is how resources are
+-- booked as a class.
+CREATE TABLE IF NOT EXISTS slotlock.resource_groups (
+  tenant_ref text NOT NULL,
+  ref text NOT NULL,
+  name text NOT NULL,
+  description text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_resource_groups_pkey PRIMARY KEY (tenant_ref, ref),
+  CONSTRAINT slotlock_resource_groups_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND ref ~ '^[a-z0-9][a-z0-9._-]{0,99}$'
+    AND char_length(name) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} AND btrim(name) <> ''
+    AND (description IS NULL
+         OR (char_length(description) BETWEEN 1 AND ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description}
+             AND btrim(description) <> ''))
+  )
+);
+CREATE TABLE IF NOT EXISTS slotlock.resource_group_members (
+  tenant_ref text NOT NULL,
+  group_ref text NOT NULL,
+  resource_id uuid NOT NULL,
+  added_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_resource_group_members_pkey PRIMARY KEY (tenant_ref, group_ref, resource_id),
+  CONSTRAINT slotlock_resource_group_members_group_fkey FOREIGN KEY (tenant_ref, group_ref)
+    REFERENCES slotlock.resource_groups (tenant_ref, ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_resource_group_members_resource_fkey FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS slotlock_resource_group_members_resource_idx
+  ON slotlock.resource_group_members (tenant_ref, resource_id);
+
+-- The counts, under the tenant's group lock.
+CREATE OR REPLACE FUNCTION slotlock.resource_groups_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_resource_groups_guard$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:groups:' || NEW.tenant_ref, 0));
+  -- An upsert of a group, or a membership, the tenant has fires this before its conflict is found.
+  IF TG_TABLE_NAME = 'resource_groups' THEN
+    IF NOT EXISTS (SELECT 1 FROM slotlock.resource_groups kept
+                    WHERE kept.tenant_ref = NEW.tenant_ref AND kept.ref = NEW.ref)
+       AND (SELECT count(*) FROM slotlock.resource_groups kept WHERE kept.tenant_ref = NEW.tenant_ref)
+           >= ${SLOTLOCK_MAX_RESOURCE_GROUPS} THEN
+      RAISE EXCEPTION 'Slotlock keeps at most ${SLOTLOCK_MAX_RESOURCE_GROUPS} groups a tenant'
+        USING ERRCODE = 'check_violation', HINT = 'group_limit_reached';
+    END IF;
+  ELSIF NOT EXISTS (SELECT 1 FROM slotlock.resource_group_members kept
+                     WHERE kept.tenant_ref = NEW.tenant_ref AND kept.group_ref = NEW.group_ref
+                       AND kept.resource_id = NEW.resource_id)
+        AND (SELECT count(*) FROM slotlock.resource_group_members kept
+              WHERE kept.tenant_ref = NEW.tenant_ref AND kept.resource_id = NEW.resource_id)
+            >= ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} THEN
+    RAISE EXCEPTION 'Slotlock puts a resource in at most ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups'
+      USING ERRCODE = 'check_violation', HINT = 'resource_group_limit_reached';
+  END IF;
+  RETURN NEW;
+END
+$slotlock_resource_groups_guard$;
+CREATE OR REPLACE TRIGGER slotlock_resource_groups_guard
+  BEFORE INSERT ON slotlock.resource_groups
+  FOR EACH ROW EXECUTE FUNCTION slotlock.resource_groups_guard();
+CREATE OR REPLACE TRIGGER slotlock_resource_group_members_guard
+  BEFORE INSERT ON slotlock.resource_group_members
+  FOR EACH ROW EXECUTE FUNCTION slotlock.resource_groups_guard();
 
 -- Every row occupies from its start to its occupied end: its end plus its turnaround buffer. Up to
 -- 0.1 the buffer bound only tenant-owned bookings to each other (slotlock_reservations_buffered_no_overlap),
@@ -4183,6 +4385,9 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'booking_rule_defaults',
   'assistant_settings',
   'assistant_conversations',
+  'locations',
+  'resource_groups',
+  'resource_group_members',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -4271,6 +4476,12 @@ ALTER TABLE slotlock.assistant_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_settings FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.locations FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_groups FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_group_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.resource_group_members FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -4302,7 +4513,10 @@ BEGIN
          'waitlist_entries',
          'booking_rule_defaults',
          'assistant_settings',
-         'assistant_conversations'
+         'assistant_conversations',
+         'locations',
+         'resource_groups',
+         'resource_group_members'
        )
   LOOP
     EXECUTE format(
@@ -4543,6 +4757,36 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'locations'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.locations
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'resource_groups'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.resource_groups
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'resource_group_members'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.resource_group_members
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -4586,6 +4830,12 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.locations
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_groups
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_group_members
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 
 INSERT INTO slotlock.rls_policy_contracts (
   table_name, tenant_context_setting, policy_fingerprint, installed_at
@@ -4628,7 +4878,10 @@ WHERE schemaname = 'slotlock'
     'waitlist_entries',
     'booking_rule_defaults',
     'assistant_settings',
-    'assistant_conversations'
+    'assistant_conversations',
+    'locations',
+    'resource_groups',
+    'resource_group_members'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

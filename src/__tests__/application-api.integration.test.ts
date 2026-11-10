@@ -122,6 +122,8 @@ describe.skipIf(!url)('the application API on the real store', () => {
           capacity: null,
           labels: [],
           attributes: {},
+          location: null,
+          groups: [],
         },
       },
     });

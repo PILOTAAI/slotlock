@@ -15,6 +15,11 @@ import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from './rules.js';
 import {
+  SLOTLOCK_GROUPING_REF,
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_LABEL,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
@@ -23,6 +28,15 @@ import {
 export type SlotlockApplicationOperation =
   | 'slotlock_create_resource'
   | 'slotlock_update_resource'
+  | 'slotlock_list_locations'
+  | 'slotlock_create_location'
+  | 'slotlock_update_location'
+  | 'slotlock_delete_location'
+  | 'slotlock_list_groups'
+  | 'slotlock_create_group'
+  | 'slotlock_delete_group'
+  | 'slotlock_add_group_member'
+  | 'slotlock_remove_group_member'
   | 'slotlock_get_resource'
   | 'slotlock_archive_resource'
   | 'slotlock_restore_resource'
@@ -98,6 +112,15 @@ type Handler = (
 export interface SlotlockApplicationBackend {
   createResource: Handler;
   updateResource: Handler;
+  listLocations: Handler;
+  createLocation: Handler;
+  updateLocation: Handler;
+  deleteLocation: Handler;
+  listGroups: Handler;
+  createGroup: Handler;
+  deleteGroup: Handler;
+  addGroupMember: Handler;
+  removeGroupMember: Handler;
   getResource: Handler;
   archiveResource: Handler;
   restoreResource: Handler;
@@ -294,6 +317,34 @@ const PROFILE_INPUT = {
   attributes: RESOURCE_ATTRIBUTES.optional(),
 };
 
+/** A location's or a group's reference: as a pool's. */
+const GROUPING_REF = z.string().regex(SLOTLOCK_GROUPING_REF);
+
+/** A place a tenant's resources are at (RFC 0003 G2). */
+const LOCATION = z
+  .object({
+    ref: GROUPING_REF,
+    name: z.string().max(PROFILE.name),
+    /** The location it is in; `null` at the top. */
+    parent_ref: GROUPING_REF.nullable(),
+    /** What a resource created here without a time zone takes; `null` to take its parent's. */
+    timezone: TIMEZONE.nullable(),
+    /** Resources at it, not counting those under it. */
+    resources: z.number().int().min(0),
+  })
+  .strict();
+
+/** A set of a tenant's resources (RFC 0003 G3). */
+const GROUP = z
+  .object({
+    ref: GROUPING_REF,
+    name: z.string().max(PROFILE.name),
+    description: z.string().max(PROFILE.description).nullable(),
+    /** Resources in it. */
+    members: z.number().int().min(0),
+  })
+  .strict();
+
 const RESOURCE = z
   .object({
     id: RESOURCE_ID,
@@ -322,6 +373,10 @@ const RESOURCE = z
     capacity: z.number().int().nullable(),
     labels: z.array(RESOURCE_LABEL).max(PROFILE.labels),
     attributes: RESOURCE_ATTRIBUTES,
+    /** The location it is at; `null` when not said. */
+    location: GROUPING_REF.nullable(),
+    /** The groups it is in, by reference. */
+    groups: z.array(GROUPING_REF).max(SLOTLOCK_MAX_GROUPS_PER_RESOURCE),
   })
   .strict();
 
@@ -462,15 +517,18 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_create_resource',
       title: 'Create or update a resource',
       description:
-        'Create the resource with this external reference, or update its time zone, and the profile fields given, if the tenant already has it. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.',
+        'Create the resource with this external reference, or update its time zone, and the profile fields and location given, if the tenant already has it. Without a time zone, a new resource takes the nearest one its location, or a location above it, has, else UTC; a location the tenant does not have answers 404 location_not_found. Repeating the call changes nothing more. visibility is shared (the default: agents list and book it) or private (agents never see it), fixed at creation: naming another for an existing resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine, equipment, service or other: a hint, never a rule), its capacity (informational), up to 20 labels to find it by, and attributes you want back.',
       method: 'POST',
       path: '/v1/resources',
       input: z
         .object({
           external_ref: IDENTITY,
-          timezone: TIMEZONE.default('UTC'),
+          /** UTC, or its location's, when not given. */
+          timezone: TIMEZONE.optional(),
           visibility: VISIBILITY.optional(),
           ...PROFILE_INPUT,
+          /** The location it is at, by reference. */
+          location: GROUPING_REF.optional(),
         })
         .strict(),
       output: z.object({ resource: RESOURCE }).strict(),
@@ -489,11 +547,11 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_update_resource',
       title: "Change a resource's profile",
       description:
-        "Change a resource's name, description, kind, capacity, labels or attributes: the fields given, keeping the rest. null clears a name, description or capacity; [] and {} clear labels and attributes. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
+        "Change a resource's name, description, kind, capacity, labels, attributes or location: the fields given, keeping the rest. null clears a name, description, capacity or location; [] and {} clear labels and attributes. A location the tenant does not have answers 404 location_not_found. The feed's resource.updated names the fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside the bounds, naming the field.",
       method: 'PATCH',
       path: '/v1/resources/{resource_id}',
       input: z
-        .object({ resource_id: RESOURCE_ID, ...PROFILE_INPUT })
+        .object({ resource_id: RESOURCE_ID, ...PROFILE_INPUT, location: GROUPING_REF.nullable().optional() })
         .strict()
         .refine(
           (input) => Object.keys(input).some((key) => key !== 'resource_id'),
@@ -503,6 +561,139 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'updateResource',
       example: { resource_id: EXAMPLE_RESOURCE_ID, name: 'Board room', labels: ['video'] },
+    },
+    {
+      name: 'slotlock_list_locations',
+      title: 'List locations',
+      description: `The tenant's locations, each after the one it is in (depth first), with how many resources are at each. A tree of at most ${SLOTLOCK_MAX_LOCATION_DEPTH} levels and ${SLOTLOCK_MAX_LOCATIONS} locations: a region, a site, a building, a floor, a zone, or whatever yours are.`,
+      method: 'GET',
+      path: '/v1/locations',
+      input: z.object({}).strict(),
+      output: z.object({ locations: z.array(LOCATION).max(SLOTLOCK_MAX_LOCATIONS) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listLocations',
+      example: {},
+    },
+    {
+      name: 'slotlock_create_location',
+      title: 'Create or update a location',
+      description: `Create the location with this reference, or change its name, and the parent and time zone given. 404 location_not_found for a parent the tenant does not have; 409 location_too_deep past ${SLOTLOCK_MAX_LOCATION_DEPTH} levels, location_cycle under itself, location_limit_reached past ${SLOTLOCK_MAX_LOCATIONS}.`,
+      method: 'POST',
+      path: '/v1/locations',
+      input: z
+        .object({
+          ref: GROUPING_REF,
+          name: z.string().min(1).max(PROFILE.name),
+          parent_ref: GROUPING_REF.nullable().optional(),
+          timezone: TIMEZONE.nullable().optional(),
+        })
+        .strict(),
+      output: z.object({ location: LOCATION }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'createLocation',
+      example: { ref: 'leeds', name: 'Leeds clinic', timezone: 'Europe/London' },
+    },
+    {
+      name: 'slotlock_update_location',
+      title: 'Change a location',
+      description: "Change a location's name, parent or time zone: the fields given. Refused as creating one is.",
+      method: 'PATCH',
+      path: '/v1/locations/{location_ref}',
+      input: z
+        .object({
+          location_ref: GROUPING_REF,
+          name: z.string().min(1).max(PROFILE.name).optional(),
+          parent_ref: GROUPING_REF.nullable().optional(),
+          timezone: TIMEZONE.nullable().optional(),
+        })
+        .strict()
+        .refine(
+          (input) => Object.keys(input).some((key) => key !== 'location_ref'),
+          'Give at least one field to change',
+        ),
+      output: z.object({ location: LOCATION }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'updateLocation',
+      example: { location_ref: 'leeds', name: 'Leeds city clinic' },
+    },
+    {
+      name: 'slotlock_delete_location',
+      title: 'Delete a location',
+      description:
+        'Delete a location. Refused with 409 location_in_use while a resource is at it or a location is in it: move them first. deleted is false when the tenant has no such location.',
+      method: 'DELETE',
+      path: '/v1/locations/{location_ref}',
+      input: z.object({ location_ref: GROUPING_REF }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteLocation',
+      example: { location_ref: 'leeds' },
+    },
+    {
+      name: 'slotlock_list_groups',
+      title: 'List groups',
+      description: `The tenant's groups, by reference, with how many resources are in each: any sets you want (a team, a department, a contract), at most ${SLOTLOCK_MAX_RESOURCE_GROUPS}. A group changes nothing about how its resources are booked; a pool does that.`,
+      method: 'GET',
+      path: '/v1/groups',
+      input: z.object({}).strict(),
+      output: z.object({ groups: z.array(GROUP).max(SLOTLOCK_MAX_RESOURCE_GROUPS) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listGroups',
+      example: {},
+    },
+    {
+      name: 'slotlock_create_group',
+      title: 'Create or update a group',
+      description: `Create the group with this reference, or change its name, and its description when given. 409 group_limit_reached past ${SLOTLOCK_MAX_RESOURCE_GROUPS}.`,
+      method: 'POST',
+      path: '/v1/groups',
+      input: z
+        .object({
+          ref: GROUPING_REF,
+          name: z.string().min(1).max(PROFILE.name),
+          description: z.string().min(1).max(PROFILE.description).nullable().optional(),
+        })
+        .strict(),
+      output: z.object({ group: GROUP }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'createGroup',
+      example: { ref: 'physio', name: 'Physiotherapy team' },
+    },
+    {
+      name: 'slotlock_delete_group',
+      title: 'Delete a group',
+      description: 'Delete a group; its resources stay as they are. deleted is false when the tenant has no such group.',
+      method: 'DELETE',
+      path: '/v1/groups/{group_ref}',
+      input: z.object({ group_ref: GROUPING_REF }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteGroup',
+      example: { group_ref: 'physio' },
+    },
+    {
+      name: 'slotlock_add_group_member',
+      title: 'Put a resource in a group',
+      description: `Put one of the tenant's resources in a group. added is false when it was in it already. 404 group_not_found or resource_not_found; 409 resource_group_limit_reached past ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups a resource.`,
+      method: 'PUT',
+      path: '/v1/groups/{group_ref}/members/{resource_id}',
+      input: z.object({ group_ref: GROUPING_REF, resource_id: RESOURCE_ID }).strict(),
+      output: z.object({ added: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'addGroupMember',
+      example: { group_ref: 'physio', resource_id: EXAMPLE_RESOURCE_ID },
+    },
+    {
+      name: 'slotlock_remove_group_member',
+      title: 'Take a resource out of a group',
+      description: 'Take a resource out of a group. removed is false when it was not in it.',
+      method: 'DELETE',
+      path: '/v1/groups/{group_ref}/members/{resource_id}',
+      input: z.object({ group_ref: GROUPING_REF, resource_id: RESOURCE_ID }).strict(),
+      output: z.object({ removed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'removeGroupMember',
+      example: { group_ref: 'physio', resource_id: EXAMPLE_RESOURCE_ID },
     },
     {
       name: 'slotlock_get_resource',

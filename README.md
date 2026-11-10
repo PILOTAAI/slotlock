@@ -1068,6 +1068,20 @@ name, description, kind, capacity and labels, and narrows by `kind` and `labels`
 how a resource is booked: a kind is a hint and a capacity is said, never enforced. The feed's
 `resource.updated` names the profile fields that changed (`profile_changed`), never what they say.
 
+Where a resource is, and the sets it is in, are kept apart from its pool, which is how it is booked:
+
+- A **location** is a place in a tree of the tenant's own, at most 5 levels (a region, a site, a
+  building, a floor, a zone) and 1,000 locations (`POST /v1/locations`). A resource is at one at
+  most (`location` when created, or `PATCH`), and created without a time zone it takes the nearest
+  one its location, or one above it, has. A location filter includes every location under it.
+  A location something is at or in cannot be deleted (`409 location_in_use`), nor one moved under
+  itself (`location_cycle`) or past 5 levels (`location_too_deep`).
+- A **group** is any set the tenant wants: a team, a department, a contract, "Saturday clinic"
+  (`POST /v1/groups`, then `PUT /v1/groups/{ref}/members/{resource_id}`). A resource is in up to
+  20 of the tenant's 500 groups. Deleting a group leaves its resources as they were.
+- `slotlock_list_resources` shows agents each resource's `location` (with its name) and `groups`,
+  and narrows by `location` and `group`, with or without a `pool`.
+
 Rentals sell a class, not a plate. Put interchangeable resources in a pool
 (`PUT /v1/resources/{id}/pool`, `setResourcePool`); agents see each resource's `pool`, list a pool's
 members with `slotlock_list_resources` and `pool`, and book the class with `slotlock_book_pool`,
@@ -1278,7 +1292,11 @@ waits for a confirmation.
 | Request | Does |
 | --- | --- |
 | `POST /v1/resources` | Create the resource with this `external_ref`, or update its `timezone` and the profile fields given; `visibility: "private"` hides it from agents |
-| `PATCH /v1/resources/{resource_id}` | Change its profile: `name`, `description`, `kind`, `capacity`, `labels`, `attributes`, the fields given (`null` clears) |
+| `PATCH /v1/resources/{resource_id}` | Change its profile: `name`, `description`, `kind`, `capacity`, `labels`, `attributes`, and its `location`, the fields given (`null` clears) |
+| `GET /v1/locations` | The tenant's locations, depth first, with how many resources are at each; `POST` creates or updates one (`ref`, `name`, `parent_ref`, `timezone`) |
+| `PATCH /v1/locations/{location_ref}` | Change its name, parent or time zone; `DELETE` removes it (`409 location_in_use` while anything is at or in it) |
+| `GET /v1/groups` | The tenant's groups, with how many resources are in each; `POST` creates or updates one (`ref`, `name`, `description`); `DELETE /v1/groups/{group_ref}` removes it |
+| `PUT /v1/groups/{group_ref}/members/{resource_id}` | Put a resource in a group; `DELETE` takes it out |
 | `GET /v1/resources/{resource_id}` | One resource, with its own weekly hours, visibility, `archived_at` and profile |
 | `POST /v1/resources/{resource_id}/archive` | Take it out of use; `…/restore` puts it back |
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |

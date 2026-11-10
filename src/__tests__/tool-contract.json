@@ -2,7 +2,7 @@
   {
     "name": "slotlock_list_resources",
     "title": "List calendar resources",
-    "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
+    "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group's. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -42,6 +42,14 @@
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
           }
+        },
+        "location": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "group": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
         }
       },
       "additionalProperties": false
@@ -113,6 +121,32 @@
                 "items": {
                   "type": "string",
                   "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                }
+              },
+              "location": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "ref",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "groups": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
                 }
               }
             },

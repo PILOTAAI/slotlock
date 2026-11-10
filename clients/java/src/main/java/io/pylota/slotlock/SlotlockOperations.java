@@ -12,7 +12,7 @@ public abstract class SlotlockOperations {
   /** Every operation, by name: its method, path, path parameters and query parameters. */
   static final Map<String, Operation> OPERATIONS =
       Map.ofEntries(
-          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool", "kind", "labels"))),
+          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool", "kind", "labels", "location", "group"))),
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "start", "end", "duration_minutes"))),
@@ -30,6 +30,15 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_get_resource", new Operation("GET", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_update_resource", new Operation("PATCH", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_delete_resource", new Operation("DELETE", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
+          Map.entry("slotlock_list_locations", new Operation("GET", "/v1/locations", List.of(), List.of())),
+          Map.entry("slotlock_create_location", new Operation("POST", "/v1/locations", List.of(), List.of())),
+          Map.entry("slotlock_update_location", new Operation("PATCH", "/v1/locations/{location_ref}", List.of("location_ref"), List.of())),
+          Map.entry("slotlock_delete_location", new Operation("DELETE", "/v1/locations/{location_ref}", List.of("location_ref"), List.of())),
+          Map.entry("slotlock_list_groups", new Operation("GET", "/v1/groups", List.of(), List.of())),
+          Map.entry("slotlock_create_group", new Operation("POST", "/v1/groups", List.of(), List.of())),
+          Map.entry("slotlock_delete_group", new Operation("DELETE", "/v1/groups/{group_ref}", List.of("group_ref"), List.of())),
+          Map.entry("slotlock_add_group_member", new Operation("PUT", "/v1/groups/{group_ref}/members/{resource_id}", List.of("group_ref", "resource_id"), List.of())),
+          Map.entry("slotlock_remove_group_member", new Operation("DELETE", "/v1/groups/{group_ref}/members/{resource_id}", List.of("group_ref", "resource_id"), List.of())),
           Map.entry("slotlock_archive_resource", new Operation("POST", "/v1/resources/{resource_id}/archive", List.of("resource_id"), List.of())),
           Map.entry("slotlock_restore_resource", new Operation("POST", "/v1/resources/{resource_id}/restore", List.of("resource_id"), List.of())),
           Map.entry("slotlock_list_busy", new Operation("GET", "/v1/resources/{resource_id}/busy", List.of("resource_id"), List.of("start", "end"))),
@@ -104,27 +113,32 @@ public abstract class SlotlockOperations {
   /**
    * List calendar resources. List resources visible to the authenticated tenant principal, with
    * what each says about itself: its name (show it rather than the reference), description, kind,
-   * capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind,
-   * only resources of that kind; with labels, only those with every label given. With pool, only
-   * that pool's members, in the order slotlock_book_pool tries them.
+   * capacity and labels, where it is (location), the groups it is in (a team, a department), and
+   * the pool it belongs to (a vehicle class, a room type). With kind, only resources of that
+   * kind; with labels, only those with every label given; with location, only those there or at a
+   * location in it; with group, only that group's. With pool, only that pool's members, in the
+   * order slotlock_book_pool tries them.
    *
    * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
-   * (integer), {@code pool} (string), {@code kind} (string), {@code labels} (list of string)
+   * (integer), {@code pool} (string), {@code kind} (string), {@code labels} (list of string),
+   * {@code location} (string), {@code group} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> listResources(Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    putOptional(values, optional, Set.of("cursor", "limit", "pool", "kind", "labels"), "slotlock_list_resources");
+    putOptional(values, optional, Set.of("cursor", "limit", "pool", "kind", "labels", "location", "group"), "slotlock_list_resources");
     return call("slotlock_list_resources", values);
   }
 
   /**
    * List calendar resources. List resources visible to the authenticated tenant principal, with
    * what each says about itself: its name (show it rather than the reference), description, kind,
-   * capacity and labels, and the pool it belongs to (a vehicle class, a room type). With kind,
-   * only resources of that kind; with labels, only those with every label given. With pool, only
-   * that pool's members, in the order slotlock_book_pool tries them.
+   * capacity and labels, where it is (location), the groups it is in (a team, a department), and
+   * the pool it belongs to (a vehicle class, a room type). With kind, only resources of that
+   * kind; with labels, only those with every label given; with location, only those there or at a
+   * location in it; with group, only that group's. With pool, only that pool's members, in the
+   * order slotlock_book_pool tries them.
    *
    * @return the response body
    * @throws SlotlockException when the server refuses the call
@@ -135,38 +149,42 @@ public abstract class SlotlockOperations {
 
   /**
    * Create or update a resource. Create the resource with this external reference, or update its
-   * time zone, and the profile fields given, if the tenant already has it. Repeating the call
-   * changes nothing more. visibility is shared (the default: agents list and book it) or private
-   * (agents never see it), fixed at creation: naming another for an existing resource answers 409
-   * resource_visibility_conflict. Its profile is optional: a name agents and people see instead
-   * of the reference, a description, its kind (person, room, desk, space, vehicle, machine,
-   * equipment, service or other: a hint, never a rule), its capacity (informational), up to 20
-   * labels to find it by, and attributes you want back.
+   * time zone, and the profile fields and location given, if the tenant already has it. Without a
+   * time zone, a new resource takes the nearest one its location, or a location above it, has,
+   * else UTC; a location the tenant does not have answers 404 location_not_found. Repeating the
+   * call changes nothing more. visibility is shared (the default: agents list and book it) or
+   * private (agents never see it), fixed at creation: naming another for an existing resource
+   * answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people
+   * see instead of the reference, a description, its kind (person, room, desk, space, vehicle,
+   * machine, equipment, service or other: a hint, never a rule), its capacity (informational), up
+   * to 20 labels to find it by, and attributes you want back.
    *
    * @param externalRef {@code external_ref}, string
    * @param optional the optional arguments, or null: {@code timezone} (string), {@code
    * visibility} (string), {@code name} (string, null clears it), {@code description} (string,
    * null clears it), {@code kind} (string), {@code capacity} (integer, null clears it), {@code
-   * labels} (list of string), {@code attributes} (object)
+   * labels} (list of string), {@code attributes} (object), {@code location} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> createResource(String externalRef, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("external_ref", externalRef);
-    putOptional(values, optional, Set.of("timezone", "visibility", "name", "description", "kind", "capacity", "labels", "attributes"), "slotlock_create_resource");
+    putOptional(values, optional, Set.of("timezone", "visibility", "name", "description", "kind", "capacity", "labels", "attributes", "location"), "slotlock_create_resource");
     return call("slotlock_create_resource", values);
   }
 
   /**
    * Create or update a resource. Create the resource with this external reference, or update its
-   * time zone, and the profile fields given, if the tenant already has it. Repeating the call
-   * changes nothing more. visibility is shared (the default: agents list and book it) or private
-   * (agents never see it), fixed at creation: naming another for an existing resource answers 409
-   * resource_visibility_conflict. Its profile is optional: a name agents and people see instead
-   * of the reference, a description, its kind (person, room, desk, space, vehicle, machine,
-   * equipment, service or other: a hint, never a rule), its capacity (informational), up to 20
-   * labels to find it by, and attributes you want back.
+   * time zone, and the profile fields and location given, if the tenant already has it. Without a
+   * time zone, a new resource takes the nearest one its location, or a location above it, has,
+   * else UTC; a location the tenant does not have answers 404 location_not_found. Repeating the
+   * call changes nothing more. visibility is shared (the default: agents list and book it) or
+   * private (agents never see it), fixed at creation: naming another for an existing resource
+   * answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people
+   * see instead of the reference, a description, its kind (person, room, desk, space, vehicle,
+   * machine, equipment, service or other: a hint, never a rule), its capacity (informational), up
+   * to 20 labels to find it by, and attributes you want back.
    *
    * @param externalRef {@code external_ref}, string
    * @return the response body
@@ -585,30 +603,33 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Change a resource's profile. Change a resource's name, description, kind, capacity, labels or
-   * attributes: the fields given, keeping the rest. null clears a name, description or capacity;
-   * [] and {} clear labels and attributes. The feed's resource.updated names the fields that
+   * Change a resource's profile. Change a resource's name, description, kind, capacity, labels,
+   * attributes or location: the fields given, keeping the rest. null clears a name, description,
+   * capacity or location; [] and {} clear labels and attributes. A location the tenant does not
+   * have answers 404 location_not_found. The feed's resource.updated names the fields that
    * changed (profile_changed), never their values. 400 invalid_resource_profile outside the
    * bounds, naming the field.
    *
    * @param resourceId {@code resource_id}, string
    * @param optional the optional arguments, or null: {@code name} (string, null clears it),
    * {@code description} (string, null clears it), {@code kind} (string), {@code capacity}
-   * (integer, null clears it), {@code labels} (list of string), {@code attributes} (object)
+   * (integer, null clears it), {@code labels} (list of string), {@code attributes} (object),
+   * {@code location} (string, null clears it)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> updateResource(String resourceId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
-    putOptional(values, optional, Set.of("name", "description", "kind", "capacity", "labels", "attributes"), "slotlock_update_resource");
+    putOptional(values, optional, Set.of("name", "description", "kind", "capacity", "labels", "attributes", "location"), "slotlock_update_resource");
     return call("slotlock_update_resource", values);
   }
 
   /**
-   * Change a resource's profile. Change a resource's name, description, kind, capacity, labels or
-   * attributes: the fields given, keeping the rest. null clears a name, description or capacity;
-   * [] and {} clear labels and attributes. The feed's resource.updated names the fields that
+   * Change a resource's profile. Change a resource's name, description, kind, capacity, labels,
+   * attributes or location: the fields given, keeping the rest. null clears a name, description,
+   * capacity or location; [] and {} clear labels and attributes. A location the tenant does not
+   * have answers 404 location_not_found. The feed's resource.updated names the fields that
    * changed (profile_changed), never their values. 400 invalid_resource_profile outside the
    * bounds, naming the field.
    *
@@ -635,6 +656,188 @@ public abstract class SlotlockOperations {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("resource_id", resourceId);
     return call("slotlock_delete_resource", values);
+  }
+
+  /**
+   * List locations. The tenant's locations, each after the one it is in (depth first), with how
+   * many resources are at each. A tree of at most 5 levels and 1000 locations: a region, a site,
+   * a building, a floor, a zone, or whatever yours are.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listLocations() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_list_locations", values);
+  }
+
+  /**
+   * Create or update a location. Create the location with this reference, or change its name, and
+   * the parent and time zone given. 404 location_not_found for a parent the tenant does not have;
+   * 409 location_too_deep past 5 levels, location_cycle under itself, location_limit_reached past
+   * 1000.
+   *
+   * @param ref {@code ref}, string
+   * @param name {@code name}, string
+   * @param optional the optional arguments, or null: {@code parent_ref} (string, null clears it),
+   * {@code timezone} (string, null clears it)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createLocation(String ref, String name, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("ref", ref);
+    values.put("name", name);
+    putOptional(values, optional, Set.of("parent_ref", "timezone"), "slotlock_create_location");
+    return call("slotlock_create_location", values);
+  }
+
+  /**
+   * Create or update a location. Create the location with this reference, or change its name, and
+   * the parent and time zone given. 404 location_not_found for a parent the tenant does not have;
+   * 409 location_too_deep past 5 levels, location_cycle under itself, location_limit_reached past
+   * 1000.
+   *
+   * @param ref {@code ref}, string
+   * @param name {@code name}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createLocation(String ref, String name) {
+    return createLocation(ref, name, null);
+  }
+
+  /**
+   * Change a location. Change a location's name, parent or time zone: the fields given. Refused
+   * as creating one is.
+   *
+   * @param locationRef {@code location_ref}, string
+   * @param optional the optional arguments, or null: {@code name} (string), {@code parent_ref}
+   * (string, null clears it), {@code timezone} (string, null clears it)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> updateLocation(String locationRef, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("location_ref", locationRef);
+    putOptional(values, optional, Set.of("name", "parent_ref", "timezone"), "slotlock_update_location");
+    return call("slotlock_update_location", values);
+  }
+
+  /**
+   * Change a location. Change a location's name, parent or time zone: the fields given. Refused
+   * as creating one is.
+   *
+   * @param locationRef {@code location_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> updateLocation(String locationRef) {
+    return updateLocation(locationRef, null);
+  }
+
+  /**
+   * Delete a location. Delete a location. Refused with 409 location_in_use while a resource is at
+   * it or a location is in it: move them first. deleted is false when the tenant has no such
+   * location.
+   *
+   * @param locationRef {@code location_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteLocation(String locationRef) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("location_ref", locationRef);
+    return call("slotlock_delete_location", values);
+  }
+
+  /**
+   * List groups. The tenant's groups, by reference, with how many resources are in each: any sets
+   * you want (a team, a department, a contract), at most 500. A group changes nothing about how
+   * its resources are booked; a pool does that.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listGroups() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_list_groups", values);
+  }
+
+  /**
+   * Create or update a group. Create the group with this reference, or change its name, and its
+   * description when given. 409 group_limit_reached past 500.
+   *
+   * @param ref {@code ref}, string
+   * @param name {@code name}, string
+   * @param optional the optional arguments, or null: {@code description} (string, null clears it)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createGroup(String ref, String name, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("ref", ref);
+    values.put("name", name);
+    putOptional(values, optional, Set.of("description"), "slotlock_create_group");
+    return call("slotlock_create_group", values);
+  }
+
+  /**
+   * Create or update a group. Create the group with this reference, or change its name, and its
+   * description when given. 409 group_limit_reached past 500.
+   *
+   * @param ref {@code ref}, string
+   * @param name {@code name}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> createGroup(String ref, String name) {
+    return createGroup(ref, name, null);
+  }
+
+  /**
+   * Delete a group. Delete a group; its resources stay as they are. deleted is false when the
+   * tenant has no such group.
+   *
+   * @param groupRef {@code group_ref}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteGroup(String groupRef) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("group_ref", groupRef);
+    return call("slotlock_delete_group", values);
+  }
+
+  /**
+   * Put a resource in a group. Put one of the tenant's resources in a group. added is false when
+   * it was in it already. 404 group_not_found or resource_not_found; 409
+   * resource_group_limit_reached past 20 groups a resource.
+   *
+   * @param groupRef {@code group_ref}, string
+   * @param resourceId {@code resource_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> addGroupMember(String groupRef, String resourceId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("group_ref", groupRef);
+    values.put("resource_id", resourceId);
+    return call("slotlock_add_group_member", values);
+  }
+
+  /**
+   * Take a resource out of a group. Take a resource out of a group. removed is false when it was
+   * not in it.
+   *
+   * @param groupRef {@code group_ref}, string
+   * @param resourceId {@code resource_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> removeGroupMember(String groupRef, String resourceId) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("group_ref", groupRef);
+    values.put("resource_id", resourceId);
+    return call("slotlock_remove_group_member", values);
   }
 
   /**

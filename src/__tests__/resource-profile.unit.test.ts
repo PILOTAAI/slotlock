@@ -3,6 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_AGENT_RESOURCE_PROFILE } from '../agent-server.js';
 import {
+  SLOTLOCK_GROUPING_REF,
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
   SLOTLOCK_RESOURCE_KINDS,
   SLOTLOCK_RESOURCE_LABEL,
   SLOTLOCK_RESOURCE_PROFILE_LIMITS,
@@ -74,6 +76,10 @@ describe('resource profiles', () => {
     expect(SLOTLOCK_AGENT_RESOURCE_PROFILE.kinds).toEqual([...SLOTLOCK_RESOURCE_KINDS]);
     expect(SLOTLOCK_AGENT_RESOURCE_PROFILE.labels).toBe(SLOTLOCK_RESOURCE_PROFILE_LIMITS.labels);
     expect(SLOTLOCK_AGENT_RESOURCE_PROFILE.name).toBe(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name);
+    expect(SLOTLOCK_AGENT_RESOURCE_PROFILE.groups).toBe(SLOTLOCK_MAX_GROUPS_PER_RESOURCE);
+    for (const ref of ['leeds', 'a.b-c_d', 'x'.repeat(100), 'Leeds', '.x', 'x'.repeat(101)]) {
+      expect(SLOTLOCK_AGENT_RESOURCE_PROFILE.groupingRef.safeParse(ref).success, ref).toBe(SLOTLOCK_GROUPING_REF.test(ref));
+    }
     for (const label of ['ev', 'a.b-c_d', 'x'.repeat(64), 'EV', '-x', 'x'.repeat(65), '']) {
       expect(SLOTLOCK_AGENT_RESOURCE_PROFILE.label.safeParse(label).success, label).toBe(
         SLOTLOCK_RESOURCE_LABEL.test(label),

@@ -10,7 +10,7 @@ import "context"
 // operations is every operation, by name: its method, path, path parameters and query parameters.
 var operations = func() map[string]operation {
 	list := []operation{
-		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool", "kind", "labels"}},
+		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool", "kind", "labels", "location", "group"}},
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "start", "end", "duration_minutes"}},
@@ -28,6 +28,15 @@ var operations = func() map[string]operation {
 		{name: "slotlock_get_resource", method: "GET", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_update_resource", method: "PATCH", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
+		{name: "slotlock_list_locations", method: "GET", path: "/v1/locations", pathParams: nil, query: nil},
+		{name: "slotlock_create_location", method: "POST", path: "/v1/locations", pathParams: nil, query: nil},
+		{name: "slotlock_update_location", method: "PATCH", path: "/v1/locations/{location_ref}", pathParams: []string{"location_ref"}, query: nil},
+		{name: "slotlock_delete_location", method: "DELETE", path: "/v1/locations/{location_ref}", pathParams: []string{"location_ref"}, query: nil},
+		{name: "slotlock_list_groups", method: "GET", path: "/v1/groups", pathParams: nil, query: nil},
+		{name: "slotlock_create_group", method: "POST", path: "/v1/groups", pathParams: nil, query: nil},
+		{name: "slotlock_delete_group", method: "DELETE", path: "/v1/groups/{group_ref}", pathParams: []string{"group_ref"}, query: nil},
+		{name: "slotlock_add_group_member", method: "PUT", path: "/v1/groups/{group_ref}/members/{resource_id}", pathParams: []string{"group_ref", "resource_id"}, query: nil},
+		{name: "slotlock_remove_group_member", method: "DELETE", path: "/v1/groups/{group_ref}/members/{resource_id}", pathParams: []string{"group_ref", "resource_id"}, query: nil},
 		{name: "slotlock_archive_resource", method: "POST", path: "/v1/resources/{resource_id}/archive", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_restore_resource", method: "POST", path: "/v1/resources/{resource_id}/restore", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_list_busy", method: "GET", path: "/v1/resources/{resource_id}/busy", pathParams: []string{"resource_id"}, query: []string{"start", "end"}},
@@ -93,6 +102,10 @@ type ListResourcesInput struct {
 	Kind *string
 
 	Labels []string
+
+	Location *string
+
+	Group *string
 }
 
 func (in ListResourcesInput) values() map[string]any {
@@ -112,14 +125,22 @@ func (in ListResourcesInput) values() map[string]any {
 	if in.Labels != nil {
 		values["labels"] = in.Labels
 	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
+	if in.Group != nil {
+		values["group"] = *in.Group
+	}
 	return values
 }
 
 // ListResources: List calendar resources. List resources visible to the authenticated tenant
 // principal, with what each says about itself: its name (show it rather than the reference),
-// description, kind, capacity and labels, and the pool it belongs to (a vehicle class, a room
-// type). With kind, only resources of that kind; with labels, only those with every label given.
-// With pool, only that pool's members, in the order slotlock_book_pool tries them.
+// description, kind, capacity and labels, where it is (location), the groups it is in (a team, a
+// department), and the pool it belongs to (a vehicle class, a room type). With kind, only
+// resources of that kind; with labels, only those with every label given; with location, only
+// those there or at a location in it; with group, only that group's. With pool, only that pool's
+// members, in the order slotlock_book_pool tries them.
 func (c *Client) ListResources(ctx context.Context, in ListResourcesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_resources", in.values())
 }
@@ -143,6 +164,8 @@ type CreateResourceInput struct {
 	Labels []string
 
 	Attributes map[string]any
+
+	Location *string
 }
 
 func (in CreateResourceInput) values() map[string]any {
@@ -172,17 +195,22 @@ func (in CreateResourceInput) values() map[string]any {
 	if in.Attributes != nil {
 		values["attributes"] = in.Attributes
 	}
+	if in.Location != nil {
+		values["location"] = *in.Location
+	}
 	return values
 }
 
 // CreateResource: Create or update a resource. Create the resource with this external reference,
-// or update its time zone, and the profile fields given, if the tenant already has it. Repeating
-// the call changes nothing more. visibility is shared (the default: agents list and book it) or
-// private (agents never see it), fixed at creation: naming another for an existing resource
-// answers 409 resource_visibility_conflict. Its profile is optional: a name agents and people see
-// instead of the reference, a description, its kind (person, room, desk, space, vehicle, machine,
-// equipment, service or other: a hint, never a rule), its capacity (informational), up to 20
-// labels to find it by, and attributes you want back.
+// or update its time zone, and the profile fields and location given, if the tenant already has
+// it. Without a time zone, a new resource takes the nearest one its location, or a location above
+// it, has, else UTC; a location the tenant does not have answers 404 location_not_found.
+// Repeating the call changes nothing more. visibility is shared (the default: agents list and
+// book it) or private (agents never see it), fixed at creation: naming another for an existing
+// resource answers 409 resource_visibility_conflict. Its profile is optional: a name agents and
+// people see instead of the reference, a description, its kind (person, room, desk, space,
+// vehicle, machine, equipment, service or other: a hint, never a rule), its capacity
+// (informational), up to 20 labels to find it by, and attributes you want back.
 func (c *Client) CreateResource(ctx context.Context, in CreateResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_resource", in.values())
 }
@@ -708,6 +736,8 @@ type UpdateResourceInput struct {
 	Labels []string
 
 	Attributes map[string]any
+
+	Location Nullable[string]
 }
 
 func (in UpdateResourceInput) values() map[string]any {
@@ -731,14 +761,18 @@ func (in UpdateResourceInput) values() map[string]any {
 	if in.Attributes != nil {
 		values["attributes"] = in.Attributes
 	}
+	if value, ok := in.Location.get(); ok {
+		values["location"] = value
+	}
 	return values
 }
 
 // UpdateResource: Change a resource's profile. Change a resource's name, description, kind,
-// capacity, labels or attributes: the fields given, keeping the rest. null clears a name,
-// description or capacity; [] and {} clear labels and attributes. The feed's resource.updated
-// names the fields that changed (profile_changed), never their values. 400
-// invalid_resource_profile outside the bounds, naming the field.
+// capacity, labels, attributes or location: the fields given, keeping the rest. null clears a
+// name, description, capacity or location; [] and {} clear labels and attributes. A location the
+// tenant does not have answers 404 location_not_found. The feed's resource.updated names the
+// fields that changed (profile_changed), never their values. 400 invalid_resource_profile outside
+// the bounds, naming the field.
 func (c *Client) UpdateResource(ctx context.Context, in UpdateResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_update_resource", in.values())
 }
@@ -761,6 +795,203 @@ func (in DeleteResourceInput) values() map[string]any {
 // deleted already, say.
 func (c *Client) DeleteResource(ctx context.Context, in DeleteResourceInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_delete_resource", in.values())
+}
+
+// ListLocationsInput holds the arguments of [Client.ListLocations].
+type ListLocationsInput struct {
+}
+
+func (in ListLocationsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListLocations: List locations. The tenant's locations, each after the one it is in (depth
+// first), with how many resources are at each. A tree of at most 5 levels and 1000 locations: a
+// region, a site, a building, a floor, a zone, or whatever yours are.
+func (c *Client) ListLocations(ctx context.Context, in ListLocationsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_locations", in.values())
+}
+
+// CreateLocationInput holds the arguments of [Client.CreateLocation].
+type CreateLocationInput struct {
+	Ref string
+
+	Name string
+
+	ParentRef Nullable[string]
+
+	Timezone Nullable[string]
+}
+
+func (in CreateLocationInput) values() map[string]any {
+	values := map[string]any{}
+	values["ref"] = in.Ref
+	values["name"] = in.Name
+	if value, ok := in.ParentRef.get(); ok {
+		values["parent_ref"] = value
+	}
+	if value, ok := in.Timezone.get(); ok {
+		values["timezone"] = value
+	}
+	return values
+}
+
+// CreateLocation: Create or update a location. Create the location with this reference, or change
+// its name, and the parent and time zone given. 404 location_not_found for a parent the tenant
+// does not have; 409 location_too_deep past 5 levels, location_cycle under itself,
+// location_limit_reached past 1000.
+func (c *Client) CreateLocation(ctx context.Context, in CreateLocationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_location", in.values())
+}
+
+// UpdateLocationInput holds the arguments of [Client.UpdateLocation].
+type UpdateLocationInput struct {
+	LocationRef string
+
+	Name *string
+
+	ParentRef Nullable[string]
+
+	Timezone Nullable[string]
+}
+
+func (in UpdateLocationInput) values() map[string]any {
+	values := map[string]any{}
+	values["location_ref"] = in.LocationRef
+	if in.Name != nil {
+		values["name"] = *in.Name
+	}
+	if value, ok := in.ParentRef.get(); ok {
+		values["parent_ref"] = value
+	}
+	if value, ok := in.Timezone.get(); ok {
+		values["timezone"] = value
+	}
+	return values
+}
+
+// UpdateLocation: Change a location. Change a location's name, parent or time zone: the fields
+// given. Refused as creating one is.
+func (c *Client) UpdateLocation(ctx context.Context, in UpdateLocationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_update_location", in.values())
+}
+
+// DeleteLocationInput holds the arguments of [Client.DeleteLocation].
+type DeleteLocationInput struct {
+	LocationRef string
+}
+
+func (in DeleteLocationInput) values() map[string]any {
+	values := map[string]any{}
+	values["location_ref"] = in.LocationRef
+	return values
+}
+
+// DeleteLocation: Delete a location. Delete a location. Refused with 409 location_in_use while a
+// resource is at it or a location is in it: move them first. deleted is false when the tenant has
+// no such location.
+func (c *Client) DeleteLocation(ctx context.Context, in DeleteLocationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_location", in.values())
+}
+
+// ListGroupsInput holds the arguments of [Client.ListGroups].
+type ListGroupsInput struct {
+}
+
+func (in ListGroupsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListGroups: List groups. The tenant's groups, by reference, with how many resources are in
+// each: any sets you want (a team, a department, a contract), at most 500. A group changes
+// nothing about how its resources are booked; a pool does that.
+func (c *Client) ListGroups(ctx context.Context, in ListGroupsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_groups", in.values())
+}
+
+// CreateGroupInput holds the arguments of [Client.CreateGroup].
+type CreateGroupInput struct {
+	Ref string
+
+	Name string
+
+	Description Nullable[string]
+}
+
+func (in CreateGroupInput) values() map[string]any {
+	values := map[string]any{}
+	values["ref"] = in.Ref
+	values["name"] = in.Name
+	if value, ok := in.Description.get(); ok {
+		values["description"] = value
+	}
+	return values
+}
+
+// CreateGroup: Create or update a group. Create the group with this reference, or change its
+// name, and its description when given. 409 group_limit_reached past 500.
+func (c *Client) CreateGroup(ctx context.Context, in CreateGroupInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_group", in.values())
+}
+
+// DeleteGroupInput holds the arguments of [Client.DeleteGroup].
+type DeleteGroupInput struct {
+	GroupRef string
+}
+
+func (in DeleteGroupInput) values() map[string]any {
+	values := map[string]any{}
+	values["group_ref"] = in.GroupRef
+	return values
+}
+
+// DeleteGroup: Delete a group. Delete a group; its resources stay as they are. deleted is false
+// when the tenant has no such group.
+func (c *Client) DeleteGroup(ctx context.Context, in DeleteGroupInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_group", in.values())
+}
+
+// AddGroupMemberInput holds the arguments of [Client.AddGroupMember].
+type AddGroupMemberInput struct {
+	GroupRef string
+
+	ResourceID string
+}
+
+func (in AddGroupMemberInput) values() map[string]any {
+	values := map[string]any{}
+	values["group_ref"] = in.GroupRef
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// AddGroupMember: Put a resource in a group. Put one of the tenant's resources in a group. added
+// is false when it was in it already. 404 group_not_found or resource_not_found; 409
+// resource_group_limit_reached past 20 groups a resource.
+func (c *Client) AddGroupMember(ctx context.Context, in AddGroupMemberInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_add_group_member", in.values())
+}
+
+// RemoveGroupMemberInput holds the arguments of [Client.RemoveGroupMember].
+type RemoveGroupMemberInput struct {
+	GroupRef string
+
+	ResourceID string
+}
+
+func (in RemoveGroupMemberInput) values() map[string]any {
+	values := map[string]any{}
+	values["group_ref"] = in.GroupRef
+	values["resource_id"] = in.ResourceID
+	return values
+}
+
+// RemoveGroupMember: Take a resource out of a group. Take a resource out of a group. removed is
+// false when it was not in it.
+func (c *Client) RemoveGroupMember(ctx context.Context, in RemoveGroupMemberInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_remove_group_member", in.values())
 }
 
 // ArchiveResourceInput holds the arguments of [Client.ArchiveResource].

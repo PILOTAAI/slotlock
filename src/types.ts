@@ -57,6 +57,12 @@ export interface SlotlockResource {
   labels?: string[];
   /** What the integrator keeps on it. Absent when it has none. */
   attributes?: SlotlockResourceAttributes;
+  /** The reference of the location it is at (resource-profile.ts). Absent when not said. */
+  location?: string;
+  /** That location's name. */
+  locationName?: string;
+  /** The references of the groups it is in, sorted. Absent when it is in none. */
+  groups?: string[];
 }
 
 /** A confirmed occupation of a resource. The DB EXCLUDE constraint is the overlap arbiter. */
