@@ -276,6 +276,7 @@ fn books_holds_and_reservations_without_double_booking() {
     assert_eq!(
         keys,
         [
+            "approvals_expired",
             "capped",
             "conflicts",
             "extended",
