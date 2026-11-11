@@ -31,6 +31,8 @@ describe.skipIf(!url)('approval policies (real Postgres)', () => {
   const principals: Record<string, SlotlockAgentPrincipal> = {
     agent: { subject: 'agent-a', tenantRef, scopes: ['read', 'write'] },
     other: { subject: 'agent-b', tenantRef, scopes: ['read', 'write'] },
+    // A key held to two live holds and three held hours (RFC 0004 A5).
+    capped: { subject: 'agent-capped', tenantRef, scopes: ['read', 'write'], limits: { maxHolds: 2, maxHeldHours: 3 } },
     admin: { subject: 'person-admin', tenantRef, scopes: ['read', 'write', 'admin'] },
   };
   const call = async (who: keyof typeof principals, method: string, path: string, body?: unknown): Promise<Answer> => {
@@ -493,5 +495,37 @@ describe.skipIf(!url)('approval policies (real Postgres)', () => {
     });
     expect(refused.body).toMatchObject({ code: 'approval_series_unsupported', policy_ref: 'series-gate' });
     await call('admin', 'DELETE', '/v1/approval-policies/series-gate');
+  });
+
+  it("counts an agent's pending approvals against its key's caps, as its own holds", async () => {
+    const vans = [await resource(), await resource(), await resource()];
+    await policy('capped-gate', { applies_to: { resource_ids: vans }, approval_ttl_minutes: 240 });
+    // Two approvals wait, each holding an hour for the capped agent.
+    const first = await book('capped', vans[0] as string, 9, 10);
+    const second = await book('capped', vans[1] as string, 9, 10);
+    expect([first.body.code, second.body.code]).toEqual(['approval_pending', 'approval_pending']);
+    // A third would hold more than the key's two: refused, holding nothing.
+    const third = await book('capped', vans[2] as string, 9, 10);
+    expect(third).toMatchObject({ status: 409, body: { code: 'hold_limit_reached' } });
+    // Nor can it hold the time itself while those wait.
+    const plain = await resource();
+    const hold = await call('capped', 'POST', '/v1/slot-holds', {
+      slots: [{ resource_id: plain, start: at(12), end: at(13) }],
+      ttl_seconds: 600,
+      idempotency_key: `cap-${randomUUID()}`,
+    });
+    expect(hold.status).toBe(200);
+    expect(hold.body).toMatchObject({ holds: [], refused: [{ code: 'hold_limit_reached' }] });
+    // Declined, the time is free and counts no more.
+    expect((await decide(first.body.approval_id as string, 'decline')).status).toBe(200);
+    const after = await book('capped', vans[2] as string, 9, 10);
+    expect(after.body.code).toBe('approval_pending');
+    // Held hours too: one hour waiting, and a three-hour booking would make four of three.
+    expect((await decide(second.body.approval_id as string, 'decline')).status).toBe(200);
+    const long = await book('capped', vans[0] as string, 11, 14);
+    expect(long).toMatchObject({ status: 409, body: { code: 'held_time_limit_reached' } });
+    // Another agent's approvals are its own.
+    expect((await book('other', vans[1] as string, 14, 15)).body.code).toBe('approval_pending');
+    await call('admin', 'DELETE', '/v1/approval-policies/capped-gate');
   });
 });

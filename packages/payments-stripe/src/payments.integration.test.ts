@@ -128,6 +128,21 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
     intents.set('pi_euro', { ...paying, id: 'pi_euro', status: 'succeeded', currency: 'eur' });
     expect(await payments.confirmPaymentIntent('pi_euro')).toMatchObject({ status: 'refused', code: 'payment_amount_mismatch' });
 
+    // Stripe counts ISK (and UGX) in hundredths ISO 4217 does not have: 100 to Stripe is 1 ISK, less
+    // than a 50 ISK hold, and 5000 is the whole 50.
+    const krona = await call('POST', '/v1/holds', {
+      resource_id: room, start: at(20), end: at(21), ttl_seconds: 900, payment_required: true,
+      payment: { amount_minor: 50, currency: 'ISK' },
+    }).then((answer) => (answer.body.hold as { id: string }).id);
+    const iceland = { object: 'payment_intent', status: 'succeeded', currency: 'isk', metadata: payments.metadataFor(krona) };
+    intents.set('pi_iskshort', { ...iceland, id: 'pi_iskshort', amount_received: 100 });
+    expect(await payments.confirmPaymentIntent('pi_iskshort')).toMatchObject({ status: 'refused', code: 'payment_amount_mismatch' });
+    intents.set('pi_iskodd', { ...iceland, id: 'pi_iskodd', amount_received: 5050 });
+    expect(await payments.confirmPaymentIntent('pi_iskodd')).toMatchObject({ status: 'refused', code: 'payment_amount_mismatch' });
+    intents.set('pi_isk', { ...iceland, id: 'pi_isk', amount_received: 5000 });
+    expect(await payments.confirmPaymentIntent('pi_isk')).toMatchObject({ status: 'paid', holdId: krona });
+    expect((await call('GET', `/v1/holds/${krona}`)).body.hold).toMatchObject({ paid_amount: { amount_minor: 50, currency: 'ISK' } });
+
     // Stripe says it succeeded: the webhook is read back from Stripe, and the hold marked paid.
     intents.set('pi_ok', { ...intents.get('pi_ok'), status: 'succeeded' });
     const payload = JSON.stringify({ type: 'payment_intent.succeeded', data: { object: { id: 'pi_ok', status: 'succeeded' } } });
@@ -150,7 +165,7 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
       status: 'paid',
       replayed: true,
     });
-    expect(refunds).toEqual(['pi_cheap', 'pi_euro']);
+    expect(refunds).toEqual(['pi_cheap', 'pi_euro', 'pi_iskshort', 'pi_iskodd']);
     await expect(payments.handleWebhook({ payload, signatureHeader: signed(payload, undefined, 'whsec_x'), webhookSecret: SECRET })).rejects.toThrow();
     expect(
       await payments.handleWebhook({ payload: JSON.stringify({ type: 'charge.refunded' }), signatureHeader: signed(JSON.stringify({ type: 'charge.refunded' })), webhookSecret: SECRET }),
@@ -167,7 +182,7 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
       code: 'hold_expired',
       refunded: true,
     });
-    expect(refunds).toEqual(['pi_cheap', 'pi_euro', 'pi_late']);
+    expect(refunds).toEqual(['pi_cheap', 'pi_euro', 'pi_iskshort', 'pi_iskodd', 'pi_late']);
 
     // Through its HTTP surface: one URL per tenant, each checked with that tenant's secret.
     const http = createPaymentsHttpHandler({

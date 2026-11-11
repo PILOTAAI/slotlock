@@ -178,6 +178,44 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     expect(await teams.changeRole(tenantRef, bea, hal, 'member')).toBe('not_found');
   });
 
+  it('limits a member to locations and groups: by an Owner or an Admin not limited, never an Owner (RFC 0004 D1)', async () => {
+    const tenantRef = await team(ada);
+    await join(tenantRef, ada, bea, 'admin');
+    await join(tenantRef, ada, cy, 'member');
+    await join(tenantRef, ada, dee, 'admin');
+    const workspaces = createSlotlockDashboardWorkspaces(application);
+    const scopeOf = (person: string, tenant = tenantRef) => (workspaces.scope as NonNullable<typeof workspaces.scope>)(tenant, person);
+    const north = { locations: ['north'], groups: [] };
+    expect(await teams.setScope(tenantRef, bea, cy, north)).toBeNull();
+    // The test environment is the same member's: limited alike.
+    expect(await scopeOf(cy)).toEqual(north);
+    expect(await scopeOf(cy, `${tenantRef}~test`)).toEqual(north);
+    expect([...(await teams.scopes(tenantRef))]).toEqual([[cy, north]]);
+    // Never an Owner; a limited Admin limits no one, nor does a Member; nor a stranger, or of one.
+    expect(await teams.setScope(tenantRef, bea, ada, north)).toBe('owner');
+    expect(await teams.setScope(tenantRef, bea, dee, { locations: [], groups: ['vans'] })).toBeNull();
+    expect(await teams.setScope(tenantRef, dee, cy, null)).toBe('not_allowed');
+    expect(await teams.setScope(tenantRef, cy, bea, north)).toBe('not_allowed');
+    expect(await teams.setScope(tenantRef, hal, cy, null)).toBe('not_allowed');
+    expect(await teams.setScope(tenantRef, bea, hal, north)).toBe('not_found');
+    // Made an Owner, they reach all of it.
+    expect(await teams.changeRole(tenantRef, ada, dee, 'owner')).toBeNull();
+    expect(await scopeOf(dee)).toBeNull();
+    expect([...(await teams.scopes(tenantRef))].map(([person]) => person)).toEqual([cy]);
+    // Given all of it again.
+    expect(await teams.setScope(tenantRef, ada, cy, null)).toBeNull();
+    expect(await scopeOf(cy)).toBeNull();
+    // A scope names at least one location or group, each a reference, in the store and the database.
+    await expect(teams.setScope(tenantRef, ada, cy, { locations: [], groups: [] })).rejects.toThrow();
+    const tooMany = JSON.stringify({ locations: Array.from({ length: 21 }, (_, index) => `l${String(index)}`), groups: [] });
+    for (const bad of ['{"locations": []}', '{"locations": [], "groups": []}', '{"locations": ["North"], "groups": []}', '{"locations": [7], "groups": []}', '[]', tooMany]) {
+      await expect(
+        application`SELECT slotlock.set_member_scope(${tenantRef}::text, ${ada}::text, ${cy}::text, ${bad}::jsonb)`,
+        bad,
+      ).rejects.toMatchObject({ code: '23514' });
+    }
+  });
+
   it('withdraws an invitation whose inviter may no longer give its role', async () => {
     const tenantRef = await team(ada);
     await join(tenantRef, ada, bea, 'admin');

@@ -74,7 +74,7 @@ refused.
 | Role | May |
 |---|---|
 | Owner | Everything: billing, and the workspace itself |
-| Admin | All but billing and the workspace itself: Full-access keys, webhooks, anyone's keys, contacts, the assistant's model |
+| Admin | All but billing and the workspace itself: Full-access keys, webhooks, anyone's keys, contacts, the assistant's model, Privacy |
 | Developer | Resources, booking rules, hours, the test environment, and read-only or read-write keys of their own |
 | Member | Bookings, approvals, the waitlist, hours and closures, and the assistant |
 | Viewer | Reads everything, changes nothing; their assistant only reads |
@@ -82,8 +82,17 @@ refused.
 
 - A person is the Owner of their own workspace. In an organization's, GitHub's owners are its
   Owners and its other members Developers, recorded at each sign-in.
-- Full-access keys, webhooks, billing and the assistant's model also need a sign-in in the last 15
+- Full-access keys, webhooks, billing, the assistant's model and Privacy also need a sign-in in the last 15
   minutes: past it, the dashboard asks the person to sign in again and comes back to the page.
+- **Privacy** (Settings, Owners and Admins, RFC 0004 D3): **Export the workspace** makes a copy of
+  everything it keeps, every table read at one moment, built in the background and kept a day;
+  **Download** gives it as one file of JSON lines (`{"table", "row"}`). **One person** finds someone
+  by email address, holder, contact or booking reference, shows how many rows of each table name
+  them, downloads them as JSON, and erases them once you tick that you understand: their contacts,
+  attendee and waitlist entries go, their references become a name that is no one's, and their
+  bookings stay as time taken. The person never goes in an address (every form posts), and the
+  audit log records each step (`export.created`, `export.downloaded`, `subject.exported`,
+  `subject.erased`) without them.
 - A Developer rotates or limits only keys they created, and never a Full-access one.
 - **Sign out everywhere** (Settings, Account) ends every session of the person on every device;
   erasing a person ends them too.
@@ -132,6 +141,22 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - **Change a role, remove someone, or leave** on Members. A team always keeps an Owner: the last
   one makes another Owner first, then may step down or leave. Removing someone revokes the keys
   they created, Live and Test, unless the form keeps them. Their next request is refused.
+- **Limit someone to locations or groups** (Members, **Limit**; RFC 0004 D1): an Owner, or an Admin
+  not limited themselves, picks up to 20 locations and 20 groups for anyone but an Owner, in Live
+  and Test alike. From their next request the dashboard reads for them as a key limited to those
+  (RFC 0003 G6): the database's `resource_scope_v1` policies keep each transaction to the resources
+  at those locations (and the locations in them) or in those groups, their bookings, holds, history
+  and waitlist, and Approvals shows only what asks for theirs alone. Their assistant is limited the
+  same way. Whatever their role, they keep only reading, the desk (approvals, the waitlist) and the
+  assistant: keys, webhooks, contacts, hours, closures, locations, usage, the audit log, Privacy,
+  the test environment's sample and changing people are refused (`authz.denied`, "limited to
+  locations and groups"). Keys they created reached the whole workspace, so limiting them revokes
+  those unless the form keeps them. **All of the workspace** gives it back. Each change is in the
+  audit log (`member.scope_changed`); Members shows what each person reaches. Made an Owner, a
+  limited person reaches all of it; their limit returns if they stop being one, until it is
+  changed. A dashboard whose
+  resources are not `createSlotlockDashboardResources`'s (no `keepsToScope`) gives a limited person
+  only their own account.
 - **Limits**: a team sends at most 50 invitations a day, and so does each person across their
   teams. Where plans apply, each person may create one team on the Free plan, which has up to 3
   people, open invitations included; a team's Owners and Billing managers buy Team for it on Usage.

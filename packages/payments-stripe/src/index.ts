@@ -9,6 +9,8 @@ export {
   type StripePaymentsOptions,
   TENANT_METADATA_KEY,
   createStripePayments,
+  isoMinorUnits,
+  stripeAmount,
   tenantDigest,
   verifySlotlockWebhook,
   verifyStripeSignature,

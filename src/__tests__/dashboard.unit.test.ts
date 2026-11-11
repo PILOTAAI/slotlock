@@ -24,6 +24,7 @@ import { SLOTLOCK_CHANGE_TYPES, type SlotlockChange, type SlotlockWebhookEndpoin
 import type { SlotlockTenantPlan } from '../plans.js';
 import type { SlotlockWaitlistEntry } from '../store.js';
 import { createSlotlockMemoryDashboardWorkspaces } from '../workspaces.js';
+import { slotlockDashboardRequestScope } from '../dashboard-scope.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
@@ -2034,6 +2035,95 @@ describe('organizations', () => {
   });
 });
 
+describe('a member limited to locations and groups (RFC 0004 D1)', () => {
+  const ACME_ORG = { id: 4101, login: 'acme' };
+  const signInTo = async (workspaces: ReturnType<typeof createSlotlockMemoryDashboardWorkspaces>, scoped: Partial<SlotlockDashboardResources>) => {
+    const github = fakeGitHub();
+    const orgs = vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+      String(input).startsWith('https://api.github.com/user/memberships/orgs')
+        ? Response.json([{ state: 'active', role: 'member', organization: ACME_ORG }])
+        : github.fetch(input, init),
+    );
+    const target = dashboard({
+      fetch: orgs,
+      organizations: [String(ACME_ORG.id)],
+      workspaces,
+      resources: { ...resources.store, ...scoped },
+    });
+    const { session } = await signIn(target);
+    return { target, session };
+  };
+
+  it('reaches only its resources, and nothing that is the whole workspace’s', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const tenantRef = `github-org:${ACME_ORG.id}`;
+    const person = `github:${GITHUB_USER.id}`;
+    const audited: { action: string; reason?: string }[] = [];
+    // The scope the store would run each transaction with, as each read saw it.
+    const seen: unknown[] = [];
+    const scoped = {
+      keepsToScope: true,
+      list: vi.fn(async (tenant: string) => {
+        seen.push(slotlockDashboardRequestScope());
+        return resources.store.list(tenant);
+      }),
+      audit: { record: async (_tenant: string, event: { action: string; reason?: string }) => void audited.push(event), list: async () => [] },
+    };
+    const { target, session } = await signInTo(workspaces, scoped);
+    workspaces.setRole(tenantRef, person, 'admin');
+    workspaces.limit(tenantRef, person, { locations: ['north'], groups: [] });
+
+    const overview = await get(target, '/base/dashboard', session);
+    expect(overview.status).toBe(200);
+    const page = await overview.text();
+    expect(seen.at(-1)).toEqual({ locations: ['north'], groups: [] });
+    // No keys, plan or setup on its overview; no keys, webhooks or usage in its menu.
+    expect(page).not.toContain('Active keys');
+    const nav = /<nav class="nav"[^>]*>([\s\S]*?)<\/nav>/.exec(page)?.[1] ?? '';
+    expect(nav).toContain('/base/dashboard/resources');
+    expect(nav).not.toContain('/base/dashboard/keys');
+    expect(nav).not.toContain('/base/dashboard/webhooks');
+    for (const path of ['/keys', '/webhooks', '/contacts', '/hours', '/closures', '/locations', '/settings/audit', '/settings/privacy']) {
+      const refused = await get(target, `/base/dashboard${path}`, session);
+      expect(refused.status, path).toBe(403);
+      expect(await refused.text(), path).toContain('limited to some locations and groups');
+    }
+    // Settings shows its account, never the workspace's endpoints or hours.
+    const settings = await (await get(target, '/base/dashboard/settings', session)).text();
+    expect(settings).not.toContain('/base/dashboard/settings/endpoints"');
+    expect((await get(target, '/base/dashboard/settings/endpoints', session)).status).toBe(403);
+    // An Admin's forms that reach the whole workspace are refused, and the refusal audited.
+    const token = await csrf(target, session);
+    for (const route of ['/keys', '/resources', '/hours', '/webhooks', '/members/invite']) {
+      expect((await post(target, `/base/dashboard${route}`, { csrf: token, name: 'x' }, session)).status, route).toBe(403);
+    }
+    expect(keys.store.create).not.toHaveBeenCalled();
+    expect(audited).toContainEqual(expect.objectContaining({ action: 'authz.denied', reason: 'limited to locations and groups' }));
+
+    // Given all of it again: the next request reads it, and the scope is gone.
+    workspaces.limit(tenantRef, person, null);
+    expect((await get(target, '/base/dashboard/keys', session)).status).toBe(200);
+    await get(target, '/base/dashboard', session);
+    expect(seen.at(-1)).toBeNull();
+    // An Owner is never limited.
+    workspaces.setRole(tenantRef, person, 'owner');
+    workspaces.limit(tenantRef, person, { locations: ['north'], groups: [] });
+    expect((await get(target, '/base/dashboard/keys', session)).status).toBe(200);
+  });
+
+  it('reaches only its own account where the resources cannot keep to a scope', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const tenantRef = `github-org:${ACME_ORG.id}`;
+    const person = `github:${GITHUB_USER.id}`;
+    const { target, session } = await signInTo(workspaces, {});
+    workspaces.setRole(tenantRef, person, 'member');
+    workspaces.limit(tenantRef, person, { locations: [], groups: ['vans'] });
+    expect((await get(target, '/base/dashboard', session)).status).toBe(403);
+    expect((await get(target, '/base/dashboard/resources', session)).status).toBe(403);
+    expect((await get(target, '/base/dashboard/settings/account', session)).status).toBe(200);
+  });
+});
+
 describe('the overview', () => {
   const at = (iso: string) => new Date(iso);
 
@@ -2676,6 +2766,101 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(303);
     expect(endpoints).toHaveLength(0);
     expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(404);
+  });
+
+  it('exports the workspace, and finds, downloads and erases one person, on Privacy', async () => {
+    const ready = {
+      id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e',
+      status: 'ready' as const,
+      requestedBy: 'github:4242',
+      createdAt: new Date(),
+      finishedAt: new Date(),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      parts: 2,
+      rows: 3,
+      bytes: 120,
+      tables: { resources: 2, outbox: 1 },
+      error: null,
+    };
+    const records = {
+      contacts: [{ ref: 'cust-1', email: 'ada@example.com' }],
+      calendar_event_attendees: [],
+      calendar_events: [],
+      reservations: [{ external_ref: 'bk-1' }, { external_ref: 'bk-2' }],
+      reservation_tombstones: [],
+      reservation_conflict_archive: [],
+      calendar_event_tombstones: [],
+      calendar_event_commands: [],
+      waitlist_entries: [],
+      approvals: [],
+      outbox: [],
+    };
+    const privacy = {
+      createExport: vi.fn(async () => ({ ...ready, status: 'pending' as const })),
+      listExports: vi.fn(async () => [ready]),
+      exportPart: vi.fn(async (_tenant: string, _id: string, part: number) =>
+        part === 1
+          ? { ok: true as const, table: 'resources' as const, lines: ['{"external_ref":"van-1"}', '{"external_ref":"van-2"}'] }
+          : part === 2
+            ? { ok: true as const, table: 'outbox' as const, lines: ['{"type":"resource.created"}'] }
+            : { ok: false as const, code: 'export_part_not_found' as const },
+      ),
+      deleteExport: vi.fn(async () => true),
+      exportSubject: vi.fn(async () => ({ records, truncated: false })),
+      eraseSubject: vi.fn(async () => ({ erased: { ...Object.fromEntries(Object.keys(records).map((table) => [table, 0])), contacts: 1, reservations: 2 } as never })),
+    };
+    const audited: { action: string; metadata?: Record<string, unknown> }[] = [];
+    const target = dashboard({
+      resources: {
+        ...resources.store,
+        privacy,
+        audit: { record: async (_tenant: string, event: { action: string }) => void audited.push(event), list: async () => [] },
+      },
+    });
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/settings/privacy', session)).text();
+    expect(page).toContain('Export the workspace');
+    expect(page).toContain(`/base/dashboard/settings/privacy/download?id=${ready.id}`);
+    const token = await csrf(target, session);
+    // Asked for, built elsewhere.
+    expect(await (await post(target, '/base/dashboard/settings/privacy/export', { csrf: token }, session)).text()).toContain('Asked for.');
+    expect(privacy.createExport).toHaveBeenCalledWith('github:4242', 'github:4242');
+    // Downloaded as JSON lines, a part at a time.
+    const file = await get(target, `/base/dashboard/settings/privacy/download?id=${ready.id}`, session);
+    expect(file.headers.get('content-disposition')).toMatch(/^attachment; filename="slotlock-export-\d{4}-\d{2}-\d{2}\.ndjson"$/);
+    expect((await file.text()).trim().split('\n').map((line) => JSON.parse(line))).toEqual([
+      { table: 'resources', row: { external_ref: 'van-1' } },
+      { table: 'resources', row: { external_ref: 'van-2' } },
+      { table: 'outbox', row: { type: 'resource.created' } },
+    ]);
+    // One person: found, downloaded, and erased only once confirmed.
+    const found = await (await post(target, '/base/dashboard/settings/privacy/person', { csrf: token, kind: 'email', value: 'ada@example.com' }, session)).text();
+    expect(found).toContain('reservations');
+    expect(privacy.exportSubject).toHaveBeenCalledWith('github:4242', { email: 'ada@example.com' });
+    const json = await post(target, '/base/dashboard/settings/privacy/person/export', { csrf: token, kind: 'email', value: 'ada@example.com' }, session);
+    expect(json.headers.get('content-disposition')).toContain('slotlock-person-');
+    expect(JSON.parse(await json.text())).toMatchObject({ records: { contacts: [{ ref: 'cust-1' }] } });
+    const unconfirmed = await post(target, '/base/dashboard/settings/privacy/person/erase', { csrf: token, kind: 'email', value: 'ada@example.com' }, session);
+    expect(unconfirmed.status).toBe(400);
+    expect(privacy.eraseSubject).not.toHaveBeenCalled();
+    const erased = await post(target, '/base/dashboard/settings/privacy/person/erase', { csrf: token, kind: 'email', value: 'ada@example.com', confirm: 'yes' }, session);
+    expect(await erased.text()).toContain('Erased: 3 rows deleted or changed.');
+    expect(privacy.eraseSubject).toHaveBeenCalledWith('github:4242', { email: 'ada@example.com' }, 'github:4242');
+    // The audit log has each, never the person.
+    expect(audited.map((event) => event.action).filter((action) => action !== 'session.signed_in')).toEqual([
+      'export.created',
+      'export.downloaded',
+      'subject.exported',
+      'subject.erased',
+    ]);
+    expect(JSON.stringify(audited)).not.toContain('ada@example.com');
+    // A stale sign-in is asked to sign in again, for the download too.
+    now += 16 * 60_000;
+    expect(await (await get(target, `/base/dashboard/settings/privacy/download?id=${ready.id}`, session)).text()).toContain('Confirm it’s you');
+    expect((await post(target, '/base/dashboard/settings/privacy/person/erase', { csrf: token, kind: 'email', value: 'x@example.com', confirm: 'yes' }, session)).status).toBe(403);
+    // Without the adapter there is no section.
+    const plain = dashboard();
+    expect((await get(plain, '/base/dashboard/settings/privacy', (await signIn(plain)).session)).status).toBe(404);
   });
 
   it('lists contacts with their consent, and forgets one', async () => {
