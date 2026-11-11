@@ -650,8 +650,11 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       // erased with it, which partners.integration covers, and never a direct tenant's.
       // workspace_memberships holds a shared workspace's members (github-org:, team:), never a
       // person's own tenant's: workspaces.integration covers its erasure, a person's included.
+      // workspaces and workspace_invitations hold team workspaces (team:) only: team-workspaces.integration
+      // covers theirs, and what a person's erasure takes from them.
+      const teamOnly = new Set(['workspace_memberships', 'workspaces', 'workspace_invitations']);
       const owned = tables.filter(
-        (table) => table !== 'tenant_suspensions' && table !== 'partner_accounts' && table !== 'workspace_memberships',
+        (table) => table !== 'tenant_suspensions' && table !== 'partner_accounts' && !teamOnly.has(table),
       );
       expect(tables).toContain('tenant_suspensions');
       const before = await counts(tenantRef, owned);

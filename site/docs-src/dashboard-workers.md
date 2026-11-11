@@ -144,6 +144,8 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
 - With organizations, set `SLOTLOCK_DASHBOARD_ORGS` on both the Worker and the server: the server
   takes an organization's keys only while its own list names it (or, with `enabled`, while an
   owner has it turned on), whether or not it serves the dashboard.
+- With team workspaces, set `SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on` on both too: the server takes
+  a team's keys only with it on, and only while the team exists.
 - Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
   keys only while its own list allows them, whether or not it serves the dashboard, so removing a
   person from both lists signs them out and stops their keys. A server without it takes every

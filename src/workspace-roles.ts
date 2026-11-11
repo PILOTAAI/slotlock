@@ -139,6 +139,17 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/environment': 'account.use',
   '/teams/enable': 'account.use',
   '/teams/disable': 'account.use',
+  // Anyone signed in may create a team workspace, join one they were invited to, or leave one.
+  '/teams/create': 'account.use',
+  '/invite/accept': 'account.use',
+  '/members/leave': 'account.use',
+  // Inviting or changing someone also needs the power the role given carries (dashboard.ts
+  // capabilitiesOf): an Owner `workspace.own`, a Billing manager `billing.manage`.
+  '/members/invite': 'members.manage',
+  '/members/resend': 'members.manage',
+  '/members/revoke': 'members.manage',
+  '/members/role': 'members.manage',
+  '/members/remove': 'members.manage',
   '/keys': 'keys.manage_own',
   '/keys/rotate': 'keys.manage_own',
   '/keys/revoke': 'keys.manage_own',
@@ -204,4 +215,5 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/endpoints': 'workspace.read',
   '/settings/hours': 'workspace.read',
   '/settings/account': 'account.use',
+  '/settings/members': 'workspace.read',
 });

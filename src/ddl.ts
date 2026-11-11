@@ -90,9 +90,10 @@ export const SLOTLOCK_SCHEMA_CONTROL_REFUSAL = 'Slotlock will not deploy into sc
  * The schema version this release creates, recorded in `slotlock.schema_version`. Up to 0.2
  * recorded nothing (0.1 was 1, 0.2 was 2); 0.3 to 0.5 recorded 3. 0.6 is 4, so a 0.5 release
  * refuses it rather than restoring the trigger that names a coverage source by its guessable
- * digest.
+ * digest. 0.10 is 5, so a 0.9 release refuses it rather than putting back an erase_tenant that
+ * leaves team workspaces, their members and invitations behind.
  */
-export const SLOTLOCK_SCHEMA_VERSION = 4;
+export const SLOTLOCK_SCHEMA_VERSION = 5;
 
 /** The start of the message with which the deployment DDL refuses a schema a newer release migrated. */
 export const SLOTLOCK_SCHEMA_NEWER_REFUSAL =
@@ -255,6 +256,8 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   'dashboard_organizations',
   'dashboard_people',
   'workspace_memberships',
+  'workspaces',
+  'workspace_invitations',
 ] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
@@ -268,6 +271,22 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.dashboard_standing(text, text)',
   'slotlock.dashboard_sign_out_everywhere(text)',
   'slotlock.prune_audit_events(text)',
+  'slotlock.dashboard_display(text, text)',
+  'slotlock.create_team(text, text, text, integer)',
+  'slotlock.workspace_info(text)',
+  'slotlock.person_workspaces(text)',
+  'slotlock.workspace_members(text)',
+  'slotlock.workspace_invitations_list(text)',
+  'slotlock.invite_member(text, text, text, text, text, text, bytea, integer, integer, integer)',
+  'slotlock.invitation_preview(bytea)',
+  'slotlock.accept_invitation(bytea, uuid, text, text[], integer)',
+  'slotlock.revoke_invitation(text, text, uuid)',
+  'slotlock.resend_invitation(text, text, uuid, bytea, integer, integer)',
+  'slotlock.change_member_role(text, text, text, text)',
+  'slotlock.remove_member(text, text, text)',
+  'slotlock.pending_invitations_for(text, text[])',
+  'slotlock.workspace_active(text)',
+  'slotlock.prune_workspace_invitations()',
 ] as const);
 
 /**
@@ -1338,6 +1357,694 @@ BEGIN
 END
 $slotlock_dashboard_sign_out_everywhere$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[7]} FROM PUBLIC;
+
+-- Team workspaces (team:<uuid>): a workspace Slotlock owns, not a person's and not a GitHub
+-- organization's, so its owners can change. Owner-only; reached through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.workspaces (
+  tenant_ref text PRIMARY KEY,
+  handle text NOT NULL,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'active',
+  -- Who created it, for the free team workspaces a person may create; cleared when they are erased.
+  created_by text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_workspaces_handle_key UNIQUE (handle),
+  CONSTRAINT slotlock_workspaces_valid CHECK (
+    tenant_ref ~ '^team:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    AND handle ~ '^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$'
+    AND char_length(name) BETWEEN 1 AND 80
+    AND name !~ '[[:cntrl:]]'
+    AND status IN ('active')
+    AND (created_by IS NULL OR created_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$')
+  )
+);
+ALTER TABLE slotlock.workspaces ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.workspaces FROM PUBLIC;
+
+-- How a person is shown to the others in their workspaces: their GitHub login or the Google email
+-- Google verified, as they last signed in. Never an identifier: people are their github:/google: ref.
+ALTER TABLE slotlock.dashboard_people ADD COLUMN IF NOT EXISTS display text;
+DO $slotlock_people_display$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_dashboard_people_display_valid'
+       AND conrelid = 'slotlock.dashboard_people'::regclass
+  ) THEN
+    ALTER TABLE slotlock.dashboard_people ADD CONSTRAINT slotlock_dashboard_people_display_valid
+      CHECK (display IS NULL OR (char_length(display) BETWEEN 1 AND 254 AND display !~ '[[:cntrl:]<>]'));
+  END IF;
+END
+$slotlock_people_display$;
+
+-- Invitations to a team workspace: to an email address or a GitHub account, with a role, by a
+-- member entitled to give it. Only a SHA-256 digest of the token is kept (the token is 256 random
+-- bits, shown or sent once). An invitation is pending until accepted, revoked or past expires_at;
+-- accepting needs the signed-in person to be the GitHub account invited, or to hold the invited
+-- email verified. Owner-only; reached through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.workspace_invitations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL REFERENCES slotlock.workspaces (tenant_ref) ON DELETE CASCADE,
+  token_sha256 bytea NOT NULL,
+  email text,
+  github_ref text,
+  github_login text,
+  role text NOT NULL,
+  inviter_ref text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  sent_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz NOT NULL,
+  accepted_at timestamptz,
+  accepted_by text,
+  revoked_at timestamptz,
+  CONSTRAINT slotlock_workspace_invitations_token_key UNIQUE (token_sha256),
+  CONSTRAINT slotlock_workspace_invitations_valid CHECK (
+    octet_length(token_sha256) = 32
+    AND (email IS NULL) <> (github_ref IS NULL)
+    AND (email IS NULL OR (char_length(email) BETWEEN 3 AND 254 AND email = lower(email)
+                           AND email ~ '^[^@[:space:][:cntrl:]<>]+@[^@[:space:][:cntrl:]<>]+$'))
+    AND (github_ref IS NULL OR github_ref ~ '^github:[1-9][0-9]{0,19}$')
+    AND (github_login IS NULL OR github_login ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$')
+    AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
+    AND inviter_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    AND (accepted_by IS NULL OR accepted_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$')
+    AND expires_at > created_at
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_workspace_invitations_tenant_idx
+  ON slotlock.workspace_invitations (tenant_ref, sent_at DESC);
+CREATE INDEX IF NOT EXISTS slotlock_workspace_invitations_github_idx
+  ON slotlock.workspace_invitations (github_ref) WHERE accepted_at IS NULL AND revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_workspace_invitations_email_idx
+  ON slotlock.workspace_invitations (email) WHERE accepted_at IS NULL AND revoked_at IS NULL;
+ALTER TABLE slotlock.workspace_invitations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.workspace_invitations FROM PUBLIC;
+
+-- Whether a role may give another (workspace-roles.ts slotlockRoleMayGrant): an Owner any role, an
+-- Admin up to Admin (never Owner or Billing), anyone else none.
+CREATE OR REPLACE FUNCTION slotlock.workspace_may_grant(granter text, granted text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_may_grant$
+  SELECT CASE granter
+           WHEN 'owner' THEN granted IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
+           WHEN 'admin' THEN granted IN ('admin', 'developer', 'member', 'viewer')
+           ELSE false
+         END;
+$slotlock_workspace_may_grant$;
+REVOKE ALL ON FUNCTION slotlock.workspace_may_grant(text, text) FROM PUBLIC;
+
+-- A person's display (their GitHub login, or the email Google verified), at sign-in.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_display(requested_person text, requested_display text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_display$
+BEGIN
+  UPDATE slotlock.dashboard_people person
+     SET display = NULLIF(requested_display, '')
+   WHERE person.person_ref = requested_person;
+END
+$slotlock_dashboard_display$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[9]} FROM PUBLIC;
+
+-- A new team workspace, its creator its Owner. With requested_cap, a person may have created at
+-- most that many active team workspaces that are not on a paid plan.
+CREATE OR REPLACE FUNCTION slotlock.create_team(
+  requested_person text, requested_name text, requested_handle text, requested_cap integer)
+RETURNS TABLE (tenant_ref text, refusal text)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_create_team$
+DECLARE
+  created text := 'team:' || gen_random_uuid()::text;
+  free_count integer;
+BEGIN
+  IF requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    RAISE EXCEPTION 'Slotlock teams: invalid person' USING ERRCODE = '22023';
+  END IF;
+  IF requested_handle IS NULL OR requested_handle !~ '^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$' THEN
+    RETURN QUERY SELECT NULL::text, 'invalid_handle'::text;
+    RETURN;
+  END IF;
+  IF requested_name IS NULL OR char_length(btrim(requested_name)) NOT BETWEEN 1 AND 80
+     OR requested_name ~ '[[:cntrl:]]' THEN
+    RETURN QUERY SELECT NULL::text, 'invalid_name'::text;
+    RETURN;
+  END IF;
+  -- One person's creations at a time, so two at once cannot both pass the cap.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:create-team:' || requested_person, 0));
+  IF requested_cap IS NOT NULL THEN
+    SELECT count(*) INTO free_count FROM slotlock.workspaces ws
+     WHERE ws.created_by = requested_person AND ws.status = 'active'
+       AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans paid
+                        WHERE paid.tenant_ref = ws.tenant_ref AND paid.plan <> 'free' AND paid.status <> 'canceled');
+    IF free_count >= requested_cap THEN
+      RETURN QUERY SELECT NULL::text, 'team_limit'::text;
+      RETURN;
+    END IF;
+  END IF;
+  IF EXISTS (SELECT 1 FROM slotlock.workspaces ws WHERE ws.handle = requested_handle) THEN
+    RETURN QUERY SELECT NULL::text, 'handle_taken'::text;
+    RETURN;
+  END IF;
+  INSERT INTO slotlock.workspaces (tenant_ref, handle, name, created_by)
+  VALUES (created, requested_handle, btrim(requested_name), requested_person);
+  INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source)
+  VALUES (created, requested_person, 'owner', 'created');
+  RETURN QUERY SELECT created, NULL::text;
+EXCEPTION WHEN unique_violation THEN
+  RETURN QUERY SELECT NULL::text, 'handle_taken'::text;
+END
+$slotlock_create_team$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[10]} FROM PUBLIC;
+
+-- A team workspace's handle, name and status (its test environment's are its own).
+CREATE OR REPLACE FUNCTION slotlock.workspace_info(requested_tenant text)
+RETURNS TABLE (handle text, name text, status text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_info$
+BEGIN
+  RETURN QUERY SELECT ws.handle, ws.name, ws.status FROM slotlock.workspaces ws
+   WHERE ws.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', '');
+END
+$slotlock_workspace_info$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[11]} FROM PUBLIC;
+
+-- The team workspaces a person is an active member of, with their role, by name.
+CREATE OR REPLACE FUNCTION slotlock.person_workspaces(requested_person text)
+RETURNS TABLE (tenant_ref text, handle text, name text, role text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_person_workspaces$
+BEGIN
+  RETURN QUERY SELECT ws.tenant_ref, ws.handle, ws.name, member.role
+    FROM slotlock.workspace_memberships member
+    JOIN slotlock.workspaces ws ON ws.tenant_ref = member.tenant_ref AND ws.status = 'active'
+   WHERE member.person_ref = requested_person AND member.status = 'active'
+   ORDER BY lower(ws.name), ws.handle
+   LIMIT 100;
+END
+$slotlock_person_workspaces$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[12]} FROM PUBLIC;
+
+-- A workspace's active members, Owners first, with how each is shown.
+CREATE OR REPLACE FUNCTION slotlock.workspace_members(requested_tenant text)
+RETURNS TABLE (person_ref text, role text, source text, display text, joined_at timestamptz)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_members$
+BEGIN
+  RETURN QUERY SELECT member.person_ref, member.role, member.source, person.display, member.created_at
+    FROM slotlock.workspace_memberships member
+    LEFT JOIN slotlock.dashboard_people person ON person.person_ref = member.person_ref
+   WHERE member.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', '')
+     AND member.status = 'active'
+   ORDER BY array_position(ARRAY['owner', 'admin', 'developer', 'member', 'viewer', 'billing'], member.role),
+            lower(coalesce(person.display, member.person_ref))
+   LIMIT 1000;
+END
+$slotlock_workspace_members$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[13]} FROM PUBLIC;
+
+-- A workspace's invitations not accepted or revoked: pending ones, and those expired in the last
+-- 30 days (to send again), newest first.
+CREATE OR REPLACE FUNCTION slotlock.workspace_invitations_list(requested_tenant text)
+RETURNS TABLE (id uuid, email text, github_login text, role text, inviter_display text,
+               sent_at timestamptz, expires_at timestamptz)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_invitations_list$
+BEGIN
+  RETURN QUERY SELECT invitation.id, invitation.email, invitation.github_login, invitation.role,
+                      coalesce(inviter.display, invitation.inviter_ref), invitation.sent_at, invitation.expires_at
+    FROM slotlock.workspace_invitations invitation
+    LEFT JOIN slotlock.dashboard_people inviter ON inviter.person_ref = invitation.inviter_ref
+   WHERE invitation.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', '')
+     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
+     AND invitation.expires_at > statement_timestamp() - interval '30 days'
+   ORDER BY invitation.sent_at DESC
+   LIMIT 500;
+END
+$slotlock_workspace_invitations_list$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[14]} FROM PUBLIC;
+
+-- Invite to a team workspace: by email or GitHub account, with a role the inviter may give, one
+-- pending invitation per address (a new one replaces it), at most requested_daily_limit sent a day,
+-- and with requested_member_cap, no more people than it counting pending invitations. The token
+-- is given as its SHA-256 digest only.
+CREATE OR REPLACE FUNCTION slotlock.invite_member(
+  requested_tenant text, requested_inviter text, requested_email text, requested_github text,
+  requested_github_login text, requested_role text, requested_token bytea, requested_days integer,
+  requested_daily_limit integer, requested_member_cap integer)
+RETURNS TABLE (invitation_id uuid, refusal text)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_invite_member$
+DECLARE
+  inviter_role text;
+  email_normalized text := NULLIF(lower(btrim(requested_email)), '');
+  occupied integer;
+  created uuid;
+BEGIN
+  IF requested_days IS NULL OR requested_days NOT BETWEEN 1 AND 30 THEN
+    RAISE EXCEPTION 'Slotlock teams: invitations last 1-30 days' USING ERRCODE = '22023';
+  END IF;
+  -- The workspace's invitations one at a time: the cap and the daily limit see each other.
+  PERFORM 1 FROM slotlock.workspaces ws
+   WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::uuid, 'not_found'::text;
+    RETURN;
+  END IF;
+  SELECT member.role INTO inviter_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_inviter AND member.status = 'active';
+  IF inviter_role IS NULL OR NOT slotlock.workspace_may_grant(inviter_role, requested_role) THEN
+    RETURN QUERY SELECT NULL::uuid, 'not_allowed'::text;
+    RETURN;
+  END IF;
+  IF (email_normalized IS NULL) = (requested_github IS NULL) THEN
+    RAISE EXCEPTION 'Slotlock teams: invite an email or a GitHub account' USING ERRCODE = '22023';
+  END IF;
+  IF requested_github IS NOT NULL AND EXISTS (
+    SELECT 1 FROM slotlock.workspace_memberships member
+     WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_github AND member.status = 'active'
+  ) THEN
+    RETURN QUERY SELECT NULL::uuid, 'already_member'::text;
+    RETURN;
+  END IF;
+  IF requested_daily_limit IS NOT NULL AND (
+    SELECT count(*) FROM slotlock.workspace_invitations sent
+     WHERE sent.tenant_ref = requested_tenant AND sent.sent_at > statement_timestamp() - interval '1 day'
+  ) >= requested_daily_limit THEN
+    RETURN QUERY SELECT NULL::uuid, 'invitation_limit'::text;
+    RETURN;
+  END IF;
+  -- A pending invitation to the same address is replaced, so it is not counted against the cap.
+  IF requested_member_cap IS NOT NULL THEN
+    SELECT (SELECT count(*) FROM slotlock.workspace_memberships member
+             WHERE member.tenant_ref = requested_tenant AND member.status = 'active')
+         + (SELECT count(*) FROM slotlock.workspace_invitations pending
+             WHERE pending.tenant_ref = requested_tenant AND pending.accepted_at IS NULL
+               AND pending.revoked_at IS NULL AND pending.expires_at > statement_timestamp()
+               AND NOT coalesce(pending.email = email_normalized OR pending.github_ref = requested_github, false))
+      INTO occupied;
+    IF occupied >= requested_member_cap THEN
+      RETURN QUERY SELECT NULL::uuid, 'member_cap'::text;
+      RETURN;
+    END IF;
+  END IF;
+  UPDATE slotlock.workspace_invitations old
+     SET revoked_at = statement_timestamp()
+   WHERE old.tenant_ref = requested_tenant AND old.accepted_at IS NULL AND old.revoked_at IS NULL
+     AND (old.email = email_normalized OR old.github_ref = requested_github);
+  INSERT INTO slotlock.workspace_invitations
+    (tenant_ref, token_sha256, email, github_ref, github_login, role, inviter_ref, expires_at)
+  VALUES (requested_tenant, requested_token, email_normalized, requested_github,
+          CASE WHEN requested_github IS NULL THEN NULL ELSE requested_github_login END,
+          requested_role, requested_inviter,
+          statement_timestamp() + make_interval(days => requested_days))
+  RETURNING id INTO created;
+  RETURN QUERY SELECT created, NULL::text;
+END
+$slotlock_invite_member$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[15]} FROM PUBLIC;
+
+-- What an invitation's holder may see before joining: the workspace, who invited them, the role,
+-- whom it is for, and its state. Nothing else of the workspace.
+CREATE OR REPLACE FUNCTION slotlock.invitation_preview(requested_token bytea)
+RETURNS TABLE (invitation_id uuid, tenant_ref text, workspace_name text, workspace_handle text,
+               inviter_display text, role text, email text, github_ref text, github_login text, state text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_invitation_preview$
+BEGIN
+  RETURN QUERY SELECT invitation.id, invitation.tenant_ref, ws.name, ws.handle,
+         coalesce(inviter.display, 'A member'), invitation.role, invitation.email, invitation.github_ref,
+         invitation.github_login,
+         CASE WHEN invitation.revoked_at IS NOT NULL THEN 'revoked'
+              WHEN invitation.accepted_at IS NOT NULL THEN 'accepted'
+              WHEN invitation.expires_at <= statement_timestamp() THEN 'expired'
+              ELSE 'pending' END
+    FROM slotlock.workspace_invitations invitation
+    JOIN slotlock.workspaces ws ON ws.tenant_ref = invitation.tenant_ref
+    LEFT JOIN slotlock.dashboard_people inviter ON inviter.person_ref = invitation.inviter_ref
+   WHERE invitation.token_sha256 = requested_token;
+END
+$slotlock_invitation_preview$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[16]} FROM PUBLIC;
+
+-- Accept an invitation, by its token's digest or (one found for the person) its id: in one
+-- transaction, only while pending, only by the GitHub account invited or a person holding the
+-- invited email verified, only while the inviter may still give the role, and within
+-- requested_member_cap. A member already keeps their role.
+CREATE OR REPLACE FUNCTION slotlock.accept_invitation(
+  requested_token bytea, requested_id uuid, requested_person text, requested_emails text[],
+  requested_member_cap integer)
+RETURNS TABLE (tenant_ref text, refusal text)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_accept_invitation$
+DECLARE
+  invitation slotlock.workspace_invitations%ROWTYPE;
+  found_id uuid;
+  found_tenant text;
+  inviter_role text;
+  members integer;
+BEGIN
+  IF requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    RAISE EXCEPTION 'Slotlock teams: invalid person' USING ERRCODE = '22023';
+  END IF;
+  SELECT found.id, found.tenant_ref INTO found_id, found_tenant FROM slotlock.workspace_invitations found
+   WHERE (requested_token IS NOT NULL AND found.token_sha256 = requested_token)
+      OR (requested_token IS NULL AND found.id = requested_id);
+  IF found_id IS NULL THEN
+    RETURN QUERY SELECT NULL::text, 'not_found'::text;
+    RETURN;
+  END IF;
+  -- The workspace first, then the invitation: the order every change to it takes, so none deadlock.
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = found_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::text, 'not_found'::text;
+    RETURN;
+  END IF;
+  SELECT * INTO invitation FROM slotlock.workspace_invitations found WHERE found.id = found_id FOR UPDATE;
+  -- Sent again while this waited: the old token no longer opens it.
+  IF NOT FOUND OR (requested_token IS NOT NULL AND invitation.token_sha256 <> requested_token) THEN
+    RETURN QUERY SELECT NULL::text, 'not_found'::text;
+    RETURN;
+  END IF;
+  IF invitation.revoked_at IS NOT NULL THEN
+    RETURN QUERY SELECT NULL::text, 'revoked'::text;
+    RETURN;
+  ELSIF invitation.accepted_at IS NOT NULL THEN
+    RETURN QUERY SELECT NULL::text, 'accepted'::text;
+    RETURN;
+  ELSIF invitation.expires_at <= statement_timestamp() THEN
+    RETURN QUERY SELECT NULL::text, 'expired'::text;
+    RETURN;
+  END IF;
+  IF NOT (
+    (invitation.github_ref IS NOT NULL AND invitation.github_ref = requested_person)
+    OR (invitation.email IS NOT NULL AND invitation.email = ANY (
+          SELECT lower(btrim(given)) FROM unnest(coalesce(requested_emails, ARRAY[]::text[])) given))
+  ) THEN
+    RETURN QUERY SELECT NULL::text, 'not_for_you'::text;
+    RETURN;
+  END IF;
+  SELECT member.role INTO inviter_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = invitation.tenant_ref AND member.person_ref = invitation.inviter_ref
+     AND member.status = 'active';
+  IF inviter_role IS NULL OR NOT slotlock.workspace_may_grant(inviter_role, invitation.role) THEN
+    UPDATE slotlock.workspace_invitations SET revoked_at = statement_timestamp() WHERE id = invitation.id;
+    RETURN QUERY SELECT NULL::text, 'revoked'::text;
+    RETURN;
+  END IF;
+  IF EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
+              WHERE member.tenant_ref = invitation.tenant_ref AND member.person_ref = requested_person
+                AND member.status = 'active') THEN
+    UPDATE slotlock.workspace_invitations
+       SET accepted_at = statement_timestamp(), accepted_by = requested_person WHERE id = invitation.id;
+    RETURN QUERY SELECT invitation.tenant_ref, NULL::text;
+    RETURN;
+  END IF;
+  IF requested_member_cap IS NOT NULL THEN
+    SELECT count(*) INTO members FROM slotlock.workspace_memberships member
+     WHERE member.tenant_ref = invitation.tenant_ref AND member.status = 'active';
+    IF members >= requested_member_cap THEN
+      RETURN QUERY SELECT NULL::text, 'member_cap'::text;
+      RETURN;
+    END IF;
+  END IF;
+  INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, source)
+  VALUES (invitation.tenant_ref, requested_person, invitation.role, 'invitation')
+  ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
+    SET role = EXCLUDED.role, status = 'active', source = 'invitation', deactivated_at = NULL,
+        updated_at = statement_timestamp();
+  UPDATE slotlock.workspace_invitations
+     SET accepted_at = statement_timestamp(), accepted_by = requested_person WHERE id = invitation.id;
+  RETURN QUERY SELECT invitation.tenant_ref, NULL::text;
+END
+$slotlock_accept_invitation$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[17]} FROM PUBLIC;
+
+-- Revoke a pending invitation, by an Owner or Admin of its workspace.
+CREATE OR REPLACE FUNCTION slotlock.revoke_invitation(requested_tenant text, requested_actor text, requested_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_revoke_invitation$
+DECLARE
+  changed integer;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
+                  WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor
+                    AND member.status = 'active' AND member.role IN ('owner', 'admin')) THEN
+    RETURN false;
+  END IF;
+  UPDATE slotlock.workspace_invitations invitation SET revoked_at = statement_timestamp()
+   WHERE invitation.id = requested_id AND invitation.tenant_ref = requested_tenant
+     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL;
+  GET DIAGNOSTICS changed = ROW_COUNT;
+  RETURN changed > 0;
+END
+$slotlock_revoke_invitation$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[18]} FROM PUBLIC;
+
+-- Send an invitation again, with a new token and a new expiry: by someone who may give its role,
+-- within the daily limit. The old token stops working.
+CREATE OR REPLACE FUNCTION slotlock.resend_invitation(
+  requested_tenant text, requested_actor text, requested_id uuid, requested_token bytea,
+  requested_days integer, requested_daily_limit integer)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_resend_invitation$
+DECLARE
+  actor_role text;
+  invitation_role text;
+BEGIN
+  IF requested_days IS NULL OR requested_days NOT BETWEEN 1 AND 30 THEN
+    RAISE EXCEPTION 'Slotlock teams: invitations last 1-30 days' USING ERRCODE = '22023';
+  END IF;
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN 'not_found';
+  END IF;
+  SELECT member.role INTO actor_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
+  SELECT invitation.role INTO invitation_role FROM slotlock.workspace_invitations invitation
+   WHERE invitation.id = requested_id AND invitation.tenant_ref = requested_tenant
+     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
+   FOR UPDATE;
+  IF invitation_role IS NULL THEN
+    RETURN 'not_found';
+  END IF;
+  IF actor_role IS NULL OR NOT slotlock.workspace_may_grant(actor_role, invitation_role) THEN
+    RETURN 'not_allowed';
+  END IF;
+  IF requested_daily_limit IS NOT NULL AND (
+    SELECT count(*) FROM slotlock.workspace_invitations sent
+     WHERE sent.tenant_ref = requested_tenant AND sent.sent_at > statement_timestamp() - interval '1 day'
+  ) >= requested_daily_limit THEN
+    RETURN 'invitation_limit';
+  END IF;
+  UPDATE slotlock.workspace_invitations invitation
+     SET token_sha256 = requested_token, sent_at = statement_timestamp(), inviter_ref = requested_actor,
+         expires_at = statement_timestamp() + make_interval(days => requested_days)
+   WHERE invitation.id = requested_id;
+  RETURN NULL;
+END
+$slotlock_resend_invitation$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[19]} FROM PUBLIC;
+
+-- Change a member's role, by someone who may give both their current role and the new one; a
+-- workspace always keeps an Owner. A role given in Slotlock is never changed by a GitHub sign-in.
+CREATE OR REPLACE FUNCTION slotlock.change_member_role(
+  requested_tenant text, requested_actor text, requested_person text, requested_role text)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_change_member_role$
+DECLARE
+  actor_role text;
+  current_role_of text;
+BEGIN
+  IF requested_role NOT IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing') THEN
+    RAISE EXCEPTION 'Slotlock teams: invalid role' USING ERRCODE = '22023';
+  END IF;
+  -- The workspace's owners one change at a time, so two Owners demoting each other leave one.
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN 'not_found';
+  END IF;
+  SELECT member.role INTO actor_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
+  SELECT member.role INTO current_role_of FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person AND member.status = 'active';
+  IF current_role_of IS NULL THEN
+    RETURN 'not_found';
+  END IF;
+  IF actor_role IS NULL OR NOT slotlock.workspace_may_grant(actor_role, current_role_of)
+     OR NOT slotlock.workspace_may_grant(actor_role, requested_role) THEN
+    RETURN 'not_allowed';
+  END IF;
+  IF current_role_of = 'owner' AND requested_role <> 'owner' AND NOT EXISTS (
+    SELECT 1 FROM slotlock.workspace_memberships other
+     WHERE other.tenant_ref = requested_tenant AND other.status = 'active' AND other.role = 'owner'
+       AND other.person_ref <> requested_person
+  ) THEN
+    RETURN 'last_owner';
+  END IF;
+  UPDATE slotlock.workspace_memberships member
+     SET role = requested_role, source = CASE WHEN member.source = 'github_org' THEN 'created' ELSE member.source END,
+         updated_at = statement_timestamp()
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person;
+  RETURN NULL;
+END
+$slotlock_change_member_role$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[20]} FROM PUBLIC;
+
+-- Remove a member (or, the actor themselves, leave): by someone who may give their role; a
+-- workspace always keeps an Owner. Their pending invitations go with them. The membership is kept
+-- inactive, so inviting them back restores what an invitation gives.
+CREATE OR REPLACE FUNCTION slotlock.remove_member(requested_tenant text, requested_actor text, requested_person text)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_remove_member$
+DECLARE
+  actor_role text;
+  removed_role text;
+BEGIN
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN 'not_found';
+  END IF;
+  SELECT member.role INTO actor_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
+  SELECT member.role INTO removed_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person AND member.status = 'active';
+  IF removed_role IS NULL OR actor_role IS NULL THEN
+    RETURN 'not_found';
+  END IF;
+  IF requested_actor <> requested_person AND NOT slotlock.workspace_may_grant(actor_role, removed_role) THEN
+    RETURN 'not_allowed';
+  END IF;
+  IF removed_role = 'owner' AND NOT EXISTS (
+    SELECT 1 FROM slotlock.workspace_memberships other
+     WHERE other.tenant_ref = requested_tenant AND other.status = 'active' AND other.role = 'owner'
+       AND other.person_ref <> requested_person
+  ) THEN
+    RETURN 'last_owner';
+  END IF;
+  UPDATE slotlock.workspace_memberships member
+     SET status = 'inactive', source = 'created', deactivated_at = statement_timestamp(),
+         updated_at = statement_timestamp()
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person;
+  UPDATE slotlock.workspace_invitations invitation SET revoked_at = statement_timestamp()
+   WHERE invitation.tenant_ref = requested_tenant AND invitation.inviter_ref = requested_person
+     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL;
+  RETURN NULL;
+END
+$slotlock_remove_member$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[21]} FROM PUBLIC;
+
+-- The pending invitations meant for a person: to their GitHub account, or to an email they hold
+-- verified. For the dashboard to offer "Join" without the link.
+CREATE OR REPLACE FUNCTION slotlock.pending_invitations_for(requested_person text, requested_emails text[])
+RETURNS TABLE (invitation_id uuid, tenant_ref text, workspace_name text, workspace_handle text,
+               inviter_display text, role text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_pending_invitations_for$
+BEGIN
+  RETURN QUERY SELECT invitation.id, invitation.tenant_ref, ws.name, ws.handle,
+         coalesce(inviter.display, 'A member'), invitation.role
+    FROM slotlock.workspace_invitations invitation
+    JOIN slotlock.workspaces ws ON ws.tenant_ref = invitation.tenant_ref AND ws.status = 'active'
+    LEFT JOIN slotlock.dashboard_people inviter ON inviter.person_ref = invitation.inviter_ref
+   WHERE invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
+     AND invitation.expires_at > statement_timestamp()
+     AND (invitation.github_ref = requested_person
+          OR invitation.email = ANY (SELECT lower(btrim(given)) FROM unnest(coalesce(requested_emails, ARRAY[]::text[])) given))
+     AND NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
+                      WHERE member.tenant_ref = invitation.tenant_ref AND member.person_ref = requested_person
+                        AND member.status = 'active')
+   ORDER BY invitation.sent_at DESC
+   LIMIT 20;
+END
+$slotlock_pending_invitations_for$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[22]} FROM PUBLIC;
+
+-- Whether a team workspace serves its keys: only while it exists and is active.
+CREATE OR REPLACE FUNCTION slotlock.workspace_active(requested_tenant text)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_active$
+BEGIN
+  RETURN EXISTS (SELECT 1 FROM slotlock.workspaces ws
+                  WHERE ws.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', '')
+                    AND ws.status = 'active');
+END
+$slotlock_workspace_active$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[23]} FROM PUBLIC;
+
+-- Invitations finished (accepted, revoked or expired) more than 30 days ago, with the address they
+-- were sent to: deleted.
+CREATE OR REPLACE FUNCTION slotlock.prune_workspace_invitations()
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_prune_workspace_invitations$
+DECLARE
+  pruned integer;
+BEGIN
+  -- Ended when accepted, revoked or, untouched, expired.
+  DELETE FROM slotlock.workspace_invitations finished
+   WHERE coalesce(finished.accepted_at, finished.revoked_at, finished.expires_at)
+         < statement_timestamp() - interval '30 days';
+  GET DIAGNOSTICS pruned = ROW_COUNT;
+  RETURN pruned;
+END
+$slotlock_prune_workspace_invitations$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[24]} FROM PUBLIC;
 `;
 
 // The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly
@@ -2139,6 +2846,7 @@ DECLARE
   setting text;
   previous jsonb := '{}'::jsonb;
   tested record;
+  cleared_rows bigint;
 BEGIN
   IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500 THEN
     RAISE EXCEPTION 'Slotlock tenant reference must be 1-500 UTF-8 bytes'
@@ -2155,6 +2863,19 @@ BEGIN
                 AND billed.stripe_subscription IS NOT NULL) THEN
     RAISE EXCEPTION 'Slotlock tenant has a live subscription: cancel it before erasing the tenant'
       USING ERRCODE = 'object_in_use', HINT = 'billing_active';
+  END IF;
+  -- Erasing a person never takes other people's workspace with it: a team's only Owner hands it
+  -- on, or deletes it, first.
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' AND EXISTS (
+    SELECT 1 FROM slotlock.workspace_memberships mine
+      JOIN slotlock.workspaces ws ON ws.tenant_ref = mine.tenant_ref AND ws.status = 'active'
+     WHERE mine.person_ref = requested_tenant_ref AND mine.status = 'active' AND mine.role = 'owner'
+       AND NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships other
+                        WHERE other.tenant_ref = mine.tenant_ref AND other.status = 'active'
+                          AND other.role = 'owner' AND other.person_ref <> mine.person_ref)
+  ) THEN
+    RAISE EXCEPTION 'Slotlock person is the only owner of a team workspace: make another owner, or delete it, first'
+      USING ERRCODE = 'object_in_use', HINT = 'sole_owner';
   END IF;
   FOR setting IN
     SELECT DISTINCT contract.tenant_context_setting FROM slotlock.rls_policy_contracts contract
@@ -2398,6 +3119,23 @@ BEGIN
     ON CONFLICT DO NOTHING
   )
   SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  -- A team workspace's record and invitations go with it.
+  erased_table := 'workspace_invitations';
+  DELETE FROM slotlock.workspace_invitations invitation
+   WHERE invitation.tenant_ref = requested_tenant_ref
+      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+          AND (invitation.inviter_ref = requested_tenant_ref OR invitation.accepted_by = requested_tenant_ref));
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'workspaces';
+  DELETE FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    UPDATE slotlock.workspaces ws SET created_by = NULL WHERE ws.created_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
   RETURN NEXT;
   -- A shared workspace's members go with it; a person's own tenant takes their memberships of
   -- every workspace, and their record of signing in, with it.

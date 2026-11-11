@@ -38,6 +38,117 @@ export interface SlotlockDashboardWorkspaces {
   standing(tenantRef: string, person: string): Promise<SlotlockWorkspaceStanding>;
   /** End every session of the person: a new epoch is drawn, and those sealed under the old are refused. */
   signOutEverywhere(person: string): Promise<number>;
+  /** Team workspaces, their members and invitations: only with the database (createSlotlockDashboardWorkspaces). */
+  teams?: SlotlockWorkspaceTeams;
+}
+
+/** A team workspace (team:<uuid>) as a person sees it in their list. */
+export interface SlotlockTeamWorkspace {
+  tenantRef: string;
+  handle: string;
+  name: string;
+  role: SlotlockWorkspaceRole;
+}
+
+/** An active member of a workspace. */
+export interface SlotlockWorkspaceMember {
+  person: string;
+  role: SlotlockWorkspaceRole;
+  source: 'github_org' | 'invitation' | 'created';
+  /** Their GitHub login or verified Google email as they last signed in; null before they have. */
+  display: string | null;
+  joinedAt: Date;
+}
+
+/** An invitation not accepted or revoked: pending, or expired in the last 30 days. */
+export interface SlotlockWorkspaceInvitation {
+  id: string;
+  email: string | null;
+  githubLogin: string | null;
+  role: SlotlockWorkspaceRole;
+  inviterDisplay: string;
+  sentAt: Date;
+  expiresAt: Date;
+}
+
+/** What the holder of an invitation's link sees before joining. */
+export interface SlotlockInvitationPreview {
+  id: string;
+  tenantRef: string;
+  workspaceName: string;
+  workspaceHandle: string;
+  inviterDisplay: string;
+  role: SlotlockWorkspaceRole;
+  email: string | null;
+  githubRef: string | null;
+  githubLogin: string | null;
+  state: 'pending' | 'accepted' | 'revoked' | 'expired';
+}
+
+/** Why a team change was refused. */
+export type SlotlockTeamRefusal =
+  | 'invalid_handle'
+  | 'invalid_name'
+  | 'handle_taken'
+  | 'team_limit'
+  | 'not_found'
+  | 'not_allowed'
+  | 'already_member'
+  | 'invitation_limit'
+  | 'member_cap'
+  | 'revoked'
+  | 'accepted'
+  | 'expired'
+  | 'not_for_you'
+  | 'last_owner';
+
+/**
+ * Team workspaces through their SECURITY DEFINER functions: each checks the actor's role and
+ * ceiling, keeps an Owner, and serialises changes to one workspace's people.
+ */
+export interface SlotlockWorkspaceTeams {
+  /** How the person is shown to others: their GitHub login or verified Google email. */
+  setDisplay(person: string, display: string | null): Promise<void>;
+  /** A new team workspace with the person its Owner; `cap` free team workspaces a person may create. */
+  create(person: string, name: string, handle: string, cap: number | null): Promise<{ tenantRef: string } | { refusal: SlotlockTeamRefusal }>;
+  info(tenantRef: string): Promise<{ handle: string; name: string } | null>;
+  /** The team workspaces the person is an active member of. */
+  workspacesOf(person: string): Promise<SlotlockTeamWorkspace[]>;
+  members(tenantRef: string): Promise<SlotlockWorkspaceMember[]>;
+  invitations(tenantRef: string): Promise<SlotlockWorkspaceInvitation[]>;
+  invite(params: {
+    tenantRef: string;
+    inviter: string;
+    to: { email: string } | { github: string; login: string };
+    role: SlotlockWorkspaceRole;
+    /** SHA-256 of the token; the token itself is never given. */
+    tokenSha256: Buffer;
+    days: number;
+    dailyLimit: number | null;
+    memberCap: number | null;
+  }): Promise<{ id: string } | { refusal: SlotlockTeamRefusal }>;
+  preview(tokenSha256: Buffer): Promise<SlotlockInvitationPreview | null>;
+  /** Accept by the token's digest or, one found for the person, by id. `emails` are those the person holds verified. */
+  accept(params: {
+    tokenSha256?: Buffer;
+    id?: string;
+    person: string;
+    emails: readonly string[];
+    memberCap: number | null;
+  }): Promise<{ tenantRef: string } | { refusal: SlotlockTeamRefusal }>;
+  revoke(tenantRef: string, actor: string, id: string): Promise<boolean>;
+  resend(tenantRef: string, actor: string, id: string, tokenSha256: Buffer, days: number, dailyLimit: number | null): Promise<SlotlockTeamRefusal | null>;
+  changeRole(tenantRef: string, actor: string, person: string, role: SlotlockWorkspaceRole): Promise<SlotlockTeamRefusal | null>;
+  /** Remove a member; the actor removing themselves leaves. */
+  remove(tenantRef: string, actor: string, person: string): Promise<SlotlockTeamRefusal | null>;
+  /** Pending invitations meant for the person (their GitHub account, or an email they hold verified). */
+  pendingFor(person: string, emails: readonly string[]): Promise<
+    { id: string; tenantRef: string; workspaceName: string; workspaceHandle: string; inviterDisplay: string; role: SlotlockWorkspaceRole }[]
+  >;
+  /** Whether a team workspace exists and serves its keys. */
+  isActive(tenantRef: string): Promise<boolean>;
+  /** Delete invitations finished more than 30 days ago; how many went. */
+  prune(): Promise<number>;
 }
 
 function refuse(message: string): never {
@@ -86,6 +197,199 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
         SELECT slotlock.dashboard_sign_out_everywhere(${person}::text) AS epoch`;
       return Number(row?.epoch ?? 0);
     },
+    teams: createTeams(sql),
+  };
+}
+
+const TEAM = /^team:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const refusalOf = (value: string | null | undefined): SlotlockTeamRefusal | null =>
+  value === null || value === undefined ? null : (value as SlotlockTeamRefusal);
+const roleOf = (value: string): SlotlockWorkspaceRole => {
+  if (!isSlotlockWorkspaceRole(value)) throw new Error(`Slotlock workspaces: unknown role ${value}`);
+  return value;
+};
+const digest = (token: Buffer) => {
+  if (token.length !== 32) refuse('a token digest is 32 bytes');
+  return token;
+};
+
+function createTeams(sql: SlotlockSql): SlotlockWorkspaceTeams {
+  return {
+    async setDisplay(person, display) {
+      if (!PERSON.test(person)) return;
+      const shown = display === null ? null : display.slice(0, 254);
+      await sql`SELECT slotlock.dashboard_display(${person}::text, ${shown}::text)`;
+    },
+    async create(person, name, handle, cap) {
+      if (!PERSON.test(person)) refuse('needs github:<id> or google:<subject>');
+      const [row] = await sql<{ tenant_ref: string | null; refusal: string | null }[]>`
+        SELECT tenant_ref, refusal FROM slotlock.create_team(${person}::text, ${name}::text, ${handle}::text, ${cap}::integer)`;
+      return row?.tenant_ref ? { tenantRef: row.tenant_ref } : { refusal: refusalOf(row?.refusal) ?? 'not_allowed' };
+    },
+    async info(tenantRef) {
+      const [row] = await sql<{ handle: string; name: string }[]>`
+        SELECT handle, name FROM slotlock.workspace_info(${tenantRef}::text)`;
+      return row ? { handle: row.handle, name: row.name } : null;
+    },
+    async workspacesOf(person) {
+      if (!PERSON.test(person)) return [];
+      const rows = await sql<{ tenant_ref: string; handle: string; name: string; role: string }[]>`
+        SELECT tenant_ref, handle, name, role FROM slotlock.person_workspaces(${person}::text)`;
+      return rows.map((row) => ({ tenantRef: row.tenant_ref, handle: row.handle, name: row.name, role: roleOf(row.role) }));
+    },
+    async members(tenantRef) {
+      if (!TEAM.test(tenantRef.replace(/~test$/, ''))) return [];
+      const rows = await sql<{ person_ref: string; role: string; source: SlotlockWorkspaceMember['source']; display: string | null; joined_at: Date }[]>`
+        SELECT person_ref, role, source, display, joined_at FROM slotlock.workspace_members(${tenantRef}::text)`;
+      return rows.map((row) => ({ person: row.person_ref, role: roleOf(row.role), source: row.source, display: row.display, joinedAt: row.joined_at }));
+    },
+    async invitations(tenantRef) {
+      if (!TEAM.test(tenantRef.replace(/~test$/, ''))) return [];
+      const rows = await sql<
+        { id: string; email: string | null; github_login: string | null; role: string; inviter_display: string; sent_at: Date; expires_at: Date }[]
+      >`SELECT id, email, github_login, role, inviter_display, sent_at, expires_at
+          FROM slotlock.workspace_invitations_list(${tenantRef}::text)`;
+      return rows.map((row) => ({
+        id: row.id,
+        email: row.email,
+        githubLogin: row.github_login,
+        role: roleOf(row.role),
+        inviterDisplay: row.inviter_display,
+        sentAt: row.sent_at,
+        expiresAt: row.expires_at,
+      }));
+    },
+    async invite(params) {
+      if (!TEAM.test(params.tenantRef) || !PERSON.test(params.inviter)) refuse('needs a team workspace and the inviter');
+      const email = 'email' in params.to ? params.to.email : null;
+      const github = 'github' in params.to ? params.to.github : null;
+      const login = 'github' in params.to ? params.to.login : null;
+      const [row] = await sql<{ invitation_id: string | null; refusal: string | null }[]>`
+        SELECT invitation_id, refusal FROM slotlock.invite_member(
+          ${params.tenantRef}::text, ${params.inviter}::text, ${email}::text, ${github}::text, ${login}::text,
+          ${params.role}::text, ${digest(params.tokenSha256)}::bytea, ${params.days}::integer,
+          ${params.dailyLimit}::integer, ${params.memberCap}::integer)`;
+      return row?.invitation_id ? { id: row.invitation_id } : { refusal: refusalOf(row?.refusal) ?? 'not_allowed' };
+    },
+    async preview(tokenSha256) {
+      const [row] = await sql<
+        {
+          invitation_id: string;
+          tenant_ref: string;
+          workspace_name: string;
+          workspace_handle: string;
+          inviter_display: string;
+          role: string;
+          email: string | null;
+          github_ref: string | null;
+          github_login: string | null;
+          state: SlotlockInvitationPreview['state'];
+        }[]
+      >`SELECT * FROM slotlock.invitation_preview(${digest(tokenSha256)}::bytea)`;
+      if (!row) return null;
+      return {
+        id: row.invitation_id,
+        tenantRef: row.tenant_ref,
+        workspaceName: row.workspace_name,
+        workspaceHandle: row.workspace_handle,
+        inviterDisplay: row.inviter_display,
+        role: roleOf(row.role),
+        email: row.email,
+        githubRef: row.github_ref,
+        githubLogin: row.github_login,
+        state: row.state,
+      };
+    },
+    async accept(params) {
+      if (!PERSON.test(params.person)) refuse('needs github:<id> or google:<subject>');
+      if ((params.tokenSha256 === undefined) === (params.id === undefined)) refuse('accept by the token or by id');
+      if (params.id !== undefined && !UUID.test(params.id)) return { refusal: 'not_found' };
+      const token = params.tokenSha256 === undefined ? null : digest(params.tokenSha256);
+      const [row] = await sql<{ tenant_ref: string | null; refusal: string | null }[]>`
+        SELECT tenant_ref, refusal FROM slotlock.accept_invitation(
+          ${token}::bytea, ${params.id ?? null}::uuid, ${params.person}::text,
+          ${[...params.emails].slice(0, 20)}::text[], ${params.memberCap}::integer)`;
+      return row?.tenant_ref ? { tenantRef: row.tenant_ref } : { refusal: refusalOf(row?.refusal) ?? 'not_found' };
+    },
+    async revoke(tenantRef, actor, id) {
+      if (!UUID.test(id)) return false;
+      const [row] = await sql<{ revoked: boolean }[]>`
+        SELECT slotlock.revoke_invitation(${tenantRef}::text, ${actor}::text, ${id}::uuid) AS revoked`;
+      return row?.revoked === true;
+    },
+    async resend(tenantRef, actor, id, tokenSha256, days, dailyLimit) {
+      if (!UUID.test(id)) return 'not_found';
+      const [row] = await sql<{ refusal: string | null }[]>`
+        SELECT slotlock.resend_invitation(${tenantRef}::text, ${actor}::text, ${id}::uuid,
+          ${digest(tokenSha256)}::bytea, ${days}::integer, ${dailyLimit}::integer) AS refusal`;
+      return refusalOf(row?.refusal);
+    },
+    async changeRole(tenantRef, actor, person, role) {
+      const [row] = await sql<{ refusal: string | null }[]>`
+        SELECT slotlock.change_member_role(${tenantRef}::text, ${actor}::text, ${person}::text, ${role}::text) AS refusal`;
+      return refusalOf(row?.refusal);
+    },
+    async remove(tenantRef, actor, person) {
+      const [row] = await sql<{ refusal: string | null }[]>`
+        SELECT slotlock.remove_member(${tenantRef}::text, ${actor}::text, ${person}::text) AS refusal`;
+      return refusalOf(row?.refusal);
+    },
+    async pendingFor(person, emails) {
+      if (!PERSON.test(person)) return [];
+      const rows = await sql<
+        { invitation_id: string; tenant_ref: string; workspace_name: string; workspace_handle: string; inviter_display: string; role: string }[]
+      >`SELECT * FROM slotlock.pending_invitations_for(${person}::text, ${[...emails].slice(0, 20)}::text[])`;
+      return rows.map((row) => ({
+        id: row.invitation_id,
+        tenantRef: row.tenant_ref,
+        workspaceName: row.workspace_name,
+        workspaceHandle: row.workspace_handle,
+        inviterDisplay: row.inviter_display,
+        role: roleOf(row.role),
+      }));
+    },
+    async isActive(tenantRef) {
+      if (!TEAM.test(tenantRef.replace(/~test$/, ''))) return false;
+      const [row] = await sql<{ active: boolean }[]>`SELECT slotlock.workspace_active(${tenantRef}::text) AS active`;
+      return row?.active === true;
+    },
+    async prune() {
+      const [row] = await sql<{ pruned: number }[]>`SELECT slotlock.prune_workspace_invitations() AS pruned`;
+      return Number(row?.pruned ?? 0);
+    },
+  };
+}
+
+/**
+ * Whether a team workspace serves its keys, for `serve`: read through slotlock.workspace_active and
+ * kept for `ttlMs` (30 seconds), so deleting one stops its keys on every server within that.
+ */
+export function createSlotlockWorkspaceCheck(
+  sql: SlotlockSql,
+  options: { ttlMs?: number; now?: () => number; maxEntries?: number } = {},
+): (tenantRef: string) => Promise<boolean> {
+  const ttlMs = options.ttlMs ?? 30_000;
+  const now = options.now ?? Date.now;
+  const maxEntries = options.maxEntries ?? 10_000;
+  const known = new Map<string, { at: number; active: Promise<boolean> }>();
+  const teams = createTeams(sql);
+  return (tenantRef) => {
+    const live = tenantRef.replace(/~test$/, '');
+    if (!TEAM.test(live)) return Promise.resolve(false);
+    const cached = known.get(live);
+    if (cached && now() - cached.at < ttlMs) return cached.active;
+    const active = teams.isActive(live).then(
+      (found) => found,
+      (error: unknown) => {
+        known.delete(live);
+        throw error;
+      },
+    );
+    known.delete(live);
+    known.set(live, { at: now(), active });
+    if (known.size > maxEntries) known.delete(known.keys().next().value as string);
+    return active;
   };
 }
 

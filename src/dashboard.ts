@@ -21,11 +21,14 @@ import {
   SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
   SLOTLOCK_FRESH_CAPABILITIES,
   SLOTLOCK_WORKSPACE_ROLE_NAMES,
+  SLOTLOCK_WORKSPACE_ROLES,
   type SlotlockWorkspaceCapability,
   type SlotlockWorkspaceRole,
+  isSlotlockWorkspaceRole,
   slotlockRoleCan,
+  slotlockRoleMayGrant,
 } from './workspace-roles.js';
-import type { SlotlockDashboardWorkspaces } from './workspaces.js';
+import type { SlotlockDashboardWorkspaces, SlotlockTeamRefusal, SlotlockTeamWorkspace } from './workspaces.js';
 import type { SlotlockAuditEvent, SlotlockAuditEventInput } from './store.js';
 import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
@@ -222,6 +225,14 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/environment',
   '/teams/enable',
   '/teams/disable',
+  '/teams/create',
+  '/invite/accept',
+  '/members/invite',
+  '/members/resend',
+  '/members/revoke',
+  '/members/role',
+  '/members/remove',
+  '/members/leave',
   '/assistant',
   '/assistant/stream',
   '/assistant/approve',
@@ -275,8 +286,17 @@ const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = 
   'billing.manage': 'change the plan or billing',
   'workspace.own': 'change who owns this workspace',
 });
-/** The pages a sign-in made to confirm it's you may come back to. */
-const STEP_UP_PAGES: ReadonlySet<string> = new Set(['/keys', '/webhooks', '/plan', '/settings', '/teams', '/contacts']);
+/** The pages a sign-in may come back to: one made to confirm it's you, or to open an invitation. */
+const STEP_UP_PAGES: ReadonlySet<string> = new Set([
+  '/keys',
+  '/webhooks',
+  '/plan',
+  '/settings',
+  '/settings/members',
+  '/teams',
+  '/contacts',
+  '/invite',
+]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
@@ -293,6 +313,70 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_MS = 86_400_000;
+/** The invitation link being opened, for the sign-in that accepts it: sealed, for 30 minutes. */
+const INVITE_COOKIE = '__Host-slotlock-invite';
+const INVITE_LINK_TTL_MS = 30 * 60_000;
+/** An invitation's token: 32 random bytes, base64url. Only its SHA-256 digest is stored. */
+const INVITE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+/** How long an invitation stays open, and how many a team workspace may send in a day. */
+const INVITATION_DAYS = 7;
+const INVITATION_DAILY_LIMIT = 50;
+/** People in a team workspace on the Free plan, its Owner and open invitations included. */
+const FREE_TEAM_MEMBERS = 3;
+/** Team workspaces on the Free plan each person may create, where plans apply. */
+const FREE_TEAMS_PER_PERSON = 1;
+/** A team workspace's id, as its tenant names it (`team:<id>`). */
+const TEAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const EMAIL_ADDRESS = /^[^@\s<>"]{1,64}@[^@\s<>"]+\.[^@\s<>"]+$/;
+/** What a team change refused says, and its status. */
+const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text: string }>> = Object.freeze({
+  invalid_handle: { status: 400, text: 'That name gives no usable handle. Try another.' },
+  invalid_name: { status: 400, text: 'Name the team: 1 to 80 characters.' },
+  handle_taken: { status: 409, text: 'That name is taken. Try another.' },
+  team_limit: {
+    status: 403,
+    text: `Each person may create ${String(FREE_TEAMS_PER_PERSON)} team on the Free plan. Upgrade yours to create another.`,
+  },
+  not_found: { status: 404, text: 'That is no longer here.' },
+  not_allowed: { status: 403, text: 'Your role can’t give that role, or change that member.' },
+  already_member: { status: 409, text: 'They are already a member.' },
+  invitation_limit: {
+    status: 429,
+    text: `This team sent ${String(INVITATION_DAILY_LIMIT)} invitations in the last day. Try again tomorrow.`,
+  },
+  member_cap: {
+    status: 403,
+    text: `A team on the Free plan has up to ${String(FREE_TEAM_MEMBERS)} people, open invitations included. Upgrade it to add more.`,
+  },
+  revoked: { status: 409, text: 'This invitation was withdrawn.' },
+  accepted: { status: 409, text: 'This invitation was already used.' },
+  expired: { status: 409, text: 'This invitation expired. Ask for a new one.' },
+  not_for_you: { status: 403, text: 'This invitation is for another account.' },
+  last_owner: { status: 409, text: 'A team keeps at least one owner. Make someone else an owner first.' },
+});
+
+/** A handle from a team's name: lower-case letters, digits and dashes; later attempts add a random end. */
+function teamHandleFrom(name: string, attempt: number): string {
+  const base =
+    name
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+/, '')
+      .slice(0, 30)
+      .replace(/-+$/, '') || 'team';
+  return attempt === 0 ? base : `${base}-${randomBytes(3).toString('hex')}`;
+}
+
+/** An address as an invitation shows it before anyone signs in: its first letter and domain. */
+function maskedEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  if (at < 1) return email;
+  return `${email.slice(0, 1)}${'•'.repeat(Math.min(3, at - 1))}${email.slice(at)}`;
+}
+
+const tokenDigest = (raw: string | Buffer) => createHash('sha256').update(raw).digest();
 const KEY_ACCESS: Readonly<Record<string, SlotlockApiKeyScope[]>> = Object.freeze({
   read: ['read'],
   read_write: ['read', 'write'],
@@ -691,6 +775,19 @@ export interface SlotlockDashboardBilling {
   formOrigins: readonly string[];
 }
 
+/** Sends an invitation's link by email (hosted Slotlock); without one, the person inviting sends it. */
+export interface SlotlockInvitationSender {
+  send(invitation: {
+    to: string;
+    /** The team workspace's name, and how the person inviting is shown. */
+    workspace: string;
+    inviter: string;
+    role: string;
+    link: string;
+    expiresAt: Date;
+  }): Promise<void>;
+}
+
 export interface SlotlockDashboardOptions {
   /** Where people reach the server; the dashboard lives at `<publicUrl>/dashboard`. */
   publicUrl: string;
@@ -765,6 +862,14 @@ export interface SlotlockDashboardOptions {
    * organization's GitHub owners are its Owners and its other members Developers, as read at sign-in.
    */
   workspaces?: SlotlockDashboardWorkspaces;
+  /**
+   * Team workspaces (`team:<id>`): anyone signed in creates one, invites people to it by email with
+   * a role, and changes or removes them (workspaces.ts teams). Needs `workspaces` with its
+   * database, and no fixed list of organizations. Off unless set.
+   */
+  teamWorkspaces?: boolean;
+  /** Sends invitations by email; the person inviting is shown each link either way. */
+  invitations?: SlotlockInvitationSender;
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
@@ -1234,6 +1339,10 @@ interface Session {
   idp?: 'google';
   /** The person's session epoch when sealed (workspaces): "Sign out everywhere" moves it on. */
   ep?: number;
+  /** The team workspace in use, by its id (`team:<id>`), with team workspaces; never with `org`. */
+  team?: string;
+  /** Addresses GitHub verified, kept only for the invitation being opened: at most its own. */
+  em?: string[];
 }
 
 interface Organization {
@@ -1649,7 +1758,7 @@ function readCookies(request: Request): Map<string, string> {
     const index = part.indexOf('=');
     if (index <= 0) continue;
     const name = part.slice(0, index).trim();
-    if (name === SESSION_COOKIE || name === SIGN_IN_COOKIE) {
+    if (name === SESSION_COOKIE || name === SIGN_IN_COOKIE || name === INVITE_COOKIE) {
       cookies.set(name, part.slice(index + 1).trim());
     }
   }
@@ -1870,6 +1979,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   // Teams on Cloud: organizations turned on in the database, beside every person's own tenant.
   const teams = options.organizations === 'enabled' ? (options.teams ?? null) : null;
   const workspaces = options.workspaces ?? null;
+  // Team workspaces: with the membership store's database, where people have workspaces of their own.
+  const teamStore = options.teamWorkspaces && !served ? (workspaces?.teams ?? null) : null;
   /** Each session's role in the workspace it acts in, as the database said when it was read. */
   const roles = new WeakMap<Session, SlotlockWorkspaceRole>();
   /** Where each request came from, for the audit log. */
@@ -1895,6 +2006,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const readsOrganizations = served !== null || teams !== null;
   /** Each session's organizations turned on, read with it (teams mode). */
   const enabledOf = new WeakMap<Session, ReadonlySet<string>>();
+  /** The team workspaces the session's person is a member of, read with their standing. */
+  const teamListOf = new WeakMap<Session, readonly SlotlockTeamWorkspace[]>();
   const brandName = options.name ?? 'Slotlock';
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
@@ -1931,8 +2044,12 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     }
   }
 
-  // Bound to the organization too: a page opened before a switch cannot write into the new one.
-  const formMac = (session: Session, nonce: string, org = session.org ?? '') =>
+  /** The workspace a form is bound to: its organization's id, `team:<id>`, or '' for one's own. */
+  function workspaceKeyOf(session: Session): string {
+    return session.team !== undefined ? `team:${session.team}` : (session.org ?? '');
+  }
+  // Bound to the workspace too: a page opened before a switch cannot write into the new one.
+  const formMac = (session: Session, nonce: string, org = workspaceKeyOf(session)) =>
     createHmac('sha256', secret)
       .update(`slotlock-dashboard-form-v2.${session.sid}.${org}.${nonce}`)
       .digest('base64url');
@@ -1948,10 +2065,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const [, nonce, mac] = match as unknown as [string, string, string];
     // Compared as text, like the cookie MACs: decoding would drop the last character's spare bits.
     if (safeEqual(mac, formMac(session, nonce))) return 'ok';
-    const other = session.orgs?.some(
-      (org) => org.id !== session.org && safeEqual(mac, formMac(session, nonce, org.id)),
-    );
-    return other ? 'other_org' : 'bad';
+    const current = workspaceKeyOf(session);
+    const others = [
+      ...(session.orgs ?? []).map((org) => org.id),
+      ...(teamListOf.get(session) ?? []).map((ws) => ws.tenantRef),
+      ...(teamStore ? [''] : []),
+    ].filter((other) => other !== current);
+    return others.some((other) => safeEqual(mac, formMac(session, nonce, other))) ? 'other_org' : 'bad';
   };
 
   function seal(context: string, payload: Record<string, unknown>): string {
@@ -1996,6 +2116,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       (payload.idp !== undefined && (payload.idp !== 'google' || !google)) ||
       !allowed(payload.uid, payload.idp as 'google' | undefined) ||
       !organizationsHold(payload) ||
+      !teamHolds(payload) ||
       (payload.env !== undefined && payload.env !== 'test') ||
       (await options.state.sessionEnded(payload.sid, payload.exp as number))
     ) {
@@ -2024,21 +2145,51 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       roles.set(session, derivedRole(session));
       return session;
     }
-    const standing = await workspaces.standing(tenantOf(session), personOf(session));
+    const person = personOf(session);
+    const [standing, listed] = await Promise.all([
+      workspaces.standing(tenantOf(session), person),
+      teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
+    ]);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
     // from before this store, or of a person erased since (no record, no epoch) never passes.
     if (session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
     if (standing.role !== null) {
       roles.set(session, standing.role);
+      teamListOf.set(session, listed);
       return session;
     }
-    if (session.org === undefined || served) return null;
-    const { org: _, ...personal } = session;
+    if ((session.org === undefined && session.team === undefined) || served) return null;
+    const { org: _, team: _team, ...personal } = session;
     const enabled = enabledOf.get(session);
     if (enabled) enabledOf.set(personal, enabled);
+    teamListOf.set(personal, listed);
     roles.set(personal, 'owner');
     return personal;
   }
+
+  /** A team workspace only with team workspaces on, never beside an organization; addresses as kept. */
+  function teamHolds(payload: Record<string, unknown>): boolean {
+    if (
+      payload.team !== undefined &&
+      (!teamStore || typeof payload.team !== 'string' || !TEAM_ID.test(payload.team) || payload.org !== undefined)
+    ) {
+      return false;
+    }
+    if (payload.em === undefined) return true;
+    return (
+      Array.isArray(payload.em) &&
+      payload.em.length <= 3 &&
+      payload.em.every((email) => typeof email === 'string' && email.length <= 254)
+    );
+  }
+
+  /** The team workspace the session acts in (`team:<id>`, Live), or undefined. */
+  const teamTenantOf = (session: Session) => (session.team !== undefined ? `team:${session.team}` : undefined);
+  const currentTeam = (session: Session) =>
+    session.team === undefined ? undefined : teamListOf.get(session)?.find((ws) => ws.tenantRef === `team:${session.team}`);
+  /** Addresses the person holds verified: their Google account's, or those GitHub confirmed for an invitation. */
+  const verifiedEmails = (session: Session): string[] =>
+    session.idp === 'google' ? (session.login.includes('@') ? [session.login.toLowerCase()] : []) : (session.em ?? []);
 
   /**
    * Without a membership store: the Owner of one's own workspace; in an organization's, its GitHub
@@ -2081,7 +2232,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       .digest('base64url');
   /** The tenant the session acts in: the workspace's, or its test environment's (`~test`). */
   const tenantOf = (session: Session) =>
-    `${session.org !== undefined ? `github-org:${session.org}` : personOf(session)}${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
+    `${
+      session.team !== undefined
+        ? `team:${session.team}`
+        : session.org !== undefined
+          ? `github-org:${session.org}`
+          : personOf(session)
+    }${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
   function personOf(session: Session): string {
     return session.idp === 'google' ? `google:${session.uid}` : `github:${session.uid}`;
@@ -2146,7 +2303,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
     ...(plans ? [{ section: 'plan' as const, label: 'Usage', path: '/plan', icon: ICONS.plan }] : []),
-    ...(teams ? [{ section: 'teams' as const, label: 'Teams', path: '/teams', icon: ICONS.teams }] : []),
+    ...(teams || teamStore ? [{ section: 'teams' as const, label: 'Teams', path: '/teams', icon: ICONS.teams }] : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
 
@@ -2160,12 +2317,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   /** The workspace the session acts in: its organization, or the person themselves. */
   function workspace(session: Session): Html {
     const current = session.orgs?.find((org) => org.id === session.org);
+    const team = currentTeam(session);
     const choices = (session.orgs ?? []).filter((org) => served?.has(org.id));
-    const name = current?.login ?? session.login;
+    const name = team?.name ?? current?.login ?? session.login;
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
     const enabled = teams ? (session.orgs ?? []).filter((org) => enabledOf.get(session)?.has(org.id)) : [];
-    if (teams && enabled.length > 0) {
-      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${current ? html`` : html` selected`}>${shownAs(session)}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+    const listed = teamListOf.get(session) ?? [];
+    if (enabled.length > 0 || listed.length > 0) {
+      const personal = !current && !team;
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${personal ? html` selected` : html``}>${shownAs(session)}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}${listed.map((ws) => html`<option value="${ws.tenantRef}"${ws.tenantRef === team?.tenantRef ? html` selected` : html``}>${ws.name}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
     if (current && choices.length > 1) {
       return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization" title="${current.login}">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
@@ -2840,7 +3000,9 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
-  type SettingsSection = 'assistant' | 'endpoints' | 'hours' | 'account';
+  type SettingsSection = 'assistant' | 'members' | 'endpoints' | 'hours' | 'account';
+  /** An invitation's link, shown once to the person who made it. */
+  type InvitationShown = { link: string; to: string; expiresAt: Date };
 
   /** Resources with hours of their own the tenant's hours page names; the rest are counted. */
   const OWN_HOURS_NAMED = 8;
@@ -2848,6 +3010,7 @@ ${
   /** Settings' sections, each its own page: the assistant's form apart from what is only read. */
   const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string; path: string }[] = Object.freeze([
     { id: 'assistant', label: 'Assistant', path: '/settings' },
+    { id: 'members', label: 'Members', path: '/settings/members' },
     { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
     { id: 'hours', label: 'Hours', path: '/settings/hours' },
     { id: 'account', label: 'Account', path: '/settings/account' },
@@ -2859,10 +3022,19 @@ ${
     notice?: string,
     draft?: AssistantDraft,
     section: SettingsSection = 'assistant',
+    invitation?: InvitationShown,
   ): Promise<Response> {
     const store = assistantStore();
-    const sections = SETTINGS_SECTIONS.filter((entry) => entry.id !== 'assistant' || store);
-    const shown: SettingsSection = section === 'assistant' && !store ? 'endpoints' : section;
+    // Members are a team workspace's: its people come from invitations, not from GitHub.
+    const sections = SETTINGS_SECTIONS.filter(
+      (entry) => (entry.id !== 'assistant' || store) && (entry.id !== 'members' || (teamStore && session.team !== undefined)),
+    );
+    const shown: SettingsSection =
+      section === 'assistant' && !store
+        ? 'endpoints'
+        : section === 'members' && !sections.some((entry) => entry.id === 'members')
+          ? 'account'
+          : section;
     const connected = store ? Boolean(await store.getSettings(tenantOf(session))) : false;
     const nav = html`<nav class="subnav" aria-label="Settings">${sections.map(
       (entry) =>
@@ -2873,6 +3045,8 @@ ${
     let body: Html;
     if (shown === 'assistant') {
       body = await assistantSettingsSection(session, status, notice, draft);
+    } else if (shown === 'members') {
+      body = await membersSection(session, status, notice, invitation);
     } else if (shown === 'endpoints') {
       body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">MCP</span><div class="row-value">${copyField('mcp-url', mcpUrl)}</div></div><div class="row"><span class="row-label">A2A</span><div class="row-value">${copyField('a2a-url', a2aUrl)}</div></div></div>`;
     } else if (shown === 'hours') {
@@ -2887,8 +3061,9 @@ ${
       }</div></div></div><p class="fine">In each resource's own time zone, for resources with no hours of their own, their location's or <a href="${root}/hours">yours</a>. Set by the server's operator.</p>`;
     } else {
       const current = session.orgs?.find((org) => org.id === session.org);
+      const team = currentTeam(session);
       const others = (session.orgs ?? []).filter((org) => org.id !== current?.id);
-      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Signed in as</span><div class="row-value">${shownAs(session)}</div></div><div class="row"><span class="row-label">${current ? 'Organization' : 'Workspace'}</span><div class="row-value">${current ? current.login : 'Personal'}</div></div>${
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Signed in as</span><div class="row-value">${shownAs(session)}</div></div><div class="row"><span class="row-label">${current ? 'Organization' : team ? 'Team' : 'Workspace'}</span><div class="row-value">${current ? current.login : team ? team.name : 'Personal'}</div></div>${
         current && others.length > 0
           ? html`<div class="row"><span class="row-label">Also a member of</span><div class="row-value">${others.map((org) => org.login).join(', ')}</div></div>`
           : html``
@@ -5274,12 +5449,13 @@ ${
   async function audit(
     session: Session,
     event: { action: string } & Partial<Omit<SlotlockAuditEventInput, 'action' | 'actorType' | 'actorRef'>>,
+    tenantRef = tenantOf(session),
   ): Promise<void> {
     const log = options.resources.audit;
     if (!log) return;
     const from = origins.get(session) ?? {};
     try {
-      await log.record(tenantOf(session), {
+      await log.record(tenantRef, {
         actorType: 'person',
         actorRef: personOf(session),
         actorRole: roleOf(session),
@@ -5333,6 +5509,12 @@ ${
     if (base === undefined) return [];
     const needed: SlotlockWorkspaceCapability[] = [base];
     if (route === '/keys' && form.get('access') === 'full') needed.push('keys.full');
+    // Giving a role needs its powers: making an Owner `workspace.own`, a Billing manager `billing.manage`.
+    if (route === '/members/invite' || route === '/members/role') {
+      const role = form.get('role');
+      if (role === 'owner') needed.push('workspace.own');
+      if (role === 'billing') needed.push('billing.manage');
+    }
     if (route === '/keys/rotate' || route === '/keys/revoke' || route === '/keys/limits') {
       // As PostgreSQL reads a uuid, whatever its case: the key the handler would act on.
       const id = (form.get('id') ?? '').toLowerCase();
@@ -5348,6 +5530,7 @@ ${
 
   /** The page a form's route belongs to, to go back to. */
   const backOf = (route: string) => {
+    if (route.startsWith('/members/')) return '/settings/members';
     const first = `/${route.split('/')[1] ?? ''}`;
     return first === '/' ? '' : first;
   };
@@ -5424,9 +5607,12 @@ ${
     if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
     if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
     if (route.startsWith('/assistant') && assistantStore()) return { path: '/assistant', page: assistantPage };
+    if (route.startsWith('/members/') && teamStore) {
+      return { path: '/settings/members', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'members') };
+    }
     if (route.startsWith('/settings')) return { path: '/settings', page: settingsPage };
     if (route.startsWith('/plan') && plans) return { path: '/plan', page: planPage };
-    if (route.startsWith('/teams') && teams) return { path: '/teams', page: teamsPage };
+    if ((route.startsWith('/teams') || route.startsWith('/invite')) && (teams || teamStore)) return { path: '/teams', page: teamsPage };
     return { path: '/', page: overviewPage };
   }
 
@@ -5580,6 +5766,8 @@ ${target === 'all' ? ownHoursChoice(state.own ?? []) : html``}
     );
   const nothingHere = (session: Session) =>
     respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+  const nothingHere404 = () =>
+    respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, null), { 'Referrer-Policy': 'no-referrer' });
 
   /** The tenant's resources in use that keep hours of their own, by name. */
   async function ownHoursOf(session: Session): Promise<SlotlockResource[]> {
@@ -5982,7 +6170,47 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
    * turns one on or off; a member asks an owner; one that is on is a workspace to switch to.
    */
   async function teamsPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    if (!teams) return nothingHere(session);
+    if (!teams && !teamStore) return nothingHere(session);
+    const own = teamStore ? await teamWorkspacesSection(session) : html``;
+    const organizations = teams ? await organizationsSection(session) : html``;
+    const content = html`${noticeOf(notice, status)}${pageHead('Teams')}${own}${organizations}`;
+    return respond(status, layout('Teams', content, session, 'teams'));
+  }
+
+  /** The person's team workspaces, the invitations open to them, and creating one. */
+  async function teamWorkspacesSection(session: Session): Promise<Html> {
+    if (!teamStore) return html``;
+    const listed = teamListOf.get(session) ?? [];
+    const offered = await teamStore.pendingFor(personOf(session), verifiedEmails(session));
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const rows = listed.map(
+      (ws) =>
+        html`<tr><td data-label="Team" class="strong">${ws.name}</td><td data-label="Handle" class="muted">@${ws.handle}</td><td data-label="You are">${SLOTLOCK_WORKSPACE_ROLE_NAMES[ws.role]}</td><td class="actions">${
+          ws.tenantRef === teamTenantOf(session)
+            ? html`<span class="muted">In use</span>`
+            : html`<form class="inline" method="post" action="${root}/organization">${hidden()}<input type="hidden" name="organization" value="${ws.tenantRef}"><button type="submit">Switch to it</button></form>`
+        }</td></tr>`,
+    );
+    const invitations = offered.map(
+      (invitation) =>
+        html`<tr><td data-label="Team" class="strong">${invitation.workspaceName}</td><td data-label="From">${invitation.inviterDisplay}</td><td data-label="As">${SLOTLOCK_WORKSPACE_ROLE_NAMES[invitation.role]}</td><td class="actions"><form class="inline" method="post" action="${root}/invite/accept">${hidden()}<input type="hidden" name="invitation" value="${invitation.id}"><button class="primary" type="submit">Join ${invitation.workspaceName}</button></form></td></tr>`,
+    );
+    return html`<section class="team-workspaces" aria-labelledby="team-workspaces"><h2 id="team-workspaces">Team workspaces</h2>${
+      invitations.length > 0
+        ? html`<div class="table"><table><caption class="visually-hidden">Invitations</caption><thead><tr><th>Invited to</th><th>From</th><th>As</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${invitations}</tbody></table></div>`
+        : html``
+    }${
+      rows.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Team</th><th>Handle</th><th>You are</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : html``
+    }<form class="create-team" method="post" action="${root}/teams/create">${hidden()}<label for="team-name">Name</label><input id="team-name" name="name" maxlength="80" autocomplete="organization" required><button class="primary" type="submit">Create team</button></form></section>`;
+  }
+
+  /** GitHub organizations turned on for Slotlock (organizations: 'enabled'). */
+  async function organizationsSection(session: Session): Promise<Html> {
+    if (!teams) return html``;
     const orgs = session.orgs ?? [];
     const enabled = orgs.length > 0 ? await teams.enabled(orgs.map((org) => org.id)) : new Set<string>();
     enabledOf.set(session, enabled);
@@ -6004,7 +6232,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
           : html`<span class="muted">An owner can turn it on</span>`;
       return html`<tr><td data-label="Organization" class="strong">${org.login}</td><td data-label="You are">${owner ? 'Owner' : 'Member'}</td><td data-label="Slotlock"><span class="pill ${on ? 'active' : 'revoked'}">${on ? 'On' : 'Off'}</span></td><td class="actions">${actions}</td></tr>`;
     });
-    const content = html`${noticeOf(notice, status)}${pageHead('Teams')}
+    return html`${teamStore ? html`<h2>GitHub organizations</h2>` : html``}
 <p>Work with the people in a GitHub organization: once an owner turns Slotlock on for it, every owner and member shares its resources, keys and history, and picks it from the workspace menu. Your own workspace stays yours.</p>
 ${
   rows.length === 0
@@ -6012,7 +6240,368 @@ ${
     : html`<div class="table"><table><thead><tr><th>Organization</th><th>You are</th><th>Slotlock</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>
 <p class="fine">Who owns an organization is read from GitHub as you sign in. Leaving one ends your access at your next sign-in.</p>`
 }`;
-    return respond(status, layout('Teams', content, session, 'teams'));
+  }
+
+  /** People a team workspace may have, open invitations included: 3 on the Free plan where plans apply. */
+  async function memberCapOf(tenantRef: string): Promise<number | null> {
+    if (!plans) return null;
+    const plan = await plans.plan(tenantRef);
+    return plan === null || plan.plan === 'free' || plan.status === 'canceled' ? FREE_TEAM_MEMBERS : null;
+  }
+
+  /** The session moved into a workspace (its own when `team` is undefined), Live or Test as it was. */
+  function moveTo(session: Session, team: string | undefined, path: string, cookies: string[] = [], keepEmails = true): Response {
+    const { org: _org, team: _team, em, ...rest } = session;
+    const kept = keepEmails && em !== undefined ? { ...rest, em } : rest;
+    const sealed = seal('slotlock-dashboard-session-v1', team === undefined ? kept : { ...kept, team });
+    const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+    return redirect(303, `${root}${path}`, [setCookie(SESSION_COOKIE, sealed, left), ...cookies]);
+  }
+
+  const refusalPage = (session: Session, refusal: SlotlockTeamRefusal) =>
+    settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'members');
+
+  async function createTeam(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!teamStore) return nothingHere(session);
+    const name = (form.get('name') ?? '').trim();
+    if (name.length === 0 || name.length > 80 || /\p{Cc}/u.test(name)) {
+      return teamsPage(session, 400, TEAM_REFUSALS.invalid_name.text);
+    }
+    const person = personOf(session);
+    const cap = plans ? FREE_TEAMS_PER_PERSON : null;
+    let made: Awaited<ReturnType<typeof teamStore.create>> = { refusal: 'handle_taken' };
+    // The handle follows the name; one taken gets a random end.
+    for (let attempt = 0; attempt < 4 && 'refusal' in made && made.refusal === 'handle_taken'; attempt += 1) {
+      made = await teamStore.create(person, name, teamHandleFrom(name, attempt), cap);
+    }
+    if ('refusal' in made) return teamsPage(session, TEAM_REFUSALS[made.refusal].status, TEAM_REFUSALS[made.refusal].text);
+    await audit(
+      session,
+      { action: 'workspace.created', actorRole: 'owner', targetType: 'workspace', targetRef: made.tenantRef },
+      made.tenantRef,
+    );
+    return moveTo(session, made.tenantRef.slice('team:'.length), '/settings/members');
+  }
+
+  /** A team's people as the others see them: their GitHub login or Google email, as last signed in. */
+  const memberName = (member: { person: string; display: string | null }) =>
+    member.display ?? (member.person.startsWith('google:') ? 'A Google account' : 'A GitHub account');
+
+  async function membersSection(session: Session, status: number, notice: string | undefined, shown?: InvitationShown): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return noticeOf(notice, status);
+    const manage = can(session, 'members.manage');
+    const me = personOf(session);
+    const mine = roleOf(session);
+    const [members, invitations, cap] = await Promise.all([
+      teamStore.members(tenantRef),
+      manage ? teamStore.invitations(tenantRef) : Promise.resolve([]),
+      memberCapOf(tenantRef),
+    ]);
+    const open = invitations.filter((invitation) => invitation.expiresAt.getTime() > now());
+    const seats = members.length + open.length;
+    const full = cap !== null && seats >= cap;
+    const team = currentTeam(session)?.name ?? 'this team';
+    const owners = members.filter((member) => member.role === 'owner').length;
+    const grantable = SLOTLOCK_WORKSPACE_ROLES.filter((role) => slotlockRoleMayGrant(mine, role));
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const roleOptions = (selected: SlotlockWorkspaceRole) =>
+      grantable.map(
+        (role) => html`<option value="${role}"${role === selected ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+      );
+    const invite = !manage
+      ? html``
+      : full
+        ? html`<p class="seats">${String(seats)} of ${String(cap)} people.${plans && can(session, 'usage.read') ? html` <a href="${root}/plan">Upgrade</a>` : html``}</p>`
+        : html`<form class="invite" method="post" action="${root}/members/invite">${hidden()}<label for="invite-email">Email</label><input id="invite-email" name="email" type="email" maxlength="254" autocomplete="off" required${shown ? html`` : html` autofocus`}><label class="visually-hidden" for="invite-role">Role</label><select id="invite-role" name="role">${roleOptions('member')}</select><button class="primary" type="submit">Invite</button></form>`;
+    const link = shown
+      ? html`<div class="set-card"><div class="row"><span class="row-label">Link for ${shown.to}</span><div class="row-value">${copyField('invite-link', shown.link)}</div></div></div><p class="fine">It works once, for that address, until ${formatDate(shown.expiresAt)}. It is not shown again.</p>`
+      : html``;
+    const pendingRows = invitations.map((invitation) => {
+      const expired = invitation.expiresAt.getTime() <= now();
+      const to = invitation.email ?? `@${invitation.githubLogin ?? 'GitHub account'}`;
+      return html`<tr><td data-label="Invited" class="strong">${to}</td><td data-label="Role">${SLOTLOCK_WORKSPACE_ROLE_NAMES[invitation.role]}</td><td data-label="By">${invitation.inviterDisplay}</td><td data-label="Expires">${expired ? html`<span class="pill revoked">Expired</span>` : formatDate(invitation.expiresAt)}</td><td class="actions">${
+        slotlockRoleMayGrant(mine, invitation.role)
+          ? html`<form class="inline" method="post" action="${root}/members/resend">${hidden()}<input type="hidden" name="id" value="${invitation.id}"><button type="submit">Send again<span class="visually-hidden"> to ${to}</span></button></form><form class="inline" method="post" action="${root}/members/revoke">${hidden()}<input type="hidden" name="id" value="${invitation.id}"><button class="danger" type="submit">Revoke<span class="visually-hidden"> the invitation to ${to}</span></button></form>`
+          : html``
+      }</td></tr>`;
+    });
+    const memberRows = members.map((member, index) => {
+      const name = memberName(member);
+      const self = member.person === me;
+      const changeable = manage && slotlockRoleMayGrant(mine, member.role);
+      const role = changeable
+        ? html`<form class="inline" method="post" action="${root}/members/role">${hidden()}<input type="hidden" name="person" value="${member.person}"><label class="visually-hidden" for="role-${String(index)}">Role for ${name}</label><select id="role-${String(index)}" name="role">${roleOptions(member.role)}</select><button type="submit">Save<span class="visually-hidden"> the role for ${name}</span></button></form>`
+        : html`${SLOTLOCK_WORKSPACE_ROLE_NAMES[member.role]}`;
+      let action = html``;
+      if (self) {
+        action =
+          member.role === 'owner' && owners <= 1
+            ? html`<span class="muted">You’re the only owner. Make someone else an owner before leaving.</span>`
+            : html`<details class="act danger"><summary>Leave</summary><div class="pop"><p>You lose access to ${team} at once. Keys you created keep working until an owner or admin revokes them.</p><form method="post" action="${root}/members/leave">${hidden()}<button class="danger" type="submit">Leave ${team}</button></form></div></details>`;
+      } else if (changeable) {
+        action = html`<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
+      }
+      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}</td><td data-label="Role">${role}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+    });
+    return html`${noticeOf(notice, status)}<h2>Members · ${String(cap === null ? members.length : seats)}${cap === null ? '' : ` of ${String(cap)}`}</h2>${invite}${link}${
+      pendingRows.length > 0
+        ? html`<h3>Pending</h3><div class="table"><table><thead><tr><th>Invited</th><th>Role</th><th>By</th><th>Expires</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
+        : html``
+    }<div class="table"><table><thead><tr><th>Member</th><th>Role</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${memberRows}</tbody></table></div>`;
+  }
+
+  /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
+  async function deliverInvitation(session: Session, to: string, role: SlotlockWorkspaceRole, link: string, expiresAt: Date): Promise<boolean> {
+    if (!options.invitations) return false;
+    try {
+      await options.invitations.send({
+        to,
+        workspace: currentTeam(session)?.name ?? 'a team',
+        inviter: shownAs(session),
+        role: SLOTLOCK_WORKSPACE_ROLE_NAMES[role],
+        link,
+        expiresAt,
+      });
+      return true;
+    } catch (error) {
+      report(`Invitation email failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      return false;
+    }
+  }
+
+  async function inviteMember(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const email = (form.get('email') ?? '').trim().toLowerCase();
+    const role = form.get('role') ?? '';
+    if (email.length > 254 || !EMAIL_ADDRESS.test(email)) {
+      return settingsPage(session, 400, 'Enter an email address.', undefined, 'members');
+    }
+    if (!isSlotlockWorkspaceRole(role)) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const raw = randomBytes(32).toString('base64url');
+    const sent = await teamStore.invite({
+      tenantRef,
+      inviter: personOf(session),
+      to: { email },
+      role,
+      tokenSha256: tokenDigest(raw),
+      days: INVITATION_DAYS,
+      dailyLimit: INVITATION_DAILY_LIMIT,
+      memberCap: await memberCapOf(tenantRef),
+    });
+    if ('refusal' in sent) return refusalPage(session, sent.refusal);
+    await audit(session, { action: 'member.invited', targetType: 'invitation', targetRef: sent.id, metadata: { role } }, tenantRef);
+    const link = `${publicRoot}/invite/${raw}`;
+    const expiresAt = new Date(now() + INVITATION_DAYS * DAY_MS);
+    const delivered = await deliverInvitation(session, email, role, link, expiresAt);
+    return settingsPage(
+      session,
+      200,
+      delivered ? `Invitation sent to ${email}.` : `Invitation made for ${email}. Send them the link.`,
+      undefined,
+      'members',
+      { link, to: email, expiresAt },
+    );
+  }
+
+  async function resendInvitation(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const id = (form.get('id') ?? '').toLowerCase();
+    const invitation = (await teamStore.invitations(tenantRef)).find((candidate) => candidate.id === id);
+    if (!invitation) return refusalPage(session, 'not_found');
+    const raw = randomBytes(32).toString('base64url');
+    const refusal = await teamStore.resend(tenantRef, personOf(session), id, tokenDigest(raw), INVITATION_DAYS, INVITATION_DAILY_LIMIT);
+    if (refusal) return refusalPage(session, refusal);
+    await audit(session, { action: 'invitation.resent', targetType: 'invitation', targetRef: id }, tenantRef);
+    const to = invitation.email ?? `@${invitation.githubLogin ?? 'GitHub account'}`;
+    const link = `${publicRoot}/invite/${raw}`;
+    const expiresAt = new Date(now() + INVITATION_DAYS * DAY_MS);
+    const delivered = invitation.email !== null && (await deliverInvitation(session, invitation.email, invitation.role, link, expiresAt));
+    return settingsPage(
+      session,
+      200,
+      delivered ? `Invitation sent to ${to} again. The old link no longer works.` : `A new link for ${to}. The old one no longer works.`,
+      undefined,
+      'members',
+      { link, to, expiresAt },
+    );
+  }
+
+  async function revokeInvitation(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const id = (form.get('id') ?? '').toLowerCase();
+    if (!(await teamStore.revoke(tenantRef, personOf(session), id))) return refusalPage(session, 'not_found');
+    await audit(session, { action: 'invitation.revoked', targetType: 'invitation', targetRef: id }, tenantRef);
+    return settingsPage(session, 200, 'Invitation revoked: its link no longer works.', undefined, 'members');
+  }
+
+  async function changeMemberRole(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const person = form.get('person') ?? '';
+    const role = form.get('role') ?? '';
+    if (!isSlotlockWorkspaceRole(role)) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const members = await teamStore.members(tenantRef);
+    const member = members.find((candidate) => candidate.person === person);
+    if (!member) return refusalPage(session, 'not_found');
+    if (member.role === role) return settingsPage(session, 200, 'Nothing changed.', undefined, 'members');
+    const refusal = await teamStore.changeRole(tenantRef, personOf(session), person, role);
+    if (refusal) return refusalPage(session, refusal);
+    await audit(
+      session,
+      { action: 'member.role_changed', targetType: 'person', targetRef: person, metadata: { from: member.role, to: role } },
+      tenantRef,
+    );
+    // One's own role changed: the page is read again under the new one.
+    if (person === personOf(session)) return redirect(303, `${root}/settings/members`);
+    return settingsPage(session, 200, `${memberName(member)} is now ${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}.`, undefined, 'members');
+  }
+
+  async function removeMember(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const me = personOf(session);
+    const person = form.get('person') ?? '';
+    if (person === me) return settingsPage(session, 400, 'To leave this team, use Leave.', undefined, 'members');
+    const member = (await teamStore.members(tenantRef)).find((candidate) => candidate.person === person);
+    if (!member) return refusalPage(session, 'not_found');
+    const refusal = await teamStore.remove(tenantRef, me, person);
+    if (refusal) return refusalPage(session, refusal);
+    // Keys they created, Live and Test: revoked unless the form keeps them.
+    const keep = form.get('keys') === 'keep';
+    let revoked = 0;
+    if (!keep) {
+      for (const tenant of [tenantRef, `${tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}`]) {
+        for (const key of await options.keys.list({ tenantRef: tenant })) {
+          if (key.createdBy !== person || key.revokedAt !== null) continue;
+          if (await options.keys.revoke({ tenantRef: tenant, actor: me, origin: 'dashboard', id: key.id })) revoked += 1;
+        }
+      }
+    }
+    await audit(
+      session,
+      { action: 'member.removed', targetType: 'person', targetRef: person, metadata: { keys: keep ? 'kept' : 'revoked', revoked } },
+      tenantRef,
+    );
+    return settingsPage(
+      session,
+      200,
+      `${memberName(member)} was removed${revoked > 0 ? `, and ${String(revoked)} key${revoked === 1 ? '' : 's'} they created revoked` : ''}.`,
+      undefined,
+      'members',
+    );
+  }
+
+  async function leaveTeam(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const me = personOf(session);
+    const refusal = await teamStore.remove(tenantRef, me, me);
+    if (refusal) return refusalPage(session, refusal);
+    await audit(session, { action: 'member.left', targetType: 'person', targetRef: me }, tenantRef);
+    return moveTo(session, undefined, '');
+  }
+
+  /** The invitation link being opened in this browser: its token, or null. */
+  function inviteTokenOf(request: Request): string | null {
+    const opened = unseal('slotlock-dashboard-invite-v1', readCookies(request).get(INVITE_COOKIE));
+    return opened &&
+      typeof opened.t === 'string' &&
+      INVITE_TOKEN.test(opened.t) &&
+      typeof opened.exp === 'number' &&
+      opened.exp > now()
+      ? opened.t
+      : null;
+  }
+
+  /** An invitation's own page: what it is for, and joining, in the states it can be in. Never consumes it. */
+  async function invitePage(session: Session | null, raw: string | null, status = 200, notice?: string, checked = false): Promise<Response> {
+    const preview = raw && teamStore ? await teamStore.preview(tokenDigest(raw)) : null;
+    const headers = { 'Referrer-Policy': 'no-referrer' };
+    if (!preview) {
+      const content = html`${noticeOf(notice, status)}${pageHead('Invitation')}<p>This invitation link can’t be used here. Open the link you were sent again, in this browser.</p>`;
+      return respond(status === 200 ? 404 : status, layout('Invitation', content, session), headers);
+    }
+    const name = preview.workspaceName;
+    const role = SLOTLOCK_WORKSPACE_ROLE_NAMES[preview.role];
+    const forWhom = preview.email !== null ? maskedEmail(preview.email) : `@${preview.githubLogin ?? 'a GitHub account'}`;
+    let body: Html;
+    if (preview.state !== 'pending') {
+      body = html`<p>${
+        preview.state === 'expired'
+          ? `This invitation expired. Ask ${preview.inviterDisplay} to send it again.`
+          : preview.state === 'revoked'
+            ? 'This invitation was withdrawn.'
+            : 'This invitation was already used.'
+      }</p>`;
+    } else if (!session) {
+      const then = new URLSearchParams({ then: '/invite' }).toString();
+      // An invitation by email asks GitHub for the person's verified addresses on the way in.
+      const github = preview.email !== null ? `${then}&email=1` : then;
+      body = html`<p>${preview.inviterDisplay} invited ${forWhom} as ${role}.</p><p class="actions"><a class="button primary" href="${root}/sign-in?${github}">${ICONS.github}Continue with GitHub</a>${
+        google && preview.email !== null
+          ? html` <a class="button" href="${root}/sign-in?with=google&amp;${then}">${ICONS.google}Continue with Google</a>`
+          : html``
+      }</p>`;
+    } else if ((teamListOf.get(session) ?? []).some((ws) => ws.tenantRef === preview.tenantRef)) {
+      body = html`<p>You’re already a member of ${name}.</p><form method="post" action="${root}/organization"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="organization" value="${preview.tenantRef}"><button class="primary" type="submit">Open ${name}</button></form>`;
+    } else {
+      const person = personOf(session);
+      const bound =
+        (preview.githubRef !== null && preview.githubRef === person) ||
+        (preview.email !== null && verifiedEmails(session).includes(preview.email));
+      if (bound) {
+        body = html`<p>${preview.inviterDisplay} invited you as ${role}.</p><form method="post" action="${root}/invite/accept"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><button class="primary" type="submit">Join as ${shownAs(session)}</button></form>`;
+      } else if (preview.email !== null && session.idp !== 'google') {
+        // A GitHub account shows its addresses only when asked: once, for this invitation.
+        body = html`<p>${preview.inviterDisplay} invited ${forWhom} as ${role}.${
+          checked ? html` None of the addresses GitHub verified for ${shownAs(session)} is it.` : html``
+        }</p><p class="actions"><a class="button primary" href="${root}/sign-in?then=%2Finvite&amp;email=1">${ICONS.github}Confirm the address with GitHub</a></p>`;
+      } else {
+        body = html`<p>This invitation is for ${forWhom}, and you’re signed in as ${shownAs(session)}. Sign out, then open the link again and sign in as that account.</p>`;
+      }
+    }
+    const content = html`${noticeOf(notice, status)}${pageHead(`Join ${name}`)}${body}`;
+    return respond(status, layout(`Join ${name}`, content, session), headers);
+  }
+
+  async function acceptInvitation(session: Session, form: URLSearchParams, request: Request): Promise<Response> {
+    if (!teamStore) return nothingHere(session);
+    const person = personOf(session);
+    const emails = verifiedEmails(session);
+    const id = (form.get('invitation') ?? '').toLowerCase();
+    let accepted: Awaited<ReturnType<typeof teamStore.accept>>;
+    let role: SlotlockWorkspaceRole;
+    let raw: string | null = null;
+    if (id !== '') {
+      // One offered on Teams: an invitation open to this person, found again here.
+      const offered = (await teamStore.pendingFor(person, emails)).find((invitation) => invitation.id === id);
+      if (!offered) return teamsPage(session, 404, 'That invitation is no longer open to you.');
+      role = offered.role;
+      accepted = await teamStore.accept({ id: offered.id, person, emails, memberCap: await memberCapOf(offered.tenantRef) });
+    } else {
+      raw = inviteTokenOf(request);
+      const preview = raw ? await teamStore.preview(tokenDigest(raw)) : null;
+      if (!raw || !preview) return invitePage(session, null, 400);
+      role = preview.role;
+      accepted = await teamStore.accept({ tokenSha256: tokenDigest(raw), person, emails, memberCap: await memberCapOf(preview.tenantRef) });
+    }
+    if ('refusal' in accepted) {
+      const { status, text } = TEAM_REFUSALS[accepted.refusal];
+      return id !== '' ? teamsPage(session, status, text) : invitePage(session, raw, status, text);
+    }
+    await audit(
+      session,
+      { action: 'member.joined', actorRole: role, targetType: 'person', targetRef: person },
+      accepted.tenantRef,
+    );
+    // Into the team joined; the link is spent, and the addresses kept for it go.
+    return moveTo(session, accepted.tenantRef.slice('team:'.length), '', [setCookie(INVITE_COOKIE, '', 0)], false);
   }
 
   async function changeTeam(session: Session, form: URLSearchParams, on: boolean): Promise<Response> {
@@ -6043,6 +6632,14 @@ ${
 
   async function switchOrganization(session: Session, form: URLSearchParams): Promise<Response> {
     const wanted = form.get('organization') ?? '';
+    const teamId = /^team:(.+)$/.exec(wanted)?.[1];
+    if (teamStore && (teamId !== undefined || (wanted === '' && !teams))) {
+      // Their own tenant, or a team workspace they are a member of now.
+      if (teamId !== undefined && (!TEAM_ID.test(teamId) || !workspaces || (await workspaces.standing(wanted, personOf(session))).role === null)) {
+        return respond(400, layout('Refused', html`<p class="notice">You are not a member of that team.</p>`, session));
+      }
+      return moveTo(session, teamId, '');
+    }
     if (teams) {
       // Their own tenant, or an organization of theirs that is turned on now.
       const org = session.orgs?.find((candidate) => candidate.id === wanted);
@@ -6052,7 +6649,7 @@ ${
           layout('Refused', html`<p class="notice">You cannot act for that organization. An owner turns it on from Teams.</p>`, session),
         );
       }
-      const { org: _, ...personal } = session;
+      const { org: _, team: _team, ...personal } = session;
       const sealed = seal('slotlock-dashboard-session-v1', wanted === '' ? personal : { ...personal, org: wanted });
       const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
       return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
@@ -6071,7 +6668,7 @@ ${
     return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
   }
 
-  async function startSignIn(then?: string): Promise<Response> {
+  async function startSignIn(then?: string, emails = false): Promise<Response> {
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -6083,13 +6680,17 @@ ${
       code_challenge: challenge,
       code_challenge_method: 'S256',
       // Reading organization membership needs read:org; a personal tenant needs no scope at all.
-      ...(readsOrganizations ? { scope: 'read:org' } : {}),
+      // Accepting an invitation by email asks GitHub for the person's verified addresses, then only.
+      ...(readsOrganizations || emails
+        ? { scope: [...(readsOrganizations ? ['read:org'] : []), ...(emails ? ['user:email'] : [])].join(' ') }
+        : {}),
     }).toString();
     const sealed = seal('slotlock-dashboard-sign-in-v1', {
       state,
       verifier,
       exp: now() + SIGN_IN_TTL_MS,
       ...(then ? { then } : {}),
+      ...(emails ? { emails: true } : {}),
     });
     return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
   }
@@ -6155,6 +6756,33 @@ ${
       return null;
     }
     return { uid: String(body.id), login: body.login };
+  }
+
+  /** The addresses GitHub verified for the token's person, lower-cased; none when it does not say. */
+  async function readGitHubEmails(token: string): Promise<string[]> {
+    const response = await fetchImpl(`${userUrl}/emails`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION,
+        'User-Agent': USER_AGENT,
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      report(`GitHub email lookup failed: HTTP ${response.status}`);
+      return [];
+    }
+    const body: unknown = await response.json().catch(() => null);
+    if (!Array.isArray(body)) return [];
+    return body
+      .slice(0, 100)
+      .filter(
+        (entry): entry is { email: string } =>
+          isRecord(entry) && entry.verified === true && typeof entry.email === 'string' && entry.email.length <= 254,
+      )
+      .map((entry) => entry.email.toLowerCase());
   }
 
   /**
@@ -6340,7 +6968,7 @@ ${
       }
       // The email names the person on the page only, and only once Google has verified it.
       const email =
-        claims.email_verified === true && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
+        (claims.email_verified === true || claims.email_verified === 'true') && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
           ? claims.email
           : 'Google account';
       return { uid: claims.sub, login: email, idp: 'google' };
@@ -6353,11 +6981,13 @@ ${
   async function askGitHub(
     code: string,
     verifier: string,
-  ): Promise<{ uid: string; login: string; orgs?: Organization[] } | null> {
+    emails = false,
+  ): Promise<{ uid: string; login: string; orgs?: Organization[]; emails?: string[] } | null> {
     try {
       const token = await exchangeCode(code, verifier);
       if (token === null) return null;
-      const user = await readGitHubUser(token);
+      const found = await readGitHubUser(token);
+      const user = found && emails ? { ...found, emails: await readGitHubEmails(token) } : found;
       if (!user || !readsOrganizations) return user;
       const orgs = await readMemberships(token);
       return orgs === null ? null : { ...user, orgs };
@@ -6403,7 +7033,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google' } | null;
+    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[] } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -6414,7 +7044,7 @@ ${
           ? google && typeof pending.nonce === 'string'
             ? await askGoogle(google, code, verifier, pending.nonce)
             : null
-          : await askGitHub(code, verifier);
+          : await askGitHub(code, verifier, pending.emails === true);
     } finally {
       signInsInFlight -= 1;
       if (client !== undefined) {
@@ -6456,6 +7086,17 @@ ${
             : user.orgs.map((org) => ({ id: org.id, role: org.role === 'admin' ? ('admin' as const) : ('member' as const) })),
         )
       : undefined;
+    // How the person is shown to the others in their teams: their GitHub login, or Google's verified email.
+    if (teamStore) {
+      await teamStore.setDisplay(person, user.idp === 'google' ? (user.login.includes('@') ? user.login : null) : `@${user.login}`);
+    }
+    // Of the addresses GitHub verified, only the invitation being opened's is kept, to accept it.
+    let em: string[] | undefined;
+    if (teamStore && user.emails) {
+      const raw = inviteTokenOf(request);
+      const invited = raw ? (await teamStore.preview(tokenDigest(raw)))?.email : null;
+      if (invited && user.emails.includes(invited)) em = [invited];
+    }
     const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
     const session = seal('slotlock-dashboard-session-v1', {
       uid: user.uid,
@@ -6465,6 +7106,7 @@ ${
       ...(user.idp === 'google' ? { idp: 'google' } : {}),
       ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
       ...(epoch !== undefined ? { ep: epoch } : {}),
+      ...(em ? { em } : {}),
     });
     if (options.resources.audit) {
       const signedInTo = sealedOrg !== undefined ? `github-org:${sealedOrg}` : person;
@@ -6474,7 +7116,7 @@ ${
         .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
     }
     const back = typeof pending.then === 'string' && STEP_UP_PAGES.has(pending.then) ? pending.then : '';
-    return redirect(303, `${root}${back}`, [
+    return redirect(303, `${root}${back}${back === '/invite' && pending.emails === true ? '?checked=1' : ''}`, [
       clearSignIn,
       setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
     ]);
@@ -6739,7 +7381,7 @@ ${
         return pageOrNotice(route)(
           session,
           409,
-          'That page was for another organization. Nothing was changed: check the organization and try again.',
+          'That page was for another workspace. Nothing was changed: check the workspace and try again.',
         );
       }
       let first: boolean;
@@ -6884,6 +7526,22 @@ ${
         return changeTeam(session, form, true);
       case '/teams/disable':
         return changeTeam(session, form, false);
+      case '/teams/create':
+        return createTeam(session, form);
+      case '/invite/accept':
+        return acceptInvitation(session, form, request);
+      case '/members/invite':
+        return inviteMember(session, form);
+      case '/members/resend':
+        return resendInvitation(session, form);
+      case '/members/revoke':
+        return revokeInvitation(session, form);
+      case '/members/role':
+        return changeMemberRole(session, form);
+      case '/members/remove':
+        return removeMember(session, form);
+      case '/members/leave':
+        return leaveTeam(session);
       default:
         return respond(
           404,
@@ -6921,6 +7579,7 @@ ${
             case '/settings/endpoints':
             case '/settings/hours':
             case '/settings/account':
+            case '/settings/members':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
@@ -6949,6 +7608,11 @@ ${
               if (route === '/settings/endpoints') return await settingsPage(session, 200, undefined, undefined, 'endpoints');
               if (route === '/settings/hours') return await settingsPage(session, 200, undefined, undefined, 'hours');
               if (route === '/settings/account') return await settingsPage(session, 200, undefined, undefined, 'account');
+              if (route === '/settings/members') {
+                return teamStore && session.team !== undefined
+                  ? await settingsPage(session, 200, undefined, undefined, 'members')
+                  : nothingHere(session);
+              }
               // A provider preset fills the assistant's form; nothing is saved until Save.
               const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
                 (candidate) => candidate.id === url.searchParams.get('preset'),
@@ -6972,7 +7636,12 @@ ${
               const back = STEP_UP_PAGES.has(then) ? then : undefined;
               return google && url.searchParams.get('with') === 'google'
                 ? await startGoogleSignIn(google, back)
-                : await startSignIn(back);
+                : await startSignIn(back, Boolean(teamStore) && back === '/invite' && url.searchParams.get('email') === '1');
+            }
+            case '/invite': {
+              if (!teamStore) return nothingHere404();
+              const session = await readSession(request);
+              return await invitePage(session, inviteTokenOf(request), 200, undefined, url.searchParams.get('checked') === '1');
             }
             case '/callback':
               return await finishSignIn(request, url);
@@ -6998,6 +7667,16 @@ ${
               return authorizePage(session, route) ?? (await locationsPage(session));
             }
             default: {
+              // An invitation's link: kept in this browser for the sign-in that accepts it, and
+              // nothing else; opening it twice (a link scanner, a preview) consumes nothing.
+              if (route.startsWith('/invite/')) {
+                const raw = route.slice('/invite/'.length);
+                if (!teamStore || !INVITE_TOKEN.test(raw)) return nothingHere404();
+                const opened = seal('slotlock-dashboard-invite-v1', { t: raw, exp: now() + INVITE_LINK_TTL_MS });
+                return respond(303, '', { Location: `${root}/invite`, 'Referrer-Policy': 'no-referrer' }, [
+                  setCookie(INVITE_COOKIE, opened, INVITE_LINK_TTL_MS / 1000),
+                ]);
+              }
               const resourceId = RESOURCE_PAGE.exec(route)?.[1];
               if (resourceId !== undefined) {
                 const session = await readSession(request);
@@ -7330,6 +8009,16 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .fine + .table, .fine + .empty { margin-top: var(--space-4); }
 .pop label { margin-bottom: var(--space-3); }
 .pop textarea { width: 100%; }
+/* Teams: one-line forms that create a team or invite to one */
+form.create-team, form.invite { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-3); margin: var(--space-5) 0; }
+form.create-team label, form.invite label { flex-basis: 100%; margin: 0; }
+form.create-team input, form.invite input { flex: 1 1 240px; min-width: 0; }
+form.invite select { flex: 0 1 auto; width: auto; }
+.team-workspaces .table + .table { margin-top: var(--space-4); }
+.seats { margin: var(--space-4) 0; color: var(--ink-2); }
+.pop fieldset { border: 0; padding: 0; margin: 0 0 var(--space-3); }
+.pop legend { font-weight: 500; padding: 0; margin-bottom: var(--space-2); }
+.pop fieldset label { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-1); font-weight: 400; }
 
 /* Buttons */
 button, .button { font: inherit; font-size: var(--text-md); font-weight: 500; height: 36px; padding: 0 var(--space-4); border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); white-space: nowrap; transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease), transform var(--fast) var(--ease); }
