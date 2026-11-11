@@ -1,0 +1,111 @@
+---
+import type { GetStaticPaths } from 'astro';
+import '../../styles/pages.css';
+import Icon from '../../components/landing/Icon.astro';
+import Rich from '../../components/landing/Rich.astro';
+import Marketing from '../../layouts/Marketing.astro';
+import { AUTHOR, type Post, POSTS } from '../../data/blog';
+import { SIGN_IN_URL } from '../../data/landing';
+import { longDate, postSeo } from '../../lib/blog';
+
+export const getStaticPaths = (() =>
+  POSTS.map((post) => ({ params: { slug: post.slug }, props: { post } }))) satisfies GetStaticPaths;
+
+const { post } = Astro.props as { post: Post };
+---
+
+<Marketing seo={postSeo(post)}>
+  <article>
+    <header class="hero page-hero">
+      <div class="wrap">
+        <nav class="crumbs" aria-label="Breadcrumb">
+          <ol>
+            <li><a href="/">Slotlock</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li aria-current="page">{post.tags[0]}</li>
+          </ol>
+        </nav>
+        <h1 class="h1">{post.title}</h1>
+        <p class="lede">{post.description}</p>
+        <p class="post-meta">
+          <time datetime={post.date}>{longDate(post.date)}</time> · <a href={AUTHOR.url}>{AUTHOR.name}</a>
+        </p>
+      </div>
+    </header>
+    <div class="wrap">
+      <div class="article">
+        {
+          post.body.map((part) =>
+            'h2' in part ? (
+              <h2>{part.h2}</h2>
+            ) : 'p' in part ? (
+              <p>
+                <Rich text={part.p} />
+              </p>
+            ) : 'ul' in part ? (
+              <ul>
+                {part.ul.map((item) => (
+                  <li>
+                    <Rich text={item} />
+                  </li>
+                ))}
+              </ul>
+            ) : 'ol' in part ? (
+              <ol>
+                {part.ol.map((item) => (
+                  <li>
+                    <Rich text={item} />
+                  </li>
+                ))}
+              </ol>
+            ) : 'code' in part ? (
+              <figure>
+                {part.caption && <figcaption class="post-meta">{part.caption}</figcaption>}
+                <pre><code>{part.code}</code></pre>
+              </figure>
+            ) : (
+              <table>
+                <thead>
+                  <tr>{part.table.columns.map((column) => <th scope="col">{column}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {part.table.rows.map((row) => (
+                    <tr>
+                      {row.map((value) => (
+                        <td>
+                          <Rich text={value} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ),
+          )
+        }
+        <h2>Read next</h2>
+        <p class="link-row">
+          {
+            post.related.map((link) => (
+              <a class="arrow-link" href={link.href}>
+                {link.label} <Icon name="arrow" />
+              </a>
+            ))
+          }
+        </p>
+      </div>
+    </div>
+  </article>
+  <section class="band closing" aria-labelledby="closing-title">
+    <div class="wrap">
+      <h2 class="h2" id="closing-title">
+        <span class="soft">Give your agents a calendar they cannot double-book.</span>
+        <span class="strong">Start free on Slotlock Cloud.</span>
+      </h2>
+      <div class="hero__actions">
+        <a class="btn btn--primary" href={SIGN_IN_URL}>Start free</a>
+        <a class="btn btn--ghost" href="/docs/">Read the docs</a>
+      </div>
+    </div>
+  </section>
+</Marketing>

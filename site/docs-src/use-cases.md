@@ -1,5 +1,6 @@
 ---
 title: Use cases
+seoTitle: 'Booking use cases: car rental, clinics, courts and more'
 description: The businesses Slotlock fits, and how to model each one with resources, pools, booking rules and holds, and what its agents do.
 sidebar:
   label: Use cases

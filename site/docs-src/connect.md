@@ -1,5 +1,6 @@
 ---
 title: Connect an agent
+seoTitle: 'Connect an AI agent to Slotlock over MCP or A2A'
 description: Give Claude Code, Cursor, VS Code, the Claude API or your own MCP or A2A client the Slotlock tools.
 ---
 

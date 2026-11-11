@@ -7,6 +7,17 @@ versioning.
 
 ### Added
 
+- **slotlock.pylota.io, for search engines** ([RFC 0005](docs/rfc/0005-search.md)). A page per
+  search intent: `/pricing/`, `/mcp-server/`, `/booking-api/`, `/open-source/`, `/about/`,
+  `/use-cases/` with eight industries, `/compare/` (a bookings table of your own, Cal.com, Cronofy,
+  Nylas and the Google Calendar API, each claim sourced and dated) and `/blog/` with four articles
+  and an RSS feed, each with a Markdown twin listed in `llms.txt`. Every page carries a search
+  title and description, an Open Graph image and JSON-LD (Organization, SoftwareApplication with
+  the plans' prices, BreadcrumbList, TechArticle, BlogPosting); the sitemap dates each page from
+  git; Markdown twins name their HTML page as canonical and agent files are `noindex`; the 404 page
+  is `noindex`. `npm run check:seo` fails the site build on a missing canonical, image or sitemap
+  entry, and `scripts/check-live-seo.sh` checks the live hosts after each deploy. The site allows
+  Cloudflare Web Analytics, which sets no cookie (PRIVACY.md).
 - **Roles in the dashboard.** What each person may do in a workspace is one of six roles (Owner,
   Admin, Developer, Member, Viewer, Billing), read from the database on every request
   (`slotlock.workspace_memberships`, `createSlotlockDashboardWorkspaces`), so a role changed or a

@@ -1,5 +1,6 @@
 ---
 title: Limits
+seoTitle: 'Slotlock limits: request limits, fair sharing and storage'
 description: The request limits slotlock serve enforces, how it shares a busy server between tenants, what one tenant may store, and how to set them behind a proxy.
 sidebar:
   label: Limits

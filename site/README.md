@@ -10,10 +10,18 @@ site/
   docs-src/*.md           docs pages; <!-- include README.md#section --> pulls text from the repo
                           (modifiers: body, lead, promote)
   src/data/landing.ts     every sentence on the landing page (the page and /index.md share it)
+  src/data/pages/*.ts     every page outside the docs for one search intent (pricing, MCP server,
+                          booking API, open source, about, use cases, comparisons), as data that
+                          src/components/marketing/Page.astro and its Markdown twin both render
+  src/data/blog.ts        the blog's posts, as data, for /blog/, /blog/<slug>.md and /blog/rss.xml
+  src/layouts/Marketing.astro   the header, footer and head of every page outside the docs
+  src/lib/seo.ts          titles, canonicals, Open Graph and the JSON-LD graph (SeoHead.astro)
   src/data/llms.mjs       what llms.txt tells agents beyond the page list (the repository tests read it)
   src/pages/index.astro   the landing page; index.md.ts its Markdown twin
   src/pages/docs/[...slug].md.ts   a Markdown twin of every docs page
   src/components/docs/    Starlight overrides: site title, page title (eyebrow, title, lede), footer
+  src/routeData.ts        the docs' search titles (frontmatter seoTitle), Open Graph image,
+                          TechArticle and breadcrumb data, and noindex on the 404 page
   src/styles/tokens.mjs   colour tokens (Pylota's, after PR #505), light and dark
   src/styles/docs.css     the docs theme on those tokens
   scripts/sync-content.mjs  builds docs pages and src/generated/facts.json from README, SPEC,
@@ -24,6 +32,10 @@ site/
   scripts/tool-notes.mjs  the words a schema cannot carry: summaries, field notes, error codes per
                           tool; the build fails on a note for a field or code that does not exist
   scripts/postbuild.mjs   pins the CSP in dist/_headers to the hashes of Starlight's inline code
+  scripts/seo-check.mjs   titles, descriptions, canonicals, images, JSON-LD and the sitemap of
+                          every built page (docs/rfc/0005-search.md)
+  scripts/og-images.mjs   draws public/og/*.png, the touch icon and the logo with Chromium
+                          (`npm run og`; the PNGs are committed)
   scripts/contrast.mjs    WCAG AA check of every text/background pair, both themes
   scripts/copy-lint.mjs   Pylota's voice rules (no em dash, no filler words) and the word count
   scripts/subset-fonts.sh rebuilds public/fonts from the OFL sources
@@ -42,7 +54,7 @@ Node.js 22.12 or newer.
 npm ci
 npm run dev            # http://localhost:4321
 npm run build          # dist/, then the CSP pinning
-npm run check          # contrast and copy lint (after a build)
+npm run check          # contrast, copy lint and the SEO check (after a build)
 npm run preview:worker # serve dist/ with Wrangler, _headers applied, on :8787
 ```
 

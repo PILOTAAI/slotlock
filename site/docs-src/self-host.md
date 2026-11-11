@@ -1,5 +1,6 @@
 ---
 title: Self-hosting
+seoTitle: 'Self-host Slotlock: open-source booking server on PostgreSQL'
 description: Run the Slotlock server from the published image or from npm, configure it with environment variables, and check it end to end.
 sidebar:
   label: Self-hosting

@@ -1,0 +1,125 @@
+---
+// The frame of every page outside the docs: the landing page and the pages for one search intent
+// each (pricing, the MCP server, the REST API, use cases, comparisons, the blog). The header and
+// footer read their links from src/data/landing.ts, so every page links every other.
+import '../styles/fonts.css';
+import '../generated/tokens.css';
+import '../styles/landing.css';
+import '../styles/lockup.css';
+import Icon from '../components/landing/Icon.astro';
+import Lockup from '../components/Lockup.astro';
+import SeoHead from '../components/seo/SeoHead.astro';
+import { footer, nav, signIn } from '../data/landing';
+import type { Seo } from '../lib/seo';
+
+interface Props {
+  seo: Seo;
+  /** Preload the display face too: pages with a large heading above the fold. */
+  displayFont?: boolean;
+}
+const { seo, displayFont = true } = Astro.props;
+const here = Astro.url.pathname;
+---
+
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <SeoHead seo={seo} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="alternate" type="application/rss+xml" title="Slotlock blog" href="/blog/rss.xml" />
+    <link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
+    {
+      displayFont && (
+        <link
+          rel="preload"
+          href="/fonts/inter-tight.woff2"
+          as="font"
+          type="font/woff2"
+          crossorigin="anonymous"
+        />
+      )
+    }
+    <meta name="theme-color" content="#F6F4EE" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+    <!-- Theme choice and the once-only hero motion, decided before first paint. -->
+    <script is:inline src="/js/head.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap site-header__row">
+        <a class="brand lockup" href="/">
+          <Lockup />
+        </a>
+        <nav class="site-nav" aria-label="Main">
+          {nav.map((item) => <a href={item.href} aria-current={here === item.href ? 'page' : undefined}>{item.label}</a>)}
+        </nav>
+        <a class="site-header__sign-in" href={signIn.href}>{signIn.label}</a>
+        <a class="btn btn--primary" href={signIn.href}>{signIn.start}</a>
+        <details class="menu">
+          <summary class="menu__button">
+            <Icon name="menu" />
+            <span class="sr-only">Menu</span>
+          </summary>
+          <nav class="menu__panel" aria-label="Menu">
+            {nav.map((item) => <a href={item.href}>{item.label}</a>)}
+            <a href={signIn.href}>{signIn.label}</a>
+          </nav>
+        </details>
+      </div>
+    </header>
+
+    <main id="main">
+      <slot />
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <div class="footer-grid">
+          <div>
+            <a class="brand lockup" href="/">
+              <Lockup />
+            </a>
+            <p>{footer.tagline}</p>
+          </div>
+          {
+            footer.columns.map((column) => (
+              <div class="footer-col">
+                <h2>{column.title}</h2>
+                <ul>
+                  {column.links.map((link) => (
+                    <li>
+                      <a href={link.href}>{link.label}</a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          }
+        </div>
+        <div class="footer-base">
+          <span class="agents-links">
+            Markdown for agents:
+            {seo.markdown && <a href={seo.markdown}>this page</a>}
+            <a href="/llms.txt">llms.txt</a>
+            <a href="/llms-full.txt">llms-full.txt</a>
+          </span>
+          <a class="footer-version" href={footer.version.href}>{footer.version.label}</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>
+            <Icon name="contrast" />
+            <span data-theme-label>Theme: system</span>
+          </button>
+          <span class="legal">{footer.legal}</span>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      import '../scripts/landing';
+    </script>
+  </body>
+</html>

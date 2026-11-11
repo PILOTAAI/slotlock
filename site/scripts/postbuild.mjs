@@ -1,10 +1,11 @@
 // After `astro build`: pin the CSP to the inline code Starlight actually ships, and refuse a
-// landing page that needs any inline code at all.
+// page of our own (the landing page and every page outside the docs) that needs any inline code.
 //
 // 1. Collect the SHA-256 of every inline <script>, <style> and style="" value in dist/**/*.html.
 //    Style attributes are allowed through `style-src-attr 'unsafe-hashes'` with their exact hashes
 //    (Starlight sets CSS custom properties such as --sl-icon-size that way).
-// 2. Fail if the landing page (dist/index.html) has an inline script, style block or style attribute.
+// 2. Fail if a page that is not Starlight's has an inline script, style block or style attribute.
+//    JSON-LD (<script type="application/ld+json">) is data, never run, and CSP does not apply to it.
 // 3. Write the hashes into dist/_headers and check every line fits Cloudflare's 2,000 characters.
 // 4. Fail if a built stylesheet ships -webkit-backdrop-filter without backdrop-filter beside it.
 import { createHash } from 'node:crypto';
@@ -43,7 +44,8 @@ for await (const file of htmlFiles(DIST)) {
   pages += 1;
   const html = await readFile(file, 'utf8');
   const page = `/${relative(DIST, file)}`;
-  const isLanding = page === '/index.html';
+  // Ours: the landing page and the pages outside the docs (src/layouts/Marketing.astro).
+  const isLanding = !html.includes('<meta name="generator" content="Starlight v');
   for (const match of html.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>/g)) {
     const [, attributes, body] = match;
     if (/type="application\/(ld\+)?json"/.test(attributes)) continue;
@@ -67,7 +69,7 @@ for await (const file of htmlFiles(DIST)) {
 
 if (problems.length > 0) {
   console.error(
-    `postbuild: the landing page must not need inline code:\n  ${problems.join('\n  ')}`,
+    `postbuild: pages outside the docs must not need inline code:\n  ${problems.join('\n  ')}`,
   );
   process.exit(1);
 }
@@ -163,5 +165,5 @@ if (tooLong.length > 0) {
 }
 await writeFile(headersPath, headers);
 console.log(
-  `postbuild: ${pages} pages; CSP allows ${scripts.size} inline script, ${styles.size} style and ${attrs.size} style-attribute hash(es), all from Starlight; the landing page has none.`,
+  `postbuild: ${pages} pages; CSP allows ${scripts.size} inline script, ${styles.size} style and ${attrs.size} style-attribute hash(es), all from Starlight; the pages outside the docs have none.`,
 );

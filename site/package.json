@@ -15,12 +15,15 @@
     "preview": "astro preview",
     "check:copy": "node scripts/copy-lint.mjs",
     "check:contrast": "node scripts/contrast.mjs",
-    "check": "npm run check:contrast && npm run check:copy",
+    "check:seo": "node scripts/seo-check.mjs",
+    "check": "npm run check:contrast && npm run check:copy && npm run check:seo",
+    "og": "node scripts/og-images.mjs",
     "fonts": "scripts/subset-fonts.sh",
     "deploy": "wrangler deploy",
     "preview:worker": "wrangler dev --port 8787"
   },
   "dependencies": {
+    "@astrojs/sitemap": "3.7.4",
     "@astrojs/starlight": "0.42.7",
     "astro": "7.4.2",
     "starlight-llms-txt": "0.12.0"

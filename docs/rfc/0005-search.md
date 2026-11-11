@@ -2,9 +2,9 @@
 
 | | |
 | --- | --- |
-| Status | Proposed |
-| Target | Phase 0 and 1 now (about a week); Phases 2 to 5 over the next three months |
-| Decision | GOVERNANCE.md: the maintainer approves. Part 5 lists the owner's calls: the domain, AI crawlers, analytics, landing copy, naming competitors. |
+| Status | Accepted (2026-11-11); Phases 1 to 3 and the in-repository part of Phase 4 are implemented on `claude/serene-sagan-4n2tr6` |
+| Target | The code in one session; the owner's settings in about 30 minutes; rankings over the following weeks and months |
+| Decision | GOVERNANCE.md: the maintainer approves. The owner decided D1 to D6 on 2026-11-11 (Part 5). |
 
 ## Summary
 
@@ -39,16 +39,17 @@ In brief:
     measured.
   - The dashboard and API hosts can be indexed.
 
-The plan has six parts:
+The plan has six parts. The code is quick to write; what takes time is outside it. Google crawls a
+new site over days, and links and rankings build over weeks.
 
-| Phase | What | Who | Size |
-| --- | --- | --- | --- |
-| 0 | Search Console, Bing, HTTPS redirect, robots and analytics settings, noindex on the app and API hosts | Owner, in dashboards | An hour |
-| 1 | Technical foundation: head metadata, Open Graph images, structured data, sitemap `lastmod`, Markdown twin canonicals, 404, the SEO check in CI | One pull request | 2 to 3 days |
-| 2 | Pages for commercial intent: `/pricing/`, `/mcp-server/`, `/booking-api/`, `/open-source/`, `/use-cases/*`, `/about/` | Pull requests, one per page group | 1 to 2 weeks |
-| 3 | Content: `/blog/` with RSS, the first eight articles, `/compare/*` | Ongoing | 2 articles a month |
-| 4 | Authority: links from pylota.io, MCP directories, package registries, launches | Owner and maintainers | Ongoing |
-| 5 | Measure and iterate | Owner | Monthly |
+| Phase | What | Who | Time to do | Time to show results |
+| --- | --- | --- | --- | --- |
+| 0 | Search Console, Bing, HTTPS redirect, robots and analytics settings, noindex on the app and API hosts | Owner, in dashboards | About 30 minutes | Search Console data in 2 to 3 days |
+| 1 | Technical foundation: head metadata, Open Graph images, structured data, sitemap `lastmod`, Markdown twin canonicals, 404, the SEO check in CI | One pull request | Done in this change | At the next crawl, days |
+| 2 | Pages for commercial intent: `/pricing/`, `/mcp-server/`, `/booking-api/`, `/open-source/`, `/use-cases/*`, `/about/` | Same pull request | Done in this change | Indexed in 1 to 4 weeks |
+| 3 | Content: `/blog/` with RSS, the first articles, `/compare/*` | Same pull request, then 2 articles a month | Scaffold and first articles done in this change | Weeks to months |
+| 4 | Authority: links from pylota.io, MCP directories, package registries, launches | Owner and maintainers; the registry metadata is in this change | An afternoon of submissions | Months |
+| 5 | Measure and iterate | Owner | 30 minutes a month | Ongoing |
 
 ## Part 1: What the audit found
 
@@ -391,8 +392,9 @@ submit it to Postgres Weekly and post it on DEV.to with `rel=canonical` pointing
   `/compare/google-calendar-api/` and `/compare/librebooking/`.
 
 Each comparison is fair and sourced. It says when to choose the other product, shows a capability
-table with links to their docs, and carries a "last checked" date. Legal review comes before the
-first page that names a company (D5).
+table with links to their docs, and carries a "last checked" date. The owner approved naming
+companies (D5); a claim about another product links the page it comes from, and is checked again
+when the date is a quarter old.
 
 ### Phase 4: authority and distribution
 
@@ -484,15 +486,15 @@ job.
 
 ## Part 5: Decisions for the owner
 
-| # | Decision | Recommendation |
-| --- | --- | --- |
-| D1 | Domain: stay on `slotlock.pylota.io` or move to a domain of its own | Decide before Phase 2, because a move later means redirects and lost time. Staying works. A separate domain makes a clearer brand. The name is shared with a Minecraft mod and a registered SLOTLOCK word mark, which is worth a check against TRADEMARKS.md with counsel. |
-| D2 | AI crawlers on this host: keep Cloudflare's blocks on GPTBot, ClaudeBot, Google-Extended and the rest, or allow them | Allow on `slotlock.pylota.io`. The code is open and on GitHub, and models that have read the docs can recommend Slotlock. The search-time bots (OAI-SearchBot, PerplexityBot) are allowed either way. |
-| D3 | Analytics | Allow Cloudflare Web Analytics through the CSP (cookieless; one line in PRIVACY.md) |
-| D4 | Landing copy: title, description, h1, topic labels in the h2s, and the entity named in Organization data | Use the drafts in 1.1 and 1.5, or the owner's words within the same limits |
-| D5 | Naming competitors in `/compare/*` | Ship `/compare/diy/` first; name companies after legal review |
-| D6 | Pylota: a link from pylota.io, and a case study with numbers | Yes; it is the strongest proof and the strongest link available |
-| D7 | Blog authors | Named maintainers, with GitHub profiles |
+| # | Decision | Recommendation | Owner's decision (2026-11-11) |
+| --- | --- | --- | --- |
+| D1 | Domain: stay on `slotlock.pylota.io` or move to a domain of its own | Decide before Phase 2, because a move later means redirects and lost time. The name is shared with a Minecraft mod and a registered SLOTLOCK word mark, which is worth a check against TRADEMARKS.md with counsel. | Stay on `slotlock.pylota.io` |
+| D2 | AI crawlers on this host: keep Cloudflare's blocks on GPTBot, ClaudeBot, Google-Extended and the rest, or allow them | Allow on `slotlock.pylota.io`. The code is open and on GitHub, and models that have read the docs can recommend Slotlock. | Allow. `site/public/robots.txt` says so; the owner turns off Cloudflare's managed robots.txt (0.4). |
+| D3 | Analytics | Allow Cloudflare Web Analytics through the CSP (cookieless; one line in PRIVACY.md) | Allow. Done in `_headers` and PRIVACY.md. |
+| D4 | Landing copy: title, description, h1, topic labels in the h2s, and the entity named in Organization data | Use the drafts in 1.1 and 1.5 | Use the drafts |
+| D5 | Naming competitors in `/compare/*` | Ship `/compare/diy/` first | Name them, with sources and a "last checked" date on each page |
+| D6 | Pylota: a link from pylota.io, and a case study with numbers | Yes | Yes. The case study is on the blog; the link from pylota.io is a change in PILOTAAI/pylota. |
+| D7 | Blog authors | Named maintainers, with GitHub profiles | Open: posts are signed by the Slotlock maintainers until a person is named |
 
 ## Part 6: Risks and non-goals
 
@@ -509,11 +511,50 @@ job.
 
 ## Order of work
 
-1. Phase 0, items 0.1 to 0.8 (owner, an hour). Do 0.1 first: Search Console needs days to show
-   data.
-2. Phase 1 in one pull request: 1.1 to 1.10, `seo-check.mjs` and the post-deploy smoke checks.
-3. Phase 2, one pull request per group: `/pricing/` and `/about/`; then `/mcp-server/` and
-   `/booking-api/`; then `/open-source/`; then `/use-cases/*`.
-4. Phase 3: the blog scaffold with article 1, then two articles a month; `/compare/diy/`.
-5. Phase 4 alongside Phase 3, starting with pylota.io and the MCP directories.
+1. Phase 0, items 0.1 to 0.8 (owner, about 30 minutes). Do 0.1 first: Search Console needs days
+   to show data. Do 0.3, 0.4 and 0.6 before the deploy of this change, so the post-deploy checks
+   pass.
+2. Phases 1 to 3, and the registry metadata of Phase 4: one pull request from
+   `claude/serene-sagan-4n2tr6`. Merging deploys it.
+3. After the deploy: submit the sitemap again, and request indexing of `/`, `/pricing/`,
+   `/mcp-server/` and `/booking-api/` in URL Inspection.
+4. Phase 4 submissions (an afternoon): pylota.io, the MCP directories, the launch posts.
+5. Phase 3 cadence: two articles a month.
 6. Phase 5 from the first week after Phase 0.
+
+## Implementation (2026-11-11)
+
+Built on `claude/serene-sagan-4n2tr6`. `npm run build && npm run check` passes: 179 pages, 178 in
+the sitemap, each with a `lastmod`, 28 Open Graph images, and no copy, contrast or SEO findings.
+
+| Item | Where | Notes |
+| --- | --- | --- |
+| 1.1 Landing head, topic labels | `site/src/layouts/Marketing.astro`, `site/src/components/seo/SeoHead.astro`, `site/src/data/landing.ts` | The landing page's word limit is 1,350 (was 1,300) for the labels and the new footer links |
+| 1.2 Docs titles, en-GB | `site/src/routeData.ts`, `site/src/content.config.ts`, `seoTitle` in 22 `docs-src` pages | |
+| 1.3 REST reference | `site/scripts/api-reference.mjs` | Title with method and path; the full description stays the lede, and `seoDescription` is the result's |
+| 1.4 Open Graph images | `site/scripts/og-images.mjs` (`npm run og`), `site/public/og/` | Drawn with Chromium and committed, as the fonts are; no build dependency |
+| 1.5 JSON-LD | `site/src/lib/seo.ts` | Prices from `facts.plans`; `seo-check.mjs` fails on a mismatch |
+| 1.6 Twins out of the index | `site/public/_headers` | Placeholders checked with `wrangler dev`: every twin names its page as canonical |
+| 1.7 Sitemap `lastmod` | `site/scripts/sync-content.mjs`, `astro.config.mjs`, `site.yml` (`fetch-depth: 0`) | A file with uncommitted changes dates from the build |
+| 1.8 404 | `site/src/routeData.ts` | |
+| 1.9 Contrast | `site/src/styles/landing.css` | The lapsed hold fades its fill, not its label |
+| 1.10 Analytics | `site/public/_headers`, PRIVACY.md | |
+| Part 4 checks | `site/scripts/seo-check.mjs`, `scripts/check-live-seo.sh` | The live check fails on what the repository controls and warns on Cloudflare settings |
+| Phase 2 pages | `site/src/data/pages/`, `site/src/components/marketing/Page.astro` | Copy lint covers every page; each has at least 400 words of prose |
+| Phase 3 | `site/src/data/blog.ts`, `site/src/pages/blog/`, `site/src/data/pages/compare.ts`, `competitors.ts` | Posts are data, not a Markdown collection: Expressive Code would add inline styles the strict CSP refuses on these pages. Four posts: the exclusion constraint, why agents double-book, holds, and the Pylota case study (without numbers until Pylota gives them) |
+| Phase 4 | README.md, `clients/python/pyproject.toml`, Dockerfile | Links to the new pages; a documentation URL on PyPI and on the image |
+
+Still the owner's, in Cloudflare and elsewhere (Phase 0 and 4). `scripts/check-live-seo.sh`
+warns until the first four are done:
+
+1. Turn on **Always Use HTTPS** for the pylota.io zone, or a redirect rule for this host (0.3).
+2. Turn off Cloudflare's **managed robots.txt** for this host (0.4, D2).
+3. Add `X-Robots-Tag: noindex` to `app.slotlock.pylota.io` and `slotlock-api.pylota.io` with a
+   Transform Rule (0.6).
+4. Leave Cloudflare Web Analytics' automatic setup on for this host (D3); the CSP now allows it.
+5. Search Console (Domain property for pylota.io) and Bing Webmaster Tools; submit the sitemap
+   after the deploy (0.1, 0.2). Turn on Crawler Hints.
+6. Keyword Planner volumes for Part 2 (0.7); the GitHub social preview and topics (0.8).
+7. The link from pylota.io to slotlock.pylota.io (PILOTAAI/pylota), and Pylota's numbers for the
+   case study (D6).
+8. The MCP directories and launch posts (Phase 4).
