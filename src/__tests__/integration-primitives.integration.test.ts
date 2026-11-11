@@ -400,12 +400,37 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
           authorize: async () => true,
         },
       }) as Promise<{ ok: boolean; code?: string; data?: Record<string, unknown> }>;
+    // The price is the tenant's (hold_price), never the agent's own.
+    const named = await agent('slotlock_hold_slots', {
+      slots: [{ resource_id: bay, start: at(13), end: at(14) }],
+      ttl_seconds: 600,
+      idempotency_key: 'agent-pay-0',
+      payment_required: true,
+      payment: { amount_minor: 2000, currency: 'GBP' },
+    });
+    expect(named.data).toMatchObject({ holds: [], refused: [{ code: 'payment_price_mismatch' }] });
+    expect(
+      (await call('PUT', `/v1/resources/${bay}/booking-rules`, { rules: { hold_price: { amount_minor: 2000, currency: 'GBP' } } })).status,
+    ).toBe(200);
+    const cheap = await agent('slotlock_hold_slots', {
+      slots: [{ resource_id: bay, start: at(13), end: at(14) }],
+      ttl_seconds: 600,
+      idempotency_key: 'agent-pay-cheap',
+      payment_required: true,
+      payment: { amount_minor: 1, currency: 'GBP' },
+    });
+    expect(cheap.data).toMatchObject({ holds: [], refused: [{ code: 'payment_price_mismatch' }] });
+    // Nor can it book the priced time without a paid hold of it.
+    expect(
+      await agent('slotlock_create_event', {
+        resource_id: bay, starts_at: at(15), ends_at: at(16), timezone: 'UTC', title: 'Unpaid', idempotency_key: 'agent-pay-direct',
+      }),
+    ).toMatchObject({ ok: false, code: 'payment_required' });
+    // Held without naming a price, it waits for the tenant's.
     const held = await agent('slotlock_hold_slots', {
       slots: [{ resource_id: bay, start: at(13), end: at(14) }],
       ttl_seconds: 600,
       idempotency_key: 'agent-pay-1',
-      payment_required: true,
-      payment: { amount_minor: 2000, currency: 'GBP' },
     });
     const hold = (held.data?.holds as { hold_id: string }[])[0];
     expect(hold).toMatchObject({ payment_required: true, payment_amount: { amount_minor: 2000, currency: 'GBP' } });

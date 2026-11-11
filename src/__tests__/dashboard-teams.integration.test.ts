@@ -409,6 +409,65 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(await teamOf(ada)).not.toBe(team);
   });
 
+  it('limits a member to a location: its resources and nothing of the whole team, and the keys they made go (RFC 0004 D1)', async () => {
+    const ada = new Browser(dashboard);
+    await signIn(ada, 'ada');
+    await ada.post('/dashboard/teams', '/teams/create', { name: 'Depots' });
+    const team = await teamOf(ada);
+    tenants.push(team);
+    const link = await linkOf(await ada.post('/dashboard/settings/members', '/members/invite', { email: 'cy@acme.example', role: 'admin' }));
+    const cy = new Browser(dashboard);
+    await cy.get(link);
+    await signIn(cy, 'cy', '?then=%2Finvite&email=1');
+    await cy.post('/dashboard/invite', '/invite/accept', {});
+    expect(await teamOf(cy)).toBe(team);
+    expect((await cy.post('/dashboard/keys', '/keys', { name: 'Cy agent', access: 'read_write', expires: '30' })).status).toBe(200);
+    const store = createSlotlockStore(application);
+    const south = await store.withTenant(team, async (tenant) => {
+      await tenant.putLocation({ tenantRef: team, ref: 'north', name: 'North' });
+      await tenant.putLocation({ tenantRef: team, ref: 'south', name: 'South' });
+      await tenant.createResource({ tenantRef: team, externalRef: 'van-north', timezone: 'UTC', location: 'north' });
+      return tenant.createResource({ tenantRef: team, externalRef: 'van-south', timezone: 'UTC', location: 'south' });
+    });
+    const cyRef = `github:${base + 2}`;
+
+    // An Owner limits Cy to North; the keys Cy made reached all of it, so they go.
+    const limited = await ada.post('/dashboard/settings/members', '/members/scope', { person: cyRef, access: 'limited', locations: 'north', keys: 'revoke' });
+    expect(limited.status).toBe(200);
+    const said = await limited.text();
+    expect(said).toContain('@cy now reaches only the resources at those locations and in those groups, and 1 key they created was revoked.');
+    expect(said).toContain('<td data-label="Reaches">Locations north</td>');
+    const keys = createSlotlockApiKeyStore(application);
+    expect((await keys.list({ tenantRef: team })).filter((key) => key.revokedAt === null)).toEqual([]);
+    // A location the team does not have, or none, is refused.
+    expect((await ada.post('/dashboard/settings/members', '/members/scope', { person: cyRef, access: 'limited', locations: 'west' })).status).toBe(400);
+    expect((await ada.post('/dashboard/settings/members', '/members/scope', { person: cyRef, access: 'limited' })).status).toBe(400);
+
+    // Cy's next request: North's van, never South's, and nothing that is the whole team's.
+    const listed = await (await cy.get('/dashboard/resources')).text();
+    expect(listed).toContain('van-north');
+    expect(listed).not.toContain('van-south');
+    expect((await cy.get(`/dashboard/resources/${south.id}`)).status).toBe(404);
+    expect((await cy.get('/dashboard/keys')).status).toBe(403);
+    expect((await cy.get('/dashboard/settings/audit')).status).toBe(403);
+    // Cy's Members page shows the team's people, and no form to change them.
+    const members = await (await cy.get('/dashboard/settings/members')).text();
+    expect(members).not.toContain('action="/dashboard/members/scope"');
+    expect(members).not.toContain('action="/dashboard/members/invite"');
+
+    // Given all of it again.
+    expect((await ada.post('/dashboard/settings/members', '/members/scope', { person: cyRef, access: 'all' })).status).toBe(200);
+    expect(await (await cy.get('/dashboard/resources')).text()).toContain('van-south');
+    expect((await cy.get('/dashboard/keys')).status).toBe(200);
+    const changes = await admin<{ metadata: Record<string, unknown> }[]>`
+      SELECT metadata FROM slotlock.audit_events
+       WHERE tenant_ref = ${team} AND action = 'member.scope_changed' ORDER BY occurred_at, id`;
+    expect(changes.map((change) => change.metadata)).toEqual([
+      { locations: ['north'], groups: [], keys: 'revoked', revoked: 1 },
+      { reaches: 'all' },
+    ]);
+  });
+
   it("shows an Owner the team's audit log, filtered and a page at a time, and nobody below Admin", async () => {
     const ada = new Browser(dashboard);
     await signIn(ada, 'ada');

@@ -11,7 +11,10 @@ PaymentIntent has succeeded for a hold, tells Slotlock `POST /v1/holds/{hold_id}
    refuses to confirm it (`409 payment_required`) until it is paid.
 2. Create a PaymentIntent on the tenant's account with `metadata: payments.metadataFor(holdId)`:
    the hold and a digest of its tenant, so where several tenants share a Stripe account each acts
-   only on its own payments.
+   only on its own payments. Its amount is `stripeAmount(amount_minor, currency)`: Slotlock keeps
+   ISO 4217 minor units, and Stripe counts ISK and UGX in hundredths that ISO does not have (5 ISK
+   is 500 to Stripe). The adapter turns Stripe's amount back with `isoMinorUnits`, and an ISK or
+   UGX amount that is not whole is read as no amount, so refused for a hold with a price.
 3. When Stripe says it succeeded, `handleWebhook` (for a delivery to your webhook endpoint) or
    `confirmPaymentIntent` (after the customer returns) reads the PaymentIntent back from Stripe,
    never trusting a payload alone, and marks the hold paid with what Stripe says was received

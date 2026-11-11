@@ -341,14 +341,20 @@ export {
   SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
   SLOTLOCK_FRESH_CAPABILITIES,
   SLOTLOCK_ROLE_CAPABILITIES,
+  SLOTLOCK_SCOPED_CAPABILITIES,
+  SLOTLOCK_SCOPED_DASHBOARD_PAGES,
+  SLOTLOCK_SCOPED_DASHBOARD_POSTS,
   SLOTLOCK_WORKSPACE_CAPABILITIES,
   SLOTLOCK_WORKSPACE_ROLE_NAMES,
   SLOTLOCK_WORKSPACE_ROLES,
   isSlotlockWorkspaceRole,
+  slotlockMemberCan,
   slotlockRoleCan,
   slotlockRoleKeyScopes,
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
+// For resource adapters of one's own that keep to a limited member's scope (`keepsToScope`).
+export { slotlockDashboardRequestScope } from './dashboard-scope.js';
 export type { SlotlockWorkspaceCapability, SlotlockWorkspaceRole } from './workspace-roles.js';
 export {
   closeSlotlockPartnerMonth,

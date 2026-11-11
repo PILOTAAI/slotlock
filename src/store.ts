@@ -953,6 +953,8 @@ interface CalendarEventRow {
   source: string | null;
   created_at: Date;
   updated_at: Date;
+  /** The start a late move kept (RFC 0004 B5), when one did. */
+  cutoff_anchor?: Date | null;
 }
 
 interface CalendarEventAttendeeRow {
@@ -2309,6 +2311,23 @@ async function paidHoldEnded(
   return true;
 }
 
+/**
+ * Whether cancelling a booking that starts at `start` would be late now (RFC 0004 B5): past its
+ * cancel cutoff, or inside the window its cancellation fee is due in. A move made then keeps that
+ * start as the booking's cutoff anchor, so a move cannot take it out of what a cancellation owes.
+ */
+function cancellationLate(rules: SlotlockBookingRules | undefined, start: Date, now: Date): boolean {
+  return (
+    cutoffRuleBroken(rules, 'cancel', start, now) !== null ||
+    (rules?.cancellationFee?.withinMinutes !== undefined && cancellationFeeDue(rules, start, now) !== null)
+  );
+}
+
+/** The start a cancellation is judged from: the cutoff anchor a late move kept, if earlier. */
+function cancellationStart(start: Date, anchor: Date | null | undefined): Date {
+  return anchor && anchor.getTime() < start.getTime() ? anchor : start;
+}
+
 async function noteEnding(
   tx: StoreSql,
   fee: { amount_minor: number; currency: string } | null,
@@ -2326,7 +2345,7 @@ async function noteEnding(
  */
 async function eventEnding(
   tx: StoreSql,
-  event: { resource_id: string; starts_at: Date; recurring: boolean },
+  event: { resource_id: string; starts_at: Date; recurring: boolean; cutoff_anchor?: Date | null },
   enforce: boolean,
   overrideReason: string | undefined,
 ): Promise<
@@ -2335,14 +2354,16 @@ async function eventEnding(
 > {
   if (event.recurring) return { ok: true, fee: null };
   const judged = await rulesNow(tx, event.resource_id);
+  // From the start it had when a late move kept it, if one did.
+  const start = cancellationStart(event.starts_at, event.cutoff_anchor);
   let note: string | null = null;
-  if (enforce && cutoffRuleBroken(judged.rules, 'cancel', event.starts_at, judged.now)) {
+  if (enforce && cutoffRuleBroken(judged.rules, 'cancel', start, judged.now)) {
     if (overrideReason === undefined) {
       return { ok: false, refusal: { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' } };
     }
     note = overrideReason;
   }
-  const due = cancellationFeeDue(judged.rules, event.starts_at, judged.now);
+  const due = cancellationFeeDue(judged.rules, start, judged.now);
   const fee = due ? { amountMinor: due.amountMinor, currency: due.currency } : null;
   await noteEnding(tx, fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null, note);
   return { ok: true, fee };
@@ -2463,6 +2484,35 @@ function sameExternalPayload(
     Number(row.revision) === params.revision &&
     row.source === (params.source ?? null)
   );
+}
+
+/**
+ * What a holder holds in the tenant, live: its own holds, and those of approvals it asked for that
+ * a person has yet to decide (RFC 0004 A4), which hold time for it just the same. Counted for its
+ * caps under the holder's lock. `except` leaves out a hold about to give way to an approval.
+ */
+async function holderHeld(
+  tx: TransactionSql,
+  tenantRef: string | null,
+  holderRef: string,
+  except?: string,
+): Promise<{ count: number; seconds: number }> {
+  const [held] = await tx<{ count: number; seconds: number }[]>`
+    SELECT count(*)::int AS count,
+           COALESCE(sum(extract(epoch FROM
+             ends_at + (buffer_after_ms + buffer_before_ms) * interval '1 millisecond'
+               - starts_at)), 0)::float8
+             AS seconds
+      FROM slotlock.reservations
+     WHERE tenant_ref IS NULL AND status = 'held'
+       AND expires_at > statement_timestamp()
+       AND resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef})
+       AND (${except ?? null}::uuid IS NULL OR id <> ${except ?? null}::uuid)
+       AND (holder_ref = ${holderRef}
+            OR holder_ref IN (SELECT 'approval:' || approval.id FROM slotlock.approvals approval
+                               WHERE approval.tenant_ref = ${tenantRef} AND approval.status = 'pending'
+                                 AND approval.requester ->> 'holder_ref' = ${holderRef}))`;
+  return { count: held?.count ?? 0, seconds: held?.seconds ?? 0 };
 }
 
 async function lockExternalIdentity(
@@ -3679,6 +3729,13 @@ export interface SlotlockStore extends SlotlockEventFeed {
      * another currency (`payment_amount_mismatch`). Without it, any recorded payment counts.
      */
     payment?: { amountMinor: number; currency: string };
+    /**
+     * An agent's hold (RFC 0004 C3): its price is the resource's `holdPrice` booking rule, never its
+     * own. On a resource with one, it waits for that payment whatever it asks (and lives at most
+     * SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS); a `payment` other than that price is refused
+     * (`payment_price_mismatch`), as is any `payment` where the resource sets none.
+     */
+    priceFromRules?: boolean;
   }): Promise<AcquireHoldResult>;
   /**
    * Record that a hold waiting for payment is paid (RFC 0004 C3), by the payment's reference at the
@@ -3842,9 +3899,17 @@ export interface SlotlockStore extends SlotlockEventFeed {
     end: Date;
     expiresAt: Date;
     consumeHold?: { holdId: string; holderRef: string };
+    /**
+     * The agent it holds time for, and its key's caps (RFC 0004 A5): its pending approvals' holds
+     * count against its live-hold and held-hour caps with its own holds, so asking for approval
+     * never holds more than the agent could hold itself (`hold_limit_reached`,
+     * `held_time_limit_reached`). Kept on the approval's requester as `holder_ref`.
+     */
+    holder?: { ref: string; caps?: { maxHolds?: number; maxHeldHours?: number } };
   }): Promise<
     | { ok: true; approval: SlotlockApproval; replayed: boolean }
     | { ok: false; code: 'overlap' | 'approval_limit_reached' | 'idempotency_conflict'; limit?: number }
+    | { ok: false; code: 'hold_limit_reached' | 'held_time_limit_reached'; limit: number }
   >;
   /** The approval a request key made, or null. */
   findApproval(params: { tenantRef: string; requestKey: string }): Promise<SlotlockApproval | null>;
@@ -6759,9 +6824,9 @@ function buildSlotlockStore(
         try {
           return await inTransaction(sql, async (tx): Promise<ExternalReservationResult> => {
             await lockExternalIdentity(tx, params.tenantRef, params.externalRef);
-            const existing = await tx<ReservationRow[]>`
+            const existing = await tx<(ReservationRow & { cutoff_anchor: Date | null })[]>`
               SELECT id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
-                     buffer_after_ms, revision, source, contact_ref, notify, reminder_minutes
+                     buffer_after_ms, revision, source, contact_ref, notify, reminder_minutes, cutoff_anchor
                 FROM slotlock.reservations
                WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
                  AND calendar_event_id IS NULL
@@ -6795,6 +6860,7 @@ function buildSlotlockStore(
               found.ends_at.getTime() !== params.end.getTime() ||
               found.resource_id !== params.resourceId;
             let overrideNote: string | null = null;
+            let cutoffAnchor = found.cutoff_anchor;
             if (moved) {
               const judged = await rulesNow(tx, found.resource_id);
               if (cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
@@ -6803,6 +6869,9 @@ function buildSlotlockStore(
                 }
                 overrideNote = params.overrideReason;
               }
+              // Moved when cancelling would already be late: it stays as late as it was.
+              const from = cancellationStart(found.starts_at, cutoffAnchor);
+              if (cancellationLate(judged.rules, from, judged.now)) cutoffAnchor = from;
             }
             const resourceState = await tenantResourceState(tx, params.resourceId, params.tenantRef);
             if (resourceState === 'missing') return { ok: false, code: 'resource_tenant_mismatch' };
@@ -6850,7 +6919,8 @@ function buildSlotlockStore(
                      checked_in_at = CASE
                        WHEN starts_at = ${params.start} AND resource_id = ${params.resourceId}
                        THEN checked_in_at
-                     END
+                     END,
+                     cutoff_anchor = ${cutoffAnchor ?? null}::timestamptz
                WHERE id = ${found.id}
                RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                          buffer_after_ms, revision, source, contact_ref, notify, reminder_minutes`;
@@ -6913,8 +6983,8 @@ function buildSlotlockStore(
             : { ok: false, code: 'reservation_cancelled' };
         }
 
-        const existing = await tx<{ id: string; revision: string | number; resource_id: string; starts_at: Date }[]>`
-          SELECT id, revision, resource_id, starts_at FROM slotlock.reservations
+        const existing = await tx<{ id: string; revision: string | number; resource_id: string; starts_at: Date; cutoff_anchor: Date | null }[]>`
+          SELECT id, revision, resource_id, starts_at, cutoff_anchor FROM slotlock.reservations
            WHERE tenant_ref = ${params.tenantRef} AND external_ref = ${params.externalRef}
              AND calendar_event_id IS NULL
            FOR UPDATE`;
@@ -6930,13 +7000,15 @@ function buildSlotlockStore(
             return { ok: false, code: 'revision_conflict' };
           }
           const judged = await rulesNow(tx, found.resource_id);
-          if (cutoffRuleBroken(judged.rules, 'cancel', found.starts_at, judged.now)) {
+          // From the start it had when a late move kept it, if one did.
+          const start = cancellationStart(found.starts_at, found.cutoff_anchor);
+          if (cutoffRuleBroken(judged.rules, 'cancel', start, judged.now)) {
             if (params.overrideReason === undefined) {
               return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
             }
             overrideNote = params.overrideReason;
           }
-          fee = cancellationFeeDue(judged.rules, found.starts_at, judged.now);
+          fee = cancellationFeeDue(judged.rules, start, judged.now);
         }
 
         if (!found) {
@@ -7090,6 +7162,24 @@ function buildSlotlockStore(
             if (!resource) return { ok: false, code: 'resource_not_found' };
             if (resource.archived) return { ok: false, code: 'resource_archived' };
             if (holdLimit !== null) return { ok: false, code: 'hold_limit_reached', limit: holdLimit };
+            // An agent's hold takes the tenant's price, never its own (RFC 0004 C3).
+            let holdPaymentRequired = paymentRequired;
+            let holdPayment = params.payment;
+            let holdTtlSeconds = ttlSeconds;
+            if (params.priceFromRules === true) {
+              const price = (await rulesNow(tx, params.resourceId)).rules?.holdPrice;
+              if (
+                params.payment !== undefined &&
+                (!price || price.amountMinor !== params.payment.amountMinor || price.currency !== params.payment.currency)
+              ) {
+                return { ok: false, code: 'payment_price_mismatch' };
+              }
+              if (price) {
+                holdPaymentRequired = true;
+                holdPayment = { amountMinor: price.amountMinor, currency: price.currency };
+                holdTtlSeconds = Math.min(ttlSeconds, SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS / 1000);
+              }
+            }
             let heldSeconds: number | null = null;
             if (holderRef !== undefined) {
               // Counted under a lock on the holder, so racing holds stop at the cap: an agent
@@ -7099,20 +7189,11 @@ function buildSlotlockStore(
                 tenantRef,
                 holderRef,
               ])}, 0))`;
-              const [held] = await tx<{ count: number; seconds: number }[]>`
-                SELECT count(*)::int AS count,
-                       COALESCE(sum(extract(epoch FROM
-                         ends_at + (buffer_after_ms + buffer_before_ms) * interval '1 millisecond'
-                           - starts_at)), 0)::float8
-                         AS seconds
-                  FROM slotlock.reservations
-                 WHERE holder_ref = ${holderRef} AND tenant_ref IS NULL AND status = 'held'
-                   AND expires_at > statement_timestamp()
-                   AND resource_id IN (SELECT id FROM slotlock.resources WHERE tenant_ref = ${tenantRef ?? null})`;
-              if ((held?.count ?? 0) >= holdCap) {
+              const held = await holderHeld(tx, tenantRef ?? null, holderRef);
+              if (held.count >= holdCap) {
                 return { ok: false, code: 'hold_limit_reached', limit: holdCap };
               }
-              if (heldHoursCap !== undefined) heldSeconds = held?.seconds ?? 0;
+              if (heldHoursCap !== undefined) heldSeconds = held.seconds;
             }
             const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
@@ -7151,9 +7232,9 @@ function buildSlotlockStore(
                 payment_amount_minor, payment_currency
               ) VALUES (
                 ${params.resourceId}, ${params.start}, ${params.end}, ${written}, ${writtenBefore}, 'held',
-                statement_timestamp() + make_interval(secs => ${ttlSeconds}), ${params.source ?? null},
-                ${holderRef ?? null}, ${params.groupId ?? null}, ${paymentRequired},
-                ${params.payment?.amountMinor ?? null}, ${params.payment?.currency ?? null}
+                statement_timestamp() + make_interval(secs => ${holdTtlSeconds}), ${params.source ?? null},
+                ${holderRef ?? null}, ${params.groupId ?? null}, ${holdPaymentRequired},
+                ${holdPayment?.amountMinor ?? null}, ${holdPayment?.currency ?? null}
               )
               RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source,
                         hold_group_id, ${tx.unsafe(HOLD_PAYMENT_COLUMNS)}`;
@@ -7978,6 +8059,33 @@ function buildSlotlockStore(
           if ((pending?.tenant ?? 0) >= SLOTLOCK_MAX_PENDING_APPROVALS) {
             return { ok: false as const, code: 'approval_limit_reached' as const, limit: SLOTLOCK_MAX_PENDING_APPROVALS };
           }
+          // The agent's caps, with its other pending approvals and without the hold that gives way
+          // to this one; under its lock, taken before the resources' as a hold takes it.
+          const holder = params.holder;
+          if (holder && isValidIdentity(holder.ref)) {
+            await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([
+              'slotlock-holder',
+              tenantRef,
+              holder.ref,
+            ])}, 0))`;
+            const consumed =
+              params.consumeHold && isValidResourceId(params.consumeHold.holdId) && params.consumeHold.holderRef === holder.ref
+                ? params.consumeHold.holdId
+                : undefined;
+            const held = await holderHeld(tx, tenantRef, holder.ref, consumed);
+            const holdCap = Math.min(maxHoldsPerHolder, holder.caps?.maxHolds ?? Number.POSITIVE_INFINITY);
+            if (held.count + params.holds.length > holdCap) {
+              return { ok: false as const, code: 'hold_limit_reached' as const, limit: holdCap };
+            }
+            const heldHoursCap =
+              holder.caps?.maxHeldHours !== undefined
+                ? Math.min(maxHeldHoursPerHolder ?? Number.POSITIVE_INFINITY, holder.caps.maxHeldHours)
+                : maxHeldHoursPerHolder;
+            const asking = params.holds.reduce((seconds, hold) => seconds + (hold.end.getTime() - hold.start.getTime()) / 1000, 0);
+            if (heldHoursCap !== undefined && held.seconds + asking > heldHoursCap * 3_600) {
+              return { ok: false as const, code: 'held_time_limit_reached' as const, limit: heldHoursCap };
+            }
+          }
           const id = randomUUID();
           // The requester's own hold of the time gives way to the approval's.
           if (params.consumeHold && isValidResourceId(params.consumeHold.holdId)) {
@@ -8017,7 +8125,8 @@ function buildSlotlockStore(
               starts_at, ends_at, request_key, expires_at
             ) VALUES (
               ${id}, ${tenantRef}, ${params.policyRef}, ${params.operation}, ${tx.json(params.request as never)},
-              ${tx.json(params.requester as never)}, ${held.map((hold) => hold.id)}::uuid[],
+              ${tx.json((holder ? { ...params.requester, holder_ref: holder.ref } : params.requester) as never)},
+              ${held.map((hold) => hold.id)}::uuid[],
               ${[...new Set(holds.map((hold) => hold.resourceId))]}::uuid[], ${params.start}, ${params.end},
               ${params.requestKey}, ${params.expiresAt}
             )
@@ -8469,7 +8578,8 @@ function buildSlotlockStore(
               SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
                      summary, description, location, status, transparency, organizer, attendees,
                      reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
-                     materialized_ends_at, recurrence_cursor, revision, source, created_at, updated_at
+                     materialized_ends_at, recurrence_cursor, revision, source, created_at, updated_at,
+                     cutoff_anchor
                 FROM slotlock.calendar_events
                WHERE tenant_ref = ${params.tenantRef}
                  AND owner_ref = ${ownerRef}
@@ -8492,6 +8602,7 @@ function buildSlotlockStore(
             // cancellation no cutoff holds), past its reschedule cutoff; made transparent, letting its
             // time go, past its cancel cutoff or once a cancellation fee is due, as a cancellation
             // would be (cancelling records the fee).
+            let movedAnchor: Date | null = null;
             if (found && params.enforceBookingRules === true && found.recurrence_rule === null) {
               const moved =
                 found.starts_at.getTime() !== event.start.getTime() ||
@@ -8504,13 +8615,16 @@ function buildSlotlockStore(
                 if (moved && cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
                   return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
                 }
+                const from = cancellationStart(found.starts_at, found.cutoff_anchor);
                 if (
                   letGo &&
-                  (cutoffRuleBroken(judged.rules, 'cancel', found.starts_at, judged.now) ||
-                    cancellationFeeDue(judged.rules, found.starts_at, judged.now) !== null)
+                  (cutoffRuleBroken(judged.rules, 'cancel', from, judged.now) ||
+                    cancellationFeeDue(judged.rules, from, judged.now) !== null)
                 ) {
                   return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
                 }
+                // Moved when cancelling would already be late: it stays as late as it was.
+                if (moved && cancellationLate(judged.rules, from, judged.now)) movedAnchor = from;
               }
             }
             const series = expanded ?? resumeStoredSeries(event, materializationWindow, found);
@@ -8544,6 +8658,7 @@ function buildSlotlockStore(
             }
             const eventId = found?.id ?? randomUUID();
             const revision = currentRevision + 1;
+            let heldPaid = false;
             if (params.fromHold) {
               const { holdId, holderRef } = params.fromHold;
               if (!isValidResourceId(holdId) || !isValidIdentity(holderRef)) {
@@ -8557,15 +8672,18 @@ function buildSlotlockStore(
                   hold_group_id: string | null;
                   live: boolean;
                   unpaid: boolean;
+                  paid: boolean;
                 }[]
               >`
                 SELECT resource_id, starts_at, ends_at, hold_group_id,
                        expires_at > statement_timestamp() AS live,
-                       (payment_required AND paid_at IS NULL) AS unpaid
+                       (payment_required AND paid_at IS NULL) AS unpaid,
+                       (payment_required AND paid_at IS NOT NULL) AS paid
                   FROM slotlock.reservations
                  WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}
                  FOR UPDATE`;
               if (!hold) return { ok: false, code: 'hold_not_found' };
+              heldPaid = hold.paid;
               // The holder's own hold that lapsed and is not yet reaped: named as the application
               // API's confirm names it. Another holder's stays not found.
               if (!hold.live) return { ok: false, code: 'hold_expired' };
@@ -8600,6 +8718,17 @@ function buildSlotlockStore(
             }
             let turnaroundMs = 0;
             let bufferBeforeMs = 0;
+            // A resource with a hold price (RFC 0004 C3) is booked by an agent only from its own
+            // hold, once paid: new time on it, or time moved onto it from another resource.
+            if (
+              params.enforceBookingRules === true &&
+              (event.transparency ?? 'opaque') === 'opaque' &&
+              (!found || found.resource_id !== params.resourceId) &&
+              !heldPaid &&
+              (await rulesNow(tx, params.resourceId)).rules?.holdPrice !== undefined
+            ) {
+              return { ok: false, code: 'payment_required' };
+            }
             if (params.enforceBookingRules === true && (event.transparency ?? 'opaque') === 'opaque') {
               const judge = await bookingJudge(tx, params.resourceId, defaultHours);
               for (const [index, occurrence] of occurrences.entries()) {
@@ -8660,6 +8789,8 @@ function buildSlotlockStore(
                        buffer_before_ms = ${bufferBeforeMs},
                        -- Whether anyone should be told (RFC 0004 P3): as sent, like the rest.
                        notify = ${params.notify !== false},
+                       -- Kept, or set by a late move (RFC 0004 B5).
+                       cutoff_anchor = COALESCE(${movedAnchor}::timestamptz, cutoff_anchor),
                        updated_at = now()
                  WHERE id = ${eventId}
                    AND tenant_ref = ${params.tenantRef}
@@ -9057,8 +9188,8 @@ function buildSlotlockStore(
             currentRevision: Number(tombstones[0].revision),
           };
         }
-        const events = await tx<{ id: string; resource_id: string; revision: string | number; starts_at: Date; recurring: boolean }[]>`
-          SELECT id, resource_id, revision, starts_at, recurrence_rule IS NOT NULL AS recurring
+        const events = await tx<{ id: string; resource_id: string; revision: string | number; starts_at: Date; recurring: boolean; cutoff_anchor: Date | null }[]>`
+          SELECT id, resource_id, revision, starts_at, recurrence_rule IS NOT NULL AS recurring, cutoff_anchor
             FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef}
              AND owner_ref = ${ownerRef}
@@ -9154,8 +9285,8 @@ function buildSlotlockStore(
           identity.owner_ref,
           identity.external_ref,
         );
-        const [found] = await tx<{ id: string; resource_id: string; revision: string | number; starts_at: Date; recurring: boolean }[]>`
-          SELECT id, resource_id, revision, starts_at, recurrence_rule IS NOT NULL AS recurring
+        const [found] = await tx<{ id: string; resource_id: string; revision: string | number; starts_at: Date; recurring: boolean; cutoff_anchor: Date | null }[]>`
+          SELECT id, resource_id, revision, starts_at, recurrence_rule IS NOT NULL AS recurring, cutoff_anchor
             FROM slotlock.calendar_events
            WHERE tenant_ref = ${params.tenantRef} AND id = ${params.eventId}
            FOR UPDATE`;

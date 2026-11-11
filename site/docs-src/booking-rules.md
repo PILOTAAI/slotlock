@@ -74,6 +74,7 @@ slotlock rules clear --resource vehicle-42
 | `defaultDurationMinutes` | (a search) is this long when the search names no length |
 | `cancelCutoffMinutes`, `rescheduleCutoffMinutes` | (a cancel or move of it) comes at least this long before its start, unless an admin gives a reason |
 | `cancellationFee` | (a cancellation of it) records this fee, within `withinMinutes` of its start when given |
+| `holdPrice` | (an agent's hold of it) waits for this payment, your price, whatever the agent asks; an agent books it only from such a hold, once paid |
 | `pickupTimes`, `returnTimes` | from one local day to another (a hire), starts in one of these windows of the day and ends in one of those |
 | `hoursApply` | how the hours hold a hire: `whole` (all of it inside them) or `ends` (only its start and end, the resource being out between); by default `ends` with `pickupTimes` or `returnTimes`, else `whole`. Writes follow it under `enforceHours`, and every search follows it: with `ends`, `slotlock_find_available_slots` and `slotlock_find_next_available` offer slots that run from one day to another, as `slotlock_find_available_ranges` does |
 | `enforceHours` | lies inside the resource's bookable hours |
@@ -91,6 +92,16 @@ slotlock rules clear --resource vehicle-42
   one-off a series counts as a move. Making a booked one-off transparent, which lets its time go,
   counts as a cancellation: it is refused inside the cancel cutoff, or once a cancellation fee is
   due, since cancelling it records the fee (`booking_rule_cancel_cutoff`).
+- Nor by moving it. A booking or event moved when cancelling it would already be late (inside the
+  cancel cutoff, or once its fee is due) keeps the start it had then: a later cancellation is
+  judged from it, however far the move took it.
+- An agent never sets a price. On a resource with `holdPrice`, an agent's hold waits for that
+  payment whether or not it asked to (`payment_required` and `payment_amount` say so), a `payment`
+  it names that is not the price is refused (`409 payment_price_mismatch`, as any `payment` is where
+  the resource has no price), and booking the resource without a paid hold of it is refused
+  (`409 payment_required`). Your own systems, through the application API, set their own price.
+- A key's caps on what its agent holds (`max_holds`, `max_held_hours`) count the time its
+  approvals hold while a person decides, as its own holds.
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
   offer only slots the rules allow, so an offered slot is one the write accepts. A length the
   duration rules refuse finds nothing; a search that names no length takes

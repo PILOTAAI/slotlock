@@ -298,6 +298,9 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.cancel_team_deletion(text, text)',
   'slotlock.erase_deleted_teams()',
   'slotlock.workspace_delete_after(text)',
+  'slotlock.member_scope(text, text)',
+  'slotlock.set_member_scope(text, text, text, jsonb)',
+  'slotlock.member_scopes(text)',
 ] as const);
 
 /**
@@ -1990,6 +1993,108 @@ BEGIN
 END
 $slotlock_change_member_role$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[20]} FROM PUBLIC;
+
+-- A member limited to part of the workspace (RFC 0004 D1): the locations and groups whose resources
+-- they reach, as an API key's resource scope (RFC 0003 G6). Null is the whole workspace; an Owner is
+-- never limited.
+ALTER TABLE slotlock.workspace_memberships ADD COLUMN IF NOT EXISTS resource_scope jsonb;
+DO $slotlock_membership_scope$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_workspace_memberships_scope_check') THEN
+    -- As a key's scope: 1-20 locations and 1-20 groups by reference, at least one in all. A CASE,
+    -- not AND, so no array function sees what is not an array, and false (never null) otherwise.
+    ALTER TABLE slotlock.workspace_memberships ADD CONSTRAINT slotlock_workspace_memberships_scope_check CHECK (
+      resource_scope IS NULL OR CASE
+        WHEN jsonb_typeof(resource_scope) = 'object'
+             AND jsonb_typeof(resource_scope -> 'locations') IS NOT DISTINCT FROM 'array'
+             AND jsonb_typeof(resource_scope -> 'groups') IS NOT DISTINCT FROM 'array'
+        THEN jsonb_array_length(resource_scope -> 'locations') <= 20
+             AND jsonb_array_length(resource_scope -> 'groups') <= 20
+             AND jsonb_array_length(resource_scope -> 'locations') + jsonb_array_length(resource_scope -> 'groups') >= 1
+             AND NOT jsonb_path_exists(resource_scope,
+               '$.locations[*] ? (@.type() != "string" || !(@ like_regex "^[a-z0-9][a-z0-9._-]{0,99}$"))')
+             AND NOT jsonb_path_exists(resource_scope,
+               '$.groups[*] ? (@.type() != "string" || !(@ like_regex "^[a-z0-9][a-z0-9._-]{0,99}$"))')
+        ELSE false
+      END
+    );
+  END IF;
+END
+$slotlock_membership_scope$;
+
+-- The part of a workspace (its test environment is its live tenant's) a person is limited to, or
+-- null for all of it. An Owner, made one since, reaches all of it.
+CREATE OR REPLACE FUNCTION slotlock.member_scope(requested_tenant text, requested_person text)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_member_scope$
+  SELECT CASE WHEN member.role = 'owner' THEN NULL ELSE member.resource_scope END
+    FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', '')
+     AND member.person_ref = requested_person AND member.status = 'active';
+$slotlock_member_scope$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[34]} FROM PUBLIC;
+
+-- Every member of a workspace limited to part of it, with what they are limited to (Members).
+CREATE OR REPLACE FUNCTION slotlock.member_scopes(requested_tenant text)
+RETURNS TABLE (person_ref text, resource_scope jsonb)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_member_scopes$
+  SELECT member.person_ref, member.resource_scope
+    FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', '')
+     AND member.status = 'active' AND member.role <> 'owner' AND member.resource_scope IS NOT NULL
+   LIMIT 1000;
+$slotlock_member_scopes$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[36]} FROM PUBLIC;
+
+-- Limit a member to locations and groups, or give them the whole workspace again (null): by an
+-- Owner or Admin who is not limited themselves, of a member who is not an Owner and whose role they
+-- may grant. Null on success; else not_found, not_allowed or owner.
+CREATE OR REPLACE FUNCTION slotlock.set_member_scope(
+  requested_tenant text, requested_actor text, requested_person text, requested_scope jsonb)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_member_scope$
+DECLARE
+  actor_role text;
+  actor_scope jsonb;
+  member_role text;
+BEGIN
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN 'not_found';
+  END IF;
+  SELECT member.role, member.resource_scope INTO actor_role, actor_scope FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
+  SELECT member.role INTO member_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person AND member.status = 'active';
+  IF member_role IS NULL THEN
+    RETURN 'not_found';
+  END IF;
+  IF member_role = 'owner' THEN
+    RETURN 'owner';
+  END IF;
+  IF actor_role IS NULL OR actor_role NOT IN ('owner', 'admin') OR actor_scope IS NOT NULL
+     OR NOT slotlock.workspace_may_grant(actor_role, member_role) THEN
+    RETURN 'not_allowed';
+  END IF;
+  UPDATE slotlock.workspace_memberships member
+     SET resource_scope = requested_scope, updated_at = statement_timestamp()
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person;
+  RETURN NULL;
+END
+$slotlock_set_member_scope$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[35]} FROM PUBLIC;
 
 -- Remove a member (or, the actor themselves, leave): by someone who may give their role; a
 -- workspace always keeps an Owner. Their pending invitations go with them. The membership is kept
@@ -7584,6 +7689,11 @@ CREATE INDEX IF NOT EXISTS slotlock_reminder_dispatches_tenant_idx
 -- A booking's reminders (RFC 0004 P3): minutes before its start, at most five; each said once on
 -- the feed as reminder.due, and again if the booking moves.
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS reminder_minutes integer[];
+-- The start a booking or event had when it was moved while cancelling it was already late (past its
+-- cancel cutoff, or inside its fee's window): a later cancellation is judged from it, so moving
+-- cannot take a booking out of what a late cancellation owes (RFC 0004 B5).
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS cutoff_anchor timestamptz;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS cutoff_anchor timestamptz;
 DO $slotlock_reservation_reminders$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_reservations_reminders_valid'

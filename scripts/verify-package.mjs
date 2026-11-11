@@ -119,6 +119,8 @@ const expectedFiles = new Set([
   'dashboard-assistant-ui.d.ts',
   'dashboard-markdown.js',
   'dashboard-markdown.d.ts',
+  'dashboard-scope.js',
+  'dashboard-scope.d.ts',
   'dashboard-settings-ui.js',
   'dashboard-settings-ui.d.ts',
   'dashboard.js',
