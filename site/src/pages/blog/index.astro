@@ -1,7 +1,7 @@
 ---
 import '../../styles/pages.css';
 import Marketing from '../../layouts/Marketing.astro';
-import { POSTS, postPath } from '../../data/blog';
+import { POSTS, postPath } from '../../lib/posts';
 import { BLOG, blogSeo, longDate } from '../../lib/blog';
 ---
 
@@ -29,11 +29,11 @@ import { BLOG, blogSeo, longDate } from '../../lib/blog';
           POSTS.map((post) => (
             <li>
               <h2>
-                <a href={postPath(post)}>{post.title}</a>
+                <a href={postPath(post)}>{post.front.title}</a>
               </h2>
-              <p>{post.description}</p>
+              <p>{post.front.description}</p>
               <p class="post-meta">
-                <time datetime={post.date}>{longDate(post.date)}</time> · {post.tags.join(', ')}
+                <time datetime={post.front.date}>{longDate(post.front.date)}</time> · {post.front.tags.join(', ')}
               </p>
             </li>
           ))

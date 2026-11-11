@@ -7,7 +7,7 @@ import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
 import starlightLlmsTxt from 'starlight-llms-txt';
 import { GROUPS, pageSlug } from './scripts/api-reference.mjs';
-import { POSTS } from './src/data/blog';
+import { POSTS } from './src/lib/posts';
 import { llmsDetails } from './src/data/llms.mjs';
 import { MARKETING_PAGES } from './src/data/pages';
 import { markdownPath } from './src/lib/page';
@@ -98,7 +98,7 @@ function markdownPageList() {
     '',
     ...MARKETING_PAGES.map((page) => `- [${page.title}](${SITE}${markdownPath(page.path)}): ${page.description}`),
     `- [Blog](${SITE}/blog.md): every post, newest first`,
-    ...POSTS.map((post) => `- [${post.title}](${SITE}/blog/${post.slug}.md): ${post.description}`),
+    ...POSTS.map((post) => `- [${post.front.title}](${SITE}/blog/${post.slug}.md): ${post.front.description}`),
   ].join('\n');
 }
 

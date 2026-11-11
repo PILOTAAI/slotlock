@@ -1,9 +1,8 @@
-// The blog's head data, Markdown and feed, from src/data/blog.ts.
-import { AUTHOR, type Part, type Post, POSTS, postPath } from '../data/blog';
-import { absolute, article, breadcrumb, graph, ogImage, type Seo, webPage } from './seo';
-
-const SITE_LINK = /\]\(\//g;
-const md = (text: string) => text.replace(SITE_LINK, `](${absolute('/')}`);
+// The blog's head data, Markdown and feed, from the posts in content/blog/ (posts.ts).
+import { postTwin } from './post-format';
+import { authorOf, type Post, POSTS, postPath } from './posts';
+import facts from '../generated/facts.json';
+import { absolute, article, breadcrumb, graph, ogImage, type Seo, SITE, webPage } from './seo';
 
 export const BLOG = {
   path: '/blog/',
@@ -14,7 +13,11 @@ export const BLOG = {
   imageAlt: 'The Slotlock blog: notes on booking, calendars and AI agents.',
 };
 
-export const authorLd = { '@type': 'Organization', name: AUTHOR.name, url: AUTHOR.url };
+/** A post's author as structured data: a Person with their GitHub profile, or the maintainers. */
+export const authorLd = (post: Post) => {
+  const author = authorOf(post);
+  return { '@type': author.type, name: author.name, url: author.url };
+};
 
 export function blogSeo(): Seo {
   return {
@@ -34,26 +37,27 @@ export function blogSeo(): Seo {
 
 export function postSeo(post: Post): Seo {
   const path = postPath(post);
-  const title = post.seoTitle ?? post.title;
-  const image = ogImage(post.image);
+  const { front } = post;
+  const title = front.seoTitle ?? front.title;
+  const image = ogImage(front.image);
   return {
     title,
-    description: post.description,
+    description: front.description,
     path,
     image,
-    imageAlt: post.imageAlt,
+    imageAlt: front.imageAlt,
     type: 'article',
     markdown: `/blog/${post.slug}.md`,
     jsonLd: [
       graph(
         article(
-          { title: post.title, description: post.description, path, image },
-          { type: 'BlogPosting', published: post.date, modified: post.updated ?? post.date, author: authorLd },
+          { title: front.title, description: front.description, path, image },
+          { type: 'BlogPosting', published: front.date, modified: front.updated ?? front.date, author: authorLd(post) },
         ),
         breadcrumb([
           { name: 'Slotlock', path: '/' },
           { name: 'Blog', path: '/blog/' },
-          { name: post.title, path },
+          { name: front.title, path },
         ]),
       ),
     ],
@@ -63,35 +67,15 @@ export function postSeo(post: Post): Seo {
 export const longDate = (iso: string) =>
   new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 
-function partMarkdown(part: Part): string {
-  if ('h2' in part) return `## ${part.h2}`;
-  if ('p' in part) return md(part.p);
-  if ('ul' in part) return part.ul.map((item) => `- ${md(item)}`).join('\n');
-  if ('ol' in part) return part.ol.map((item, i) => `${i + 1}. ${md(item)}`).join('\n');
-  if ('code' in part) return `${part.caption ? `${part.caption}:\n\n` : ''}\`\`\`\n${part.code}\n\`\`\``;
-  return [
-    `| ${part.table.columns.join(' | ')} |`,
-    `| ${part.table.columns.map(() => '---').join(' | ')} |`,
-    ...part.table.rows.map((row) => `| ${row.map(md).join(' | ')} |`),
-  ].join('\n');
-}
-
 export function postMarkdown(post: Post): string {
-  return `${[
-    `# ${post.title}`,
-    `> ${post.description}`,
-    `${longDate(post.date)} · ${AUTHOR.name}`,
-    ...post.body.map(partMarkdown),
-    `Related: ${post.related.map((l) => `[${l.label}](${absolute(l.href)})`).join(' · ')}`,
-    `Page: ${absolute(postPath(post))}`,
-  ].join('\n\n')}\n`;
+  return postTwin(post, { site: SITE, author: authorOf(post), longDate: longDate(post.front.date), facts });
 }
 
 export function blogMarkdown(): string {
   return `${[
     `# ${BLOG.title}`,
     `> ${BLOG.description}`,
-    ...POSTS.map((post) => `- [${post.title}](${absolute(`/blog/${post.slug}.md`)}) (${post.date}): ${post.description}`),
+    ...POSTS.map((post) => `- [${post.front.title}](${absolute(`/blog/${post.slug}.md`)}) (${post.front.date}): ${post.front.description}`),
     `Feed: ${absolute('/blog/rss.xml')}`,
   ].join('\n\n')}\n`;
 }
@@ -102,11 +86,11 @@ const xml = (text: string) =>
 export function rss(): string {
   const items = POSTS.map(
     (post) => `    <item>
-      <title>${xml(post.title)}</title>
+      <title>${xml(post.front.title)}</title>
       <link>${absolute(postPath(post))}</link>
       <guid isPermaLink="true">${absolute(postPath(post))}</guid>
-      <pubDate>${new Date(`${post.date}T09:00:00Z`).toUTCString()}</pubDate>
-      <description>${xml(post.description)}</description>
+      <pubDate>${new Date(`${post.front.date}T09:00:00Z`).toUTCString()}</pubDate>
+      <description>${xml(post.front.description)}</description>
     </item>`,
   ).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>

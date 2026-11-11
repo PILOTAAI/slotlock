@@ -1,0 +1,2 @@
+# Redirects for the site (Cloudflare Workers static assets): one "from to status" per line.
+# The admin console adds a line when a post's slug changes, so its old address keeps working.

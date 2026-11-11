@@ -643,7 +643,7 @@ const MARKETING_INPUTS = {
   '/open-source/': ['site/src/data/pages/open-source.ts'],
   '/use-cases/': ['site/src/data/pages/use-cases.ts'],
   '/compare/': ['site/src/data/pages/compare.ts'],
-  '/blog/': ['site/src/data/blog.ts'],
+  '/blog/': ['site/content/blog'],
 };
 
 const BUILT = new Date().toISOString();
@@ -691,11 +691,14 @@ async function lastModified(apiSlugs) {
       put(`${prefix}${match[1]}/`, [`site/src/data/pages/${file}`]);
     }
   }
-  // A post dates from its own `updated` (or `date`) in src/data/blog.ts, which says when its words
-  // last changed; a commit that only touches another post leaves it alone.
-  const blog = await readFile(join(SITE, 'src/data/blog.ts'), 'utf8');
-  for (const post of blog.matchAll(/^ {2}slug: '([a-z0-9-]+)',[\s\S]*?^ {2}date: '(\d{4}-\d{2}-\d{2})',(?:\n {2}updated: '(\d{4}-\d{2}-\d{2})',)?/gm)) {
-    dates[`/blog/${post[1]}/`] = post[3] ?? post[2];
+  // A post dates from its own `updated` (or `date`) in its file's frontmatter, which says when its
+  // words last changed; a commit that only touches another post leaves it alone.
+  const blogDirectory = join(SITE, 'content/blog');
+  for (const file of await readdir(blogDirectory).catch(() => [])) {
+    if (!file.endsWith('.md')) continue;
+    const front = (await readFile(join(blogDirectory, file), 'utf8')).split(/^---$/m)[1] ?? '';
+    const date = /^updated: (\d{4}-\d{2}-\d{2})$/m.exec(front)?.[1] ?? /^date: (\d{4}-\d{2}-\d{2})$/m.exec(front)?.[1];
+    if (date) dates[`/blog/${file.slice(0, -3)}/`] = date;
   }
   return dates;
 }

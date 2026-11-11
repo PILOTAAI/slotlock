@@ -13,7 +13,11 @@ site/
   src/data/pages/*.ts     every page outside the docs for one search intent (pricing, MCP server,
                           booking API, open source, about, use cases, comparisons), as data that
                           src/components/marketing/Page.astro and its Markdown twin both render
-  src/data/blog.ts        the blog's posts, as data, for /blog/, /blog/<slug>.md and /blog/rss.xml
+  content/blog/<slug>.md  the blog's posts: frontmatter and a strict Markdown subset, written here or in
+                          the admin console (RFC 0006); src/lib/post-format.ts renders them for
+                          /blog/, /blog/<slug>.md and /blog/rss.xml, and the console's preview
+  src/data/authors.json   who a post can name as its author (Person or Organization, structured data)
+  public/blog/<slug>/     a post's own images
   src/layouts/Marketing.astro   the header, footer and head of every page outside the docs
   src/lib/seo.ts          titles, canonicals, Open Graph and the JSON-LD graph (SeoHead.astro)
   src/data/llms.mjs       what llms.txt tells agents beyond the page list (the repository tests read it)

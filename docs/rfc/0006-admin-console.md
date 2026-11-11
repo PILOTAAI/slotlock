@@ -343,7 +343,8 @@ lint, the SEO check and a strict CSP.
 
 1. **Format.** `site/content/blog/<slug>.md`: frontmatter (the fields of today's `Post`, plus
    `author`, `status` and `publishAt`) and a Markdown body. The four posts move across unchanged in
-   words; `blog.ts` goes.
+   words; `blog.ts` goes. (Done in Phase 4a: the four posts render the same HTML and Markdown twins
+   as before.)
 2. **Rendering without inline styles.** A content loader renders Markdown with remark and rehype,
    without Expressive Code:
    - code blocks become plain `<pre><code class="language-…">`, styled by `pages.css`;
