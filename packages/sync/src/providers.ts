@@ -392,10 +392,13 @@ export type ICalendarFeedParser = (
   text: string,
   calendarTimezone?: string,
   window?: Interval,
-) => {
+) => ICalendarFeedRead | Promise<ICalendarFeedRead>;
+
+/** What a parser reads of a feed: slotlock's parseICalendarFeed, or its worker pool's (async). */
+export interface ICalendarFeedRead {
   changes: { start: Date | null; end: Date | null; busy: boolean; deleted: boolean }[];
   refused: unknown[];
-};
+}
 
 /** The most an iCalendar feed may be, as slotlock reads it. */
 const MAX_ICS_BYTES = 2_000_000;
@@ -426,7 +429,7 @@ export async function readIcsBusy(params: {
   const declared = Number(response.headers.get('content-length') ?? 0);
   if (declared > MAX_ICS_BYTES) throw new ProviderError('The calendar is over 2 MB');
   const text = await readCapped(response, MAX_ICS_BYTES);
-  const read = params.parse(text, params.calendarTimezone, params.window);
+  const read = await params.parse(text, params.calendarTimezone, params.window);
   if (read.refused.length > 0) {
     throw new ProviderError(`${read.refused.length} series in the calendar could not be read, so its time is unknown`);
   }

@@ -63,9 +63,14 @@ and forgets it), and `POST /v1/run` (a pass now).
 ## Secrets
 
 OAuth tokens, iCalendar URLs (which often carry a token), each tenant's Slotlock key and each
-OAuth flow's verifier are kept sealed with AES-256-GCM, each bound to what it belongs to, so a
-sealed value copied to another row does not open. Keys rotate: list `id:base64` pairs, newest first.
-OAuth states are kept only as SHA-256 digests.
+OAuth flow's verifier are kept sealed with AES-256-GCM, each bound to its tenant and to what it
+belongs to, so a sealed value copied to another row, or a row moved to another tenant, does not
+open; a mapping uses only a connection of its own tenant. Keys rotate: list `id:base64` pairs,
+newest first. OAuth states are kept only as SHA-256 digests.
+
+A connection holds only what it asked for: Google is not asked to include scopes the person granted
+the app before, and a connection whose token lacks one it asked for (a box the person unticked), or
+a read-only connection whose token could write events, is refused.
 
 ## Run it
 
@@ -87,7 +92,9 @@ characters), `SYNC_LINK_SECRET` (32+ bytes), `SYNC_PUBLIC_URL` (https; OAuth app
 `MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET`/`MICROSOFT_DIRECTORY`, `SYNC_INTERVAL_SECONDS`
 (300), `SYNC_WINDOW_DAYS` (60), `HOST`, `PORT` (8090). iCalendar URLs need the slotlock package
 installed beside it (the image has it), and are fetched through its guarded fetch, which refuses
-private addresses. `packages/integrations.Dockerfile` builds an image with all three integrations.
+private addresses, and read on its worker threads, with a deadline, so a feed never holds the
+process. A library user who passes `parseICalendar` must pass that fetch as `icsFetch` too.
+`packages/integrations.Dockerfile` builds an image with all three integrations.
 
 ## Limits
 
@@ -97,6 +104,13 @@ private addresses. `packages/integrations.Dockerfile` builds an image with all t
 - An iCalendar feed with a series Slotlock cannot read is not recorded at all, since that series'
   time is unknown.
 - At most 50 written events are read back in one pass to see where they went.
+- Bookings are written back only to calendars the account can write: the choose page shows the
+  others as read only. A calendar that refuses for good (access revoked, made read only, deleted) is
+  that mapping's failure: the tenant's other calendars are written on, the pass reports it
+  (`failedMappings`), and the daily reconcile writes it again once it can. One that may answer later
+  (a 5xx, a rate limit) stops the tenant's pass there, to be tried again.
+- A connection disconnected while a pass reads it stays gone: a refreshed token is not kept, and
+  its busy time is not recorded.
 
 ## Status
 

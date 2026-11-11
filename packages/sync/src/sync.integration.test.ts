@@ -37,8 +37,16 @@ describe.skipIf(!url)('@slotlock/sync with Slotlock (real Postgres)', () => {
   ]);
   const revoked: string[] = [];
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  // What the person allowed on Google's consent page (granular consent lets them untick one).
+  let granted = [
+    'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+    'https://www.googleapis.com/auth/calendar.freebusy',
+    'https://www.googleapis.com/auth/calendar.events',
+  ];
   const googleFetch = async (target: string, init: RequestInit = {}): Promise<Response> => {
-    if (target === 'https://oauth2.googleapis.com/token') return json({ access_token: 'google-token', refresh_token: 'refresh', expires_in: 3600 });
+    if (target === 'https://oauth2.googleapis.com/token') {
+      return json({ access_token: 'google-token', refresh_token: 'refresh', expires_in: 3600, scope: granted.join(' ') });
+    }
     if (target === 'https://oauth2.googleapis.com/revoke') {
       revoked.push(new URLSearchParams(String(init.body)).get('token') as string);
       return json({});
@@ -136,6 +144,18 @@ describe.skipIf(!url)('@slotlock/sync with Slotlock (real Postgres)', () => {
     // The operator keeps the tenant's key and makes a link; the person follows it, comes back, and
     // chooses the calendar for the van.
     expect((await operator('PUT', `/v1/tenants/${tenantRef}`, { api_key: 'admin-key-0123456789' })).status).toBe(200);
+    // A person who unticked writing events connects nothing to a link that writes bookings back.
+    const unticked = (await (await operator('POST', `/v1/tenants/${tenantRef}/connect-links`, { provider: 'google', write_back: true })).json()) as { url: string };
+    const tried = await http(new Request(unticked.url));
+    granted = granted.filter((scope) => !scope.endsWith('calendar.events'));
+    const refused = await http(
+      new Request(`${SYNC}/oauth/callback?state=${new URL(tried.headers.get('location') as string).searchParams.get('state')}&code=c`, {
+        headers: { cookie: (tried.headers.get('set-cookie') ?? '').split(';')[0] as string },
+      }),
+    );
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('allow each calendar permission');
+    granted = [...granted, 'https://www.googleapis.com/auth/calendar.events'];
     const link = (await (await operator('POST', `/v1/tenants/${tenantRef}/connect-links`, { provider: 'google', write_back: true })).json()) as { url: string };
     const followed = await http(new Request(link.url));
     const toGoogle = new URL(followed.headers.get('location') as string);

@@ -81,7 +81,10 @@ export function beginAuthorization(
     code_challenge: challenge,
     code_challenge_method: 'S256',
     ...(client.provider === 'google'
-      ? { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' }
+      // Only what this connection asks for: never scopes the person granted the app before
+      // (include_granted_scopes would add them, so a read-only connection could hold a token
+      // that writes events).
+      ? { access_type: 'offline', prompt: 'consent' }
       : { response_mode: 'query' }),
     ...(options.loginHint ? { login_hint: options.loginHint } : {}),
   });

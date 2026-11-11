@@ -21,7 +21,7 @@ export interface SyncConnection {
   provider: SyncProviderKind;
   /** Whose calendar it is, for people to tell connections apart (an address, or the URL's host). */
   account: string;
-  /** Its secret, sealed for `connection:<id>`: OAuth tokens as JSON, or an iCalendar URL. */
+  /** Its secret, sealed for its tenant and id: OAuth tokens as JSON, or an iCalendar URL. */
   sealed: string;
   /** Write confirmed bookings back to the calendar (Google and Microsoft only). */
   writeBack: boolean;
@@ -84,6 +84,11 @@ export interface SyncStore {
   listTenants(): Promise<SyncTenant[]>;
   setCursor(tenantRef: string, cursor: string | null): Promise<void>;
   putConnection(connection: SyncConnection): Promise<void>;
+  /**
+   * Keep a connection's tokens sealed anew (a refresh), only while it is still there: false for
+   * one disconnected meanwhile, which stays gone.
+   */
+  resealConnection(id: string, sealed: string): Promise<boolean>;
   getConnection(id: string): Promise<SyncConnection | null>;
   listConnections(tenantRef: string): Promise<SyncConnection[]>;
   /** Forget a connection, its mappings and what they wrote back. */
@@ -133,6 +138,12 @@ export function createMemorySyncStore(): SyncStore {
     },
     async putConnection(connection) {
       connections.set(connection.id, { ...connection, createdAt: connection.createdAt ?? new Date() });
+    },
+    async resealConnection(id, sealed) {
+      const connection = connections.get(id);
+      if (!connection) return false;
+      connections.set(id, { ...connection, sealed });
+      return true;
     },
     async getConnection(id) {
       return copy(connections.get(id));
@@ -359,6 +370,10 @@ export function createPostgresSyncStore(sql: Sql): SyncStore & { applySchema(): 
         INSERT INTO slotlock_sync.connections (id, tenant_ref, provider, account, sealed, write_back)
         VALUES (${value.id}, ${value.tenantRef}, ${value.provider}, ${value.account}, ${value.sealed}, ${value.writeBack})
         ON CONFLICT (id) DO UPDATE SET account = EXCLUDED.account, sealed = EXCLUDED.sealed, write_back = EXCLUDED.write_back`;
+    },
+    async resealConnection(id, sealed) {
+      const updated = await sql`UPDATE slotlock_sync.connections SET sealed = ${sealed} WHERE id = ${id} RETURNING id`;
+      return updated.length === 1;
     },
     async getConnection(id) {
       const [row] = await sql<ConnectionRow[]>`
