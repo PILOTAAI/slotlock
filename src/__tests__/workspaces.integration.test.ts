@@ -58,14 +58,13 @@ describe.skipIf(!url)('workspace memberships and the audit log (real Postgres)',
 
   it("records a sign-in, and GitHub's organizations as memberships: owners Owner, members Developer", async () => {
     const workspaces = createSlotlockDashboardWorkspaces(application);
-    expect(
-      await workspaces.signedIn(person, [
-        { id: org, role: 'admin' },
-        { id: other, role: 'member' },
-      ]),
-    ).toBe(0);
-    expect(await workspaces.standing(`github-org:${org}`, person)).toEqual({ role: 'owner', sessionEpoch: 0 });
-    expect(await workspaces.standing(`github-org:${other}`, person)).toEqual({ role: 'developer', sessionEpoch: 0 });
+    const epoch = await workspaces.signedIn(person, [
+      { id: org, role: 'admin' },
+      { id: other, role: 'member' },
+    ]);
+    expect(epoch).toBeGreaterThan(0);
+    expect(await workspaces.standing(`github-org:${org}`, person)).toEqual({ role: 'owner', sessionEpoch: epoch });
+    expect(await workspaces.standing(`github-org:${other}`, person)).toEqual({ role: 'developer', sessionEpoch: epoch });
     // The test environment has the live workspace's members; one's own workspace is one's own.
     expect((await workspaces.standing(`github-org:${other}~test`, person)).role).toBe('developer');
     expect((await workspaces.standing(person, person)).role).toBe('owner');
@@ -96,12 +95,23 @@ describe.skipIf(!url)('workspace memberships and the audit log (real Postgres)',
     expect((await workspaces.standing(`github-org:${other}`, person)).role).toBe('developer');
   });
 
-  it('signs a person out everywhere by moving their epoch on', async () => {
+  it('signs a person out everywhere by drawing a new epoch, and an erased person has none', async () => {
     const workspaces = createSlotlockDashboardWorkspaces(application);
-    expect(await workspaces.signOutEverywhere(person)).toBe(1);
-    expect((await workspaces.standing(person, person)).sessionEpoch).toBe(1);
-    expect(await workspaces.signedIn(person)).toBe(1);
-    expect(await workspaces.signOutEverywhere(person)).toBe(2);
+    const before = (await workspaces.standing(person, person)).sessionEpoch;
+    expect(before).toBeGreaterThan(0);
+    const after = await workspaces.signOutEverywhere(person);
+    expect(after).not.toBe(before);
+    expect((await workspaces.standing(person, person)).sessionEpoch).toBe(after);
+    expect(await workspaces.signedIn(person)).toBe(after);
+    // Erased, the person has no epoch, so no session of theirs passes; signing in again draws afresh.
+    const someone = `github:${Number(uid) + 7}`;
+    const first = await workspaces.signedIn(someone);
+    await store.eraseTenant({ tenantRef: someone });
+    expect((await workspaces.standing(someone, someone)).sessionEpoch).toBeNull();
+    expect((await workspaces.standing('github:9', 'github:9')).sessionEpoch).toBeNull();
+    const again = await workspaces.signedIn(someone);
+    expect(again).toBeGreaterThan(0);
+    expect(again).not.toBe(first);
   });
 
   it('refuses a malformed person or organization list in the database itself', async () => {

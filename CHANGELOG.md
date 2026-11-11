@@ -28,7 +28,9 @@ versioning.
   Full-access key (which reaches contacts, webhooks, history and erasure), revoke anyone's key and
   add webhooks. Members are now Developers: read-only and read-write keys of their own, resources,
   rules and hours. Review the Full-access keys your organization's members created.
-- Run `slotlock migrate`: three new tables and four functions.
+- Run `slotlock migrate`: three new tables and four functions. With the membership store (as
+  `serve` and the hosted dashboard run), every session carries its person's epoch: sessions from
+  before this release have none, so everyone signs in once more after it.
 
 ## 0.9.1 - 2026-11-11
 

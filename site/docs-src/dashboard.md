@@ -84,7 +84,10 @@ refused.
 - Full-access keys, webhooks, billing and the assistant's model also need a sign-in in the last 15
   minutes: past it, the dashboard asks the person to sign in again and comes back to the page.
 - A Developer rotates or limits only keys they created, and never a Full-access one.
-- **Sign out everywhere** (Settings, Account) ends every session of the person on every device.
+- **Sign out everywhere** (Settings, Account) ends every session of the person on every device;
+  erasing a person ends them too.
+- A form needs every capability it touches: rotating someone else's Full-access key needs both
+  changing anyone's keys and Full access, and so a recent sign-in.
 - An audit log (`slotlock.audit_events`, kept 180 days) records who created, rotated or revoked a
   key, changed a webhook, the plan, billing or the assistant's model, forgot a contact, signed in or
   out everywhere, and every refusal, with the address and browser it came from. The serving role

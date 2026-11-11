@@ -2025,7 +2025,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const standing = await workspaces.standing(tenantOf(session), personOf(session));
-    if ((session.ep ?? 0) !== standing.sessionEpoch) return null;
+    // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
+    // from before this store, or of a person erased since (no record, no epoch) never passes.
+    if (session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
     if (standing.role !== null) {
       roles.set(session, standing.role);
       return session;
@@ -5321,21 +5323,27 @@ ${
   }
 
   /**
-   * The capability a form needs: its route's, or more where the form decides. A Full-access key asks
-   * `keys.full`; a key someone else created asks `keys.manage_any`; rotating or limiting a
-   * Full-access key asks `keys.full` too, so a person who lost that power cannot keep it by rotating.
+   * Every capability a form needs: its route's, and more where the form decides. A Full-access key
+   * asks `keys.full`; a key someone else created asks `keys.manage_any`; rotating or limiting a
+   * Full-access key asks `keys.full` as well, so a person who lost that power cannot keep it by
+   * rotating, and anyone rotating one signed in recently. An empty list is a route with none.
    */
-  async function capabilityOf(session: Session, route: string, form: URLSearchParams): Promise<SlotlockWorkspaceCapability | undefined> {
-    if (route === '/keys' && form.get('access') === 'full') return 'keys.full';
+  async function capabilitiesOf(session: Session, route: string, form: URLSearchParams): Promise<SlotlockWorkspaceCapability[]> {
+    const base = SLOTLOCK_DASHBOARD_POST_CAPABILITIES[route];
+    if (base === undefined) return [];
+    const needed: SlotlockWorkspaceCapability[] = [base];
+    if (route === '/keys' && form.get('access') === 'full') needed.push('keys.full');
     if (route === '/keys/rotate' || route === '/keys/revoke' || route === '/keys/limits') {
-      const id = form.get('id') ?? '';
+      // As PostgreSQL reads a uuid, whatever its case: the key the handler would act on.
+      const id = (form.get('id') ?? '').toLowerCase();
       if (UUID_PATTERN.test(id)) {
-        const key = (await options.keys.list({ tenantRef: tenantOf(session) })).find((candidate) => candidate.id === id);
-        if (key && key.createdBy !== personOf(session)) return 'keys.manage_any';
-        if (key?.scopes.includes('admin') && route !== '/keys/revoke') return 'keys.full';
+        const key = (await options.keys.list({ tenantRef: tenantOf(session) })).find((candidate) => candidate.id.toLowerCase() === id);
+        // A key not listed here is not one the person made: only who may change anyone's tries it.
+        if (!key || key.createdBy !== personOf(session)) needed.push('keys.manage_any');
+        if (key?.scopes.includes('admin') && route !== '/keys/revoke') needed.push('keys.full');
       }
     }
-    return SLOTLOCK_DASHBOARD_POST_CAPABILITIES[route];
+    return needed;
   }
 
   /** The page a form's route belongs to, to go back to. */
@@ -5346,19 +5354,19 @@ ${
 
   /** Refuse a form the person's role does not allow, or ask them to sign in again for a fresh one. */
   async function authorizePost(session: Session, route: string, form: URLSearchParams): Promise<Response | null> {
-    const capability = await capabilityOf(session, route, form);
-    if (capability === undefined || !can(session, capability)) {
+    const needed = await capabilitiesOf(session, route, form);
+    const missing = needed.length === 0 ? undefined : needed.find((capability) => !can(session, capability));
+    if (needed.length === 0 || missing !== undefined) {
       await audit(session, {
         action: 'authz.denied',
         outcome: 'denied',
-        reason: capability ? `needs ${capability}` : 'not a listed route',
+        reason: missing ? `needs ${missing}` : 'not a listed route',
         metadata: { route },
       });
-      return deniedPage(session, capability, backOf(route));
+      return deniedPage(session, missing, backOf(route));
     }
-    if (SLOTLOCK_FRESH_CAPABILITIES.has(capability) && !freshlySignedIn(session)) {
-      return confirmPage(session, capability, backOf(route));
-    }
+    const fresh = needed.find((capability) => SLOTLOCK_FRESH_CAPABILITIES.has(capability));
+    if (fresh !== undefined && !freshlySignedIn(session)) return confirmPage(session, fresh, backOf(route));
     return null;
   }
 
@@ -5991,6 +5999,10 @@ ${
     const org = session.orgs?.find((candidate) => candidate.id === form.get('organization'));
     if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
     if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    // And an Owner of its workspace in Slotlock: a GitHub owner Slotlock gave a lesser role may not.
+    if (workspaces && (await workspaces.standing(`github-org:${org.id}`, personOf(session))).role !== 'owner') {
+      return teamsPage(session, 403, `Only an owner of ${org.login}'s workspace can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    }
     // Who owns it was read as the person signed in: only a recent sign-in is trusted to say so.
     if (now() - (session.exp - SESSION_TTL_MS) > FRESH_SIGN_IN_MS) {
       return teamsPage(
@@ -6690,9 +6702,6 @@ ${
       );
     }
     origins.set(session, requestOrigin(request));
-    // What the person may do, from their role now: before anything is spent or changed.
-    const refused = await authorizePost(session, route, form);
-    if (refused) return refused;
     // A form sent again (a reload of its result, a double click) must not create or rotate twice.
     // Every form but sign-out carries a single-use value, so leaving it out cannot skip this check
     // or the per-person form limit.
@@ -6738,6 +6747,10 @@ ${
         );
       }
     }
+    // What the person may do, from their role now: before anything changes, and after the form's
+    // single-use value and the per-person form limit, so refusals cannot flood the audit log.
+    const refused = await authorizePost(session, route, form);
+    if (refused) return refused;
     // A tenant new to plans is put on the default plan before it adds what plans limit.
     if (route === '/keys' || route === '/resources' || route === '/webhooks') {
       await plans?.enrol?.(tenantOf(session));
@@ -6751,8 +6764,10 @@ ${
   async function dispatchPost(session: Session, route: string, form: URLSearchParams, request: Request): Promise<Response> {
     switch (route) {
       case '/sign-out-everywhere':
-        // Every session of the person, on every device and server, this one included.
-        await workspaces?.signOutEverywhere(personOf(session));
+        // Every session of the person, on every device and server, this one included: only with
+        // the membership store, which holds the epoch every session carries.
+        if (!workspaces) return notFound(session);
+        await workspaces.signOutEverywhere(personOf(session));
         await options.state.endSession(session.sid, session.exp);
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
       case '/sign-out':

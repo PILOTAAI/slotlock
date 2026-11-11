@@ -1178,17 +1178,19 @@ $slotlock_disable_organization$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[4]} FROM PUBLIC;
 
 -- The people who sign in to the dashboard, by their identity (github:<id> or google:<subject>,
--- never an email): when they last signed in, and the epoch their sessions carry. "Sign out
--- everywhere" moves the epoch on, and a session sealed under an earlier one is refused (ASVS 5.0
--- 7.4.1's per-user revocation). Owner-only; reached through the functions below.
+-- never an email): when they last signed in, and the epoch their sessions carry. The epoch is
+-- drawn at random: "Sign out everywhere" draws another, and a session sealed under any other is
+-- refused (ASVS 5.0 7.4.1's per-user revocation). A person without a row (erased) has no epoch,
+-- so none of their sessions passes, and a row made again draws afresh. Owner-only; reached
+-- through the functions below.
 CREATE TABLE IF NOT EXISTS slotlock.dashboard_people (
   person_ref text PRIMARY KEY,
-  session_epoch integer NOT NULL DEFAULT 0,
+  session_epoch integer NOT NULL DEFAULT (1 + floor(random() * 2147483646))::integer,
   last_sign_in_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   CONSTRAINT slotlock_dashboard_people_valid CHECK (
     person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
-    AND session_epoch >= 0
+    AND session_epoch > 0
   )
 );
 ALTER TABLE slotlock.dashboard_people ENABLE ROW LEVEL SECURITY;
@@ -1197,8 +1199,10 @@ REVOKE ALL ON slotlock.dashboard_people FROM PUBLIC;
 -- Who belongs to a shared workspace, and as what (workspace-roles.ts). A person's own workspace
 -- (their github:<id> or google:<subject> tenant) has no row: they are its Owner. The live tenant
 -- holds the rows; its test environment (~test) has the same members. Inactive rows are kept so
--- someone added back gets their role again. Owner-only: the serving role neither reads nor writes
--- a role but through the functions below, so no bug in the application can grant one.
+-- someone added back gets their role again. Owner-only: the serving role reads and writes roles only
+-- through the functions below, which check what they are given; it cannot write the table itself.
+-- A change made in Slotlock (a role given, a member removed) sets source to 'created' or
+-- 'invitation', and sign-in's mirroring of GitHub never touches such a row again.
 CREATE TABLE IF NOT EXISTS slotlock.workspace_memberships (
   tenant_ref text NOT NULL,
   person_ref text NOT NULL,
@@ -1302,14 +1306,14 @@ AS $slotlock_dashboard_standing$
                     AND member.person_ref = requested_person
                     AND member.status = 'active')
          END,
-         coalesce((SELECT person.session_epoch FROM slotlock.dashboard_people person
-                    WHERE person.person_ref = requested_person), 0)
+         (SELECT person.session_epoch FROM slotlock.dashboard_people person
+           WHERE person.person_ref = requested_person)
     FROM live;
 $slotlock_dashboard_standing$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[6]} FROM PUBLIC;
 
--- Sign a person out everywhere: every session sealed under their current epoch is refused from
--- now on. Returns the new epoch.
+-- Sign a person out everywhere: a new epoch is drawn (never the old one), and every session sealed
+-- under the old is refused from now on. Returns the new epoch.
 CREATE OR REPLACE FUNCTION slotlock.dashboard_sign_out_everywhere(requested_person text)
 RETURNS integer
 LANGUAGE plpgsql
@@ -1324,8 +1328,11 @@ BEGIN
      OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
     RAISE EXCEPTION 'Slotlock dashboard: invalid person' USING ERRCODE = '22023';
   END IF;
-  INSERT INTO slotlock.dashboard_people AS person (person_ref, session_epoch) VALUES (requested_person, 1)
-  ON CONFLICT (person_ref) DO UPDATE SET session_epoch = person.session_epoch + 1
+  INSERT INTO slotlock.dashboard_people AS person (person_ref) VALUES (requested_person)
+  ON CONFLICT (person_ref) DO UPDATE
+    SET session_epoch = (
+      SELECT CASE WHEN drawn.epoch = person.session_epoch THEN drawn.epoch % 2147483646 + 1 ELSE drawn.epoch END
+        FROM (SELECT (1 + floor(random() * 2147483646))::integer AS epoch) drawn)
   RETURNING person.session_epoch INTO epoch;
   RETURN epoch;
 END

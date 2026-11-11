@@ -1686,6 +1686,27 @@ describe('organizations', () => {
     expect(failed.session).toBeUndefined();
   });
 
+  it("refuses to turn an organization off for a GitHub owner whose workspace role in Slotlock is less than Owner", async () => {
+    const on = new Set<string>([String(ACME.id)]);
+    const teams = {
+      enabled: vi.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => on.has(id)))),
+      enable: vi.fn(async (org: { id: string }) => !on.has(org.id) && Boolean(on.add(org.id))),
+      disable: vi.fn(async (id: string) => on.delete(id)),
+    };
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const target = orgDashboard([{ ...ACME, role: 'admin' }], { organizations: 'enabled', teams, workspaces });
+    const { session } = await signIn(target);
+    workspaces.setRole(`github-org:${ACME.id}`, `github:${GITHUB_USER.id}`, 'viewer');
+    const off = await post(
+      target,
+      '/base/dashboard/teams/disable',
+      { csrf: await csrf(target, session), organization: String(ACME.id), confirm: ACME.login },
+      session,
+    );
+    expect(off.status).toBe(403);
+    expect(teams.disable).not.toHaveBeenCalled();
+  });
+
   it('lets an owner turn an organization on, its members switch to it, and turning it off end that', async () => {
     const on = new Set<string>();
     const teams = {
@@ -1859,6 +1880,17 @@ describe('organizations', () => {
     expect(revoke.status).toBe(403);
     expect(await revoke.text()).toContain('change a key someone else created');
     expect(keys.store.revoke).not.toHaveBeenCalled();
+    // PostgreSQL reads a uuid in any case as the same key: an uppercase id is that key too, and a
+    // valid id that names no key of the person's is refused as anyone's.
+    for (const id of [theirs.apiKey.id.toUpperCase(), randomUUID()]) {
+      for (const route of ['/keys/rotate', '/keys/revoke', '/keys/limits']) {
+        const refused = await post(target, `/base/dashboard${route}`, { csrf: token, id }, session);
+        expect(refused.status, `${route} ${id}`).toBe(403);
+      }
+    }
+    expect(keys.store.rotate).not.toHaveBeenCalled();
+    expect(keys.store.revoke).not.toHaveBeenCalled();
+    expect(keys.store.setLimits).not.toHaveBeenCalled();
     for (const route of ['/webhooks', '/contacts/forget', '/settings/assistant', '/plan/manage']) {
       const refused = await post(target, `/base/dashboard${route}`, { csrf: token }, session);
       expect(refused.status, route).toBe(403);
@@ -1902,9 +1934,19 @@ describe('organizations', () => {
     const { session } = await signIn(target);
     const person = `github:${GITHUB_USER.id}`;
     // GitHub's owner of the organization is its Owner, recorded at sign-in.
-    expect(await workspaces.standing(`github-org:${ACME.id}`, person)).toEqual({ role: 'owner', sessionEpoch: 0 });
+    expect((await workspaces.standing(`github-org:${ACME.id}`, person)).role).toBe('owner');
     const token = await csrf(target, session);
     expect((await post(target, '/base/dashboard/keys', { csrf: token, name: 'A', access: 'full', expires: 'never' }, session)).status).toBe(200);
+    // An Admin may change anyone's key, but rotating a Full-access one (which shows its new secret)
+    // still asks a recent sign-in, whoever made it.
+    workspaces.setRole(`github-org:${ACME.id}`, person, 'admin');
+    const theirs = await keys.store.create({ tenantRef: `github-org:${ACME.id}`, name: 'Prod', scopes: ['read', 'write', 'admin'], createdBy: 'github:2' });
+    now += 16 * 60_000;
+    const stale = await post(target, '/base/dashboard/keys/rotate', { csrf: token, id: theirs.apiKey.id }, session);
+    expect(stale.status).toBe(403);
+    expect(await stale.text()).toContain('Confirm it’s you');
+    expect(keys.store.rotate).not.toHaveBeenCalled();
+    now -= 16 * 60_000;
     // Demoted in the database: the same cookie, the next request.
     workspaces.setRole(`github-org:${ACME.id}`, person, 'developer');
     expect((await post(target, '/base/dashboard/keys', { csrf: token, name: 'B', access: 'full', expires: 'never' }, session)).status).toBe(403);
@@ -1931,6 +1973,11 @@ describe('organizations', () => {
     // A new sign-in is a session of the new epoch.
     const next = (await signIn(target)).session;
     expect((await get(target, '/base/dashboard/keys', next)).status).toBe(200);
+    // Without the membership store there is no epoch to move on: nothing to offer, or claim.
+    const plain = dashboard();
+    const own = (await signIn(plain)).session;
+    expect(await (await get(plain, '/base/dashboard/settings/account', own)).text()).not.toContain('sign-out-everywhere');
+    expect((await post(plain, '/base/dashboard/sign-out-everywhere', { csrf: await csrf(plain, own) }, own)).status).toBe(404);
   });
 
   it('lets a viewer read and change nothing, and sends a billing manager to Usage', async () => {

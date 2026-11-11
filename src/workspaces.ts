@@ -19,8 +19,11 @@ export interface SlotlockGitHubMembership {
 export interface SlotlockWorkspaceStanding {
   /** Their role, or null when they do not belong to it (any longer). */
   role: SlotlockWorkspaceRole | null;
-  /** The epoch their sessions must carry: "sign out everywhere" moves it on. */
-  sessionEpoch: number;
+  /**
+   * The epoch their sessions must carry, or null when the person has no record (never signed in
+   * with this store, or erased): then no session passes. "Sign out everywhere" draws a new one.
+   */
+  sessionEpoch: number | null;
 }
 
 /** What the dashboard reads and records of people and their memberships. */
@@ -33,7 +36,7 @@ export interface SlotlockDashboardWorkspaces {
   signedIn(person: string, githubOrganizations?: readonly SlotlockGitHubMembership[]): Promise<number>;
   /** The person's role in a tenant (its test environment is its live tenant's) and their epoch. */
   standing(tenantRef: string, person: string): Promise<SlotlockWorkspaceStanding>;
-  /** End every session of the person: those sealed under the old epoch are refused. */
+  /** End every session of the person: a new epoch is drawn, and those sealed under the old are refused. */
   signOutEverywhere(person: string): Promise<number>;
 }
 
@@ -67,11 +70,15 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
       return Number(row?.epoch ?? 0);
     },
     async standing(tenantRef, person) {
-      if (!PERSON.test(person)) return { role: null, sessionEpoch: 0 };
-      const [row] = await sql<{ role: string | null; session_epoch: number }[]>`
+      if (!PERSON.test(person)) return { role: null, sessionEpoch: null };
+      const [row] = await sql<{ role: string | null; session_epoch: number | null }[]>`
         SELECT role, session_epoch FROM slotlock.dashboard_standing(${tenantRef}::text, ${person}::text)`;
       const role = row?.role ?? null;
-      return { role: isSlotlockWorkspaceRole(role) ? role : null, sessionEpoch: Number(row?.session_epoch ?? 0) };
+      const epoch = row?.session_epoch;
+      return {
+        role: isSlotlockWorkspaceRole(role) ? role : null,
+        sessionEpoch: epoch === null || epoch === undefined ? null : Number(epoch),
+      };
     },
     async signOutEverywhere(person) {
       if (!PERSON.test(person)) refuse('needs github:<id> or google:<subject>');
@@ -93,6 +100,12 @@ export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWork
   const live = (tenantRef: string) => tenantRef.replace(/~test$/, '');
   const memberships = new Map<string, { role: SlotlockWorkspaceRole; source: string; active: boolean }>();
   const epochs = new Map<string, number>();
+  /** A new epoch, never the one it replaces. */
+  const draw = (old?: number) => {
+    let next = old ?? 0;
+    while (next === old || next === 0) next = 1 + Math.floor(Math.random() * 2_147_483_646);
+    return next;
+  };
   const key = (tenantRef: string, person: string) => `${live(tenantRef)}\n${person}`;
   return {
     async signedIn(person, githubOrganizations) {
@@ -114,16 +127,17 @@ export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWork
           if (who === person && membership.source === 'github_org' && !listed.has(tenant as string)) membership.active = false;
         }
       }
-      return epochs.get(person) ?? 0;
+      if (!epochs.has(person)) epochs.set(person, draw());
+      return epochs.get(person) as number;
     },
     async standing(tenantRef, person) {
-      const sessionEpoch = epochs.get(person) ?? 0;
+      const sessionEpoch = epochs.get(person) ?? null;
       if (live(tenantRef) === person) return { role: 'owner', sessionEpoch };
       const found = memberships.get(key(tenantRef, person));
       return { role: found?.active ? found.role : null, sessionEpoch };
     },
     async signOutEverywhere(person) {
-      const next = (epochs.get(person) ?? 0) + 1;
+      const next = draw(epochs.get(person));
       epochs.set(person, next);
       return next;
     },
@@ -131,8 +145,12 @@ export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWork
       memberships.set(key(tenantRef, person), { role, source, active: true });
     },
     remove(tenantRef, person) {
+      // A removal made in Slotlock is Slotlock's: signing in again never undoes it.
       const found = memberships.get(key(tenantRef, person));
-      if (found) found.active = false;
+      if (found) {
+        found.active = false;
+        found.source = 'created';
+      }
     },
   };
 }
