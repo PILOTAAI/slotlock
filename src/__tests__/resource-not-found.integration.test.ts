@@ -1,7 +1,10 @@
 // An id that names no resource of the caller's tenant answers `resource_not_found` on every
 // surface, never a server error: ids the store never issues are refused like another tenant's.
+// What is not an id at all (a reference, as a model passes) also names the caller's resources that
+// best match it, and never another tenant's.
 // Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -153,9 +156,17 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
       }),
     });
 
-  const notFoundResult = {
-    content: [{ type: 'text', text: '{"error":{"code":"resource_not_found"}}' }],
-    isError: true,
+  const notFound = { code: 'resource_not_found' };
+
+  /** The error a tool result's one text part carries, or undefined when it is not one. */
+  const toolError = (result: unknown): unknown => {
+    const { content, isError } = (result ?? {}) as { content?: { type?: string; text?: string }[]; isError?: unknown };
+    if (isError !== true || content?.length !== 1 || content[0]?.type !== 'text') return undefined;
+    try {
+      return (JSON.parse(content[0].text ?? '') as { error?: unknown }).error;
+    } catch {
+      return undefined;
+    }
   };
 
   beforeAll(async () => {
@@ -195,22 +206,27 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
     await sql.end();
   });
 
-  const unknownIds = (): [string, string][] => [
-    ['an external reference (the quickstart passes vehicle-42)', 'vehicle-42'],
-    ['the nil UUID', '00000000-0000-0000-0000-000000000000'],
-    ['a version 7 UUID', '01928f3a-5b6c-7d8e-9f01-23456789abcd'],
-    ['a version 4 UUID that names nothing', randomUUID()],
-    ["another tenant's resource", foreignResource],
+  /** Each id, and the error naming it answers: only a reference names candidates, the caller's own. */
+  const unknownIds = (): [string, string, Record<string, string>][] => [
+    [
+      'an external reference (the quickstart passes vehicle-42)',
+      'vehicle-42',
+      { ...notFound, candidate_1: `${resourceA} vehicle-42` },
+    ],
+    ['the nil UUID', '00000000-0000-0000-0000-000000000000', notFound],
+    ['a version 7 UUID', '01928f3a-5b6c-7d8e-9f01-23456789abcd', notFound],
+    ['a version 4 UUID that names nothing', randomUUID(), notFound],
+    ["another tenant's resource", foreignResource, notFound],
   ];
 
   it('answers resource_not_found over MCP 2025-11-25, MCP 2026-07-28, REST and A2A', async () => {
     const failures: string[] = [];
-    for (const [what, id] of unknownIds()) {
+    for (const [what, id, expected] of unknownIds()) {
       for (const [operation, input] of callsNaming(id)) {
         const where = `${operation} with ${what}`;
         const legacy = await server().fetch(legacyMcp(operation, input));
         const legacyBody = (await legacy.json()) as Record<string, unknown>;
-        if (legacy.status !== 200 || !isEqual(legacyBody.result, notFoundResult)) {
+        if (legacy.status !== 200 || !isDeepStrictEqual(toolError(legacyBody.result), expected)) {
           failures.push(`${where} over MCP 2025: ${legacy.status} ${JSON.stringify(legacyBody)}`);
         }
 
@@ -222,12 +238,7 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
           ),
         );
         const modernBody = await rpc(modern);
-        const modernResult = modernBody.result as Record<string, unknown> | undefined;
-        if (
-          modern.status !== 200 ||
-          !isEqual(modernResult?.content, notFoundResult.content) ||
-          modernResult?.isError !== true
-        ) {
+        if (modern.status !== 200 || !isDeepStrictEqual(toolError(modernBody.result), expected)) {
           failures.push(`${where} over MCP 2026: ${modern.status} ${JSON.stringify(modernBody)}`);
         }
 
@@ -237,7 +248,7 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
         if (
           rest.status !== 404 ||
           restProblem.code !== 'resource_not_found' ||
-          !isEqual(restProblem.error, { code: 'resource_not_found' })
+          !isDeepStrictEqual(restProblem.error, notFound)
         ) {
           failures.push(`${where} over REST: ${rest.status} ${JSON.stringify(restBody)}`);
         }
@@ -248,9 +259,7 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
         };
         if (
           agent.status !== 200 ||
-          !isEqual(agentBody.result?.message?.parts?.[0]?.data, {
-            error: { code: 'resource_not_found' },
-          })
+          !isDeepStrictEqual(agentBody.result?.message?.parts?.[0]?.data, { error: expected })
         ) {
           failures.push(`${where} over A2A: ${agent.status} ${JSON.stringify(agentBody)}`);
         }
@@ -292,7 +301,3 @@ describe.skipIf(!url)('a resource id that names no resource, on the real store',
     });
   });
 });
-
-function isEqual(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
