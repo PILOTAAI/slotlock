@@ -23,6 +23,10 @@ notes first.
     `workspace_memberships`, `workspace_invitations`, `tenant_exports`, `tenant_export_parts`), new
     columns (among them `cutoff_anchor` on bookings and events, and the audit log's chain) and 39
     functions.
+  - Verified domains add three more tables (`workspace_domains`, `workspace_join_requests`,
+    `workspace_join_blocks`) and single sign-on five (`sso_connections`, `sso_identities`,
+    `sso_role_mappings`, `dashboard_session_sso`, `sso_bypasses`), with their functions, unused until
+    turned on.
   - It grants the serving role what this release needs; a library user runs
     `grantApplicationRole` again.
 - **The change history can no longer be edited by the serving role.** It may only add to
@@ -48,7 +52,11 @@ notes first.
 - **New and off until set:**
   - team workspaces (`SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on`);
   - invitations by email (`SLOTLOCK_INVITATION_EMAIL`, `SLOTLOCK_INVITATION_EMAIL_KEY`,
-    `SLOTLOCK_INVITATION_EMAIL_FROM`).
+    `SLOTLOCK_INVITATION_EMAIL_FROM`);
+  - verified domains, with team workspaces (`SLOTLOCK_VERIFIED_DOMAINS=on`; the server's maintenance
+    checks each domain daily, so set it on the server too);
+  - single sign-on through each team's provider, with verified domains (`SLOTLOCK_TEAM_SSO=on` and
+    `SLOTLOCK_SSO_SECRET`, the same on the server and the Worker).
 
 ### Added
 
@@ -161,6 +169,23 @@ notes first.
   as a Viewer (an address verified once by Google or GitHub, or one the team removed or declined,
   only asks), or turn joining off. A record behind a CNAME does not count, and 14 days of resolver
   errors lapse a domain too.
+- **Single sign-on through each team's own identity provider** (`SLOTLOCK_TEAM_SSO=on`, with
+  verified domains, and `SLOTLOCK_SSO_SECRET`): Okta, Microsoft Entra ID (one tenant), Google
+  Workspace or any OpenID Connect provider, set up, tested and turned on by the team's Owners on
+  Settings, Identity. ID tokens are checked with WebCrypto on both runtimes (`verifySlotlockIdToken`:
+  RS256, PS256 or ES256, never none or HMAC; RSA of 2048 bits or more; exact issuer; audience and
+  azp; time with 60 seconds' skew; nonce), keys cached per JWKS URL, an Owner's URLs fetched as
+  hostile (https on public names, no redirects, 5 seconds, 256 KB), client secrets sealed with
+  AES-256-GCM. Identities are the provider's subject, never an email; a sign-in through a provider
+  alone makes a person with no workspace of their own, scoped to the team (no other team, nor the
+  person's other sessions); members link their GitHub or Google person by signing in through it,
+  with a work account at the verified domain, while signed in. Members at the verified domains
+  join at their first sign-in (on by default, as Viewer), groups map to roles (never Owner, and
+  nobody who signs in only through a provider is made one), and the team may require single
+  sign-on, with an Owner's audited one-hour bypass. Turning a connection off or changing it ends the
+  sessions and proofs it gave; deleting it, or erasing the team, erases the people who signed in
+  only through it. Google sign-in now goes through the same verifier, which allows 60 seconds of
+  clock skew.
   An Owner may also hold invitations to the team's verified domains. New capability
   `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,
   `runSlotlockDomainChecks`, `normalizeSlotlockDomain`, `createSlotlockDohResolver`.
