@@ -156,6 +156,15 @@ export const GROUPS = [
     operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
   },
   {
+    name: 'Audit and privacy',
+    operations: [
+      'slotlock_list_audit_events',
+      'slotlock_verify_audit_log',
+      'slotlock_export_subject',
+      'slotlock_erase_subject',
+    ],
+  },
+  {
     name: 'Partner accounts',
     operations: [
       'slotlock_partner_put_account',
@@ -407,6 +416,7 @@ const CLEAN_UP = new Set([
   'slotlock_cancel',
   'slotlock_delete_resource',
   'slotlock_erase_tenant',
+  'slotlock_erase_subject',
 ]);
 
 /** Split example arguments into path values, query pairs and a JSON body. */

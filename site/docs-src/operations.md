@@ -41,6 +41,15 @@ In a process of your own:
   (provider and sync authority) are kept until you erase the tenant. After the window a retried
   command is evaluated afresh under its expected revision, and a pruned agent identity can be
   created again. `retentionDays` (1-3650) changes the window; keep it longer than any client retries.
+- **One person.** `slotlock subject export --email <address>` (or `--holder`, `--contact`,
+  `--reference`) prints what the tenant keeps about one person, a JSON line per row;
+  `slotlock subject erase` with the same option takes them out, leaving bookings as time taken, and
+  records `subject.erased` in the audit log without them. The store's `exportSubject` and
+  `eraseSubject`, and `POST /v1/subjects/export` and `/erase`, do the same.
+- **Audit log.** `slotlock audit verify` checks the workspace audit log's hash chain (exit 1 at the
+  first event changed outside Slotlock); `slotlock audit export` prints it, newest first. Events are
+  kept 180 days, or 400 on the Team plan. The serving role can neither change nor delete an event
+  or a change in the history: both are pruned only by definer functions.
 - **Erasure.** `slotlock tenant erase --confirm <tenant>`, or the store's `eraseTenant({ tenantRef })`,
   deletes everything the tenant owns in one transaction, waiting for its transactions in flight:
   resources, holds, bookings, events with their attendees and reminders, cancellations,

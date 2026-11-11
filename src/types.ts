@@ -741,3 +741,22 @@ export interface CalendarFreeBusy {
   busy: Interval[];
   coverage: CalendarCoverageAssessment;
 }
+
+/**
+ * The tables a subject export lists and an erasure counts (RFC 0004 D3), in that order: what can
+ * name one person.
+ */
+export const SLOTLOCK_SUBJECT_TABLES = Object.freeze([
+  'contacts',
+  'calendar_event_attendees',
+  'calendar_events',
+  'reservations',
+  'reservation_tombstones',
+  'reservation_conflict_archive',
+  'calendar_event_tombstones',
+  'calendar_event_commands',
+  'waitlist_entries',
+  'approvals',
+  'outbox',
+] as const);
+export type SlotlockSubjectTable = (typeof SLOTLOCK_SUBJECT_TABLES)[number];

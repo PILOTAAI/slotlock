@@ -306,6 +306,22 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
 export const SLOTLOCK_WORKSPACE_ROLE_VALUES = Object.freeze(['owner', 'admin', 'developer', 'member', 'viewer', 'billing'] as const);
 export const SLOTLOCK_AUDIT_RETENTION_DAYS = 180;
 
+/**
+ * Days the change history (slotlock.outbox: the feed, and each booking's history) keeps a change on
+ * each hosted plan (RFC 0004 D2). A tenant with no plan keeps the store's `retentionDays` (default
+ * 30); one with a plan keeps its plan's days, or the store's if longer. A cancelled plan keeps Free's.
+ * The workspace audit log keeps SLOTLOCK_AUDIT_RETENTION_DAYS, or the plan's days if longer.
+ */
+export const SLOTLOCK_CHANGE_RETENTION_BY_PLAN = Object.freeze({ free: 30, developer: 90, team: 400 } as const);
+
+/** The plan's change retention in days for the tenant `tenant` (an SQL expression), null without a plan. */
+const planChangeRetentionDaysSql = (tenant: string) =>
+  `(SELECT CASE WHEN given.status = 'canceled' THEN ${SLOTLOCK_CHANGE_RETENTION_BY_PLAN.free}
+                ELSE CASE given.plan ${Object.entries(SLOTLOCK_CHANGE_RETENTION_BY_PLAN)
+                  .map(([plan, days]) => `WHEN '${plan}' THEN ${days}`)
+                  .join(' ')} END END
+      FROM slotlock.tenant_plan(${tenant}) given LIMIT 1)`;
+
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
 export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
 
@@ -360,6 +376,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.note_usage_threshold(text, date, text, integer, bigint, bigint)',
   'slotlock.tenant_plan_quotas(text)',
   'slotlock.reset_test_tenant(text)',
+  'slotlock.prune_changes(text, integer, integer)',
+  'slotlock.erase_subject_changes(text, text, text, text)',
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -463,9 +481,11 @@ export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
 
 /**
  * Tenant tables the serving role may only add to and read (no UPDATE or DELETE): the audit log,
- * whose rows go only through slotlock.prune_audit_events and erasure.
+ * whose rows go only through slotlock.prune_audit_events and erasure, and the change history,
+ * whose rows go only through slotlock.prune_changes and erasure, and whose one edit is taking a
+ * person out of it (slotlock.erase_subject_changes).
  */
-export const SLOTLOCK_APPEND_ONLY_TABLES = Object.freeze(['audit_events'] as const);
+export const SLOTLOCK_APPEND_ONLY_TABLES = Object.freeze(['outbox', 'audit_events'] as const);
 
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
 export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
@@ -4588,22 +4608,147 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_prune_audit_events$
 DECLARE
   pruned integer;
+  kept_days integer;
 BEGIN
+  -- SLOTLOCK_AUDIT_RETENTION_DAYS, or the plan's change history if longer (Team's 400 days).
+  kept_days := greatest(${SLOTLOCK_AUDIT_RETENTION_DAYS}, coalesce(${planChangeRetentionDaysSql('requested_tenant')}, 0));
   -- The start of the chain only, so what is kept still links up: every event up to the last one
   -- written before retention's cut, and events from before the chain past it.
   DELETE FROM slotlock.audit_events gone
    WHERE gone.tenant_ref = requested_tenant
      AND ((gone.chain_index IS NULL
-           AND gone.occurred_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_AUDIT_RETENTION_DAYS}))
+           AND gone.occurred_at < statement_timestamp() - make_interval(days => kept_days))
           OR gone.chain_index <= (
             SELECT max(old.chain_index) FROM slotlock.audit_events old
              WHERE old.tenant_ref = requested_tenant
-               AND old.occurred_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_AUDIT_RETENTION_DAYS})));
+               AND old.occurred_at < statement_timestamp() - make_interval(days => kept_days)));
   GET DIAGNOSTICS pruned = ROW_COUNT;
   RETURN pruned;
 END
 $slotlock_prune_audit_events$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[8]} FROM PUBLIC;
+
+-- A tenant's changes past retention (RFC 0004 D2). The serving role cannot change or delete a
+-- change itself: this is the one way they go, besides erasure. It keeps the store's days
+-- (requested_days, 1 to 3650), or the plan's (SLOTLOCK_CHANGE_RETENTION_BY_PLAN) if longer, so a
+-- serving role cannot cut a hosted tenant's history short. Oldest first in feed order, and only up
+-- to the first change kept (within retention, still owed to an enabled webhook, or later than the
+-- oldest running transaction), so every kept change is after every pruned one and a reader starting
+-- over reads past the gap.
+CREATE OR REPLACE FUNCTION slotlock.prune_changes(requested_tenant text, batch integer, requested_days integer)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_prune_changes$
+DECLARE
+  kept_days integer;
+  pruned integer;
+BEGIN
+  IF batch IS NULL OR batch < 1 OR batch > 10000 OR requested_days IS NULL OR requested_days < 1
+     OR requested_days > 3650 THEN
+    RAISE EXCEPTION 'Slotlock prunes 1 to 10000 changes at a time, keeping 1 to 3650 days'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- A role that cannot delete changes itself (the serving role) acts only for the tenant it
+  -- acts in, where row security names one: the function runs as the schema's owner, which row
+  -- security may not bind. The owner, or a library on its connection, needs no tenant context.
+  IF NOT pg_catalog.has_table_privilege(session_user, 'slotlock.outbox', 'DELETE')
+     AND EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts contract
+                      WHERE current_setting(contract.tenant_context_setting, true) = requested_tenant) THEN
+    RAISE EXCEPTION 'Slotlock prunes the history of only the tenant the caller acts in'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  kept_days := greatest(requested_days, coalesce(${planChangeRetentionDaysSql('requested_tenant')}, 0));
+  WITH head AS MATERIALIZED (
+    SELECT outbox.id, outbox.txid,
+           outbox.occurred_at >= now() - make_interval(days => kept_days)
+           OR EXISTS (
+             SELECT 1 FROM slotlock.webhook_endpoints endpoint
+              WHERE endpoint.tenant_ref = outbox.tenant_ref AND endpoint.disabled_at IS NULL
+                AND (outbox.txid, outbox.id) > (endpoint.cursor_txid, endpoint.cursor_id)
+           ) AS kept
+      FROM slotlock.outbox
+     WHERE outbox.tenant_ref = requested_tenant
+       AND outbox.txid < pg_snapshot_xmin(pg_current_snapshot())
+     ORDER BY outbox.txid, outbox.id
+     LIMIT batch
+  ), doomed AS MATERIALIZED (
+    SELECT change.id, change.txid FROM head change
+     WHERE NOT EXISTS (
+       SELECT 1 FROM head keeper
+        WHERE keeper.kept AND (keeper.txid, keeper.id) <= (change.txid, change.id))
+  ), missed AS (
+    -- A disabled endpoint that had not received one of them has lost it.
+    UPDATE slotlock.webhook_endpoints endpoint SET changes_pruned = true
+     WHERE endpoint.tenant_ref = requested_tenant AND endpoint.disabled_at IS NOT NULL
+       AND NOT endpoint.changes_pruned
+       AND EXISTS (
+         SELECT 1 FROM doomed
+          WHERE (doomed.txid, doomed.id) > (endpoint.cursor_txid, endpoint.cursor_id))
+  ), deleted AS (
+    DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id RETURNING 1
+  )
+  SELECT count(*)::integer INTO pruned FROM deleted;
+  RETURN pruned;
+END
+$slotlock_prune_changes$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[21]} FROM PUBLIC;
+
+-- Taking one person out of a tenant's change history (RFC 0004 D3, slotlock subject erase): the
+-- one edit it allows. A holder's reference and a booking's reference become \`replacement\` (an
+-- \`erased-\` name, the same one everywhere the erasure reached, so what was one booking still reads
+-- as one), and a contact's reference is taken off. Nothing else in a change is touched, and the
+-- serving role can write nothing but such a name. Row security keeps it to the caller's tenant.
+CREATE OR REPLACE FUNCTION slotlock.erase_subject_changes(
+  requested_tenant text, kind text, erased text, replacement text
+)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_erase_subject_changes$
+DECLARE
+  changed integer;
+BEGIN
+  IF kind IS NULL OR kind NOT IN ('holder', 'contact', 'reference')
+     OR erased IS NULL OR octet_length(erased) NOT BETWEEN 1 AND 500
+     OR (kind <> 'contact' AND (replacement IS NULL OR replacement !~ '^erased-[0-9a-f]{32}$')) THEN
+    RAISE EXCEPTION 'Slotlock erases a holder, a contact or a reference from the history, and names it erased-<32 hex>'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- A role that cannot update changes itself (the serving role) acts only for the tenant it
+  -- acts in, where row security names one: the function runs as the schema's owner, which row
+  -- security may not bind. The owner, or a library on its connection, needs no tenant context.
+  IF NOT pg_catalog.has_table_privilege(session_user, 'slotlock.outbox', 'UPDATE')
+     AND EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts)
+     AND NOT EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts contract
+                      WHERE current_setting(contract.tenant_context_setting, true) = requested_tenant) THEN
+    RAISE EXCEPTION 'Slotlock erases from the history of only the tenant the caller acts in'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF kind = 'holder' THEN
+    UPDATE slotlock.outbox change
+       SET data = pg_catalog.jsonb_set(change.data, '{holder_ref}', pg_catalog.to_jsonb(replacement))
+     WHERE change.tenant_ref = requested_tenant AND change.data ->> 'holder_ref' = erased;
+  ELSIF kind = 'contact' THEN
+    UPDATE slotlock.outbox change SET data = change.data - 'contact_ref'
+     WHERE change.tenant_ref = requested_tenant AND change.data ->> 'contact_ref' = erased;
+  ELSE
+    -- A booking's changes are named by its reference and carry it.
+    UPDATE slotlock.outbox change
+       SET subject = CASE WHEN change.subject = erased THEN replacement ELSE change.subject END,
+           data = pg_catalog.jsonb_set(change.data, '{reference}', pg_catalog.to_jsonb(replacement))
+     WHERE change.tenant_ref = requested_tenant AND change.data ->> 'reference' = erased;
+  END IF;
+  GET DIAGNOSTICS changed = ROW_COUNT;
+  RETURN changed;
+END
+$slotlock_erase_subject_changes$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[22]} FROM PUBLIC;
 
 -- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
 CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()

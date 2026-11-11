@@ -521,21 +521,38 @@ provider comes back as coverage and is reported as a conflict, never applied sil
 
 ### P4: platform (alongside)
 
-**D1. Roles for people (T2).**
+**D1. Roles for people (T2).** Status: built by the Teams work, but for limiting a person to
+locations or groups. Six roles (Owner, Admin, Developer, Member, Viewer, Billing) read from the
+database on every request, invitations by email, and sign-in with GitHub or Google. A person's
+role reaches the whole workspace.
 - Roles `owner`, `admin`, `member` and `viewer` within a tenant, from GitHub or by invitation
   (for Google accounts).
 - Only `owner` and `admin` make `admin` keys, webhooks and policy changes.
 - `viewer` reads.
 - A person's access may be limited to locations or groups, reusing G6's policy.
 
-**D2. An audit log that cannot be edited (T2).**
+**D2. An audit log that cannot be edited (T2).** Status: built. The serving role may only add to
+and read both the change history (`slotlock.outbox`) and the workspace audit log
+(`slotlock.audit_events`). The history leaves only through `slotlock.prune_changes`, after 30 days
+on Free, 90 on Developer and 400 on Team (or the store's `retentionDays` if longer), and its one edit
+is taking a person out (`slotlock.erase_subject_changes`, D3). The audit log keeps 180 days, or 400
+on Team, and is hash-chained per tenant. `GET /v1/audit` (on Team where plans apply, as the
+dashboard's export), `GET /v1/audit/verify`, `slotlock audit export` and `slotlock audit verify`.
+The chain covers the audit log, not the history: chaining every change would make each tenant's
+writes take turns, which A7 avoids.
 - Revoke UPDATE and DELETE on the outbox from the serving role, and prune through a definer
   function.
 - Retention by plan: 30 days Free, 90 Developer, 400 Team.
 - `GET /v1/audit` exports it.
 - Optionally, a hash chain per tenant, checked by `slotlock audit verify`.
 
-**D3. Data export and per-person erasure (T2).**
+**D3. Data export and per-person erasure (T2).** Status: per-person export and erasure built;
+the whole-tenant export is not. `POST /v1/subjects/export` and `/erase` (`slotlock subject export`,
+`slotlock subject erase`) find a person by email, holder, contact or booking reference. Erasure
+deletes their contacts, attendee and waitlist entries, takes their email out of events and
+approvals, and gives their references one `erased-` name in bookings, holds, tombstones, events,
+approvals and the history. The bookings stay, as time taken. PRIVACY.md says account holders can do
+this themselves.
 - `slotlock tenant export` and `POST /v1/tenant/export` write NDJSON per table to a signed
   download, asynchronously for large tenants.
 - `slotlock subject erase --email | --holder | --reference` removes:

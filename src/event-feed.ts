@@ -313,7 +313,7 @@ export interface SlotlockEventFeed {
     limit?: number;
     before?: string;
   }): Promise<SlotlockChange[]>;
-  /** Delete up to `limit` of the tenant's changes older than the retention; how many went. */
+  /** Delete up to `limit` of the tenant's changes past retention (slotlock.prune_changes); how many went. */
   pruneChanges(params: { tenantRef: string; limit: number }): Promise<number>;
 }
 
@@ -873,41 +873,13 @@ export function slotlockEventFeedMethods(
 
     async pruneChanges(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
-      // Oldest first in feed order, and only up to the first change kept (within retention, still
-      // owed to an enabled webhook, or later than the oldest running transaction), so every kept
-      // change is after every pruned one and a reader starting over reads past the gap.
+      // Through slotlock.prune_changes: the serving role may only add changes and read them (RFC
+      // 0004 D2). It keeps retentionDays, or the tenant's plan's days if longer, and prunes oldest
+      // first in feed order up to the first change kept, so a reader starting over reads past the gap.
       const rows = await sql<{ deleted: number }[]>`
-        WITH head AS MATERIALIZED (
-          SELECT outbox.id, outbox.txid,
-                 outbox.occurred_at >= now() - make_interval(days => ${retentionDays})
-                 OR EXISTS (
-                   SELECT 1 FROM slotlock.webhook_endpoints endpoint
-                    WHERE endpoint.tenant_ref = outbox.tenant_ref AND endpoint.disabled_at IS NULL
-                      AND (outbox.txid, outbox.id) > (endpoint.cursor_txid, endpoint.cursor_id)
-                 ) AS kept
-            FROM slotlock.outbox
-           WHERE outbox.tenant_ref = ${params.tenantRef}
-             AND outbox.txid < pg_snapshot_xmin(pg_current_snapshot())
-           ORDER BY outbox.txid, outbox.id
-           LIMIT ${params.limit}
-        ), doomed AS MATERIALIZED (
-          SELECT change.id, change.txid FROM head change
-           WHERE NOT EXISTS (
-             SELECT 1 FROM head keeper
-              WHERE keeper.kept AND (keeper.txid, keeper.id) <= (change.txid, change.id))
-        ), missed AS (
-          -- A disabled endpoint that had not received one of them has lost it.
-          UPDATE slotlock.webhook_endpoints endpoint SET changes_pruned = true
-           WHERE endpoint.tenant_ref = ${params.tenantRef} AND endpoint.disabled_at IS NOT NULL
-             AND NOT endpoint.changes_pruned
-             AND EXISTS (
-               SELECT 1 FROM doomed
-                WHERE (doomed.txid, doomed.id) > (endpoint.cursor_txid, endpoint.cursor_id))
-        ), deleted AS (
-          DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id RETURNING 1
-        )
-        SELECT count(*)::int AS deleted FROM deleted`;
-      return rows[0]?.deleted ?? 0;
+        SELECT slotlock.prune_changes(${params.tenantRef}::text, ${params.limit}::integer,
+                                      ${retentionDays}::integer) AS deleted`;
+      return Number(rows[0]?.deleted ?? 0);
     },
   };
 }

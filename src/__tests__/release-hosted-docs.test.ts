@@ -8,6 +8,7 @@ import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
 import { SLOTLOCK_MAX_WEBHOOK_ENDPOINTS } from '../event-feed.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
+import { SLOTLOCK_AUDIT_RETENTION_DAYS, SLOTLOCK_CHANGE_RETENTION_BY_PLAN } from '../ddl.js';
 import { SLOTLOCK_PLAN_LIMITS } from '../plans.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from '../rules.js';
 import { parseAvailabilityRules } from '../weekly-hours.js';
@@ -99,6 +100,11 @@ describe('the published policies', () => {
     expect(privacy).toContain('keeps them for 30 days and then deletes them.');
     expect(privacy).not.toMatch(/10 years|3,650 days/);
     expect(privacy).not.toContain('150 MB');
+    // The history's retention by plan (RFC 0004 D2), and erasing one person (D3).
+    const { free, developer, team } = SLOTLOCK_CHANGE_RETENTION_BY_PLAN;
+    expect(privacy).toContain(`${free} days on the Free plan, ${developer} days on Developer and ${team} days on Team`);
+    expect(privacy).toContain(`${SLOTLOCK_AUDIT_RETENTION_DAYS} days (${team} days on the Team plan)`);
+    expect(privacy).toContain('`POST /v1/subjects/erase` (or `slotlock subject erase`)');
     // Outbox rows hold no event content, as the history row says.
     expect(read('src/ddl.ts')).toContain('never titles,\n// descriptions or attendees');
     expect(privacy).toContain('It never holds titles, descriptions or attendees');

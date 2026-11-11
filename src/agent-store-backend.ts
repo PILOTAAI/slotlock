@@ -64,7 +64,9 @@ import { findEarliestRange } from './ranges.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
   type SlotlockStore,
+  type SlotlockSubject,
   type SlotlockTenantStore,
+  slotlockAuditEventRecord,
   type SlotlockWaitlistEntry,
   SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
   calendarEventRollingHorizon,
@@ -257,6 +259,22 @@ function actorOf(context: TenantCallContext): string | undefined {
 
 function assertActive(context: TenantCallContext): void {
   if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
+}
+
+/** The person an access or erasure request names (RFC 0004 D3), as the schema checked it. */
+function subjectOf(input: Record<string, unknown>): SlotlockSubject {
+  for (const kind of ['email', 'holder', 'contact', 'reference'] as const) {
+    const value = input[kind];
+    if (typeof value === 'string') return { [kind]: value } as SlotlockSubject;
+  }
+  throw new SlotlockAgentOperationError('invalid_subject', 400);
+}
+
+function subjectRefusal(error: unknown): never {
+  if ((error as { code?: unknown } | null)?.code === 'invalid_subject') {
+    throw new SlotlockAgentOperationError('invalid_subject', 400);
+  }
+  throw error;
 }
 
 async function withTenant<T>(
@@ -4390,6 +4408,68 @@ export function createSlotlockStoreApplicationBackend(
         keys: summary.keys.map(({ keyId, ...totals }) => ({ key_id: keyId, ...totals })),
         surfaces: summary.surfaces,
       };
+    },
+
+    async listAuditEvents(context, input) {
+      const tenantRef = tenantOf(context);
+      const limit = (input.limit as number | undefined) ?? 50;
+      return withTenant(store, context, async (tenant) => {
+        // As the dashboard's export: where hosted plans apply, the Team plan's.
+        const plan = await tenant.tenantPlan({ tenantRef });
+        if (plan && (plan.plan !== 'team' || plan.status === 'canceled')) {
+          throw new SlotlockAgentOperationError('team_plan_required', 403);
+        }
+        const events = await tenant.listAuditEvents({
+          tenantRef,
+          limit,
+          ...(typeof input.cursor === 'string' ? { beforeId: input.cursor } : {}),
+          ...(typeof input.action === 'string' ? { action: input.action } : {}),
+          ...(typeof input.actor_ref === 'string' ? { actorRef: input.actor_ref } : {}),
+        });
+        return {
+          events: events.map(slotlockAuditEventRecord),
+          // A full page may have more after it; the next then answers none.
+          next_cursor: events.length === limit ? (events.at(-1)?.id ?? null) : null,
+        };
+      });
+    },
+
+    async verifyAuditLog(context) {
+      const verified = await withTenant(store, context, (tenant) =>
+        tenant.verifyAuditChain({ tenantRef: tenantOf(context) }),
+      );
+      return { checked: verified.checked, broken_at: verified.brokenAt };
+    },
+
+    async exportSubject(context, input) {
+      const subject = subjectOf(input);
+      const exported = await withTenant(store, context, (tenant) =>
+        tenant.exportSubject({ tenantRef: tenantOf(context), subject, limit: 1_000 }),
+      ).catch(subjectRefusal);
+      return { records: exported.records, truncated: exported.truncated };
+    },
+
+    async eraseSubject(context, input) {
+      const subject = subjectOf(input);
+      const tenantRef = tenantOf(context);
+      const keyId = context.principal.keyId;
+      return withTenant(store, context, async (tenant) => {
+        const { erased } = await tenant.eraseSubject({ tenantRef, subject }).catch(subjectRefusal);
+        // Who erased whom is the workspace's to know, but never the person: how they were named,
+        // and what went.
+        await tenant.recordAuditEvent({
+          tenantRef,
+          event: {
+            action: 'subject.erased',
+            ...(typeof keyId === 'string' && /^[0-9a-f-]{36}$/i.test(keyId)
+              ? { actorType: 'api_key' as const, actorRef: `api_key:${keyId}` }
+              : { actorType: 'system' as const, actorRef: 'application' }),
+            targetType: 'subject',
+            metadata: { by: Object.keys(subject)[0], ...Object.fromEntries(Object.entries(erased).filter(([, rows]) => rows > 0)) },
+          },
+        });
+        return { erased };
+      }, WRITE);
     },
 
     async enableWebhook(context, input) {

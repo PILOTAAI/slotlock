@@ -131,6 +131,9 @@ slotlock tenant status
 slotlock tenant suspend --reason "unpaid" # reads only; needs the owner's URL
 slotlock tenant unsuspend
 slotlock tenant erase --confirm default   # everything, keys included, for good
+slotlock subject export --email ada@example.com   # what the tenant keeps about one person
+slotlock subject erase --email ada@example.com    # take them out; bookings stay as time taken
+slotlock audit verify                     # check the audit log's hash chain
 ```
 
 - The resource commands take a reference or an id, and act in `SLOTLOCK_TENANT`. Hours and

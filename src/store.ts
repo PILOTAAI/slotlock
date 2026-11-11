@@ -46,7 +46,7 @@ import {
   bookingSearch,
   parseBookingRules,
 } from './booking-rules.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import ICAL from 'ical.js';
 import type { Sql, TransactionSql } from 'postgres';
 import {
@@ -130,6 +130,7 @@ import type {
   SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
 } from './types.js';
+import { SLOTLOCK_SUBJECT_TABLES, type SlotlockSubjectTable } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 import { applicableHours, exceptionQueryDays } from './hours.js';
 import { zonedDateTimeToUtc } from './timezone.js';
@@ -1320,6 +1321,100 @@ function sandboxTestOnlyError(): Error & { code: 'sandbox_test_only' } {
     new Error('Slotlock does this only in a test environment (a tenant ending ~test)'),
     { code: 'sandbox_test_only' as const },
   );
+}
+
+/** A subject request's email: one address, compared without case. */
+const SUBJECT_EMAIL = /^[^\s@]+@[^\s@]+$/;
+
+interface SubjectKey {
+  kind: 'email' | 'holder' | 'contact' | 'reference';
+  value: string;
+}
+
+/** Whom a subject request names, checked; null when it names none, more than one, or a bad one. */
+function subjectKey(subject: SlotlockSubject | null | undefined): SubjectKey | null {
+  if (typeof subject !== 'object' || subject === null) return null;
+  const named = Object.entries(subject).filter(([, value]) => value !== undefined);
+  if (named.length !== 1) return null;
+  const [kind, raw] = named[0] as [string, unknown];
+  if (typeof raw !== 'string') return null;
+  if (kind === 'email') {
+    const value = raw.trim().toLowerCase();
+    const bytes = Buffer.byteLength(value);
+    return bytes >= 3 && bytes <= 320 && SUBJECT_EMAIL.test(value) ? { kind, value } : null;
+  }
+  if (kind === 'contact') return isValidContactRef(raw) ? { kind, value: raw } : null;
+  if (kind === 'holder' || kind === 'reference') return isValidIdentity(raw) ? { kind, value: raw } : null;
+  return null;
+}
+
+function invalidSubjectError(): Error & { code: 'invalid_subject' } {
+  return Object.assign(
+    new Error('Slotlock names a person by exactly one of email, holder, contact or reference'),
+    { code: 'invalid_subject' as const },
+  );
+}
+
+function emptySubjectCounts(): Record<SlotlockSubjectTable, number> {
+  return Object.fromEntries(SLOTLOCK_SUBJECT_TABLES.map((table) => [table, 0])) as Record<SlotlockSubjectTable, number>;
+}
+
+/** The request fields an approval may keep a booking's or an event's reference in. */
+const SUBJECT_REFERENCE_KEYS = ['reference', 'reservation_ref', 'external_ref', 'event_ref'] as const;
+
+/** The approvals whose request names the subject (SQL, on `approval`). */
+function subjectApprovalSql(tx: TransactionSql, key: SubjectKey, contactRefs: readonly string[]) {
+  const value = key.value;
+  switch (key.kind) {
+    case 'email':
+      return tx`(lower(approval.request -> 'organizer' ->> 'email') = ${value}
+                 OR (jsonb_typeof(approval.request -> 'attendees') = 'array'
+                     AND EXISTS (SELECT 1 FROM jsonb_array_elements(approval.request -> 'attendees') AS attendee(value)
+                                  WHERE lower(attendee.value ->> 'email') = ${value}))
+                 OR approval.request ->> 'contact_ref' = ANY(${contactRefs as string[]}::text[]))`;
+    case 'holder':
+      return tx`approval.request ->> 'holder_ref' = ${value}`;
+    case 'contact':
+      return tx`approval.request ->> 'contact_ref' = ${value}`;
+    case 'reference':
+      return tx`EXISTS (SELECT 1 FROM unnest(${[...SUBJECT_REFERENCE_KEYS]}::text[]) AS field(name)
+                         WHERE approval.request ->> field.name = ${value})`;
+  }
+}
+
+/** An approval's request with the subject taken out (SQL, on `approval`). */
+function subjectScrubbedRequestSql(
+  tx: TransactionSql,
+  key: SubjectKey,
+  contactRefs: readonly string[],
+  replacement: string,
+) {
+  const value = key.value;
+  switch (key.kind) {
+    case 'email':
+      return tx`(
+        SELECT CASE WHEN lower(kept.request -> 'organizer' ->> 'email') = ${value} THEN kept.request - 'organizer'
+                    ELSE kept.request END
+          FROM (SELECT CASE
+                         WHEN jsonb_typeof(scrubbed.request -> 'attendees') = 'array'
+                         THEN jsonb_set(scrubbed.request, '{attendees}', coalesce((
+                           SELECT jsonb_agg(attendee.value ORDER BY attendee.ordinality)
+                             FROM jsonb_array_elements(scrubbed.request -> 'attendees')
+                                  WITH ORDINALITY AS attendee(value, ordinality)
+                            WHERE lower(attendee.value ->> 'email') IS DISTINCT FROM ${value}), '[]'::jsonb))
+                         ELSE scrubbed.request END AS request
+                  FROM (SELECT CASE WHEN approval.request ->> 'contact_ref' = ANY(${contactRefs as string[]}::text[])
+                                    THEN approval.request - 'contact_ref' ELSE approval.request END AS request) scrubbed) kept)`;
+    case 'holder':
+      return tx`jsonb_set(approval.request, '{holder_ref}', to_jsonb(${replacement}::text))`;
+    case 'contact':
+      return tx`approval.request - 'contact_ref'`;
+    case 'reference':
+      return tx`(
+        SELECT approval.request || coalesce(jsonb_object_agg(field.name, to_jsonb(${replacement}::text)), '{}'::jsonb)
+          FROM unnest(${[...SUBJECT_REFERENCE_KEYS]}::text[]) AS field(name)
+         WHERE approval.request ->> field.name = ${value})`;
+  }
 }
 
 function invalidIdentityError(message: string): Error & { code: 'invalid_identity' } {
@@ -3503,6 +3598,22 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * bookings that no longer name them.
    */
   deleteContact(params: { tenantRef: string; ref: string }): Promise<{ deleted: boolean; bookings: number }>;
+  /**
+   * What the tenant keeps about one person (RFC 0004 D3, an access request): the rows that name
+   * them, as kept, by table (SLOTLOCK_SUBJECT_TABLES), up to `limit` (1-10,000, default 1,000) a
+   * table. It lists what eraseSubject would delete or take them out of; an event lists its time and
+   * title, and an approval its decision, never the other people they name.
+   */
+  exportSubject(params: { tenantRef: string; subject: SlotlockSubject; limit?: number }): Promise<SlotlockSubjectExport>;
+  /**
+   * Take one person out of the tenant's data (RFC 0004 D3, an erasure request), in one transaction.
+   * Their contacts, attendee entries and waitlist entries are deleted; their email leaves events'
+   * attendee and organizer lists and approvals' requests; their holder reference and booking
+   * reference become one `erased-` name wherever they were (bookings, holds, ended bookings, the
+   * change history, approvals), and a contact's reference leaves them. Bookings stay, as time taken.
+   * Counts, by table, the rows deleted or changed.
+   */
+  eraseSubject(params: { tenantRef: string; subject: SlotlockSubject }): Promise<SlotlockSubjectErasure>;
   /** One of the tenant's live holds, or null (none, expired, confirmed, or another tenant's). */
   getHold(params: { tenantRef: string; holdId: string }): Promise<SlotlockHold | null>;
   /**
@@ -3993,9 +4104,13 @@ export interface SlotlockStore extends SlotlockEventFeed {
     tenantRef: string;
     limit?: number;
     before?: { occurredAt: Date; id: string };
+    /** After the event with this id, at its exact time (the API's cursor); none if it was pruned. */
+    beforeId?: string;
     action?: string;
     actorRef?: string;
   }): Promise<SlotlockAuditEvent[]>;
+  /** The tenant's hosted plan and its standing (slotlock.tenant_plan), or null when none applies. */
+  tenantPlan(params: { tenantRef: string }): Promise<{ plan: string; status: string } | null>;
   /** Delete the tenant's audit events older than SLOTLOCK_AUDIT_RETENTION_DAYS; how many went. */
   pruneAuditEvents(params: { tenantRef: string }): Promise<number>;
   /**
@@ -4172,6 +4287,48 @@ export interface SlotlockAuditEventInput {
   userAgent?: string;
   /** Before-and-after values and the like: never a secret, a token or a key. */
   metadata?: Record<string, unknown>;
+}
+
+/** An audit event as the API and `slotlock audit export` give it: snake_case, nulls kept. */
+export function slotlockAuditEventRecord(event: SlotlockAuditEvent): Record<string, unknown> {
+  return {
+    id: event.id,
+    occurred_at: event.occurredAt.toISOString(),
+    action: event.action,
+    actor_type: event.actorType,
+    actor_ref: event.actorRef,
+    actor_role: event.actorRole ?? null,
+    target_type: event.targetType ?? null,
+    target_ref: event.targetRef ?? null,
+    outcome: event.outcome,
+    reason: event.reason ?? null,
+    ip_address: event.ipAddress ?? null,
+    user_agent: event.userAgent ?? null,
+    metadata: event.metadata,
+    chain_index: event.chainIndex,
+    hash: event.hash,
+  };
+}
+
+/**
+ * Whom an access or erasure request is about (RFC 0004 D3): one person, by exactly one of the
+ * identifiers Slotlock keeps for them. `email` matches contacts, event attendees and organizers
+ * (ignoring case); `holder` the holder reference on holds, bookings and waitlist entries;
+ * `contact` a contact's reference; `reference` a booking's or an event's reference.
+ */
+export type SlotlockSubject = { email: string } | { holder: string } | { contact: string } | { reference: string };
+
+/** What the tenant keeps about one person (exportSubject). */
+export interface SlotlockSubjectExport {
+  /** Each table's rows that name them, as kept (snake_case, without the tenant). */
+  records: Record<SlotlockSubjectTable, Record<string, unknown>[]>;
+  /** True when a table had more rows than the limit: its first ones are listed. */
+  truncated: boolean;
+}
+
+/** What an erasure did (eraseSubject): by table, the rows deleted or taken the person out of. */
+export interface SlotlockSubjectErasure {
+  erased: Record<SlotlockSubjectTable, number>;
 }
 
 /** An audit event as the log keeps it. */
@@ -6906,6 +7063,250 @@ function buildSlotlockStore(
            WHERE tenant_ref = ${params.tenantRef} AND contact_ref = ${params.ref}
            RETURNING id`;
         return { deleted: deleted.length > 0, bookings: bookings.length };
+      }, 'read committed');
+    },
+
+    async exportSubject(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const key = subjectKey(params.subject);
+      if (!key) throw invalidSubjectError();
+      const limit = params.limit ?? 1_000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+        throw Object.assign(new RangeError('Slotlock subject export limit must be 1-10000'), { code: 'invalid_limit' as const });
+      }
+      const tenantRef = params.tenantRef;
+      const value = key.value;
+      const take = limit + 1;
+      return inTransaction(sql, async (tx) => {
+        // The contacts an email or a contact reference names; the bookings, changes and approvals
+        // that name those contacts are theirs too.
+        const contactRefs =
+          key.kind === 'email'
+            ? (await tx<{ ref: string }[]>`
+                SELECT ref FROM slotlock.contacts WHERE tenant_ref = ${tenantRef} AND lower(email) = ${value}`).map((row) => row.ref)
+            : key.kind === 'contact'
+              ? [value]
+              : [];
+        const records = Object.fromEntries(SLOTLOCK_SUBJECT_TABLES.map((table) => [table, []])) as unknown as SlotlockSubjectExport['records'];
+        const read = async (table: SlotlockSubjectTable, rows: PromiseLike<readonly unknown[]>) => {
+          records[table] = (await rows).map((entry) => (entry as { row: Record<string, unknown> }).row);
+        };
+        if (contactRefs.length > 0) {
+          await read('contacts', tx`
+            SELECT to_jsonb(contact) - 'tenant_ref' AS row FROM slotlock.contacts contact
+             WHERE contact.tenant_ref = ${tenantRef} AND contact.ref = ANY(${contactRefs}::text[])
+             ORDER BY contact.ref LIMIT ${take}`);
+          await read('reservations', tx`
+            SELECT to_jsonb(booking) - 'tenant_ref' AS row FROM slotlock.reservations booking
+             WHERE booking.tenant_ref = ${tenantRef} AND booking.contact_ref = ANY(${contactRefs}::text[])
+             ORDER BY booking.created_at, booking.id LIMIT ${take}`);
+          await read('outbox', tx`
+            SELECT jsonb_build_object('id', change.id::text, 'type', change.type, 'subject', change.subject,
+                                      'data', change.data, 'occurred_at', change.occurred_at) AS row
+              FROM slotlock.outbox change
+             WHERE change.tenant_ref = ${tenantRef} AND change.data ->> 'contact_ref' = ANY(${contactRefs}::text[])
+             ORDER BY change.id LIMIT ${take}`);
+        }
+        if (key.kind === 'email') {
+          await read('calendar_event_attendees', tx`
+            SELECT to_jsonb(attendee) - 'tenant_ref' AS row FROM slotlock.calendar_event_attendees attendee
+             WHERE attendee.tenant_ref = ${tenantRef} AND lower(attendee.email) = ${value}
+             ORDER BY attendee.event_id, attendee.ordinal LIMIT ${take}`);
+        }
+        if (key.kind === 'email' || key.kind === 'reference') {
+          // An event's time and title, and its organizer only when that is them: never the others
+          // it names.
+          await read('calendar_events', tx`
+            SELECT jsonb_strip_nulls(jsonb_build_object(
+                     'id', event.id, 'external_ref', event.external_ref, 'resource_id', event.resource_id,
+                     'starts_at', event.starts_at, 'ends_at', event.ends_at, 'timezone', event.timezone,
+                     'summary', event.summary, 'status', event.status,
+                     'recurring', event.recurrence_rule IS NOT NULL, 'created_at', event.created_at,
+                     'organizer', CASE WHEN lower(event.organizer ->> 'email') = ${value} THEN event.organizer END)) AS row
+              FROM slotlock.calendar_events event
+             WHERE event.tenant_ref = ${tenantRef}
+               AND ${
+                 key.kind === 'email'
+                   ? tx`(lower(event.organizer ->> 'email') = ${value}
+                         OR EXISTS (SELECT 1 FROM jsonb_array_elements(event.attendees) AS attendee(value)
+                                     WHERE lower(attendee.value ->> 'email') = ${value}))`
+                   : tx`event.external_ref = ${value}`
+               }
+             ORDER BY event.created_at, event.id LIMIT ${take}`);
+        }
+        if (key.kind === 'holder') {
+          // A hold may keep no tenant of its own: its resource's is its.
+          await read('reservations', tx`
+            SELECT to_jsonb(booking) - 'tenant_ref' AS row FROM slotlock.reservations booking
+             WHERE booking.holder_ref = ${value}
+               AND (booking.tenant_ref = ${tenantRef}
+                    OR (booking.tenant_ref IS NULL AND booking.resource_id IN (
+                      SELECT resource.id FROM slotlock.resources resource WHERE resource.tenant_ref = ${tenantRef})))
+             ORDER BY booking.created_at, booking.id LIMIT ${take}`);
+          await read('waitlist_entries', tx`
+            SELECT to_jsonb(entry) - 'tenant_ref' AS row FROM slotlock.waitlist_entries entry
+             WHERE entry.tenant_ref = ${tenantRef} AND entry.holder_ref = ${value}
+             ORDER BY entry.created_at, entry.id LIMIT ${take}`);
+          await read('outbox', tx`
+            SELECT jsonb_build_object('id', change.id::text, 'type', change.type, 'subject', change.subject,
+                                      'data', change.data, 'occurred_at', change.occurred_at) AS row
+              FROM slotlock.outbox change
+             WHERE change.tenant_ref = ${tenantRef} AND change.data ->> 'holder_ref' = ${value}
+             ORDER BY change.id LIMIT ${take}`);
+        }
+        if (key.kind === 'reference') {
+          await read('reservations', tx`
+            SELECT to_jsonb(booking) - 'tenant_ref' AS row FROM slotlock.reservations booking
+             WHERE booking.tenant_ref = ${tenantRef} AND booking.external_ref = ${value}
+               AND booking.calendar_event_id IS NULL
+             ORDER BY booking.created_at, booking.id LIMIT ${take}`);
+          for (const table of [
+            'reservation_tombstones',
+            'reservation_conflict_archive',
+            'calendar_event_tombstones',
+            'calendar_event_commands',
+          ] as const) {
+            await read(table, tx`
+              SELECT to_jsonb(kept) - 'tenant_ref' AS row FROM ${tx(`slotlock.${table}`)} kept
+               WHERE kept.tenant_ref = ${tenantRef} AND kept.external_ref = ${value}
+               LIMIT ${take}`);
+          }
+          await read('outbox', tx`
+            SELECT jsonb_build_object('id', change.id::text, 'type', change.type, 'subject', change.subject,
+                                      'data', change.data, 'occurred_at', change.occurred_at) AS row
+              FROM slotlock.outbox change
+             WHERE change.tenant_ref = ${tenantRef} AND change.data ->> 'reference' = ${value}
+             ORDER BY change.id LIMIT ${take}`);
+        }
+        // An approval's decision, never its request: that may name others.
+        await read('approvals', tx`
+          SELECT jsonb_strip_nulls(jsonb_build_object(
+                   'id', approval.id, 'policy_ref', approval.policy_ref, 'status', approval.status,
+                   'operation', approval.operation, 'starts_at', approval.starts_at,
+                   'ends_at', approval.ends_at, 'expires_at', approval.expires_at,
+                   'decided_at', approval.decided_at, 'created_at', approval.created_at)) AS row
+            FROM slotlock.approvals approval
+           WHERE approval.tenant_ref = ${tenantRef} AND ${subjectApprovalSql(tx, key, contactRefs)}
+           ORDER BY approval.created_at, approval.id LIMIT ${take}`);
+        let truncated = false;
+        for (const table of SLOTLOCK_SUBJECT_TABLES) {
+          if (records[table].length > limit) {
+            records[table] = records[table].slice(0, limit);
+            truncated = true;
+          }
+        }
+        return { records, truncated };
+      }, 'read committed');
+    },
+
+    async eraseSubject(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const key = subjectKey(params.subject);
+      if (!key) throw invalidSubjectError();
+      const tenantRef = params.tenantRef;
+      const value = key.value;
+      // One name for what the erasure reached, so what was one holder or booking still reads as one.
+      const replacement = `erased-${randomBytes(16).toString('hex')}`;
+      return inTransaction(sql, async (tx) => {
+        const erased = emptySubjectCounts();
+        const count = async (table: SlotlockSubjectTable, rows: PromiseLike<readonly unknown[]>) => {
+          erased[table] += (await rows).length;
+        };
+        const changes = async (kind: 'holder' | 'contact' | 'reference', name: string) => {
+          const [row] = await tx<{ changed: number }[]>`
+            SELECT slotlock.erase_subject_changes(${tenantRef}::text, ${kind}::text, ${name}::text,
+                                                  ${kind === 'contact' ? null : replacement}::text) AS changed`;
+          erased.outbox += Number(row?.changed ?? 0);
+        };
+        const contactRefs =
+          key.kind === 'email'
+            ? (await tx<{ ref: string }[]>`
+                SELECT ref FROM slotlock.contacts WHERE tenant_ref = ${tenantRef} AND lower(email) = ${value}
+                 ORDER BY ref`).map((row) => row.ref)
+            : key.kind === 'contact'
+              ? [value]
+              : [];
+        // As deleteContact: a contact written meanwhile waits, then finds itself gone or kept.
+        for (const ref of contactRefs) await lockExternalIdentity(tx, tenantRef, `contact:${ref}`);
+        if (key.kind === 'reference') await lockExternalIdentity(tx, tenantRef, value);
+        // Approvals first, while their requests still match what is being erased.
+        await count('approvals', tx`
+          UPDATE slotlock.approvals approval
+             SET request = ${subjectScrubbedRequestSql(tx, key, contactRefs, replacement)}
+           WHERE approval.tenant_ref = ${tenantRef} AND ${subjectApprovalSql(tx, key, contactRefs)}
+          RETURNING 1`);
+        if (contactRefs.length > 0) {
+          await count('contacts', tx`
+            DELETE FROM slotlock.contacts
+             WHERE tenant_ref = ${tenantRef} AND ref = ANY(${contactRefs}::text[])
+            RETURNING 1`);
+          // The bookings stay; they no longer name whom to tell.
+          await count('reservations', tx`
+            UPDATE slotlock.reservations SET contact_ref = NULL
+             WHERE tenant_ref = ${tenantRef} AND contact_ref = ANY(${contactRefs}::text[])
+            RETURNING 1`);
+          for (const ref of contactRefs) await changes('contact', ref);
+        }
+        if (key.kind === 'email') {
+          await count('calendar_event_attendees', tx`
+            DELETE FROM slotlock.calendar_event_attendees
+             WHERE tenant_ref = ${tenantRef} AND lower(email) = ${value}
+            RETURNING 1`);
+          // The event keeps its revision: nothing it books changed, and no one is told of it again.
+          await count('calendar_events', tx`
+            UPDATE slotlock.calendar_events event
+               SET attendees = coalesce((
+                     SELECT jsonb_agg(attendee.value ORDER BY attendee.ordinality)
+                       FROM jsonb_array_elements(event.attendees) WITH ORDINALITY AS attendee(value, ordinality)
+                      WHERE lower(attendee.value ->> 'email') IS DISTINCT FROM ${value}), '[]'::jsonb),
+                   organizer = CASE WHEN lower(event.organizer ->> 'email') = ${value} THEN NULL ELSE event.organizer END
+             WHERE event.tenant_ref = ${tenantRef}
+               AND (lower(event.organizer ->> 'email') = ${value}
+                    OR EXISTS (SELECT 1 FROM jsonb_array_elements(event.attendees) AS attendee(value)
+                                WHERE lower(attendee.value ->> 'email') = ${value}))
+            RETURNING 1`);
+        }
+        if (key.kind === 'holder') {
+          await count('waitlist_entries', tx`
+            DELETE FROM slotlock.waitlist_entries
+             WHERE tenant_ref = ${tenantRef} AND holder_ref = ${value}
+            RETURNING 1`);
+          // Holds and bookings stay as time taken, held by a name that is no one's.
+          await count('reservations', tx`
+            UPDATE slotlock.reservations booking SET holder_ref = ${replacement}
+             WHERE booking.holder_ref = ${value}
+               AND (booking.tenant_ref = ${tenantRef}
+                    OR (booking.tenant_ref IS NULL AND booking.resource_id IN (
+                      SELECT resource.id FROM slotlock.resources resource WHERE resource.tenant_ref = ${tenantRef})))
+            RETURNING 1`);
+          await changes('holder', value);
+        }
+        if (key.kind === 'reference') {
+          // A booking keeps its time under a name that is no one's; so do its ended bookings and
+          // events. The reference is free to book again.
+          await count('reservations', tx`
+            UPDATE slotlock.reservations SET external_ref = ${replacement}
+             WHERE tenant_ref = ${tenantRef} AND external_ref = ${value} AND calendar_event_id IS NULL
+            RETURNING 1`);
+          for (const table of [
+            'reservation_tombstones',
+            'reservation_conflict_archive',
+            'calendar_events',
+            'calendar_event_tombstones',
+            'calendar_event_commands',
+          ] as const) {
+            await count(table, tx`
+              UPDATE ${tx(`slotlock.${table}`)} SET external_ref = ${replacement}
+               WHERE tenant_ref = ${tenantRef} AND external_ref = ${value}
+              RETURNING 1`);
+          }
+          await changes('reference', value);
+        }
+        return { erased };
       }, 'read committed');
     },
 
@@ -10066,6 +10467,8 @@ function buildSlotlockStore(
       const before = params.before;
       const action = params.action !== undefined && AUDIT_ACTION.test(params.action) ? params.action : null;
       const actor = params.actorRef !== undefined && isValidIdentity(params.actorRef) ? params.actorRef : null;
+      const beforeId = params.beforeId !== undefined && isValidResourceId(params.beforeId) ? params.beforeId : null;
+      if (params.beforeId !== undefined && beforeId === null) return [];
       const rows = await sql<
         {
           id: string;
@@ -10093,6 +10496,9 @@ function buildSlotlockStore(
            AND (${actor}::text IS NULL OR actor_ref = ${actor}::text)
            AND (${before?.occurredAt ?? null}::timestamptz IS NULL
                 OR (occurred_at, id) < (${before?.occurredAt ?? null}::timestamptz, ${before?.id ?? null}::uuid))
+           AND (${beforeId}::uuid IS NULL
+                OR (occurred_at, id) < (SELECT kept.occurred_at, kept.id FROM slotlock.audit_events kept
+                                         WHERE kept.tenant_ref = ${params.tenantRef} AND kept.id = ${beforeId}::uuid))
          ORDER BY occurred_at DESC, id DESC
          LIMIT ${limit}`;
       return rows.map((row) => ({
@@ -10112,6 +10518,13 @@ function buildSlotlockStore(
         hash: row.hash === null ? null : row.hash.toString('hex'),
         metadata: row.metadata,
       }));
+    },
+
+    async tenantPlan(params) {
+      if (!isValidIdentity(params.tenantRef)) return null;
+      const [row] = await sql<{ plan: string; status: string }[]>`
+        SELECT plan, status FROM slotlock.tenant_plan(${params.tenantRef}::text) LIMIT 1`;
+      return row ? { plan: row.plan, status: row.status } : null;
     },
 
     async pruneAuditEvents(params) {

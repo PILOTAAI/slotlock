@@ -356,6 +356,7 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'webhook.deleted': 'removed a webhook',
   'webhook.enabled': 'turned a webhook back on',
   'contact.forgotten': 'forgot a contact',
+  'subject.erased': 'erased a person',
   'assistant.settings_saved': "changed the assistant's model",
   'assistant.settings_removed': "removed the assistant's model",
   'billing.checkout_started': 'started a checkout',
@@ -385,7 +386,7 @@ const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = O
   ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
-  ['Other', ['contact.forgotten', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
+  ['Other', ['contact.forgotten', 'subject.erased', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
 ]);
 const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
 

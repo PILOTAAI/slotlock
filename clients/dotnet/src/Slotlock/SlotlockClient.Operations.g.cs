@@ -113,6 +113,10 @@ public sealed partial class SlotlockClient
         ["slotlock_delete_webhook"] = new("DELETE", "/v1/webhooks/{webhook_id}", ["webhook_id"], ["dry_run"]),
         ["slotlock_enable_webhook"] = new("POST", "/v1/webhooks/{webhook_id}/enable", ["webhook_id"], []),
         ["slotlock_get_usage"] = new("GET", "/v1/usage", [], ["from", "to"]),
+        ["slotlock_list_audit_events"] = new("GET", "/v1/audit", [], ["limit", "cursor", "action", "actor_ref"]),
+        ["slotlock_verify_audit_log"] = new("GET", "/v1/audit/verify", [], []),
+        ["slotlock_export_subject"] = new("POST", "/v1/subjects/export", [], []),
+        ["slotlock_erase_subject"] = new("POST", "/v1/subjects/erase", [], []),
         ["slotlock_list_approval_policies"] = new("GET", "/v1/approval-policies", [], []),
         ["slotlock_put_approval_policy"] = new("PUT", "/v1/approval-policies/{policy_ref}", ["policy_ref"], []),
         ["slotlock_delete_approval_policy"] = new("DELETE", "/v1/approval-policies/{policy_ref}", ["policy_ref"], ["dry_run"]),
@@ -3626,6 +3630,131 @@ public sealed partial class SlotlockClient
         if (from.HasValue) values["from"] = Json.ToNode(from.Value);
         if (to.HasValue) values["to"] = Json.ToNode(to.Value);
         return CallAsync("slotlock_get_usage", values, cancellationToken);
+    }
+
+    /// <summary>List audit events.</summary>
+    /// <remarks>
+    /// The workspace audit log, newest first: who did what to its people, keys, webhooks, billing
+    /// and settings, from where, and whether it was refused. Actors are references
+    /// (github:&lt;id&gt;, api_key:&lt;id&gt;), never names. Each event carries its place in the
+    /// tenant's hash chain and its hash (slotlock_verify_audit_log checks them). Only events of
+    /// action or actor_ref when given; pass next_cursor as cursor for the next page, until it is
+    /// null. Events are kept 180 days, 400 on the Team plan. Where hosted plans apply, the log is
+    /// read this way on the Team plan only (403 team_plan_required).
+    /// </remarks>
+    /// <param name="limit">limit</param>
+    /// <param name="cursor">cursor</param>
+    /// <param name="action">action</param>
+    /// <param name="actorRef">actor_ref</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListAuditEventsAsync(
+        Optional<long> limit = default,
+        Optional<string> cursor = default,
+        Optional<string> action = default,
+        Optional<string> actorRef = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
+        if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
+        if (action.HasValue) values["action"] = Json.ToNode(action.Value);
+        if (actorRef.HasValue) values["actor_ref"] = Json.ToNode(actorRef.Value);
+        return CallAsync("slotlock_list_audit_events", values, cancellationToken);
+    }
+
+    /// <summary>Verify the audit log.</summary>
+    /// <remarks>
+    /// Check the workspace audit log's hash chain from its oldest event kept: each event numbered
+    /// after the one before, linked to its hash, and hashed over its own content. checked counts
+    /// the events that held; broken_at is the number of the first that does not (an event
+    /// changed, removed or reordered outside Slotlock), or null when every one does.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> VerifyAuditLogAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_verify_audit_log", values, cancellationToken);
+    }
+
+    /// <summary>Export a person's data.</summary>
+    /// <remarks>
+    /// What the tenant keeps about one person, for an access request: the rows that name them, as
+    /// kept, by table (contacts, calendar_event_attendees, calendar_events, reservations,
+    /// reservation_tombstones, reservation_conflict_archive, calendar_event_tombstones,
+    /// calendar_event_commands, waitlist_entries, approvals, outbox), up to 1,000 a table
+    /// (truncated: true when a table had more). Name them by exactly one of email (contacts,
+    /// event attendees and organizers, ignoring case), holder (holds, bookings and waitlist
+    /// entries), contact (a contact's reference) or reference (a booking's or an event's). It
+    /// lists what slotlock_erase_subject would delete or take them out of: the bookings, changes
+    /// and approvals that name their contacts too. An event lists its time and title, and an
+    /// approval its decision, never the other people they name. 400 invalid_subject when no
+    /// identifier, or more than one, is given.
+    /// </remarks>
+    /// <param name="email">email</param>
+    /// <param name="holder">holder</param>
+    /// <param name="contact">contact</param>
+    /// <param name="reference">reference</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ExportSubjectAsync(
+        Optional<string> email = default,
+        Optional<string> holder = default,
+        Optional<string> contact = default,
+        Optional<string> reference = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (email.HasValue) values["email"] = Json.ToNode(email.Value);
+        if (holder.HasValue) values["holder"] = Json.ToNode(holder.Value);
+        if (contact.HasValue) values["contact"] = Json.ToNode(contact.Value);
+        if (reference.HasValue) values["reference"] = Json.ToNode(reference.Value);
+        return CallAsync("slotlock_export_subject", values, cancellationToken);
+    }
+
+    /// <summary>Erase a person.</summary>
+    /// <remarks>
+    /// Take one person out of the tenant's data, for an erasure request, at once: their contacts,
+    /// attendee entries and waitlist entries are deleted; their email leaves events' attendee and
+    /// organizer lists and approvals' requests; their holder reference and booking reference
+    /// become one erased-&lt;32 hex&gt; name wherever they were (holds, bookings, ended bookings,
+    /// events, the change history, approvals), and their contact's reference leaves bookings and
+    /// changes. Bookings stay, as time taken, and nobody is told: the feed gets no change. Name
+    /// them as for slotlock_export_subject. erased counts, by table, the rows deleted or changed;
+    /// erasing again changes nothing. Recorded in the audit log (subject.erased) without the
+    /// identifier. 400 invalid_subject when no identifier, or more than one, is given.
+    /// </remarks>
+    /// <param name="email">email</param>
+    /// <param name="holder">holder</param>
+    /// <param name="contact">contact</param>
+    /// <param name="reference">reference</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> EraseSubjectAsync(
+        Optional<string> email = default,
+        Optional<string> holder = default,
+        Optional<string> contact = default,
+        Optional<string> reference = default,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        if (email.HasValue) values["email"] = Json.ToNode(email.Value);
+        if (holder.HasValue) values["holder"] = Json.ToNode(holder.Value);
+        if (contact.HasValue) values["contact"] = Json.ToNode(contact.Value);
+        if (reference.HasValue) values["reference"] = Json.ToNode(reference.Value);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_erase_subject", values, cancellationToken);
     }
 
     /// <summary>List approval policies.</summary>

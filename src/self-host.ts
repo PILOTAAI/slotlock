@@ -141,10 +141,12 @@ import { createSlotlockRequestLimits } from './rate-limit.js';
 import { createSlotlockUsageMeter, recordSlotlockUsage } from './usage.js';
 import {
   type SlotlockSql,
+  type SlotlockSubject,
   type SlotlockStore,
   type SlotlockTenantLimits,
   assertSlotlockSchemaCurrent,
   createSlotlockStore,
+  slotlockAuditEventRecord,
 } from './store.js';
 import type { SlotlockResource, WeeklyAvailabilityRule } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
@@ -1640,6 +1642,101 @@ function hoursLine(resource: SlotlockResource): string {
 }
 
 /**
+ * `audit verify|export` (RFC 0004 D2): the tenant's workspace audit log. verify exits 1 when the
+ * chain is broken; export prints every event kept, newest first, as JSON lines.
+ */
+async function runAudit(
+  config: SlotlockDatabaseConfig,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  subcommand: string,
+): Promise<number> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    if (subcommand === 'audit verify') {
+      const verified = await store.withTenant(tenantRef, (tenant) => tenant.verifyAuditChain({ tenantRef }));
+      io.stdout.write(`${JSON.stringify({ checked: verified.checked, broken_at: verified.brokenAt })}\n`);
+      if (verified.brokenAt === null) return 0;
+      io.stderr.write(`slotlock: the audit log's chain breaks at event ${verified.brokenAt}: it was changed outside Slotlock\n`);
+      return 1;
+    }
+    let before: string | undefined;
+    for (;;) {
+      const page = await store.withTenant(tenantRef, (tenant) =>
+        tenant.listAuditEvents({ tenantRef, limit: 200, ...(before ? { beforeId: before } : {}) }),
+      );
+      for (const event of page) io.stdout.write(`${JSON.stringify(slotlockAuditEventRecord(event))}\n`);
+      const last = page.at(-1);
+      if (page.length < 200 || !last) return 0;
+      before = last.id;
+    }
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
+ * `subject export|erase` (RFC 0004 D3): what the tenant keeps about one person, and taking them out
+ * of it. The erasure is recorded in the audit log without the person.
+ */
+async function runSubject(
+  config: SlotlockDatabaseConfig,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  subcommand: string,
+  subject: SlotlockSubject,
+): Promise<number> {
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    try {
+      if (subcommand === 'subject export') {
+        const exported = await store.withTenant(tenantRef, (tenant) =>
+          tenant.exportSubject({ tenantRef, subject, limit: 10_000 }),
+        );
+        for (const [table, rows] of Object.entries(exported.records)) {
+          for (const row of rows) io.stdout.write(`${JSON.stringify({ table, row })}\n`);
+        }
+        if (exported.truncated) io.stderr.write('slotlock: a table had more than 10,000 rows; the first 10,000 are listed\n');
+        return 0;
+      }
+      const { erased } = await store.withTenant(
+        tenantRef,
+        async (tenant) => {
+          const result = await tenant.eraseSubject({ tenantRef, subject });
+          await tenant.recordAuditEvent({
+            tenantRef,
+            event: {
+              action: 'subject.erased',
+              actorType: 'system',
+              actorRef: 'cli',
+              targetType: 'subject',
+              metadata: {
+                by: Object.keys(subject)[0],
+                ...Object.fromEntries(Object.entries(result.erased).filter(([, rows]) => rows > 0)),
+              },
+            },
+          });
+          return result;
+        },
+        { isolation: 'read committed' },
+      );
+      io.stdout.write(`${JSON.stringify({ erased })}\n`);
+      return 0;
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'invalid_subject') {
+        io.stderr.write('slotlock: give an email address, or a holder, contact or booking reference of 1-500 bytes\n');
+        return 2;
+      }
+      throw error;
+    }
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
  * `closures list|add|delete|import` (RFC 0004 B1): the tenant's closures and special days. Exit 0, 1
  * when a name, id or file is not found or refused, as JSON lines on stdout.
  */
@@ -2565,6 +2662,16 @@ Commands:
                            Delete everything the tenant has, its API keys included, for good;
                            --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is
                            paid for (cancel the subscription first)
+  audit verify             Check the tenant's audit log chain: prints how many events held and
+                           the first that does not (exit 1 when one does not)
+  audit export             Print the tenant's audit log, newest first, one JSON object per line
+  subject export (--email <address> | --holder <ref> | --contact <ref> | --reference <ref>)
+                           Print what the tenant keeps about one person, one JSON line per row:
+                           {"table": ..., "row": ...}, up to 10,000 rows a table
+  subject erase (--email <address> | --holder <ref> | --contact <ref> | --reference <ref>)
+                           Take one person out of the tenant's data: their contacts, attendee
+                           and waitlist entries go; their references become an erased name;
+                           bookings stay as time taken. Prints what it changed, by table
   plan status              Print the deployment's default plan and the tenant's own (hosted)
   plan default (free | developer | none) [--from <date>]
                            Put every tenant without a plan of its own on this one from --from
@@ -2726,7 +2833,9 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'partner' ||
     command === 'overage' ||
     command === 'billing' ||
-    command === 'sandbox'
+    command === 'sandbox' ||
+    command === 'audit' ||
+    command === 'subject'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -2775,6 +2884,10 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'partner close': 2,
     'overage report': 1,
     'billing daily': 1,
+    'audit verify': 1,
+    'audit export': 1,
+    'subject export': 1,
+    'subject erase': 1,
   };
   // closures add takes a last day or not.
   const expected =
@@ -2826,6 +2939,15 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       return usage('--from must be an ISO date or time, like 2026-12-09 or 2026-12-09T00:00:00Z');
     }
     if (named !== 'none') planDefault = { plan: named, appliesFrom };
+  }
+  const subjectOptions = (['email', 'holder', 'contact', 'reference'] as const).filter(
+    (option) => values[option] !== undefined,
+  );
+  if (subjectOptions.length > 0 && !subcommand.startsWith('subject ')) {
+    return usage('--email, --holder, --contact and --reference apply only to subject export and subject erase');
+  }
+  if (subcommand.startsWith('subject ') && subjectOptions.length !== 1) {
+    return usage(`${subcommand} needs exactly one of --email, --holder, --contact or --reference`);
   }
   if (subcommand === 'tenant erase' && values.confirm === undefined) {
     return usage('tenant erase needs --confirm <tenant>, the tenant it erases (SLOTLOCK_TENANT)');
@@ -3179,6 +3301,16 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         }
         return 0;
       }
+      case 'audit verify':
+      case 'audit export':
+        return runAudit(readSlotlockDatabaseConfig(io.env), io, subcommand);
+      case 'subject export':
+      case 'subject erase': {
+        const option = subjectOptions[0] as 'email' | 'holder' | 'contact' | 'reference';
+        return runSubject(readSlotlockDatabaseConfig(io.env), io, subcommand, {
+          [option]: values[option] as string,
+        } as SlotlockSubject);
+      }
       case 'closures list':
       case 'closures add':
       case 'closures delete':
@@ -3315,6 +3447,10 @@ function parseCliArguments(argv: readonly string[]) {
       open: { type: 'string' },
       reason: { type: 'string' },
       confirm: { type: 'string' },
+      email: { type: 'string' },
+      holder: { type: 'string' },
+      contact: { type: 'string' },
+      reference: { type: 'string' },
       from: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
