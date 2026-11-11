@@ -92,8 +92,16 @@ STRIPE_TEST_SECRET_KEY=sk_test_... DATABASE_URL=postgres://... npx vitest run pa
 ```
 
 It runs only with a test-mode key: a live key is refused, and the account must answer
-`livemode: false`. It moves no money. Without `STRIPE_TEST_SECRET_KEY` it is skipped, as it is in
-CI. Behind an HTTPS proxy, add `NODE_USE_ENV_PROXY=1`. Stripe cannot reach a test machine, so the
+`livemode: false`. It moves no money. Without `STRIPE_TEST_SECRET_KEY` it is skipped. Behind an
+HTTPS proxy, add `NODE_USE_ENV_PROXY=1`.
+
+In GitHub, the **Stripe end to end** workflow (`.github/workflows/stripe-e2e.yml`) runs it on
+every pull request and push to `main` that changes the code payments go through, every day, and
+on demand. It refuses a run in which any case was skipped. It needs the `STRIPE_TEST_SECRET_KEY`
+repository secret: a test-mode secret key, or a restricted test key that writes PaymentIntents and
+Refunds and reads Events and Balance. Without the secret (a fork's pull request never gets it) it
+says so and passes untested. It is not part of the required **CI passed** check, so Stripe's test
+mode being down never blocks a merge. Stripe cannot reach a test machine, so the
 test signs Stripe's events itself.
 
 ## Status
