@@ -77,10 +77,13 @@ any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they
 (`invalid_transaction_isolation`). Uncapped creates take no lock.
 
 `setResourceAvailability({ tenantRef, id, rules })` gives a resource its own bookable hours (`null`
-inherits, `[]` closes it). `setTenantAvailability({ tenantRef, rules, overrideResources? })` and
+inherits, `[]` closes it). `storeTenantAvailability({ tenantRef, rules, overrideResources? })` and
 `setLocationAvailability({ tenantRef, location, rules })` store hours a resource without its own
 inherits: its location's, the nearest up the chain, then the tenant's (RFC 0004 B2). Each answers
-`{ inheriting, ownHours }`. A resource read carries `inheritedAvailability` when it has no hours of
+`{ inheriting, ownHours }`. `overrideResources` is `none` (resources keep their own hours, the
+default), `all` (they lose them) or `matching` (only those the same as the tenant's were, or as
+these). `setTenantAvailability({ tenantRef, rules })` is kept as 0.8.0 had it, deprecated: every
+resource uses the hours afterwards, and it answers how many. A resource read carries `inheritedAvailability` when it has no hours of
 its own. `createAvailabilityException`, `listAvailabilityExceptions` and
 `deleteAvailabilityException` keep closures and special days (B1). `openWindows` (exported) is the
 one evaluator search and enforced writes share. `createSlotlockStoreAgentBackend` answers from

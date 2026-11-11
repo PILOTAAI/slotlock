@@ -167,6 +167,13 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         expect.objectContaining({ id: decoy, hours: null }),
       ]);
 
+      // --matching clears only hours the same as the tenant's or as these: closed here, so the
+      // resource set closed above loses its own and the other keeps them.
+      const matched = await run(['hours', 'set', '[]', '--all', '--matching']);
+      expect(matched.code).toBe(0);
+      expect(lines((await run(['hours', 'show', '--resource', named])).stdout.text())).toEqual([
+        expect.objectContaining({ id: named, hours: null }),
+      ]);
       // The tenant's hours are stored and inherited (RFC 0004 B2); --override clears resources' own.
       const closedAll = await run(['hours', 'set', '[]', '--all', '--override']);
       expect(closedAll.code).toBe(0);

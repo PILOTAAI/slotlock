@@ -1600,7 +1600,7 @@ pub struct GetAvailabilityDefaultsInput {
 pub struct SetTenantAvailabilityInput {
     pub rules: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub override_resources: Option<bool>,
+    pub override_resources: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2939,10 +2939,13 @@ impl Client {
     ///
     /// Store the tenant's weekly bookable hours: every resource without hours of its own, and
     /// with no location hours above it, uses them, resources added later too. `null` hands them
-    /// back to the server's default. Nothing is copied: a resource with its own hours keeps them,
-    /// unless override_resources is true, which clears them so every resource inherits.
-    /// resources_updated counts the resources in use these hours now apply to;
-    /// resources_with_own_hours, those that keep their own.
+    /// back to the server's default. Nothing is copied: a resource with its own hours keeps them
+    /// (override_resources none, the default), unless override_resources is all, which clears
+    /// them so every resource inherits, or matching, which clears only those whose hours are the
+    /// same as the tenant's were before or as these: the copies versions up to 0.8.0 made when
+    /// setting the tenant's hours, while hours set apart on purpose stay. resources_updated
+    /// counts the resources in use these hours now apply to; resources_with_own_hours, those that
+    /// keep their own.
     pub fn set_tenant_availability(&self, input: &SetTenantAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_set_tenant_availability", serde_json::to_value(input)?)
     }

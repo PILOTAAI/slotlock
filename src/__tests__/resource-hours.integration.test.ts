@@ -117,7 +117,7 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
       ),
     ).toBeNull();
     const updatedForB = await store().withTenant(tenantB, (tenant) =>
-      tenant.setTenantAvailability({ tenantRef: tenantB, rules: AFTERNOONS }),
+      tenant.storeTenantAvailability({ tenantRef: tenantB, rules: AFTERNOONS }),
     );
     expect(updatedForB).toEqual({ inheriting: 1, ownHours: 0 });
     expect(await get(tenantA, mine.id)).toMatchObject({ availabilityRules: WEEKDAYS });
@@ -135,7 +135,7 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
     const mine = await add(tenantA, 'car-owner-path');
     await setHours(tenantA, mine.id, WEEKDAYS);
     expect(await owner.setResourceAvailability({ tenantRef: tenantB, id: mine.id, rules: [] })).toBeNull();
-    const before = await owner.setTenantAvailability({ tenantRef: tenantB, rules: AFTERNOONS, overrideResources: true });
+    const before = await owner.storeTenantAvailability({ tenantRef: tenantB, rules: AFTERNOONS, overrideResources: 'all' });
     const [countB] = await admin<{ n: number }[]>`
       SELECT count(*)::int AS n FROM slotlock.resources WHERE tenant_ref = ${tenantB} AND archived_at IS NULL`;
     expect(before.inheriting).toBe(countB?.n);
@@ -153,7 +153,7 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
       await setHours(tenant, ids[2] as string, AFTERNOONS);
       expect(
         await store().withTenant(tenant, (scoped) =>
-          scoped.setTenantAvailability({ tenantRef: tenant, rules: WEEKDAYS }),
+          scoped.storeTenantAvailability({ tenantRef: tenant, rules: WEEKDAYS }),
         ),
       ).toEqual({ inheriting: 2, ownHours: 1 });
       for (const id of ids.slice(0, 2)) {
@@ -163,11 +163,11 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
       expect(await get(tenant, ids[2] as string)).toMatchObject({ availabilityRules: AFTERNOONS });
       expect(
         await store().withTenant(tenant, (scoped) =>
-          scoped.setTenantAvailability({ tenantRef: tenant, rules: WEEKDAYS, overrideResources: true }),
+          scoped.storeTenantAvailability({ tenantRef: tenant, rules: WEEKDAYS, overrideResources: 'all' }),
         ),
       ).toEqual({ inheriting: 3, ownHours: 0 });
       await store().withTenant(tenant, (scoped) =>
-        scoped.setTenantAvailability({ tenantRef: tenant, rules: null }),
+        scoped.storeTenantAvailability({ tenantRef: tenant, rules: null }),
       );
       for (const id of ids) {
         expect(await get(tenant, id)).not.toHaveProperty('availabilityRules');
@@ -175,12 +175,72 @@ describe.skipIf(!url)('per-resource bookable hours (real Postgres)', () => {
       }
       await expect(
         store().withTenant(tenant, (scoped) =>
-          scoped.setTenantAvailability({
+          scoped.storeTenantAvailability({
             tenantRef: tenant,
             rules: [{ rrule: 'FREQ=DAILY', startMinutes: 0, durationMinutes: 60 }],
           }),
         ),
       ).rejects.toMatchObject({ code: 'invalid_availability' });
+    } finally {
+      await admin`DELETE FROM slotlock.availability_defaults WHERE tenant_ref = ${tenant}`;
+      await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenant}`;
+    }
+  });
+
+  it("clears only copies with 'matching': the same hours as the tenant's were, or as these, in any order", async () => {
+    const tenant = `hours-matching-${randomUUID()}`;
+    const EVENINGS = [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', startMinutes: 1_080, durationMinutes: 180 }];
+    const BOTH = [...WEEKDAYS, ...AFTERNOONS];
+    try {
+      const [copyOfOld, copyOfNew, reordered, custom, closed] = await Promise.all(
+        ['copy-old', 'copy-new', 'reordered', 'custom', 'closed'].map((ref) => add(tenant, ref)),
+      );
+      const ids = { copyOfOld, copyOfNew, reordered, custom, closed } as Record<string, { id: string }>;
+      // What 0.8.0 left: every resource with a copy of the tenant's hours, here WEEKDAYS (stored now too).
+      await store().withTenant(tenant, (scoped) => scoped.storeTenantAvailability({ tenantRef: tenant, rules: WEEKDAYS }));
+      await setHours(tenant, ids.copyOfOld?.id as string, WEEKDAYS);
+      await setHours(tenant, ids.copyOfNew?.id as string, BOTH);
+      await setHours(tenant, ids.reordered?.id as string, [...BOTH].reverse());
+      await setHours(tenant, ids.custom?.id as string, EVENINGS);
+      await setHours(tenant, ids.closed?.id as string, []);
+
+      const result = await store().withTenant(tenant, (scoped) =>
+        scoped.storeTenantAvailability({ tenantRef: tenant, rules: BOTH, overrideResources: 'matching' }),
+      );
+      expect(result).toEqual({ inheriting: 3, ownHours: 2 });
+      for (const ref of ['copyOfOld', 'copyOfNew', 'reordered']) {
+        expect(await get(tenant, ids[ref]?.id as string), ref).not.toHaveProperty('availabilityRules');
+      }
+      // Hours set apart on purpose stay, closed ones too.
+      expect(await get(tenant, ids.custom?.id as string)).toMatchObject({ availabilityRules: EVENINGS });
+      expect(await get(tenant, ids.closed?.id as string)).toMatchObject({ availabilityRules: [] });
+      await expect(
+        store().withTenant(tenant, (scoped) =>
+          scoped.storeTenantAvailability({ tenantRef: tenant, rules: BOTH, overrideResources: 'some' as never }),
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_availability' });
+    } finally {
+      await admin`DELETE FROM slotlock.availability_defaults WHERE tenant_ref = ${tenant}`;
+      await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenant}`;
+    }
+  });
+
+  it('keeps setTenantAvailability as 0.8.0 had it: every resource uses the hours, and it answers a count', async () => {
+    const tenant = `hours-compat-${randomUUID()}`;
+    try {
+      const ids = [];
+      for (const ref of ['a', 'b']) ids.push((await add(tenant, ref)).id);
+      await setHours(tenant, ids[1] as string, AFTERNOONS);
+      const updated = await store().withTenant(tenant, (scoped) =>
+        scoped.setTenantAvailability({ tenantRef: tenant, rules: WEEKDAYS }),
+      );
+      expect(updated).toBe(2);
+      for (const id of ids) {
+        expect(await get(tenant, id)).toMatchObject({ inheritedAvailability: { source: 'tenant', rules: WEEKDAYS } });
+      }
+      // A resource added later uses them too, which a copy never reached.
+      const later = await add(tenant, 'c');
+      expect(await get(tenant, later.id)).toMatchObject({ inheritedAvailability: { source: 'tenant', rules: WEEKDAYS } });
     } finally {
       await admin`DELETE FROM slotlock.availability_defaults WHERE tenant_ref = ${tenant}`;
       await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenant}`;

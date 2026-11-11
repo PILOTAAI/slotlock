@@ -132,12 +132,17 @@ versioning.
 
 ### Changed
 
-- `setTenantAvailability` no longer copies hours onto every resource (RFC 0004 B2). It stores the
-  tenant's hours, which resources without their own inherit, and answers
-  `{ inheriting, ownHours }` instead of a count. A resource whose hours an earlier call copied keeps
-  them: pass `overrideResources: true` (`override_resources`, `hours set --all --override`, or the
-  dashboard's checkbox) once to clear them. `PUT /v1/availability` answers `resources_updated`
-  (resources the hours now apply to) and `resources_with_own_hours`.
+- The tenant's hours are stored, not copied onto every resource (RFC 0004 B2), and resources
+  without their own inherit them, those added later too. `storeTenantAvailability` stores them and
+  answers `{ inheriting, ownHours }`. `setTenantAvailability` keeps its 0.8.0 contract, deprecated:
+  every resource uses the hours afterwards, and it answers how many. `PUT /v1/availability` keeps
+  the hours resources have of their own by default; its `override_resources` is `none`, `all`
+  (clear them) or `matching` (clear those the same as the tenant's were or as the new ones: the
+  copies earlier versions made, while hours set apart on purpose stay), as are
+  `hours set --all --override` and `--matching`. It answers `resources_updated` (resources the
+  hours now apply to) and `resources_with_own_hours`. The dashboard's "Your hours" names the
+  resources that keep their own, with the same three choices, and `/resources?hours=own` lists
+  them.
 - `slotlock_run_maintenance` answers `bookings_completed`; the five clients' checks of its keys
   include it. `slotlock_cancel_reservation` and `slotlock_cancel_tenant_event` answer
   `cancellation_fee` (null when none).

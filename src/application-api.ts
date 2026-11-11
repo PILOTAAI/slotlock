@@ -1339,10 +1339,12 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_tenant_availability',
       title: "Set the tenant's bookable hours",
       description:
-        "Store the tenant's weekly bookable hours: every resource without hours of its own, and with no location hours above it, uses them, resources added later too. `null` hands them back to the server's default. Nothing is copied: a resource with its own hours keeps them, unless override_resources is true, which clears them so every resource inherits. resources_updated counts the resources in use these hours now apply to; resources_with_own_hours, those that keep their own.",
+        "Store the tenant's weekly bookable hours: every resource without hours of its own, and with no location hours above it, uses them, resources added later too. `null` hands them back to the server's default. Nothing is copied: a resource with its own hours keeps them (override_resources none, the default), unless override_resources is all, which clears them so every resource inherits, or matching, which clears only those whose hours are the same as the tenant's were before or as these: the copies versions up to 0.8.0 made when setting the tenant's hours, while hours set apart on purpose stay. resources_updated counts the resources in use these hours now apply to; resources_with_own_hours, those that keep their own.",
       method: 'PUT',
       path: '/v1/availability',
-      input: z.object({ rules: AVAILABILITY_RULES.nullable(), override_resources: z.boolean().optional() }).strict(),
+      input: z
+        .object({ rules: AVAILABILITY_RULES.nullable(), override_resources: z.enum(['none', 'matching', 'all']).optional() })
+        .strict(),
       output: z.object(AVAILABILITY_DEFAULTS_RESULT).strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'setTenantAvailability',

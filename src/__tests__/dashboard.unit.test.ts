@@ -1027,8 +1027,10 @@ describe('bookable hours in the dashboard', () => {
     const target = dashboard();
     const { session } = await signIn(target);
     const page = await (await get(target, '/base/dashboard/hours', session)).text();
-    expect(page).toContain('every resource');
+    expect(page).toContain('Every resource without hours of its own uses these');
     expect(page).toMatch(/name="resource" value="all"/);
+    // No resource keeps hours of its own, so there is nothing to keep or clear.
+    expect(page).not.toContain('name="override"');
     const token = await csrf(target, session);
     const saved = await post(
       target,
@@ -1045,7 +1047,32 @@ describe('bookable hours in the dashboard', () => {
     // Stored as the tenant's, which every resource without its own inherits (RFC 0004 B2).
     expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
       { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
-    ], 'github:4242', false);
+    ], 'github:4242', 'none');
+  });
+
+  it("names the resources that keep hours of their own, and clears copies of the tenant's with 'matching'", async () => {
+    own('car-plain');
+    own('car-copy', [weekdays]);
+    own('car-late', [{ rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 1_200, durationMinutes: 120 }]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/hours', session)).text();
+    expect(page).toContain('<legend>2 resources keep hours of their own</legend>');
+    expect(page).toMatch(/>car-copy<\/a>, <a [^>]*>car-late<\/a>/);
+    expect(page).toContain('<input type="radio" name="override" value="none" checked> Keep them');
+    expect(page).toContain('href="/base/dashboard/resources?hours=own"');
+    const listed = await (await get(target, '/base/dashboard/resources?hours=own', session)).text();
+    expect(listed).toContain('2 resources keep hours of their own');
+    expect(listed).toContain('car-copy');
+    expect(listed).not.toContain('car-plain');
+    const saved = await post(
+      target,
+      '/base/dashboard/hours',
+      { csrf: await csrf(target, session), resource: 'all', mode: 'custom', override: 'matching', ...weekFields({ mo_from_1: '09:00', mo_to_1: '17:00' }) },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(resources.store.setHours).toHaveBeenLastCalledWith('github:4242', 'all', expect.any(Array), 'github:4242', 'matching');
   });
 
   it.each([

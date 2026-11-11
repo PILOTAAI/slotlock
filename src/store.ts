@@ -134,6 +134,7 @@ import {
   type SlotlockAvailabilityDefaults,
   type SlotlockAvailabilityDefaultsResult,
   type SlotlockAvailabilityExceptionInput,
+  type SlotlockOverrideResources,
   createAvailabilityException,
   deleteAvailabilityException,
   getAvailabilityDefaults,
@@ -141,7 +142,7 @@ import {
   rankedExceptions,
   replaceImportedExceptions,
   setLocationAvailability,
-  setTenantAvailability,
+  storeTenantAvailability,
   storedInheritedAvailability,
 } from './availability-store.js';
 import type { SlotlockAvailabilityException, SlotlockRankedException } from './hours.js';
@@ -3149,13 +3150,23 @@ export interface SlotlockStore extends SlotlockEventFeed {
   /**
    * Store (or clear, with `null`) the tenant's weekly hours (RFC 0004 B2): every resource without its
    * own and with no location hours above it uses them, new ones too. Nothing is copied: a resource
-   * keeps hours of its own unless `overrideResources` clears them. Refuses `invalid_availability`.
+   * keeps hours of its own unless `overrideResources` clears them (`all`), or clears those that are
+   * the same as the tenant's were or as these (`matching`). Refuses `invalid_availability`.
    */
-  setTenantAvailability(params: {
+  storeTenantAvailability(params: {
     tenantRef: string;
     rules: readonly WeeklyAvailabilityRule[] | null;
-    overrideResources?: boolean;
+    overrideResources?: SlotlockOverrideResources;
   }): Promise<SlotlockAvailabilityDefaultsResult>;
+  /**
+   * Every resource the tenant has uses these weekly hours (or the server's, with `null`): as in 0.8.0,
+   * whatever hours of their own they had are gone. Now done by storing them as the tenant's, which
+   * resources added later inherit too. Returns how many resources in use they now apply to.
+   *
+   * @deprecated Use storeTenantAvailability, which can keep the hours resources have of their own
+   * and says how many do.
+   */
+  setTenantAvailability(params: { tenantRef: string; rules: readonly WeeklyAvailabilityRule[] | null }): Promise<number>;
   /**
    * Store (or clear) a location's weekly hours: resources at it or inside it without their own use
    * them, unless a nearer location has its own. Null for a location the tenant does not have.
@@ -4603,6 +4614,7 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'declineApproval',
   'resetTestTenant',
   'fastForwardTestTenant',
+  'storeTenantAvailability',
   'setTenantAvailability',
   'setLocationAvailability',
   'createAvailabilityException',
@@ -5691,13 +5703,28 @@ function buildSlotlockStore(
            AND member_order = 'round_robin'`;
     },
 
+    async storeTenantAvailability(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      // What `matching` compares with is read in the same transaction as what replaces it.
+      return inTransaction(sql, (tx) => storeTenantAvailability(tx, params), 'read committed');
+    },
+
     async setTenantAvailability(params) {
       if (!isValidIdentity(params.tenantRef)) {
         throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
           code: 'invalid_identity' as const,
         });
       }
-      return setTenantAvailability(sql, params);
+      const stored = await inTransaction(
+        sql,
+        (tx) => storeTenantAvailability(tx, { tenantRef: params.tenantRef, rules: params.rules, overrideResources: 'all' }),
+        'read committed',
+      );
+      return stored.inheriting;
     },
 
     async setLocationAvailability(params) {

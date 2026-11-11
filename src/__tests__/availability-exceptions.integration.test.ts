@@ -193,7 +193,7 @@ describe.skipIf(!url)('stored hours and closures (real Postgres)', () => {
       locations: [{ location: 'region', rules: rules(10, 14) }],
     });
     // Override hands every resource to what it inherits.
-    const override = await call('admin', 'PUT', '/v1/availability', { rules: rules(9, 17), override_resources: true });
+    const override = await call('admin', 'PUT', '/v1/availability', { rules: rules(9, 17), override_resources: 'all' });
     expect(override.body).toEqual({ resources_updated: 1, resources_with_own_hours: 0 });
     expect(await resourceOf(own)).toMatchObject({ availability: null, inherited_availability: { location: 'region' } });
     // Another tenant sees none of it.

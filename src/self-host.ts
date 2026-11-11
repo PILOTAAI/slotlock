@@ -102,6 +102,7 @@ import {
 } from './otel.js';
 import { readFile } from 'node:fs/promises';
 import type { SlotlockAvailabilityException } from './hours.js';
+import type { SlotlockOverrideResources } from './availability-store.js';
 import { parseHolidayCalendar } from './holidays.js';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
@@ -1768,7 +1769,7 @@ async function runHours(
   out: OutputStream,
   target: { resource: string } | { location: string } | 'all' | 'show',
   rules?: WeeklyAvailabilityRule[] | null,
-  override = false,
+  override: SlotlockOverrideResources = 'none',
 ): Promise<boolean> {
   const sql = connect(config.databaseUrl, 1);
   try {
@@ -1777,7 +1778,7 @@ async function runHours(
     if (target === 'all') {
       // The tenant's hours, which every resource without its own inherits (RFC 0004 B2).
       const result = await store.withTenant(tenantRef, (tenant) =>
-        tenant.setTenantAvailability({ tenantRef, rules: rules ?? null, overrideResources: override }),
+        tenant.storeTenantAvailability({ tenantRef, rules: rules ?? null, overrideResources: override }),
       );
       out.write(`${JSON.stringify({ inheriting: result.inheriting, own_hours: result.ownHours })}\n`);
       return true;
@@ -2443,11 +2444,12 @@ Commands:
   hours show [--resource <ref>]
                            Print each resource's bookable hours: its own (null when none) and
                            what it inherits from its location or the tenant
-  hours set <json> (--resource <ref> | --location <ref> | --all [--override])
+  hours set <json> (--resource <ref> | --location <ref> | --all [--override | --matching])
                            Give one resource, one location or the tenant weekly hours; a
                            resource without its own inherits its location's, then the
                            tenant's, then the server's; --override also clears resources'
-                           own hours; [] closes
+                           own hours, --matching only those the same as the tenant's were
+                           or as these (copies 0.8.0 made); [] closes
   hours clear (--resource <ref> | --location <ref> | --all)
                            Clear those hours, so they inherit from further up
   closures list            Print the tenant's closures and special days from yesterday on
@@ -2794,6 +2796,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     return usage('--all applies only to hours set and hours clear');
   }
   if (values.override && subcommand !== 'hours set') return usage('--override applies only to hours set --all');
+  if (values.matching && subcommand !== 'hours set') return usage('--matching applies only to hours set --all');
+  if (values.override && values.matching) return usage('--override and --matching: give one');
   if (
     values.resource !== undefined &&
     !subcommand.startsWith('hours ') &&
@@ -2836,6 +2840,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     return usage(`${subcommand} needs --resource <ref>, --location <ref> or --all, one of them`);
   }
   if (values.override && values.all !== true) return usage('--override applies only to hours set --all');
+  if (values.matching && values.all !== true) return usage('--matching applies only to hours set --all');
   let hours: WeeklyAvailabilityRule[] | null = null;
   if (subcommand === 'hours set') {
     let candidate: unknown;
@@ -3121,7 +3126,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
           io.stdout,
           target,
           subcommand === 'hours show' ? undefined : hours,
-          values.override === true,
+          values.override === true ? 'all' : values.matching === true ? 'matching' : 'none',
         );
         if (!found) {
           io.stderr.write(
@@ -3264,6 +3269,7 @@ function parseCliArguments(argv: readonly string[]) {
       location: { type: 'string' },
       all: { type: 'boolean' },
       override: { type: 'boolean' },
+      matching: { type: 'boolean' },
       label: { type: 'string' },
       open: { type: 'string' },
       reason: { type: 'string' },

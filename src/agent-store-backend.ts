@@ -54,6 +54,7 @@ import {
   openWindows,
 } from './hours.js';
 import { fetchHolidayCalendar, parseHolidayCalendar } from './holidays.js';
+import { SLOTLOCK_OVERRIDE_RESOURCES, type SlotlockOverrideResources } from './availability-store.js';
 import { findEarliestRange } from './ranges.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
@@ -3256,10 +3257,12 @@ export function createSlotlockStoreApplicationBackend(
       const rules = rulesInput(input.rules);
       return withTenant(store, context, async (tenant) => {
         try {
-          const result = await tenant.setTenantAvailability({
+          const result = await tenant.storeTenantAvailability({
             tenantRef: tenantOf(context),
             rules,
-            overrideResources: input.override_resources === true,
+            overrideResources: SLOTLOCK_OVERRIDE_RESOURCES.includes(input.override_resources as SlotlockOverrideResources)
+              ? (input.override_resources as SlotlockOverrideResources)
+              : 'none',
           });
           return { resources_updated: result.inheriting, resources_with_own_hours: result.ownHours };
         } catch (error) {

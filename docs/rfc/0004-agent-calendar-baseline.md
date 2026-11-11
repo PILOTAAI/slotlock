@@ -362,9 +362,12 @@ its own uses its location's, then its tenant's, then the server's. A new resourc
 
 As built: `availability_defaults` holds the tenant's and each location's rules. The database
 function `slotlock.inherited_availability` finds the nearest, and every resource read carries it.
-`setTenantAvailability` now answers `{ inheriting, ownHours }`. Hours an earlier version copied stay
-a resource's own until `overrideResources` clears them. Clearing them silently would have changed
-hours an owner may have set on purpose.
+`storeTenantAvailability` answers `{ inheriting, ownHours }`, and `setTenantAvailability` keeps its
+0.8.0 contract (every resource uses the hours, and a count), deprecated. Hours an earlier version
+copied stay a resource's own until `overrideResources` clears them: `all` clears every resource's,
+`matching` only those the same as the tenant's were or as the new ones. Clearing them silently
+would have changed hours an owner may have set on purpose; the dashboard names the resources that
+keep their own.
 
 **B3. Durations and multi-day (T1).** Status: built.
 - Booking rules gain:

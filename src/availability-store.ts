@@ -31,6 +31,16 @@ export interface SlotlockAvailabilityDefaults {
   locations: { location: string; rules: WeeklyAvailabilityRule[] }[];
 }
 
+/**
+ * What storing the tenant's hours does to resources with hours of their own: `none` keeps them,
+ * `all` clears them so every resource inherits, and `matching` clears only those whose hours are
+ * the same as the tenant's were before, or as the hours being stored: the copies an earlier
+ * version (0.8.0 and before) made, while hours set apart on purpose stay.
+ */
+export type SlotlockOverrideResources = 'none' | 'matching' | 'all';
+
+export const SLOTLOCK_OVERRIDE_RESOURCES: readonly SlotlockOverrideResources[] = Object.freeze(['none', 'matching', 'all']);
+
 /** What setting stored hours changed: resources now on them, and those that keep their own. */
 export interface SlotlockAvailabilityDefaultsResult {
   /** Resources in use whose hours these now are. */
@@ -90,13 +100,31 @@ function notFound(code: 'location_not_found' | 'resource_not_found', message: st
 
 /**
  * Store the tenant's weekly hours (or clear them, `null`): every resource without its own and with
- * no location hours above it uses them. `overrideResources` also clears the hours resources keep of
- * their own, so every resource inherits.
+ * no location hours above it uses them. `overrideResources` says what becomes of the hours
+ * resources keep of their own (SlotlockOverrideResources; `none` by default).
  */
-export async function setTenantAvailability(
+export async function storeTenantAvailability(
   sql: StoreSql,
-  params: { tenantRef: string; rules: readonly WeeklyAvailabilityRule[] | null; overrideResources?: boolean },
+  params: {
+    tenantRef: string;
+    rules: readonly WeeklyAvailabilityRule[] | null;
+    overrideResources?: SlotlockOverrideResources;
+  },
 ): Promise<SlotlockAvailabilityDefaultsResult> {
+  const override = params.overrideResources ?? 'none';
+  if (!SLOTLOCK_OVERRIDE_RESOURCES.includes(override)) {
+    throw Object.assign(new Error("overrideResources must be 'none', 'matching' or 'all'"), {
+      code: 'invalid_availability' as const,
+    });
+  }
+  const rules = params.rules === null ? null : parseAvailabilityRules([...params.rules]);
+  // The hours stored before, for `matching`: read before they are replaced.
+  const [before] =
+    override === 'matching'
+      ? await sql<{ rules: unknown }[]>`
+          SELECT rules FROM slotlock.availability_defaults
+           WHERE tenant_ref = ${params.tenantRef} AND location_ref IS NULL`
+      : [];
   if (params.rules === null) {
     await sql`DELETE FROM slotlock.availability_defaults WHERE tenant_ref = ${params.tenantRef} AND location_ref IS NULL`;
   } else {
@@ -106,10 +134,29 @@ export async function setTenantAvailability(
       ON CONFLICT (tenant_ref, (COALESCE(location_ref, '')))
       DO UPDATE SET rules = EXCLUDED.rules, updated_at = statement_timestamp()`;
   }
-  if (params.overrideResources === true) {
+  if (override === 'all') {
     await sql`
       UPDATE slotlock.resources SET availability_rules = NULL
        WHERE tenant_ref = ${params.tenantRef} AND availability_rules IS NOT NULL`;
+  } else if (override === 'matching') {
+    const same = [rules, before ? storedRules(before.rules) : null].filter(
+      (candidate): candidate is WeeklyAvailabilityRule[] => candidate !== null,
+    );
+    if (same.length > 0) {
+      // The same hours in any order: each list compared with its rules sorted.
+      await sql`
+        WITH wanted AS (
+          SELECT COALESCE((SELECT jsonb_agg(rule ORDER BY rule::text) FROM jsonb_array_elements(hours) rule), '[]'::jsonb) AS hours
+            FROM jsonb_array_elements(${sql.json(same.map((list) => list.map((rule) => ({ ...rule }))) as never)}::jsonb) hours
+        )
+        UPDATE slotlock.resources AS resource SET availability_rules = NULL
+         WHERE resource.tenant_ref = ${params.tenantRef}
+           AND jsonb_typeof(resource.availability_rules) = 'array'
+           AND COALESCE(
+                 (SELECT jsonb_agg(rule ORDER BY rule::text) FROM jsonb_array_elements(resource.availability_rules) rule),
+                 '[]'::jsonb
+               ) IN (SELECT hours FROM wanted)`;
+    }
   }
   const [counted] = await sql<{ inheriting: string; own_hours: string }[]>`
     SELECT count(*) FILTER (

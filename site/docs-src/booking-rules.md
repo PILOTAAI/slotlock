@@ -32,7 +32,10 @@ slotlock closures import holidays.ics --location london-depot
 Hours inherit (RFC 0004 B2): a resource without its own uses its location's, the nearest up the
 chain, then the tenant's, then `SLOTLOCK_AVAILABILITY`. Resources added later inherit too.
 Nothing is copied, so `hours set --all` leaves a resource's own hours alone unless `--override`
-clears them.
+clears them, or `--matching` clears those that are the same as the tenant's were or as the new
+ones: the copies 0.8.0 and earlier made, while hours set apart on purpose stay. The dashboard's
+"Your hours" names the resources that keep their own, with the same three choices, and
+`/resources?hours=own` lists them.
 
 Closures and special days (RFC 0004 B1) replace whole days, read in each resource's time zone: a
 closure empties them, `--open` gives them hours of their own. Each is the tenant's, one location's

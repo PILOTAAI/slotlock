@@ -157,7 +157,7 @@ describe.skipIf(!url)('the application API on the real store', () => {
       resources_updated: 0,
       resources_with_own_hours: 1,
     });
-    expect((await call('a', 'PUT', '/v1/availability', { rules: null, override_resources: true })).body).toEqual({
+    expect((await call('a', 'PUT', '/v1/availability', { rules: null, override_resources: 'all' })).body).toEqual({
       resources_updated: 1,
       resources_with_own_hours: 0,
     });

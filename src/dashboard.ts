@@ -103,7 +103,11 @@ import {
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
 import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
-import type { SlotlockAvailabilityDefaults, SlotlockAvailabilityExceptionInput } from './availability-store.js';
+import type {
+  SlotlockAvailabilityDefaults,
+  SlotlockAvailabilityExceptionInput,
+  SlotlockOverrideResources,
+} from './availability-store.js';
 import { type SlotlockAvailabilityException, dayToDate, epochDay } from './hours.js';
 import { parseHolidayCalendar } from './holidays.js';
 import { SlotlockAgentOperationError } from './agent-server.js';
@@ -287,16 +291,17 @@ export interface SlotlockDashboardResources {
   /**
    * Set the bookable hours of one of the tenant's resources (`{ id }`), one of its locations
    * (`{ location }`), or the tenant's own (`'all'`), which every resource without its own inherits
-   * (RFC 0004 B2); `null` hands them to what is above and `[]` closes. With `override`, the tenant's
-   * hours also clear resources' own. Returns 0 for an id or location that is not the tenant's, else
-   * at least 1 (for the tenant's, how many resources they now apply to).
+   * (RFC 0004 B2); `null` hands them to what is above and `[]` closes. For the tenant's, `override`
+   * says what becomes of resources' own hours (SlotlockOverrideResources: `none` keeps them).
+   * Returns 0 for an id or location that is not the tenant's, else at least 1 (for the tenant's, how
+   * many resources they now apply to).
    */
   setHours(
     tenantRef: string,
     target: { id: string } | { location: string } | 'all',
     rules: WeeklyAvailabilityRule[] | null,
     actor?: string,
-    override?: boolean,
+    override?: SlotlockOverrideResources,
   ): Promise<number>;
   /** The people the tenant keeps to tell about bookings (RFC 0004 P3), and forgetting one. */
   contacts?: {
@@ -800,7 +805,7 @@ export function createSlotlockDashboardResources(
         tenantRef,
         async (tenant) => {
           if (target === 'all') {
-            return (await tenant.setTenantAvailability({ tenantRef, rules, overrideResources: override === true })).inheriting;
+            return (await tenant.storeTenantAvailability({ tenantRef, rules, overrideResources: override ?? 'none' })).inheriting;
           }
           if ('location' in target) {
             const result = await tenant.setLocationAvailability({ tenantRef, location: target.location, rules });
@@ -2552,9 +2557,13 @@ ${
     };
   }
 
-  async function resourcesPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const resources = await options.resources.list(tenantOf(session));
-    const allowance = await resourceAllowance(tenantOf(session), resources);
+  async function resourcesPage(session: Session, status = 200, notice?: string, ownHoursOnly = false): Promise<Response> {
+    const every = await options.resources.list(tenantOf(session));
+    const allowance = await resourceAllowance(tenantOf(session), every);
+    // `?hours=own`: those that keep hours of their own, which the tenant's hours do not reach.
+    const resources = ownHoursOnly
+      ? every.filter((resource) => resource.archivedAt === undefined && resource.availabilityRules !== undefined)
+      : every;
     const token = csrfToken(session);
     const content = html`${noticeOf(notice, status)}
 ${pageHead(
@@ -2573,7 +2582,11 @@ ${pageHead(
 <p class="fine">${String(allowance.used)} of ${String(allowance.limit)}${allowance.planned ? html` on your plan${allowance.archived > 0 ? html`, ${String(allowance.archived)} of them archived (archived resources count until deleted)` : html``}` : html``}. Adding a reference you have changes its time zone.</p>
 </section>
 ${
-  resources.length === 0
+  ownHoursOnly
+    ? html`<p class="notice" role="status">${String(resources.length)} ${resources.length === 1 ? 'resource keeps hours of its own' : 'resources keep hours of their own'}, so <a href="${root}/hours">your hours</a> do not reach ${resources.length === 1 ? 'it' : 'them'}. <a href="${root}/resources">Show every resource</a></p>`
+    : html``
+}${
+  resources.length === 0 && !ownHoursOnly
     ? emptyState(ICONS.resources, 'No resources yet. Agents can only book what is listed here.', { href: '#reference', label: 'Add a resource' })
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
@@ -2668,6 +2681,9 @@ ${
   }
 
   type SettingsSection = 'assistant' | 'endpoints' | 'hours' | 'account';
+
+  /** Resources with hours of their own the tenant's hours page names; the rest are counted. */
+  const OWN_HOURS_NAMED = 8;
 
   /** Settings' sections, each its own page: the assistant's form apart from what is only read. */
   const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string; path: string }[] = Object.freeze([
@@ -4859,6 +4875,22 @@ ${
   const isLocationTarget = (target: HoursTarget): target is { location: SlotlockLocation } =>
     typeof target === 'object' && 'location' in target && typeof target.location === 'object';
 
+  /** How many resources keep hours of their own, a few by name, and what saving does to them. */
+  function ownHoursChoice(own: readonly SlotlockResource[]): Html {
+    if (own.length === 0) return html``;
+    const named = own.slice(0, OWN_HOURS_NAMED);
+    const word = own.length === 1 ? 'resource keeps hours of its own' : 'resources keep hours of their own';
+    return html`<fieldset class="modes"><legend>${String(own.length)} ${word}</legend>
+<p class="fine">${named.map(
+      (resource, index) =>
+        html`${index > 0 ? ', ' : ''}<a href="${root}/hours?resource=${resource.id}">${resourceName(resource, resource.id)}</a>`,
+    )}${own.length > named.length ? html` and ${String(own.length - named.length)} more` : html``}. <a href="${root}/resources?hours=own">See them all</a></p>
+<label class="choice"><input type="radio" name="override" value="none" checked> Keep them</label>
+<label class="choice"><input type="radio" name="override" value="matching"> Clear those with the same hours as yours were, or as these: copies an earlier version made when your hours were set</label>
+<label class="choice"><input type="radio" name="override" value="all"> Clear them all, so every resource uses these</label>
+</fieldset>`;
+  }
+
   function hoursPage(
     session: Session,
     state: {
@@ -4868,6 +4900,8 @@ ${
       unshown?: readonly WeeklyAvailabilityRule[];
       status?: number;
       notice?: string;
+      /** For the tenant's hours: the resources in use that keep hours of their own. */
+      own?: readonly SlotlockResource[] | undefined;
     },
   ): Response {
     const { target, mode } = state;
@@ -4930,7 +4964,7 @@ ${place ? html`<input type="hidden" name="location" value="${place.ref}">` : htm
 </fieldset>
 <div class="table"><table class="week"><thead><tr><th>Day</th><th>Opens</th><th>Closes</th><th>Opens</th><th>Closes</th></tr></thead><tbody>${rows}</tbody></table></div>
 <p class="fine">A closing time at or before the opening time closes the next day; 00:00 to 00:00 is the whole day. Leave a window empty for none.</p>
-${target === 'all' ? html`<label class="choice"><input type="checkbox" name="override" value="yes"> Also clear the hours resources have of their own, so every resource uses these</label>` : html``}
+${target === 'all' ? ownHoursChoice(state.own ?? []) : html``}
 <button class="primary" type="submit">Save hours</button>
 </form>
 </section>`;
@@ -4973,6 +5007,14 @@ ${target === 'all' ? html`<label class="choice"><input type="checkbox" name="ove
   const nothingHere = (session: Session) =>
     respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
 
+  /** The tenant's resources in use that keep hours of their own, by name. */
+  async function ownHoursOf(session: Session): Promise<SlotlockResource[]> {
+    const resources = await options.resources.list(tenantOf(session));
+    return resources
+      .filter((resource) => resource.archivedAt === undefined && resource.availabilityRules !== undefined)
+      .sort((one, other) => resourceName(one, one.id).localeCompare(resourceName(other, other.id)));
+  }
+
   async function hoursEditor(session: Session, url: URL): Promise<Response> {
     const ref = url.searchParams.get('location');
     if (ref !== null) {
@@ -4984,13 +5026,17 @@ ${target === 'all' ? html`<label class="choice"><input type="checkbox" name="ove
     }
     const id = url.searchParams.get('resource');
     if (id === null) {
-      const defaults = await options.resources.hours?.defaults(tenantOf(session));
-      return hoursPage(session, { target: 'all', ...hoursState(defaults?.tenant ?? null) });
+      const [defaults, own] = await Promise.all([options.resources.hours?.defaults(tenantOf(session)), ownHoursOf(session)]);
+      return hoursPage(session, { target: 'all', ...hoursState(defaults?.tenant ?? null), own });
     }
     const resource = await ownResource(session, id);
     if (!resource) return notFound(session);
     return hoursPage(session, { target: resource, ...hoursState(resource.availabilityRules) });
   }
+
+  /** The form's choice for resources' own hours; anything else keeps them. */
+  const overrideOf = (value: string | null): SlotlockOverrideResources =>
+    value === 'all' || value === 'matching' ? value : 'none';
 
   async function saveHours(session: Session, form: URLSearchParams): Promise<Response> {
     const ref = form.get('location');
@@ -5005,6 +5051,7 @@ ${target === 'all' ? html`<label class="choice"><input type="checkbox" name="ove
     if (!target) return notFound(session);
     const mode = form.get('mode');
     const week = readWeekForm(form);
+    const own = target === 'all' ? await ownHoursOf(session) : undefined;
     if (mode !== 'server' && mode !== 'closed' && mode !== 'custom') {
       return hoursPage(session, {
         target,
@@ -5012,6 +5059,7 @@ ${target === 'all' ? html`<label class="choice"><input type="checkbox" name="ove
         week,
         status: 400,
         notice: 'Choose which hours to use.',
+        own,
       });
     }
     let rules: WeeklyAvailabilityRule[] | null = mode === 'server' ? null : [];
@@ -5031,13 +5079,14 @@ ${target === 'all' ? html`<label class="choice"><input type="checkbox" name="ove
           week,
           status: 400,
           notice: (error as Error).message,
+          own,
         });
       }
     }
     const place = isLocationTarget(target) ? target.location : null;
     const changed =
       target === 'all'
-        ? await options.resources.setHours(tenantOf(session), 'all', rules, personOf(session), form.get('override') === 'yes')
+        ? await options.resources.setHours(tenantOf(session), 'all', rules, personOf(session), overrideOf(form.get('override')))
         : await options.resources.setHours(
             tenantOf(session),
             place ? { location: place.ref } : { id: (target as SlotlockResource).id },
@@ -6166,7 +6215,9 @@ ${
                 );
               }
               if (route === '/keys') return await keysPage(session);
-              if (route === '/resources') return await resourcesPage(session);
+              if (route === '/resources') {
+                return await resourcesPage(session, 200, undefined, url.searchParams.get('hours') === 'own');
+              }
               if (route === '/webhooks') return await webhooksPage(session);
               if (route === '/waitlist') return await waitlistPage(session);
               if (route === '/approvals') return await approvalsPage(session);

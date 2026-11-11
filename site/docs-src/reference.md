@@ -204,7 +204,7 @@ waits for a confirmation.
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
 | `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
 | `PUT /v1/resources/{resource_id}/availability` | `{"rules":[…]}`: its own weekly hours; `"rules":[]` never bookable, `"rules":null` the server's |
-| `PUT /v1/availability` | `{"rules":[…], "override_resources"?}`: the tenant's weekly hours, which resources without their own inherit; `GET` reads them and each location's |
+| `PUT /v1/availability` | `{"rules":[…], "override_resources"?}`: the tenant's weekly hours, which resources without their own inherit; `override_resources` `none` (default), `matching` or `all` says which resources' own hours are cleared; `GET` reads them and each location's |
 | `PUT /v1/locations/{location}/availability` | `{"rules":[…]}`: a location's weekly hours, inherited by resources at it or inside it |
 | `GET /v1/availability/exceptions` | Closures and special days: `?resource_id=` those that apply to it, `?location=` one location's own |
 | `POST /v1/availability/exceptions` | `{"starts_on","ends_on"?,"outcome":"closed"\|"open","hours"?,"label","location"?,"resource_id"?}`; `DELETE …/{exception_id}` removes one |

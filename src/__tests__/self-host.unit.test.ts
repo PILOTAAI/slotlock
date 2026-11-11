@@ -864,6 +864,9 @@ describe('slotlock command line', () => {
     [['closures', 'list', '--label', 'x'], /--label and --open apply only to closures add/],
     [['hours', 'set', '[]', '--location', 'depot', '--all'], /one of them/],
     [['hours', 'set', '[]', '--resource', 'van', '--override'], /--override applies only to hours set --all/],
+    [['hours', 'set', '[]', '--resource', 'van', '--matching'], /--matching applies only to hours set --all/],
+    [['hours', 'clear', '--all', '--matching'], /--matching applies only to hours set --all/],
+    [['hours', 'set', '[]', '--all', '--override', '--matching'], /--override and --matching: give one/],
     [['hours', 'set', 'Mon 9-5', '--all'], /hours must be a JSON array of weekly rules/],
     [
       ['hours', 'set', '[{"rrule":"FREQ=DAILY","startMinutes":540,"durationMinutes":60}]', '--all'],
