@@ -1569,13 +1569,16 @@ describe('organizations', () => {
       })),
       contact: 'mailto:founder@example.com',
     };
-    const target = orgDashboard([{ ...ACME, role: 'member' }], { plans });
+    const target = orgDashboard([{ ...ACME, role: 'member' }], { plans, resources: { ...resources.store, count: vi.fn(async () => 10) } });
     const { session } = await signIn(target);
     const switched = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
     const inOrg = cookie(switched, '__Host-slotlock-session')?.pair as string;
     const html = await (await get(target, '/base/dashboard/plan', inOrg)).text();
     expect(html).toContain('An owner of this organization can change its plan.');
     expect(html).not.toContain('Talk to us about');
+    // At a limit, a member is told who can lift it, with nothing to click that would not let them.
+    expect(html).toContain('On Free, you have 10 of 10 resources: adding another is refused. An owner of this organization can upgrade.');
+    expect(html).not.toContain('>Upgrade</a>');
   });
 
   it("leaves an organization's plan and billing to its owners", async () => {
@@ -2036,7 +2039,8 @@ describe('the overview', () => {
     const html = await (await get(target, '/base/dashboard', session)).text();
     const attention = /<ul class="attention-list"[^>]*>([\s\S]*?)<\/ul>/.exec(html)?.[1] ?? '';
     expect(attention).toContain('You have used 84% of this month&#39;s operations.');
-    expect(attention).toContain('href="/base/dashboard/plan">Usage</a>');
+    // From 80%, the owner is offered the upgrade, not only the page.
+    expect(attention).toContain('href="/base/dashboard/plan#upgrade">Upgrade</a>');
     expect(attention).toContain('2 bookings wait for your approval.');
     expect(attention).toContain('href="/base/dashboard/approvals">Review</a>');
     expect(html).toContain('<span class="stat-label">Waiting for approval</span><span class="stat-value">2</span>');
@@ -3142,10 +3146,107 @@ describe('usage and plans without Stripe', () => {
     const html = await (await get(target, '/base/dashboard/plan', session)).text();
     expect(html).toContain('<div class="plan-head"><h2>Free from 9 Dec 2026</h2>');
     expect(html).toContain(
-      'From 2026-12-09 00:00 UTC, this workspace is on Free: 10 resources, 10 API keys and 2 webhooks. You have 14 resources: nothing is removed, but you cannot add more until you have fewer, or upgrade.',
+      'From 2026-12-09 00:00 UTC, this workspace is on Free: 10 resources, 10 API keys and 2 webhooks. You have 14 of 10 resources: nothing is removed, but from then, adding another is refused. Upgrade for more.',
     );
     expect(html).toContain('<span>Resources</span><span class="meter-value">14<span class="meta"> of 10</span>');
     expect(html).toContain('<div class="meter bad">');
+  });
+
+  it('asks an owner to upgrade at a limit of the plan the workspace is on, on Usage and the overview', async () => {
+    let count = 10;
+    const store = { ...resources.store, count: vi.fn(async () => count) };
+    const target = dashboard({ plans: planned(free), resources: store });
+    const { session } = await signIn(target);
+    const usage = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(usage).toContain(
+      '<li class="attention warn"><span class="attention-text">On Free, you have 10 of 10 resources: adding another is refused. Upgrade for more.</span><a class="attention-action" href="#upgrade">Upgrade</a></li>',
+    );
+    expect(usage).toContain('<section class="panel" id="upgrade">');
+    const overview = await (await get(target, '/base/dashboard', session)).text();
+    const attention = /<ul class="attention-list"[^>]*>([\s\S]*?)<\/ul>/.exec(overview)?.[1] ?? '';
+    expect(attention).toContain('On Free, you have 10 of 10 resources');
+    expect(attention).toContain('href="/base/dashboard/plan#upgrade">Upgrade</a>');
+    expect(overview).toMatch(/<section class="panel plan-card">[\s\S]*href="\/base\/dashboard\/plan#upgrade">Upgrade<\/a><\/section>/);
+    // Past it (a plan that allows less than the workspace has): nothing is removed.
+    count = 12;
+    expect(await (await get(target, '/base/dashboard/plan', session)).text()).toContain(
+      '<li class="attention bad"><span class="attention-text">On Free, you have 12 of 10 resources: nothing is removed, but adding another is refused. Upgrade for more.',
+    );
+    // Below it: nothing to do, and no upgrade pressed on the overview.
+    count = 9;
+    expect(await (await get(target, '/base/dashboard/plan', session)).text()).not.toContain('adding another is refused');
+    expect(await (await get(target, '/base/dashboard', session)).text()).not.toMatch(/plan-card[\s\S]*>Upgrade<\/a>/);
+  });
+
+  it('offers no upgrade where none is sold or arranged, nor to a workspace that pays', async () => {
+    const store = { ...resources.store, count: vi.fn(async () => 100) };
+    const unsold = dashboard({ plans: planned(free, { contact: undefined }), resources: store });
+    const first = await signIn(unsold);
+    const plain = await (await get(unsold, '/base/dashboard/plan', first.session)).text();
+    expect(plain).toContain('On Free, you have 100 of 10 resources: nothing is removed, but adding another is refused.</span></li>');
+    expect(plain).not.toContain('Upgrade for more');
+    const paying = { ...free, plan: 'developer' as const, limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 } };
+    const paid = dashboard({ plans: planned(paying), resources: store });
+    const second = await signIn(paid);
+    const html = await (await get(paid, '/base/dashboard/plan', second.session)).text();
+    expect(html).toContain('On Developer, you have 100 of 100 resources: adding another is refused.</span></li>');
+    expect(html).not.toContain('Upgrade for more');
+  });
+
+  it('warns before the default plan starts what the workspace has at its limits, and offers the upgrade', async () => {
+    const plans = planned(null, {
+      planDefault: vi.fn(async () => ({ plan: 'free', limits: free.limits, appliesFrom: new Date('2026-12-09T00:00:00Z') })),
+    });
+    const store = { ...resources.store, count: vi.fn(async () => 10) };
+    const target = dashboard({ plans, resources: store });
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(html).toContain(
+      'From 2026-12-09 00:00 UTC, this workspace is on Free: 10 resources, 10 API keys and 2 webhooks. You have 10 of 10 resources: from then, adding another is refused. Upgrade for more.</span><a class="attention-action" href="#upgrade">Upgrade</a>',
+    );
+  });
+
+  it('links a refusal at a plan limit to the upgrade for an owner, and to Usage for a workspace that pays', async () => {
+    const refusing = {
+      ...resources.store,
+      add: vi.fn(async () => {
+        throw Object.assign(new Error('cap'), { code: 'resource_limit_reached', limit: 10 });
+      }),
+      webhooks: {
+        list: vi.fn(async () => []),
+        create: vi.fn(async () => ({ ok: false as const, code: 'webhook_limit_reached' as const, limit: 2 })),
+        remove: vi.fn(async () => false),
+      },
+    };
+    const cappedKeys = {
+      ...keys.store,
+      create: vi.fn(async () => {
+        throw Object.assign(new Error('cap'), { code: 'api_key_limit_reached' });
+      }),
+    };
+    const free10 = dashboard({ plans: planned(free), resources: refusing as never, keys: cappedKeys });
+    const { session } = await signIn(free10);
+    const resource = await post(free10, '/base/dashboard/resources', { csrf: await csrf(free10, session), reference: 'van-11', timezone: 'UTC' }, session);
+    expect(resource.status).toBe(409);
+    expect(await resource.text()).toContain(
+      'You have 10 resources, archived ones included, as many as your plan allows. Delete one, or <a href="/base/dashboard/plan#upgrade">upgrade</a>.',
+    );
+    const key = await post(free10, '/base/dashboard/keys', { csrf: await csrf(free10, session), name: 'agent', access: 'read', expires: 'never' }, session);
+    expect(key.status).toBe(409);
+    expect(await key.text()).toContain(
+      'You have as many active keys as your plan allows. Revoke one first, or <a href="/base/dashboard/plan#upgrade">upgrade</a>.',
+    );
+    const hook = await post(free10, '/base/dashboard/webhooks', { csrf: await csrf(free10, session), url: 'https://example.com/hook' }, session);
+    expect(hook.status).toBe(409);
+    expect(await hook.text()).toContain(
+      'You have 2 webhooks, as many as your plan allows. Delete one first, or <a href="/base/dashboard/plan#upgrade">upgrade</a>.',
+    );
+    // A workspace that pays has no upgrade here: Usage says what it has.
+    const paying = { ...free, plan: 'developer' as const, limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 } };
+    const paid = dashboard({ plans: planned(paying), resources: refusing as never, keys: cappedKeys });
+    const second = await signIn(paid);
+    const refused = await post(paid, '/base/dashboard/resources', { csrf: await csrf(paid, second.session), reference: 'van-11', timezone: 'UTC' }, second.session);
+    expect(await refused.text()).toContain('Delete one, or see <a href="/base/dashboard/plan">Usage</a>.');
   });
 
   it('puts a new tenant on the default plan before its first key, with no Stripe', async () => {

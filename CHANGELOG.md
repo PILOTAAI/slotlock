@@ -5,6 +5,18 @@ versioning.
 
 ## Unreleased
 
+### Fixed
+
+- **The dashboard asks an owner to upgrade where a plan stops them.** A workspace at a limit of its
+  plan (10 of 10 resources on Free, say) saw only a red bar: Usage and the Overview now say
+  "On Free, you have 10 of 10 resources: adding another is refused", with **Upgrade**, and the
+  Overview's plan card offers it too. The same holds for the plan a workspace is about to move to.
+  An add refused at a limit (a resource, a key, a webhook) links to the upgrade, or to Usage for a
+  workspace that pays. A quota at 80% offers the upgrade as well as at 100%. A member is told an
+  owner can upgrade, and where the deployment neither sells nor arranges plans, no upgrade is named.
+
+## 0.9.0 - 2026-11-11
+
 ### Added
 
 - Each hold's payment is kept apart from the hold (new table `hold_payments`, under RLS, erased with
