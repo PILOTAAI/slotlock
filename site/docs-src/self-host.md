@@ -67,6 +67,11 @@ Two URLs: `SLOTLOCK_MIGRATE_DATABASE_URL` is the schema owner's, for `migrate`; 
 the serving role's (`NOSUPERUSER NOBYPASSRLS`, owning nothing), for `serve`. Node.js 22.12+ and
 PostgreSQL 16+ with `btree_gist`.
 
+A deployment that runs the admin console (Slotlock Cloud does) sets a third,
+`SLOTLOCK_ADMIN_DATABASE_URL`, for `migrate` only: the console's own role, which `migrate` grants
+the admin functions and nothing else. It must be neither of the other two roles. Leave it unset
+otherwise.
+
 From a clone, build once and run each command as `node dist/cli.js` (a clone does not put
 `slotlock` on your `PATH`):
 

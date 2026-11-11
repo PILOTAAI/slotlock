@@ -11,6 +11,8 @@ import {
   startSlotlockWebhookDelivery,
 } from './webhooks.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { userInfo } from 'node:os';
+import { SLOTLOCK_STAFF_ENROLLMENT_DAYS, SLOTLOCK_STAFF_ROLES } from './staff-ddl.js';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
 import {
@@ -161,6 +163,7 @@ export { SlotlockConfigError, type SlotlockEnv, type SlotlockServeDashboardConfi
 export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'DATABASE_URL',
   'SLOTLOCK_MIGRATE_DATABASE_URL',
+  'SLOTLOCK_ADMIN_DATABASE_URL',
   'SLOTLOCK_AUTH_TOKEN',
   'SLOTLOCK_CONFIRMATION_SECRET',
   'SLOTLOCK_CONFIRM_WRITES',
@@ -272,6 +275,11 @@ export interface SlotlockDatabaseConfig {
    * role, `migrate` grants that role exactly the runtime access it needs (`grantApplicationRole`).
    */
   migrateDatabaseUrl?: string;
+  /**
+   * The admin console's role (RFC 0006), when this deployment runs one: `migrate` grants it the admin
+   * functions and nothing else (`grantAdminRole`). Never the serving role or the schema owner.
+   */
+  adminDatabaseUrl?: string;
   tenantRef: string;
   /**
    * How long history is kept, in days (SLOTLOCK_RETENTION_DAYS); 30 without it. Every command that
@@ -433,6 +441,8 @@ export function readSlotlockDatabaseConfig(env: SlotlockEnv): SlotlockDatabaseCo
   if (retentionDays !== undefined) config.retentionDays = retentionDays;
   const migrateDatabaseUrl = readDatabaseUrl(env, 'SLOTLOCK_MIGRATE_DATABASE_URL');
   if (migrateDatabaseUrl !== undefined) config.migrateDatabaseUrl = migrateDatabaseUrl;
+  const adminDatabaseUrl = readDatabaseUrl(env, 'SLOTLOCK_ADMIN_DATABASE_URL');
+  if (adminDatabaseUrl !== undefined) config.adminDatabaseUrl = adminDatabaseUrl;
   return config;
 }
 
@@ -683,7 +693,7 @@ function secretsIn(env: SlotlockEnv): string[] {
     secrets.push(previous);
     for (const part of previous.split(',')) if (part.trim()) secrets.push(part.trim());
   }
-  for (const name of ['DATABASE_URL', 'SLOTLOCK_MIGRATE_DATABASE_URL']) {
+  for (const name of ['DATABASE_URL', 'SLOTLOCK_MIGRATE_DATABASE_URL', 'SLOTLOCK_ADMIN_DATABASE_URL']) {
     const value = env[name]?.trim();
     if (!value) continue;
     secrets.push(value);
@@ -774,10 +784,31 @@ export async function migrateSlotlock(
     } finally {
       await application.end({ timeout: 5 });
     }
-    if (role !== (await currentRole(owner))) {
+    const ownerRole = await currentRole(owner);
+    if (role !== ownerRole) {
       await store.grantApplicationRole(role);
       log.info('application_role_granted', { role });
     }
+    if (config.adminDatabaseUrl === undefined) return;
+    const console = connect(config.adminDatabaseUrl, 1);
+    let adminRole: string;
+    try {
+      adminRole = await currentRole(console);
+    } finally {
+      await console.end({ timeout: 5 });
+    }
+    // The console's role reaches every account through the admin functions; the serving role and
+    // the owner must never hold them, nor it theirs.
+    if (adminRole === role || adminRole === ownerRole) {
+      throw Object.assign(
+        new Error(
+          `SLOTLOCK_ADMIN_DATABASE_URL connects as ${adminRole}, which is the ${adminRole === role ? 'serving role (DATABASE_URL)' : 'schema owner'}: give the admin console a role of its own (CREATE ROLE slotlock_admin_app LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS)`,
+        ),
+        { code: 'admin_role_not_separate' as const },
+      );
+    }
+    await store.grantAdminRole(adminRole);
+    log.info('admin_role_granted', { role: adminRole });
   } finally {
     await owner.end({ timeout: 5 });
   }
@@ -2263,6 +2294,80 @@ async function runPartnerCommand(
   }
 }
 
+/** Who ran a staff command, for the staff log: `cli:` and the operating system user. */
+function cliActor(): string {
+  let name = 'operator';
+  try {
+    name = userInfo().username;
+  } catch {
+    // No user database (a scratch container): the generic name.
+  }
+  const cleaned = name.toLowerCase().replace(/[^a-z0-9_.-]/g, '_').replace(/^[^a-z_]/, '_').slice(0, 64);
+  return `cli:${cleaned || 'operator'}`;
+}
+
+/** `123` or `github:123`, as the staff tables name members; null for anything else. */
+function readStaffRef(value: string | undefined): string | null {
+  const id = /^(?:github:)?([1-9][0-9]{0,19})$/.exec(value?.trim() ?? '')?.[1];
+  return id === undefined ? null : `github:${id}`;
+}
+
+/**
+ * `staff list|add|role|reset|remove`: the admin console's staff (RFC 0006). Only the schema owner
+ * may run the functions behind them (SLOTLOCK_OPERATOR_FUNCTIONS), so they connect as
+ * SLOTLOCK_MIGRATE_DATABASE_URL when it is set. Each change lands in the staff log as `cli:<user>`.
+ * `add` and `reset` print a one-time code, of which only the SHA-256 is stored.
+ */
+async function runStaffCommand(
+  config: SlotlockDatabaseConfig,
+  out: OutputStream,
+  action: 'list' | 'add' | 'role' | 'reset' | 'remove',
+  staffRef: string | null,
+  role: string | undefined,
+): Promise<void> {
+  const sql = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
+  const actor = cliActor();
+  const line = (value: Record<string, unknown>) => out.write(`${JSON.stringify(value)}\n`);
+  const code = () => {
+    const value = randomBytes(24).toString('base64url');
+    return {
+      value,
+      hash: createHash('sha256').update(value).digest(),
+      expires: new Date(Date.now() + SLOTLOCK_STAFF_ENROLLMENT_DAYS * 86_400_000),
+    };
+  };
+  try {
+    if (action === 'list') {
+      const rows = await sql<{ staff_ref: string; role: string; status: string; added_at: Date; last_seen_at: Date | null; passkeys: number }[]>`
+        SELECT member.staff_ref, member.role, member.status, member.added_at, member.last_seen_at,
+               (SELECT count(*)::integer FROM slotlock.staff_passkeys key WHERE key.staff_ref = member.staff_ref) AS passkeys
+          FROM slotlock.staff_members member
+         ORDER BY member.status, member.added_at`;
+      for (const row of rows) line({ ...row });
+      return;
+    }
+    if (action === 'add' || action === 'reset') {
+      const issued = code();
+      if (action === 'add') {
+        await sql`SELECT slotlock.staff_add(${staffRef}, ${role ?? null}, ${actor}, ${issued.hash}, ${issued.expires})`;
+      } else {
+        await sql`SELECT slotlock.staff_reset(${staffRef}, ${actor}, ${issued.hash}, ${issued.expires})`;
+      }
+      line({ staff: staffRef, ...(role !== undefined ? { role } : {}), enrollment_code: issued.value, expires_at: issued.expires.toISOString() });
+      return;
+    }
+    if (action === 'role') {
+      await sql`SELECT slotlock.staff_set_role(${staffRef}, ${role ?? null}, ${actor})`;
+      line({ staff: staffRef, role });
+      return;
+    }
+    await sql`SELECT slotlock.staff_remove(${staffRef}, ${actor})`;
+    line({ staff: staffRef, removed: true });
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 /**
  * `tenant status|suspend|unsuspend|erase` for SLOTLOCK_TENANT. Suspending and lifting a suspension
  * are the deployment role's alone, so they connect as SLOTLOCK_MIGRATE_DATABASE_URL when it is set;
@@ -2551,7 +2656,8 @@ export const SLOTLOCK_CLI_HELP = `Usage: slotlock <command> [options]
 
 Commands:
   migrate                  Apply the schema and row-level security, then grant the serving
-                           role when SLOTLOCK_MIGRATE_DATABASE_URL names another role
+                           role when SLOTLOCK_MIGRATE_DATABASE_URL names another role, and the
+                           admin console's role when SLOTLOCK_ADMIN_DATABASE_URL is set
   serve [--migrate]        Serve MCP, A2A and REST over HTTP (--migrate runs migrate first);
                            maintains every tenant with data every hour
   maintain                 Run maintenance for the tenant now: extend recurring events to the
@@ -2662,6 +2768,15 @@ Commands:
                            Delete everything the tenant has, its API keys included, for good;
                            --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is
                            paid for (cancel the subscription first)
+  staff list               Print the admin console's staff (RFC 0006), as the schema owner
+                           (SLOTLOCK_MIGRATE_DATABASE_URL when set), like every staff command
+  staff add <github-id> <role>
+                           Add a member (owner, support, billing, editor or viewer) and print
+                           a one-time code for their first passkey, valid for 2 days
+  staff role <github-id> <role>
+                           Change a member's role
+  staff reset <github-id>  Remove a member's passkeys and print a new one-time code
+  staff remove <github-id> Remove a member and their passkeys (never the last owner)
   audit verify             Check the tenant's audit log chain: prints how many events held and
                            the first that does not (exit 1 when one does not)
   audit export             Print the tenant's audit log, newest first, one JSON object per line
@@ -2687,6 +2802,8 @@ Environment:
   DATABASE_URL                   postgres:// URL of the role Slotlock serves as (required); serve
                                  refuses a superuser or a role with BYPASSRLS
   SLOTLOCK_MIGRATE_DATABASE_URL  postgres:// URL of the schema owner, for migrate (optional)
+  SLOTLOCK_ADMIN_DATABASE_URL    postgres:// URL of the admin console's own role, which migrate
+                                 grants the admin functions only (optional; Slotlock Cloud)
   SLOTLOCK_AUTH_TOKEN            Optional bearer token for SLOTLOCK_TENANT with read and write
                                  access (never admin), 32+ random characters (serve); API keys
                                  work with or without it
@@ -2835,7 +2952,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     command === 'billing' ||
     command === 'sandbox' ||
     command === 'audit' ||
-    command === 'subject'
+    command === 'subject' ||
+    command === 'staff'
       ? `${command} ${operands[0] ?? ''}`.trim()
       : command;
   const expectedOperands: Record<string, number> = {
@@ -2853,6 +2971,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'tenant suspend': 1,
     'tenant unsuspend': 1,
     'tenant erase': 1,
+    'staff list': 1,
+    'staff add': 3,
+    'staff role': 3,
+    'staff reset': 2,
+    'staff remove': 2,
     'plan status': 1,
     'plan default': 2,
     'key create': 2,
@@ -3183,6 +3306,42 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         if (!changed) {
           io.stderr.write('slotlock: no resource with that reference or id in this tenant\n');
           return 1;
+        }
+        return 0;
+      }
+      case 'staff list':
+      case 'staff add':
+      case 'staff role':
+      case 'staff reset':
+      case 'staff remove': {
+        const action = subcommand.slice('staff '.length) as 'list' | 'add' | 'role' | 'reset' | 'remove';
+        const staffRef = action === 'list' ? null : readStaffRef(operands[1]);
+        if (action !== 'list' && staffRef === null) {
+          return usage('<github-id> must be a GitHub account id (a number, or github:<number>)');
+        }
+        const role = action === 'add' || action === 'role' ? operands[2] : undefined;
+        if (role !== undefined && !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(role)) {
+          return usage(`<role> must be one of ${SLOTLOCK_STAFF_ROLES.join(', ')}`);
+        }
+        try {
+          await runStaffCommand(readSlotlockDatabaseConfig(io.env), io.stdout, action, staffRef, role);
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === '42501' || code === '42883') {
+            io.stderr.write(
+              'slotlock: only the schema owner manages staff; set SLOTLOCK_MIGRATE_DATABASE_URL to its URL\n',
+            );
+            return 1;
+          }
+          if (code === 'P0002') {
+            io.stderr.write('slotlock: no active staff member with that GitHub id\n');
+            return 1;
+          }
+          if (code === '23514') {
+            io.stderr.write('slotlock: the last owner cannot be removed; add another owner first\n');
+            return 1;
+          }
+          throw error;
         }
         return 0;
       }

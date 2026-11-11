@@ -186,7 +186,8 @@ describe('Compose quickstart', () => {
     );
     expect(passed, 'canary: the service environment was found').toContain('DATABASE_URL');
     // The owner's URL belongs to the one-off migrate service; HOST and PORT are the image's own.
-    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'HOST', 'PORT']);
+    // The admin console's URL is for migrate alone, on a deployment that runs the console (RFC 0006).
+    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'SLOTLOCK_ADMIN_DATABASE_URL', 'HOST', 'PORT']);
     const missing = SLOTLOCK_ENVIRONMENT_VARIABLES.filter(
       (name) => !owned.has(name) && !passed.has(name),
     );

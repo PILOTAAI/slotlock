@@ -5,6 +5,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runSlotlockCli } from '../self-host.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim();
@@ -23,6 +24,7 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
   let application: postgres.Sql;
   let adminSql: postgres.Sql;
   let app: SlotlockStore;
+  let databaseUrls: { superuser: string; serving: string };
 
   const OWNER = 'github:1001';
   const SUPPORT = 'github:1002';
@@ -67,6 +69,7 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
       u.password = password;
       return u.href;
     };
+    databaseUrls = { superuser: target.href, serving: as(serving) };
     application = postgres(as(serving), { max: 4, onnotice: () => undefined });
     adminSql = postgres(as(adminRole), { max: 4, onnotice: () => undefined });
     app = createSlotlockStore(application);
@@ -252,6 +255,52 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     expect(
       (await adminSql<{ ok: boolean }[]>`SELECT slotlock.admin_passkey_used(${SUPPORT}, ${credential}, 99) AS ok`)[0]?.ok,
     ).toBe(false);
+  });
+
+  /** Run `slotlock …` against this database, as the schema owner unless `serving`. */
+  async function cli(argv: string[], serving = false) {
+    const chunks = { out: [] as string[], err: [] as string[] };
+    const env = {
+      DATABASE_URL: databaseUrls.serving,
+      ...(serving ? {} : { SLOTLOCK_MIGRATE_DATABASE_URL: databaseUrls.superuser }),
+    };
+    const code = await runSlotlockCli(argv, {
+      env,
+      stdout: { write: (chunk: string) => chunks.out.push(chunk) },
+      stderr: { write: (chunk: string) => chunks.err.push(chunk) },
+      signal: new AbortController().signal,
+    });
+    const lines = chunks.out.join('').split('\n').filter((line) => line.startsWith('{'));
+    return { code, lines: lines.map((line) => JSON.parse(line) as Record<string, unknown>), err: chunks.err.join('') };
+  }
+
+  it('manages staff from the command line, as the schema owner only', async () => {
+    const added = await cli(['staff', 'add', '2001', 'editor']);
+    expect(added.code).toBe(0);
+    expect(added.lines[0]).toMatchObject({ staff: 'github:2001', role: 'editor' });
+    const code = String(added.lines[0]?.enrollment_code);
+    expect(code).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    // Only the code's hash is stored.
+    const [stored] = await superuser<{ hash: Buffer }[]>`
+      SELECT enrollment_hash AS hash FROM slotlock.staff_members WHERE staff_ref = 'github:2001'`;
+    expect(Buffer.from(stored?.hash ?? [])).toEqual(sha(code));
+    expect((await cli(['staff', 'role', 'github:2001', 'support'])).code).toBe(0);
+    const listed = await cli(['staff', 'list']);
+    expect(listed.lines).toEqual(expect.arrayContaining([expect.objectContaining({ staff_ref: 'github:2001', role: 'support' })]));
+    expect((await cli(['staff', 'reset', '2001'])).lines[0]?.enrollment_code).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect((await cli(['staff', 'remove', '2001'])).code).toBe(0);
+    expect((await cli(['staff', 'remove', '2001'])).code).toBe(1);
+    // Mistakes are refused before anything is written.
+    expect((await cli(['staff', 'add', 'octocat', 'owner'])).code).toBe(2);
+    expect((await cli(['staff', 'add', '2002', 'root'])).code).toBe(2);
+    // The serving role cannot add staff, whatever its URL says.
+    const refused = await cli(['staff', 'add', '2003', 'owner'], true);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain('only the schema owner manages staff');
+    const log = await superuser<{ staff_ref: string; action: string; target: string }[]>`
+      SELECT staff_ref, action, target FROM slotlock.staff_audit_events WHERE target = 'github:2001' ORDER BY chain_index`;
+    expect(log.map((row) => row.action)).toEqual(['staff.added', 'staff.role_changed', 'staff.passkeys_reset', 'staff.removed']);
+    expect(log.every((row) => row.staff_ref.startsWith('cli:'))).toBe(true);
   });
 
   it('removes staff and their passkeys, never the last owner', async () => {
