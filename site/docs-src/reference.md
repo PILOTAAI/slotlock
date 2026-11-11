@@ -212,15 +212,17 @@ waits for a confirmation.
 | `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
 | `GET /v1/holds/{hold_id}` | One live hold; `GET /v1/resources/{resource_id}/holds` lists them |
 | `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation (`409 payment_required` while a hold made with `payment_required` is unpaid) |
-| `POST /v1/holds/{hold_id}/paid` | `{"payment_ref"}`: record a hold's payment, verified at your processor |
+| `POST /v1/holds/{hold_id}/paid` | `{"payment_ref","received"?}`: record a hold's payment, verified at your processor; `received` (`amount_minor`, `currency`) is checked against the hold's `payment` |
 | `DELETE /v1/holds/{hold_id}` | Release the hold |
 | `GET /v1/reservations/{reservation_ref}` | The booking at its current revision |
 | `GET /v1/resources/{resource_id}/reservations?start=…&end=…` | Its bookings in a window |
-| `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1); `contact_ref` and `notify` say whom to tell |
+| `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1); `contact_ref` and `notify` say whom to tell, `reminder_minutes` (up to five) when to remind them |
 | `PUT /v1/contacts/{contact_ref}` | Keep a person a booking may name: email, phone, WhatsApp, locale and consent per channel; `GET` reads one, `DELETE` forgets them and their reference on every booking |
+| `GET /v1/contacts?limit=…&cursor=…` | The tenant's contacts a page at a time, each with `consent_at` |
 | `DELETE /v1/reservations/{reservation_ref}?revision=…` | Cancel, at the current revision plus 1 |
 | `PUT /v1/resources/{resource_id}/coverage/{source}` | Record that `source`'s events are complete for a window |
 | `PUT /v1/resources/{resource_id}/coverage/{source}/busy` | Record a window's coverage and the busy time in it, for a calendar that gives no events |
+| `POST /v1/resources/{resource_id}/coverage/{source}/conflicts` | `{"reservation_ref"\|"event_id","reason","calendar_start"?,"calendar_end"?}`: a booking the source's calendar moved or removed, put on the feed as `coverage.conflict` |
 | `GET /v1/tenant/events?resource_id=…&start=…&end=…` | Every key's events on a resource, with the `id` the next two take |
 | `GET /v1/tenant/events/{event_id}` | One of them |
 | `DELETE /v1/tenant/events/{event_id}?expected_revision=…` | Cancel it, whichever key wrote it |

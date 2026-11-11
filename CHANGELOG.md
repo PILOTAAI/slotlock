@@ -18,38 +18,57 @@ versioning.
   schema and secrets, talking to Slotlock over its API:
   - `@slotlock/sync` (C1, C4, T2): busy time from Google freeBusy, Microsoft getSchedule and
     iCalendar URLs, recorded as each source's busy time; confirmed bookings written back to Google
-    and Microsoft calendars, times only. OAuth with PKCE; tokens, URLs and keys sealed with
-    AES-256-GCM. A booking changed in the calendar is reported, never applied.
+    and Microsoft calendars, times only. OAuth with PKCE, then a signed page where the tenant's person
+    chooses which calendar blocks which resource; tokens, URLs and keys sealed with AES-256-GCM. A
+    booking changed in the calendar is reported on the feed (`coverage.conflict`), never applied. A
+    provider's 429 or 503 is retried when it says, else with backoff; a feed cursor that expired
+    while the sync was down is recovered by reconciling each calendar with the bookings as they are.
   - `@slotlock/notify` (C2): confirmations, moves, cancellations and reminders by Postmark,
     Resend or SES, and Twilio SMS and WhatsApp, each send recorded under its key (change id,
     channel, recipient) before it is made. Consent per channel; test tenants go to a capture inbox.
+    Recipients are kept only as digests, except an event's attendees, kept sealed until a day after
+    it ends so a cancellation reaches them.
   - `@slotlock/payments-stripe` (C3, T2): a PaymentIntent read back from the tenant's own Stripe
-    account marks its hold paid; a payment for an expired hold is refused and, if asked, refunded.
+    account marks its hold paid, with the amount received; a payment for an expired hold is refused
+    and, if asked, refunded.
+  - Each runs as its own process (`slotlock-sync`, `slotlock-notify`, `slotlock-payments-stripe`,
+    each with `migrate` and `serve`), and `packages/integrations.Dockerfile` builds one image with
+    all three.
 - What integrations build on (RFC 0004 P3, D1's recommendation: core keeps primitives, packages
   outside it send and sync). Feed type `reminder.due`: maintenance puts each event reminder on the
   feed once, when it comes due (within the last day, before the event starts), and again if the
   occurrence moves; `reminders_due` in its answer. A change's `id` is the key a sender sends it
   once by. Events take `notify` (`slotlock_create_event`'s `notify: false`): no reminders, and a
-  sender tells no one.
+  sender tells no one. Reservations take `reminder_minutes` (up to five, minutes before the start),
+  each said once as `reminder.due` for the contact the reservation names, and again if it moves.
 - Contacts (P3, T2): new table `contacts`, the people a booking may name to be told about it, by
   the tenant's own reference, with email, phone and WhatsApp numbers (E.164), locale and consent
   per channel. `slotlock_put_contact`, `slotlock_get_contact`, `slotlock_delete_contact`
   (`/v1/contacts/{contact_ref}`); deleting one also takes its reference off every booking. At most
-  100,000 a tenant. Reservations take `contact_ref` and `notify`, both on the feed with each
-  change; neither is ever the person.
+  100,000 a tenant. `slotlock_list_contacts` (`GET /v1/contacts`) lists them a page at a time, and
+  each answers `consent_at`: when each channel's answer was given, kept while it stands. The
+  dashboard's Contacts page lists them and forgets one, for an erasure request. Reservations take
+  `contact_ref` and `notify`, both on the feed with each change; neither is ever the person.
 - Holds that wait for payment (RFC 0004 C3, T2): `payment_required` on `slotlock_acquire_hold`
   (time to live at most 30 minutes). Confirming one answers `409 payment_required` until
   `slotlock_mark_hold_paid` (`POST /v1/holds/{hold_id}/paid`) records the payment's reference at
   the integrator's processor: the same reference again answers the same hold, another
   `payment_conflict`, an expired hold `hold_expired`. New feed type `hold.paid`. Slotlock records
-  payment state and never moves money.
+  payment state and never moves money. A hold may name what the payment must be (`payment`:
+  `amount_minor` and `currency`); `slotlock_mark_hold_paid` then takes what was `received`, and
+  less, or another currency, is `409 payment_amount_mismatch`. Holds answer `payment_amount` and
+  `paid_amount`. Agents' `slotlock_hold_slots` takes `payment_required` and `payment` too.
 - Busy time from calendars that give no events (RFC 0004 C1, T2): `slotlock_put_source_busy`
   (`PUT /v1/resources/{resource_id}/coverage/{source}/busy`) records a source's coverage of a
   window and the busy time in it (at most 5,000 intervals, merged), replacing what it said of that
-  window. New table `source_busy`. Free/busy counts it, and every booking Slotlock makes is refused
+  window. New table `source_busy`. Every read counts it (free/busy, a resource's busy time,
+  searches and waitlist offers), and every booking Slotlock makes is refused
   over it (`overlap`). A confirmed booking the source newly reports busy time over is left alone
   and reported once as `coverage.conflict` (named by `source_id`, never the source). Retiring the
-  source forgets its busy time.
+  source forgets its busy time. `slotlock_report_coverage_conflict`
+  (`POST /v1/resources/{resource_id}/coverage/{source}/conflicts`) lets a calendar sync report a
+  booking it wrote that was moved (`changed_in_calendar`) or removed (`removed_from_calendar`) in
+  the calendar, as `coverage.conflict` with the booking left as it is.
 - Hours that inherit (RFC 0004 B2). The tenant and each location store weekly hours
   (`setTenantAvailability`, the new `setLocationAvailability`; `PUT /v1/availability`,
   `PUT /v1/locations/{location}/availability`, `GET /v1/availability`). A resource without its own

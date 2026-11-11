@@ -56,6 +56,9 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
   each resource's, two windows a day, overnight or all day, or closed. A resource without its own
   inherits its location's, then the person's, then the server's (`SLOTLOCK_AVAILABILITY`). The
   Closures page lists closures and special days, adds them, and imports a pasted holiday calendar.
+- The Contacts page lists the people their bookings name to be told about them (kept by their own
+  systems through the API), with the channels each agreed to, and forgets one for an erasure
+  request.
 
 ## Organizations
 
