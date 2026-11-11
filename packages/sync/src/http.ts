@@ -123,7 +123,13 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
 
   const formToken = (connectionId: string, expires: number) => sign('choose', `${connectionId}\n${expires}`);
 
-  function choosePage(connectionId: string, account: string, calendars: ProviderCalendar[], resources: SlotlockResourceSummary[]): Response {
+  function choosePage(
+    connectionId: string,
+    account: string,
+    calendars: ProviderCalendar[],
+    resources: SlotlockResourceSummary[],
+    writeBack: boolean,
+  ): Response {
     if (resources.length === 0) return page('No resources yet', '<p>The tenant has no resources to put this calendar\'s time on.</p>');
     const expires = now().getTime() + LINK_TTL_MS;
     const options = (selected: string) =>
@@ -139,9 +145,13 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
       .slice(0, 100)
       .map(
         (calendar, index) =>
-          `<p><label>${escapeHtml(calendar.name)}${calendar.primary ? ' (main calendar)' : ''}<br>` +
-          `<input type="hidden" name="calendar_${index}" value="${escapeHtml(calendar.id)}">` +
-          `<select name="resource_${index}">${options('')}</select></label></p>`,
+          // Bookings are written back to the calendars chosen: one this account may only read
+          // would refuse every one of them.
+          writeBack && !calendar.writable
+            ? `<p>${escapeHtml(calendar.name)} (read only: bookings cannot be written to it)</p>`
+            : `<p><label>${escapeHtml(calendar.name)}${calendar.primary ? ' (main calendar)' : ''}<br>` +
+              `<input type="hidden" name="calendar_${index}" value="${escapeHtml(calendar.id)}">` +
+              `<select name="resource_${index}">${options('')}</select></label></p>`,
       )
       .join('');
     return page(
@@ -296,11 +306,24 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
         let finished: Awaited<ReturnType<Syncer['finishConnection']>>;
         try {
           finished = await options.syncer.finishConnection({ state, code, browserHash: digest(browser) });
-        } catch {
+        } catch (error) {
+          if (error instanceof Error && error.message === 'oauth_scope_mismatch') {
+            return page(
+              'Not connected',
+              '<p>The calendar was not connected: allow each calendar permission Google asks for. Ask for a new link to try again.</p>',
+              400,
+            );
+          }
           return page('This link has expired', '<p>Ask for a new link to connect your calendar.</p>', 400);
         }
         const resources = await options.syncer.listResources(finished.connection.tenantRef);
-        const chosen = choosePage(finished.connection.id, finished.connection.account, finished.calendars, resources);
+        const chosen = choosePage(
+          finished.connection.id,
+          finished.connection.account,
+          finished.calendars,
+          resources,
+          finished.connection.writeBack,
+        );
         chosen.headers.append('set-cookie', `${FLOW_COOKIE}=; Path=/oauth/callback; Max-Age=0; HttpOnly; SameSite=Lax${secureCookie}`);
         return chosen;
       }
@@ -324,7 +347,7 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
           if (!resourceId) continue;
           const calendar = calendars.get(calendarId);
           const resource = resources.get(resourceId);
-          if (!calendar || !resource) continue;
+          if (!calendar || !resource || (connection.writeBack && !calendar.writable)) continue;
           await options.syncer.mapCalendar({ connectionId: connection.id, calendarId, resourceId });
           saved.push(`<li>${escapeHtml(calendar.name)} → ${escapeHtml(resource.name ?? resource.externalRef)}</li>`);
         }

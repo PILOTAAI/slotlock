@@ -54,13 +54,22 @@ async function main(command: string): Promise<void> {
   // iCalendar URLs are read with slotlock's own parser, through its guarded fetch (no private
   // addresses), when the slotlock package is installed beside this one.
   let parseICalendar: ICalendarFeedParser | undefined;
+  let icsPool: { close(): Promise<void> } | undefined;
   let icsFetch: typeof fetch | undefined;
   try {
     const slotlock = (await import('slotlock' as string)) as {
       parseICalendarFeed: ICalendarFeedParser;
       createSlotlockGuardedFetch: () => typeof fetch;
+      createICalendarWorkerPool?: () => {
+        parseICalendarFeed(text: string, calendarTimezone?: string, window?: { start: Date; end: Date }): ReturnType<ICalendarFeedParser>;
+        close(): Promise<void>;
+      };
     };
-    parseICalendar = slotlock.parseICalendarFeed;
+    // On worker threads, with a deadline: a feed someone else controls never holds this
+    // process (its HTTP, OAuth callbacks and every tenant's sync) while it is read.
+    const pool = slotlock.createICalendarWorkerPool?.();
+    icsPool = pool;
+    parseICalendar = pool ? (text, calendarTimezone, window) => pool.parseICalendarFeed(text, calendarTimezone, window) : slotlock.parseICalendarFeed;
     icsFetch = slotlock.createSlotlockGuardedFetch();
   } catch {
     log('warn', 'iCalendar URLs are off: the slotlock package is not installed');
@@ -109,6 +118,7 @@ async function main(command: string): Promise<void> {
     stop.abort();
     server.close();
     await loop;
+    await icsPool?.close();
     await sql.end({ timeout: 5 });
     log('info', 'stopped');
   };

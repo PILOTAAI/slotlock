@@ -71,6 +71,21 @@ GOVERNANCE.md requires.
   refuse it too. Busy time that ended a month ago goes.
 - **A `@slotlock/sync` connect link could be reused** by anyone who had it for 30 minutes. A link is
   now followed once, and its flow is finished only in the browser that followed it.
+- **Reminders already sent were sent again when a reminder list changed.** Each sent reminder was
+  kept by its place in the list, so adding, removing or reordering one sent the earlier ones twice
+  (an SMS or email through `@slotlock/notify`). They are now kept by when they were due: a changed
+  list sends only what is new, and a moved booking is reminded again as before.
+- **`@slotlock/sync`, hardened further:**
+  - One calendar that refuses for good (read only, access revoked) no longer stops write-back for
+    the whole tenant: it is that mapping's failure (`failedMappings`), and read-only calendars are
+    not offered for write-back.
+  - A connection disconnected during a pass no longer comes back with its tokens, nor records busy
+    time.
+  - Seals are bound to their tenant, and a mapping uses only its own tenant's connection.
+    Connections made before this must be connected again.
+  - iCalendar feeds are read on core's worker threads, with a deadline.
+  - Google connections hold only the scopes they asked for, and one missing a scope is refused.
+  - A library user who reads iCalendar URLs must pass the guarded fetch.
 
 ## 0.9.1 - 2026-11-11
 

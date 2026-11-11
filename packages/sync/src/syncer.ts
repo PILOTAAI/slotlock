@@ -19,6 +19,7 @@ import {
   OAuthError,
   beginAuthorization,
   exchangeCode,
+  oauthScopes,
   refreshTokens,
 } from './oauth.js';
 import {
@@ -54,11 +55,14 @@ export interface SyncerOptions {
   slotlockUrl: string;
   /** OAuth apps, for the providers offered. */
   clients?: { google?: OAuthClient; microsoft?: OAuthClient };
-  /** slotlock's parseICalendarFeed, for iCalendar URLs. */
+  /** slotlock's parseICalendarFeed (or its worker pool's), for iCalendar URLs: needs icsFetch. */
   parseICalendar?: ICalendarFeedParser;
   /** For providers and Slotlock. */
   fetch?: typeof fetch;
-  /** For iCalendar URLs a tenant gave: pass slotlock's createSlotlockGuardedFetch(). */
+  /**
+   * For iCalendar URLs a tenant gave: slotlock's createSlotlockGuardedFetch(), which refuses
+   * private addresses. Required with parseICalendar: a tenant's URL is never read with plain fetch.
+   */
   icsFetch?: typeof fetch;
   /** How far ahead busy time is read and bookings written, in days (1-367, default 60). */
   windowDays?: number;
@@ -125,6 +129,9 @@ function sourceFor(connection: SyncConnection, calendarId: string): string {
 }
 
 export function createSyncer(options: SyncerOptions) {
+  if (options.parseICalendar && !options.icsFetch) {
+    throw new TypeError("icsFetch is needed with parseICalendar: pass slotlock's createSlotlockGuardedFetch()");
+  }
   const send = options.fetch ?? fetch;
   const now = options.now ?? (() => new Date());
   const windowDays = options.windowDays ?? 60;
@@ -154,8 +161,14 @@ export function createSyncer(options: SyncerOptions) {
   }
 
   type StoredTokens = Omit<OAuthTokens, 'expiresAt'> & { expiresAt: string };
+  /**
+   * What a connection's secrets are sealed for: its tenant and its id, so a ciphertext moved to
+   * another row, or a row moved to another tenant, does not open.
+   */
+  const sealedFor = (connection: Pick<SyncConnection, 'tenantRef' | 'id'>) =>
+    `connection:${JSON.stringify([connection.tenantRef, connection.id])}`;
   const tokensOf = (connection: SyncConnection) =>
-    JSON.parse(open(options.keys, connection.sealed, `connection:${connection.id}`)) as StoredTokens;
+    JSON.parse(open(options.keys, connection.sealed, sealedFor(connection))) as StoredTokens;
 
   /** A connection's access token, refreshed (and sealed again) when it has expired. */
   async function accessToken(connection: SyncConnection): Promise<string> {
@@ -163,8 +176,11 @@ export function createSyncer(options: SyncerOptions) {
     if (Date.parse(tokens.expiresAt) > now().getTime()) return tokens.accessToken;
     if (!tokens.refreshToken) throw new ProviderError('The connection has no refresh token: connect it again');
     const fresh = await refreshTokens(oauthClient(connection.provider as OAuthProvider), tokens.refreshToken, send);
-    connection.sealed = seal(options.keys, JSON.stringify(fresh), `connection:${connection.id}`);
-    await options.store.putConnection(connection);
+    connection.sealed = seal(options.keys, JSON.stringify(fresh), sealedFor(connection));
+    // Kept only while it is still there: a connection disconnected meanwhile stays gone.
+    if (!(await options.store.resealConnection(connection.id, connection.sealed))) {
+      throw new ProviderError('The connection was removed', 404);
+    }
     return fresh.accessToken;
   }
 
@@ -179,8 +195,9 @@ export function createSyncer(options: SyncerOptions) {
   async function readBusy(connection: SyncConnection, mapping: SyncMapping, span: Interval): Promise<Interval[]> {
     if (connection.provider === 'ics') {
       if (!options.parseICalendar) throw new Error('parseICalendar is needed for iCalendar URLs');
-      const url = open(options.keys, connection.sealed, `connection:${connection.id}`);
-      return readIcsBusy({ url, window: span, parse: options.parseICalendar, fetch: options.icsFetch ?? send });
+      if (!options.icsFetch) throw new Error('icsFetch is needed for iCalendar URLs');
+      const url = open(options.keys, connection.sealed, sealedFor(connection));
+      return readIcsBusy({ url, window: span, parse: options.parseICalendar, fetch: options.icsFetch });
     }
     const token = await accessToken(connection);
     if (connection.provider === 'google') {
@@ -218,7 +235,10 @@ export function createSyncer(options: SyncerOptions) {
     const span = window();
     const slotlock = await api(mapping.tenantRef);
     const connection = await options.store.getConnection(mapping.connectionId);
-    if (!connection) return { ok: false, mappingId: id, error: 'connection_not_found', retryAt: null };
+    // A mapping reads only its own tenant's connection, whatever its row says.
+    if (!connection || connection.tenantRef !== mapping.tenantRef) {
+      return { ok: false, mappingId: id, error: 'connection_not_found', retryAt: null };
+    }
     let busy: Interval[];
     try {
       busy = await readBusy(connection, mapping, span);
@@ -277,6 +297,10 @@ export function createSyncer(options: SyncerOptions) {
       await options.store.putWriteBack({ ...written, drift: drift.signature });
     }
     const theirs = withoutOwn(busy, inStep);
+    // Disconnected while it was read: its source was retired, and is not recorded again.
+    if (!(await options.store.getMapping(mapping.id)) || !(await options.store.getConnection(connection.id))) {
+      return { ok: false, mappingId: mapping.id, error: 'mapping_not_found', retryAt: null };
+    }
     const put = (revision: number) =>
       slotlock.putSourceBusy({ resourceId: mapping.resourceId, source: mapping.source, window: span, revision, busy: theirs });
     let recorded = await put(mapping.revision + 1).catch((error: unknown) => {
@@ -331,7 +355,7 @@ export function createSyncer(options: SyncerOptions) {
   }
 
   /** Keep one change's booking on the calendars of its resource that write back. */
-  async function writeBack(tenantRef: string, change: SlotlockChange): Promise<number> {
+  async function writeBack(tenantRef: string, change: SlotlockChange, failed?: Set<string>): Promise<number> {
     const data = change.data;
     const resourceId = typeof data.resource_id === 'string' ? data.resource_id : null;
     const id = typeof data.id === 'string' ? data.id : null;
@@ -364,13 +388,28 @@ export function createSyncer(options: SyncerOptions) {
     for (const [resource, todo] of [[resourceId, action], ...(left ? ([[left, 'remove']] as const) : [])] as const) {
       for (const mapping of await options.store.listMappings({ tenantRef, resourceId: resource })) {
         const connection = await options.store.getConnection(mapping.connectionId);
-        const calendar = connection ? writer(connection) : null;
+        const calendar = connection && connection.tenantRef === tenantRef ? writer(connection) : null;
         if (!calendar) continue;
-        const changed = todo === 'remove' ? await removeFrom(calendar, mapping, key) : await putOn(calendar, mapping, booking);
-        if (changed) written += 1;
+        try {
+          const changed = todo === 'remove' ? await removeFrom(calendar, mapping, key) : await putOn(calendar, mapping, booking);
+          if (changed) written += 1;
+        } catch (error) {
+          // A calendar that refuses for good (access revoked, read only, gone) is that mapping's
+          // failure, never the tenant's: its other calendars go on, and the daily reconcile puts
+          // this one right once it can be written. One that may answer later stops the read here,
+          // to be tried again.
+          if (!refusedForGood(error)) throw error;
+          failed?.add(mapping.id);
+        }
       }
     }
     return written;
+  }
+
+  /** A provider's refusal that trying again will not change. */
+  function refusedForGood(error: unknown): boolean {
+    if (error instanceof OAuthError) return true;
+    return error instanceof ProviderError && error.status !== null && [400, 401, 403, 404, 410].includes(error.status);
   }
 
   /**
@@ -439,7 +478,7 @@ export function createSyncer(options: SyncerOptions) {
         stateHash: hash,
         tenantRef: params.tenantRef,
         provider: params.provider,
-        sealedVerifier: seal(options.keys, flow.verifier, `oauth:${hash}`),
+        sealedVerifier: seal(options.keys, flow.verifier, `oauth:${JSON.stringify([params.tenantRef, hash])}`),
         writeBack: params.writeBack,
         browserHash: params.browserHash,
         expiresAt: new Date(now().getTime() + OAUTH_STATE_TTL_MS),
@@ -460,8 +499,18 @@ export function createSyncer(options: SyncerOptions) {
     }): Promise<{ connection: SyncConnection; calendars: ProviderCalendar[] }> {
       const flow = await options.store.takeOAuthState(stateHash(params.state), now());
       if (!flow || !flow.browserHash || flow.browserHash !== params.browserHash) throw new Error('oauth_state_invalid');
-      const verifier = open(options.keys, flow.sealedVerifier, `oauth:${flow.stateHash}`);
+      const verifier = open(options.keys, flow.sealedVerifier, `oauth:${JSON.stringify([flow.tenantRef, flow.stateHash])}`);
       const tokens = await exchangeCode(oauthClient(flow.provider), { code: params.code, verifier }, send);
+      // Exactly what the connection asked for: a person who unticked a scope Google asked about
+      // connects nothing, and a read-only connection never keeps a token that writes events.
+      if (flow.provider === 'google') {
+        const granted = new Set(tokens.scope.split(/\s+/).filter(Boolean));
+        const wanted = oauthScopes('google', flow.writeBack);
+        const events = 'https://www.googleapis.com/auth/calendar.events';
+        if (wanted.some((scope) => !granted.has(scope)) || (!flow.writeBack && granted.has(events))) {
+          throw new Error('oauth_scope_mismatch');
+        }
+      }
       const listed =
         flow.provider === 'google' ? await listGoogleCalendars(tokens.accessToken, send) : await listMicrosoftCalendars(tokens.accessToken, send);
       const id = randomUUID();
@@ -470,7 +519,7 @@ export function createSyncer(options: SyncerOptions) {
         tenantRef: flow.tenantRef,
         provider: flow.provider,
         account: (listed.account ?? `${flow.provider} account`).slice(0, 320),
-        sealed: seal(options.keys, JSON.stringify(tokens), `connection:${id}`),
+        sealed: seal(options.keys, JSON.stringify(tokens), sealedFor({ tenantRef: flow.tenantRef, id })),
         writeBack: flow.writeBack,
       };
       await options.store.putConnection(connection);
@@ -502,7 +551,7 @@ export function createSyncer(options: SyncerOptions) {
         tenantRef: params.tenantRef,
         provider: 'ics',
         account: url.hostname,
-        sealed: seal(options.keys, url.toString(), `connection:${id}`),
+        sealed: seal(options.keys, url.toString(), sealedFor({ tenantRef: params.tenantRef, id })),
         writeBack: false,
       };
       await options.store.putConnection(connection);
@@ -572,10 +621,12 @@ export function createSyncer(options: SyncerOptions) {
      * longer keeps (410 cursor_expired: the sync was down past its 30 days) is dropped, and the
      * tenant's calendars are reconciled with its bookings as they are now.
      */
-    async writeBackChanges(): Promise<{ written: number; failed: string[]; reconciled: string[] }> {
+    async writeBackChanges(): Promise<{ written: number; failed: string[]; reconciled: string[]; failedMappings: string[] }> {
       let written = 0;
       const failed: string[] = [];
       const reconciled: string[] = [];
+      // Mappings whose calendar refused for good: left to the daily reconcile, said here.
+      const failedMappings = new Set<string>();
       for (const tenant of await options.store.listTenants()) {
         try {
           const slotlock = await api(tenant.tenantRef);
@@ -594,7 +645,7 @@ export function createSyncer(options: SyncerOptions) {
             }
             // Each change is written back idempotently, so a page read again after a failure
             // repeats nothing; the cursor moves only past a page done whole.
-            for (const change of page.changes) written += await writeBack(tenant.tenantRef, change);
+            for (const change of page.changes) written += await writeBack(tenant.tenantRef, change, failedMappings);
             cursor = page.next;
             await options.store.setCursor(tenant.tenantRef, cursor);
             if (page.changes.length === 0) break;
@@ -603,7 +654,7 @@ export function createSyncer(options: SyncerOptions) {
           failed.push(tenant.tenantRef);
         }
       }
-      return { written, failed, reconciled };
+      return { written, failed, reconciled, failedMappings: [...failedMappings] };
     },
 
     /**
