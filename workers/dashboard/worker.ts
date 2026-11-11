@@ -66,6 +66,7 @@ import { slotlockDomainResolvers } from '../../src/domains.js';
 import { createSlotlockSecretBox } from '../../src/oidc.js';
 import type { SlotlockWorkspaceDomains } from '../../src/workspace-domains.js';
 import type { SlotlockWorkspaceSso } from '../../src/workspace-sso.js';
+import type { SlotlockWorkspaceScim } from '../../src/workspace-scim.js';
 import {
   type SlotlockDashboardSessions,
   type SlotlockDashboardWorkspaces,
@@ -266,12 +267,14 @@ function perRequestWorkspaces(current: () => SlotlockDashboardWorkspaces): Slotl
   const sessions = perRequest(() => current().sessions as SlotlockDashboardSessions);
   const domains = perRequest(() => current().domains as SlotlockWorkspaceDomains);
   const sso = perRequest(() => current().sso as SlotlockWorkspaceSso);
+  const scim = perRequest(() => current().scim as SlotlockWorkspaceScim);
   return new Proxy({} as SlotlockDashboardWorkspaces, {
     get(_target, property) {
       if (property === 'teams') return teams;
       if (property === 'sessions') return sessions;
       if (property === 'domains') return domains;
       if (property === 'sso') return sso;
+      if (property === 'scim') return scim;
       const target = current();
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -407,6 +410,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(config.teamSso
         ? { sso: { secretBox: createSlotlockSecretBox(config.teamSso.secret), fetch: (input, init) => fetch(input, init) } }
         : {}),
+      ...(config.teamScim ? { scim: true } : {}),
       ...(config.invitationEmail
         ? {
             invitations: createSlotlockInvitationEmailSender(config.invitationEmail, {

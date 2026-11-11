@@ -157,6 +157,11 @@ export interface SlotlockServeDashboardConfig {
    * domains): its client secrets sealed under SLOTLOCK_SSO_SECRET.
    */
   teamSso?: { secret: string };
+  /**
+   * SCIM provisioning (SLOTLOCK_TEAM_SCIM=on, with verified domains): each team's identity provider
+   * adds, deactivates and groups its people at the dashboard's /scim/v2.
+   */
+  teamScim?: boolean;
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -292,6 +297,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   const invitationEmail = readInvitationEmail(env, teamWorkspaces);
   const verifiedDomains = readVerifiedDomains(env);
   const teamSso = readTeamSso(env, verifiedDomains !== undefined);
+  const teamScim = readTeamScim(env, verifiedDomains !== undefined);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -313,6 +319,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     ...(invitationEmail ? { invitationEmail } : {}),
     ...(verifiedDomains ? { verifiedDomains } : {}),
     ...(teamSso ? { teamSso } : {}),
+    ...(teamScim ? { teamScim } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(termsUrl !== undefined ? { termsUrl } : {}),
     ...(privacyUrl !== undefined ? { privacyUrl } : {}),
@@ -469,6 +476,16 @@ function readTeamSso(env: SlotlockEnv, verifiedDomains: boolean): { secret: stri
     throw new SlotlockConfigError(`SLOTLOCK_SSO_SECRET must be 32 or more characters without spaces. ${SECRET_HINT}`);
   }
   return { secret };
+}
+
+/** SLOTLOCK_TEAM_SCIM: on or off (the default), only with verified domains. */
+function readTeamScim(env: SlotlockEnv, verifiedDomains: boolean): boolean {
+  const value = optional(env, 'SLOTLOCK_TEAM_SCIM') ?? 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_TEAM_SCIM must be on or off');
+  if (value === 'on' && !verifiedDomains) {
+    throw new SlotlockConfigError('SLOTLOCK_TEAM_SCIM adds people only at verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+  }
+  return value === 'on';
 }
 
 /**

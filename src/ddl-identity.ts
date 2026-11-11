@@ -129,7 +129,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
      WHERE conname = 'slotlock_workspace_memberships_valid' AND conrelid = 'slotlock.workspace_memberships'::regclass
-       AND pg_get_constraintdef(oid) LIKE '%''sso''%'
+       AND pg_get_constraintdef(oid) LIKE '%''scim''%'
   ) THEN
     ALTER TABLE slotlock.workspace_memberships DROP CONSTRAINT IF EXISTS slotlock_workspace_memberships_valid;
     ALTER TABLE slotlock.workspace_memberships ADD CONSTRAINT slotlock_workspace_memberships_valid CHECK (
@@ -137,7 +137,7 @@ BEGIN
       AND person_ref ~ '${PERSON}'
       AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
       AND status IN ('active', 'inactive')
-      AND source IN ('github_org', 'invitation', 'created', 'domain', 'sso')
+      AND source IN ('github_org', 'invitation', 'created', 'domain', 'sso', 'scim')
       AND (status = 'active') = (deactivated_at IS NULL)
     );
   END IF;
@@ -820,7 +820,7 @@ BEGIN
   INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source, joined_via_domain, joined_email)
   VALUES (requested_tenant, asked.person_ref, requested_role, 'domain', asked.domain_id, asked.email)
   ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
-     SET role = excluded.role, status = 'active', source = 'domain', joined_via_domain = excluded.joined_via_domain,
+     SET role = excluded.role, status = 'active', source = 'domain', joined_via_domain = excluded.joined_via_domain, deactivated_by = NULL,
          joined_email = excluded.joined_email, deactivated_at = NULL, updated_at = statement_timestamp();
   -- Let in by a person who decided: the address is no longer one the team turned away.
   DELETE FROM slotlock.workspace_join_blocks blocked

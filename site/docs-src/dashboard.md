@@ -250,6 +250,33 @@ it up on Settings, Identity. A provider that speaks only SAML cannot be connecte
 - People see "Continue with single sign-on" on the sign-in page, and type their work email. A link
   to `/dashboard/sso/<team handle>` opens a page naming the team, whose button goes on to the provider.
 
+### SCIM
+
+Set `SLOTLOCK_TEAM_SCIM=on` (with verified domains) for each team's identity provider (Okta,
+Microsoft Entra ID, or any SCIM 2.0 client) to add, deactivate and group its people. Its Owners set
+it up on Settings, Identity.
+
+- **Turn on SCIM** and choose what happens to the API keys of someone the directory deactivates:
+  revoked, or kept working. There is no default.
+- **New token** shows a bearer token once (Slotlock keeps its SHA-256 only), with the SCIM URL,
+  `https://<your dashboard>/scim/v2/<team id>`, to paste into the provider. A team keeps two
+  tokens at a time, so one can replace the other; each works for its own team only.
+- **Users** the directory adds must be at a domain the team verified. One becomes a member, as a
+  Viewer unless a group says otherwise, when they sign in with a Google Workspace account of that
+  domain or through the team's single sign-on with that address; an address GitHub or a personal
+  Google account verified does not count. With single sign-on, the directory decides who joins at
+  its addresses, whatever "Who joins" says.
+- **Deactivated** (or deleted) in the directory, someone leaves the team at their next request,
+  and only that team: their own workspace and other teams are untouched. Their keys go as the Owner
+  chose. Reactivated, they need a new sign-in.
+- **Groups** named `slotlock-role-admin`, `-developer`, `-member`, `-viewer` or `-billing` give
+  that role; an Owner can map any other group to a role on Settings, Identity. The highest wins. A
+  role set by hand on Members stays.
+- The directory never changes, deactivates or deletes an Owner, and no group makes one.
+- Okta's and Entra's requests work as they send them (`Replace` with a capital, `"False"` as a
+  string, a member removed without a filter). Bulk, sorting and ETags are not offered, as the
+  service provider configuration says.
+
 ## Organizations
 
 For organizations instead of people, set `SLOTLOCK_DASHBOARD_ORGS` to the GitHub organization ids

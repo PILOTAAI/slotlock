@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import type { SlotlockSql } from './store.js';
 import { type SlotlockWorkspaceDomains, createSlotlockWorkspaceDomains } from './workspace-domains.js';
 import { type SlotlockWorkspaceSso, createSlotlockWorkspaceSso } from './workspace-sso.js';
+import { type SlotlockWorkspaceScim, createSlotlockWorkspaceScim } from './workspace-scim.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
 
@@ -71,6 +72,8 @@ export interface SlotlockDashboardWorkspaces {
   domains?: SlotlockWorkspaceDomains;
   /** Teams' single sign-on (workspace-sso.ts): only with the database. */
   sso?: SlotlockWorkspaceSso;
+  /** Teams' SCIM provisioning (workspace-scim.ts): only with the database. */
+  scim?: SlotlockWorkspaceScim;
 }
 
 /** A session a person signed in with, as their Account page lists it. */
@@ -295,6 +298,7 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
     sessions: createSessions(sql),
     domains: createSlotlockWorkspaceDomains(sql),
     sso: createSlotlockWorkspaceSso(sql),
+    scim: createSlotlockWorkspaceScim(sql),
   };
 }
 
