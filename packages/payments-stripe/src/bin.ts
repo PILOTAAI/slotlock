@@ -4,7 +4,8 @@
 //
 // Settings (environment): SLOTLOCK_URL, PAYMENTS_TENANTS_FILE (a JSON file, kept as a secret: each
 // tenant's stripeSecretKey, a restricted key that reads PaymentIntents and writes refunds; its
-// webhookSecret; its slotlockApiKey; and refundRefused), HOST, PORT (default 8092).
+// webhookSecret; its slotlockApiKey; refundRefused; and slotlockWebhookSecret, for
+// /slotlock/webhook/<tenant>), HOST, PORT (default 8092).
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { type StripeTenant, createPaymentsHttpHandler } from './http.js';
@@ -22,9 +23,13 @@ function readTenants(path: string): Map<string, StripeTenant> {
       !/^(sk|rk)_(live|test)_/.test(tenant.stripeSecretKey) ||
       typeof tenant.webhookSecret !== 'string' ||
       !tenant.webhookSecret.startsWith('whsec_') ||
-      typeof tenant.slotlockApiKey !== 'string'
+      typeof tenant.slotlockApiKey !== 'string' ||
+      (tenant.slotlockWebhookSecret !== undefined &&
+        (typeof tenant.slotlockWebhookSecret !== 'string' || !tenant.slotlockWebhookSecret.startsWith('whsec_')))
     ) {
-      throw new TypeError(`Tenant ${tenantRef} needs stripeSecretKey (sk_ or rk_), webhookSecret (whsec_) and slotlockApiKey`);
+      throw new TypeError(
+        `Tenant ${tenantRef} needs stripeSecretKey (sk_ or rk_), webhookSecret (whsec_) and slotlockApiKey, and slotlockWebhookSecret (whsec_) if given`,
+      );
     }
     tenants.set(tenantRef, tenant);
   }
@@ -32,7 +37,7 @@ function readTenants(path: string): Map<string, StripeTenant> {
 }
 
 const tenants = readTenants(setting('PAYMENTS_TENANTS_FILE'));
-const handler = createPaymentsHttpHandler({ slotlockUrl: setting('SLOTLOCK_URL'), tenant: async (ref) => tenants.get(ref) ?? null });
+const handler = createPaymentsHttpHandler({ slotlockUrl: setting('SLOTLOCK_URL'), tenant: async (ref) => tenants.get(ref) ?? null, log });
 const server = createServer(
   serveFetchHandler(handler, { maxBodyBytes: 256 * 1024, onError: (error) => log('error', 'request failed', { error: String(error) }) }),
 );

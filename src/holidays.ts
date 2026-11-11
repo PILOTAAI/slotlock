@@ -11,6 +11,27 @@ export const SLOTLOCK_MAX_HOLIDAY_DAYS = 1_000;
 /** How long Slotlock waits for a holiday calendar URL. */
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_LABEL = 200;
+/** Steps through one recurring event's occurrences, and through all of a calendar's. */
+const MAX_STEPS_PER_EVENT = 5_000;
+const MAX_STEPS_PER_CALENDAR = 20_000;
+/**
+ * Repeats a calendar of days off has no use for, refused before they are expanded: ical.js steps a
+ * DAILY rule day by day until it finds a day of the month or year that may never come (February
+ * 30), and never returns; a rule more often than daily cannot name whole days.
+ */
+const SUB_DAILY = new Set(['SECONDLY', 'MINUTELY', 'HOURLY']);
+const DAILY_FILTERS = ['BYMONTHDAY', 'BYYEARDAY', 'BYWEEKNO'];
+
+/** Why a recurrence rule cannot be read here, or null when it can. */
+function unreadableRule(rule: unknown): string | null {
+  const recur = rule as { freq?: unknown; parts?: Record<string, unknown> } | null;
+  const freq = String(recur?.freq ?? '').toUpperCase();
+  if (SUB_DAILY.has(freq)) return `it repeats ${freq.toLowerCase()}, and a holiday is a whole day`;
+  if (freq === 'DAILY' && DAILY_FILTERS.some((part) => recur?.parts?.[part] !== undefined)) {
+    return 'it repeats daily on days of the month or year: repeat it monthly or yearly instead';
+  }
+  return null;
+}
 
 export interface SlotlockHoliday {
   /** The event's UID, with the day for each occurrence of a recurring one: importing again matches it. */
@@ -57,16 +78,28 @@ export function parseHolidayCalendar(text: string, span: { from: string; to: str
   if (root.name !== 'vcalendar') throw invalidHolidayCalendar('The text is not a VCALENDAR');
   const holidays: SlotlockHoliday[] = [];
   let skipped = 0;
+  let steps = 0;
+  const vevents = root.getAllSubcomponents('vevent');
+  // Each series' overrides, found once: ical.js otherwise looks through every event for each
+  // event, so a calendar of many events took minutes.
+  const overrides = new Map<string, InstanceType<typeof ICAL.Component>[]>();
+  for (const component of vevents) {
+    if (!component.hasProperty('recurrence-id')) continue;
+    const uid = String(component.getFirstPropertyValue('uid') ?? '');
+    overrides.set(uid, [...(overrides.get(uid) ?? []), component]);
+  }
   const add = (holiday: SlotlockHoliday) => {
     holidays.push(holiday);
     if (holidays.length > SLOTLOCK_MAX_HOLIDAY_DAYS) {
       throw invalidHolidayCalendar(`The calendar names more than ${SLOTLOCK_MAX_HOLIDAY_DAYS} holidays in the span`);
     }
   };
-  for (const component of root.getAllSubcomponents('vevent')) {
+  for (const component of vevents) {
     // An override of one occurrence is read with its series.
     if (component.hasProperty('recurrence-id')) continue;
-    const event = new ICAL.Event(component);
+    const event = new ICAL.Event(component, {
+      exceptions: overrides.get(String(component.getFirstPropertyValue('uid') ?? '')) ?? [],
+    });
     const start = event.startDate;
     const status = String(component.getFirstPropertyValue('status') ?? '').toUpperCase();
     if (!start || !start.isDate || status === 'CANCELLED') {
@@ -95,12 +128,26 @@ export function parseHolidayCalendar(text: string, span: { from: string; to: str
       occurrence(startDay, uid || `${dateOf(start)}:${label}`);
       continue;
     }
-    const iterator = event.iterator();
-    for (let next = iterator.next(), steps = 0; next && steps < 5_000; next = iterator.next(), steps++) {
-      const day = epochDay(dateOf(next)) as number;
-      if (day > last) break;
-      if (day + length - 1 < first) continue;
-      occurrence(day, `${uid || label}:${dateOf(next)}`);
+    for (const rule of component.getAllProperties('rrule')) {
+      const why = unreadableRule(rule.getFirstValue());
+      if (why) throw invalidHolidayCalendar(`"${label}" cannot be read: ${why}`);
+    }
+    try {
+      const iterator = event.iterator();
+      for (let next = iterator.next(), own = 0; next && own < MAX_STEPS_PER_EVENT; next = iterator.next(), own++) {
+        steps += 1;
+        if (steps > MAX_STEPS_PER_CALENDAR) {
+          throw invalidHolidayCalendar('The calendar repeats too much to read: give its holidays from a later start');
+        }
+        const day = epochDay(dateOf(next)) as number;
+        if (day > last) break;
+        if (day + length - 1 < first) continue;
+        occurrence(day, `${uid || label}:${dateOf(next)}`);
+      }
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 'invalid_holiday_calendar') throw error;
+      // ical.js refusing a rule it cannot follow.
+      throw invalidHolidayCalendar(`"${label}" repeats in a way that cannot be read`);
     }
   }
   const given = String(root.getFirstPropertyValue('x-wr-calname') ?? '').replace(/\s+/g, ' ').trim();
@@ -147,7 +194,14 @@ export async function fetchHolidayCalendar(fetcher: typeof fetch, url: string): 
   const chunks: Uint8Array[] = [];
   let size = 0;
   for (;;) {
-    const { done, value } = await reader.read();
+    let read: Awaited<ReturnType<typeof reader.read>>;
+    try {
+      read = await reader.read();
+    } catch {
+      // Cut off while its body was read (the timeout, or the connection reset).
+      throw unreachable('The calendar URL could not be read');
+    }
+    const { done, value } = read;
     if (done) break;
     size += value.byteLength;
     if (size > SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES) {

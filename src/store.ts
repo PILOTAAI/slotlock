@@ -1916,9 +1916,23 @@ async function localStartFor(
 async function sourceBusyLoss(tx: StoreSql, resourceId: string, start: Date, end: Date): Promise<boolean> {
   const [hit] = await tx`
     SELECT 1 FROM slotlock.source_busy
-     WHERE resource_id = ${resourceId} AND starts_at < ${end} AND ends_at > ${start}
+     WHERE resource_id IN (${compositeKin(tx, resourceId)}) AND starts_at < ${end} AND ends_at > ${start}
      LIMIT 1`;
   return hit !== undefined;
+}
+
+/**
+ * The resources whose busy time keeps this one busy (RFC 0003 G8, RFC 0004 C1), as a subquery: it,
+ * its composite if it is a part (the whole is in use), and its parts if it is a composite (a part
+ * in use takes the whole). Never its sibling parts, which are booked apart.
+ */
+function compositeKin(executor: StoreSql, resourceId: string) {
+  return executor`
+    SELECT ${resourceId}::uuid
+    UNION ALL
+    SELECT parent_id FROM slotlock.resources WHERE id = ${resourceId}::uuid AND parent_id IS NOT NULL
+    UNION ALL
+    SELECT id FROM slotlock.resources WHERE parent_id = ${resourceId}::uuid`;
 }
 
 /**
@@ -2060,6 +2074,30 @@ async function rulesNow(tx: StoreSql, resourceId: string): Promise<{ rules: Slot
  * Mark what the next change of a booking records on the feed (RFC 0004 B5): a cancellation's fee
  * and an admin's reason for going past a cutoff. Cleared with nulls.
  */
+/**
+ * Whether a paid hold ended without a booking (RFC 0004 C3), so its payment was never applied:
+ * not booked (confirmed, or booked from), not still held, and not taken over by an approval that
+ * was granted or may still be.
+ */
+async function paidHoldEnded(
+  tx: StoreSql,
+  tenantRef: string,
+  payment: { id: string; booked_at: Date | null; approval_id: string | null },
+): Promise<boolean> {
+  if (payment.booked_at) return false;
+  const [hold] = await tx<{ status: string; live: boolean }[]>`
+    SELECT status, expires_at > statement_timestamp() AS live FROM slotlock.reservations WHERE id = ${payment.id}`;
+  if (hold) return hold.status === 'held' && !hold.live;
+  if (payment.approval_id) {
+    const [approval] = await tx<{ status: string; live: boolean }[]>`
+      SELECT status, expires_at > statement_timestamp() AS live FROM slotlock.approvals
+       WHERE id = ${payment.approval_id}::uuid AND tenant_ref = ${tenantRef}`;
+    if (approval?.status === 'granted') return false;
+    if (approval?.status === 'pending' && approval.live) return false;
+  }
+  return true;
+}
+
 async function noteEnding(
   tx: StoreSql,
   fee: { amount_minor: number; currency: string } | null,
@@ -2098,6 +2136,9 @@ async function eventEnding(
   await noteEnding(tx, fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null, note);
   return { ok: true, fee };
 }
+
+/** How long busy time a calendar reported is kept after it ended: the feed's retention. */
+const SOURCE_BUSY_RETENTION_DAYS = 30;
 
 /** How recently a sync must have read a resource whose booking rules require certainty. */
 const CERTAIN_COVERAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -2716,6 +2757,23 @@ async function rollStoredSeries(
     cursor: row.recurrence_cursor ?? null,
     stored: true,
   });
+  // Busy time a calendar reported (RFC 0004 C1) is refused to a rolled occurrence as an overlap is:
+  // nothing is written, the series is put off, and the roll counts it a conflict.
+  if ((event.transparency ?? 'opaque') === 'opaque' && occurrences.length > 0) {
+    const beforeMs = Number(row.buffer_before_ms ?? 0);
+    const afterMs = Number(row.buffer_after_ms ?? 0);
+    const [met] = await tx`
+      SELECT 1
+        FROM slotlock.source_busy busy
+        JOIN ROWS FROM (
+               pg_catalog.unnest(${occurrences.map((each) => new Date(each.start.getTime() - beforeMs).toISOString())}::text[]::timestamptz[]),
+               pg_catalog.unnest(${occurrences.map((each) => new Date(each.end.getTime() + afterMs).toISOString())}::text[]::timestamptz[]))
+             AS occurrence(starts_at, ends_at)
+          ON busy.starts_at < occurrence.ends_at AND busy.ends_at > occurrence.starts_at
+       WHERE busy.resource_id IN (${compositeKin(tx, row.resource_id)})
+       LIMIT 1`;
+    if (met) throw Object.assign(new Error('slotlock: a rolled occurrence meets reported busy time'), { code: EXCLUSION_VIOLATION });
+  }
   await replaceCalendarEventOccurrences(tx, {
     tenantRef,
     eventId: row.id,
@@ -3265,7 +3323,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
   listHolidayCalendars(params: { tenantRef: string }): Promise<SlotlockHolidayCalendar[]>;
   /** Delete a holiday calendar and its closures; null for one the tenant does not have. */
   deleteHolidayCalendar(params: { tenantRef: string; id: string }): Promise<{ closures: number } | null>;
-  /** Subscriptions due to be imported again, the longest waiting first. */
+  /**
+   * Subscriptions due to be imported again, each put off a day before it is read (maintenance):
+   * importing it sets its next import, so one a pass never finishes is not tried again at once.
+   */
   dueHolidayCalendars(params: { tenantRef: string; limit: number }): Promise<SlotlockHolidayCalendar[]>;
   /** Note why a subscription's import failed; it is tried again a day later. */
   noteHolidayCalendarFailure(params: { tenantRef: string; id: string; error: string }): Promise<void>;
@@ -3406,7 +3467,7 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * Record that a hold waiting for payment is paid (RFC 0004 C3), by the payment's reference at the
    * integrator's processor: the integrator says so, or an adapter that verified it. Once paid it
    * may be confirmed. The same reference again answers the same hold, whatever became of it since
-   * (confirmed, booked, expired: the payment is kept apart); another is `payment_conflict`. The feed says so (`hold.paid`). A hold that does not wait for payment is
+   * (confirmed or booked from: the payment is kept apart), unless the hold ended without a booking (`hold_ended`: never applied, so refunded); another is `payment_conflict`, naming the one recorded. The feed says so (`hold.paid`). A hold that does not wait for payment is
    * `payment_not_required`; an expired one `hold_expired`; one confirmed, released or unknown
    * `hold_not_found`.
    */
@@ -4588,7 +4649,7 @@ function sourceBusy(executor: StoreSql, resourceId: string, window: Interval) {
   return executor`
     SELECT busy.starts_at AS occupied_starts_at, busy.ends_at AS occupied_ends_at
       FROM slotlock.source_busy busy
-     WHERE busy.resource_id = ${resourceId}
+     WHERE busy.resource_id IN (${compositeKin(executor, resourceId)})
        AND busy.starts_at < ${window.end} AND busy.ends_at > ${window.start}`;
 }
 
@@ -6843,16 +6904,21 @@ function buildSlotlockStore(
         // (a reloaded return page, a redelivered webhook) after the hold was booked is answered as
         // recorded, never as a refusal a payment adapter would refund.
         await lockExternalIdentity(tx, params.tenantRef, `hold-payment:${params.holdId}`);
-        const [recorded] = await tx<HoldRow[]>`
+        const [recorded] = await tx<(HoldRow & { booked_at: Date | null; approval_id: string | null })[]>`
           SELECT hold_id AS id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at,
                  NULL::text AS source, true AS payment_required, payment_ref, paid_at,
-                 payment_amount_minor, payment_currency, paid_amount_minor, paid_currency
+                 payment_amount_minor, payment_currency, paid_amount_minor, paid_currency,
+                 booked_at, approval_id
             FROM slotlock.hold_payments
            WHERE hold_id = ${params.holdId} AND tenant_ref = ${params.tenantRef}`;
         if (recorded) {
-          return recorded.payment_ref === params.paymentRef
-            ? { ok: true, hold: toHold(recorded), idempotent: true }
-            : { ok: false, code: 'payment_conflict' };
+          if (recorded.payment_ref !== params.paymentRef) {
+            // Named, so an adapter refunds only a payment it can tell is another.
+            return { ok: false, code: 'payment_conflict', paymentRef: recorded.payment_ref as string };
+          }
+          // Its hold ended without a booking: the payment was never applied, and is refunded.
+          if (await paidHoldEnded(tx, params.tenantRef, recorded)) return { ok: false, code: 'hold_ended' };
+          return { ok: true, hold: toHold(recorded), idempotent: true };
         }
         const [row] = await tx<(HoldRow & { status: string; live: boolean })[]>`
           SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
@@ -6870,7 +6936,7 @@ function buildSlotlockStore(
         if (row.payment_ref !== null && row.payment_ref !== undefined) {
           return row.payment_ref === params.paymentRef
             ? { ok: true, hold: toHold(row), idempotent: true }
-            : { ok: false, code: 'payment_conflict' };
+            : { ok: false, code: 'payment_conflict', paymentRef: row.payment_ref };
         }
         // Paid after it lapsed: the time may be someone else's by now. The integrator refunds.
         if (!row.live) return { ok: false, code: 'hold_expired' };
@@ -7141,10 +7207,15 @@ function buildSlotlockStore(
           const id = randomUUID();
           // The requester's own hold of the time gives way to the approval's.
           if (params.consumeHold && isValidResourceId(params.consumeHold.holdId)) {
+            // Taken over, not ended: its payment, if any, goes with the approval (booked if granted).
+            await tx`SELECT set_config('slotlock.ending', 'approval', true)`;
             await tx`
               DELETE FROM slotlock.reservations
                WHERE id = ${params.consumeHold.holdId} AND status = 'held'
                  AND holder_ref = ${params.consumeHold.holderRef}`;
+            await tx`SELECT set_config('slotlock.ending', '', true)`;
+            await tx`UPDATE slotlock.hold_payments SET approval_id = ${id}::uuid
+                      WHERE hold_id = ${params.consumeHold.holdId} AND tenant_ref = ${tenantRef}`;
           }
           const holds = [...params.holds].sort(
             (left, right) => left.resourceId.localeCompare(right.resourceId) || left.start.getTime() - right.start.getTime(),
@@ -7387,6 +7458,13 @@ function buildSlotlockStore(
         // A hold that waits for payment is booked only once it is paid (RFC 0004 C3).
         if (row.unpaid) return { ok: false, code: 'payment_required' };
         if (resource?.archived !== false) return { ok: false, code: 'resource_archived' };
+        // Busy time a calendar reported since the hold was made (RFC 0004 C1) is refused, as an
+        // agent's confirmation of its hold refuses it: the source's time is not to be booked.
+        if (
+          await sourceBusyLoss(tx, row.resource_id, row.starts_at, new Date(row.ends_at.getTime() + Number(row.buffer_after_ms)))
+        ) {
+          return { ok: false, code: 'overlap' };
+        }
         if (bookingTenant !== null) {
           const [retired] = await tx<{ revision: string }[]>`
             SELECT revision FROM slotlock.reservation_tombstones
@@ -7411,6 +7489,9 @@ function buildSlotlockStore(
           RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                     buffer_after_ms, revision, source, contact_ref, notify, reminder_minutes`;
         if (!confirmed) throw new Error('slotlock: hold confirmation returned no row');
+        // Its payment, if any, is applied: never refunded as a hold that ended unbooked.
+        await tx`UPDATE slotlock.hold_payments SET booked_at = statement_timestamp()
+                  WHERE hold_id = ${holdId} AND booked_at IS NULL`;
         // Its linked alternatives (one group, one holder) are released with it, as booking one
         // from an agent releases the rest.
         if (row.hold_group_id !== null && row.holder_ref !== null) {
@@ -7632,19 +7713,30 @@ function buildSlotlockStore(
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
             }
-            // A one-off event moved in time or to another resource, past its reschedule cutoff
-            // (RFC 0004 B5), is refused to a writer held to the booking rules.
-            if (
-              found &&
-              params.enforceBookingRules === true &&
-              found.recurrence_rule === null &&
-              (found.starts_at.getTime() !== event.start.getTime() ||
+            // A one-off event changed past its cutoffs (RFC 0004 B5) is refused to a writer held to
+            // the booking rules: moved in time or to another resource, or made a series (whose
+            // cancellation no cutoff holds), past its reschedule cutoff; made transparent, letting its
+            // time go, past its cancel cutoff or once a cancellation fee is due, as a cancellation
+            // would be (cancelling records the fee).
+            if (found && params.enforceBookingRules === true && found.recurrence_rule === null) {
+              const moved =
+                found.starts_at.getTime() !== event.start.getTime() ||
                 found.ends_at.getTime() !== event.end.getTime() ||
-                found.resource_id !== params.resourceId)
-            ) {
-              const judged = await rulesNow(tx, found.resource_id);
-              if (cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
-                return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
+                found.resource_id !== params.resourceId ||
+                (event.recurrence?.rrule ?? null) !== null;
+              const letGo = found.transparency !== 'transparent' && (event.transparency ?? 'opaque') === 'transparent';
+              if (moved || letGo) {
+                const judged = await rulesNow(tx, found.resource_id);
+                if (moved && cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
+                  return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
+                }
+                if (
+                  letGo &&
+                  (cutoffRuleBroken(judged.rules, 'cancel', found.starts_at, judged.now) ||
+                    cancellationFeeDue(judged.rules, found.starts_at, judged.now) !== null)
+                ) {
+                  return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
+                }
               }
             }
             const series = expanded ?? resumeStoredSeries(event, materializationWindow, found);
@@ -7720,6 +7812,9 @@ function buildSlotlockStore(
               await tx`SELECT set_config('slotlock.ending', 'confirmed', true)`;
               await tx`DELETE FROM slotlock.reservations WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}`;
               await tx`SELECT set_config('slotlock.ending', '', true)`;
+              // Its payment, if any, is applied to this booking.
+              await tx`UPDATE slotlock.hold_payments SET booked_at = statement_timestamp()
+                        WHERE hold_id = ${holdId} AND booked_at IS NULL`;
               // A set held together (RFC 0004 B7) is booked member by member: its other holds stay.
               await tx`
                 DELETE FROM slotlock.reservations
@@ -8704,6 +8799,18 @@ function buildSlotlockStore(
           )
           SELECT count(*)::int AS deleted FROM deleted`;
         const tombstonesDeleted = Number(tombstones?.deleted ?? 0);
+        // Busy time a calendar reported (RFC 0004 C1) that ended a month ago keeps nothing out any
+        // more: it goes, as the feed's changes do, so a person's schedule is not kept for good.
+        const [busy] = await tx<{ deleted: number }[]>`
+          WITH ended AS (
+            SELECT ctid FROM slotlock.source_busy
+             WHERE tenant_ref = ${params.tenantRef}
+               AND ends_at < statement_timestamp() - make_interval(days => ${SOURCE_BUSY_RETENTION_DAYS})
+             LIMIT ${limit}
+          ), deleted AS (
+            DELETE FROM slotlock.source_busy busy USING ended WHERE busy.ctid = ended.ctid RETURNING 1
+          )
+          SELECT count(*)::int AS deleted FROM deleted`;
         return {
           expiredHoldsDeleted,
           holdCommandsDeleted,
@@ -8712,7 +8819,8 @@ function buildSlotlockStore(
             legacy.length === limit ||
             expiredHoldsDeleted === limit ||
             holdCommandsDeleted === limit ||
-            tombstonesDeleted === limit,
+            tombstonesDeleted === limit ||
+            Number(busy?.deleted ?? 0) === limit,
         };
       });
     },
@@ -8950,7 +9058,7 @@ function buildSlotlockStore(
                  reported.starts_at AS busy_start, reported.ends_at AS busy_end
             FROM slotlock.reservations booking
             JOIN reported ON booking.starts_at < reported.ends_at AND booking.ends_at > reported.starts_at
-           WHERE booking.resource_id = ${params.resourceId}
+           WHERE booking.resource_id IN (${compositeKin(tx, params.resourceId)})
              AND booking.status = 'confirmed'
              AND booking.starts_at < ${window.end} AND booking.ends_at > ${window.start}
              AND NOT EXISTS (

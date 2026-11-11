@@ -353,6 +353,13 @@ describe.skipIf(!url)('stored hours and closures (real Postgres)', () => {
     expect(failed).toMatchObject({ calendar_id: calendarId, last_error: 'The calendar URL answered 503', closures: 2 });
     expect(Date.parse(failed?.next_import_at as string) - Date.now()).toBeGreaterThan(23 * 3_600_000);
     expect((await maintainSlotlockTenant(store, tenantRef, { holidayFetch })).holidayCalendarsImported).toBe(0);
+    // A pass that never finishes reading one (a process stopped on it) does not take it up again at
+    // once: each is put off a day as it is taken, and two passes never both take it.
+    await sql`UPDATE slotlock.holiday_calendars SET next_import_at = now() - interval '1 minute' WHERE id = ${calendarId}::uuid`;
+    expect((await store.withTenant(tenantRef, (tenant) => tenant.dueHolidayCalendars({ tenantRef, limit: 5 }))).map((due) => due.id)).toEqual([
+      calendarId,
+    ]);
+    expect(await store.withTenant(tenantRef, (tenant) => tenant.dueHolidayCalendars({ tenantRef, limit: 5 }))).toEqual([]);
 
     // A closure imported before calendars were kept becomes the calendar's that names it.
     await sql`

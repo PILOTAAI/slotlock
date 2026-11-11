@@ -8,7 +8,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../../../src/agent-store-backend.js';
 import { type SlotlockStore, createSlotlockStore } from '../../../src/store.js';
-import { createPaymentsHttpHandler, createStripePayments, verifyStripeSignature } from './index.js';
+import { deliverSlotlockWebhooks } from '../../../src/webhooks.js';
+import { createPaymentsHttpHandler, createStripePayments, tenantDigest, verifyStripeSignature } from './index.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const BASE = 'http://localhost/slotlock';
@@ -40,6 +41,8 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
   // The fake Stripe: PaymentIntents by id, and the refunds asked for.
   const intents = new Map<string, Record<string, unknown>>();
   const refunds: string[] = [];
+  /** What the fake Stripe answers a refund, when it does not make it. */
+  let refundFails: number | null = null;
   const send = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const target = String(input instanceof Request ? input.url : input);
     if (target.startsWith(BASE)) return server.fetch(new Request(target, init));
@@ -48,6 +51,7 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
     const intent = /\/v1\/payment_intents\/(pi_\w+)$/.exec(target);
     if (intent) return intents.has(intent[1] as string) ? json(intents.get(intent[1] as string)) : json({ error: {} }, 404);
     if (target === 'https://api.stripe.com/v1/refunds') {
+      if (refundFails !== null) return json({ error: { type: 'api_error' } }, refundFails);
       refunds.push(new URLSearchParams(String(init.body)).get('payment_intent') as string);
       return json({ id: 're_1', status: 'succeeded' });
     }
@@ -91,6 +95,7 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
 
   it('marks a hold paid from a verified PaymentIntent, once, and refunds one for an expired hold', async () => {
     const payments = createStripePayments({
+      tenantRef,
       stripeSecretKey: 'sk_test_tenant',
       slotlock: { baseUrl: BASE, apiKey: 'admin' },
       refundRefused: true,
@@ -185,5 +190,106 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
     intents.set('pi_other', { object: 'payment_intent', id: 'pi_other', status: 'succeeded', metadata: {} });
     expect(await payments.confirmPaymentIntent('pi_other')).toEqual({ status: 'not_paid', reason: 'no_hold' });
     expect(await payments.confirmPaymentIntent('pi_missing')).toEqual({ status: 'not_paid', reason: 'not_found' });
+  });
+  it('refunds every payment it could not apply, says what it keeps, and retries a refund not made', async () => {
+    const logged: { level: string; message: string; fields: Record<string, unknown> }[] = [];
+    const http = createPaymentsHttpHandler({
+      slotlockUrl: BASE,
+      fetch: send,
+      log: (level, message, fields) => logged.push({ level, message, fields }),
+      tenant: async (ref) =>
+        ref === tenantRef
+          ? { stripeSecretKey: 'sk_test_tenant', webhookSecret: SECRET, slotlockApiKey: 'admin', refundRefused: true, slotlockWebhookSecret: hookSecret }
+          : null,
+    });
+    const created = await store.createWebhookEndpoint({
+      tenantRef,
+      url: `https://payments.example/slotlock/webhook/${encodeURIComponent(tenantRef)}`,
+      eventTypes: ['hold.expired', 'hold.released'],
+    });
+    if (!created.ok) throw new Error(created.code);
+    const hookSecret = created.secret;
+    const payments = createStripePayments({ tenantRef, stripeSecretKey: 'sk_test_tenant', slotlock: { baseUrl: BASE, apiKey: 'admin' }, refundRefused: true, fetch: send });
+    const day = Date.UTC(new Date().getUTCFullYear() + 1, 7, 8);
+    const at = (hour: number) => new Date(day + hour * HOUR).toISOString();
+    const room = ((await call('POST', '/v1/resources', { external_ref: 'room-refunds', timezone: 'UTC' })).body.resource as { id: string }).id;
+    const hold = async (start: number) =>
+      ((await call('POST', '/v1/holds', {
+        resource_id: room, start: at(start), end: at(start + 1), ttl_seconds: 900,
+        payment_required: true, payment: { amount_minor: 4500, currency: 'GBP' },
+      })).body.hold as { id: string }).id;
+    const paying = (id: string, holdId: string) =>
+      intents.set(id, { object: 'payment_intent', id, status: 'succeeded', amount_received: 4500, currency: 'gbp', metadata: payments.metadataFor(holdId) });
+    const stripeDelivery = (id: string) => {
+      const payload = JSON.stringify({ type: 'payment_intent.succeeded', data: { object: { id } } });
+      return http(new Request(`https://payments.example/stripe/webhook/${encodeURIComponent(tenantRef)}`, {
+        method: 'POST', headers: { 'stripe-signature': signed(payload) }, body: payload,
+      }));
+    };
+    refunds.length = 0;
+
+    // Paid after its hold expired and was taken away (another booking over its time): not found
+    // here, so refunded, since a payment this tenant applied is always found.
+    const reaped = await hold(9);
+    await sql`UPDATE slotlock.reservations SET expires_at = statement_timestamp() - interval '1 second' WHERE id = ${reaped}`;
+    expect((await call('POST', '/v1/holds', { resource_id: room, start: at(9), end: at(10), ttl_seconds: 60 })).status).toBe(200);
+    paying('pi_reaped', reaped);
+    expect(await (await stripeDelivery('pi_reaped')).json()).toEqual({ status: 'refused', code: 'hold_not_found', refunded: true });
+
+    // Another tenant's on a shared Stripe account: theirs, never refunded here.
+    intents.set('pi_theirs', { object: 'payment_intent', id: 'pi_theirs', status: 'succeeded', amount_received: 4500, currency: 'gbp',
+      metadata: { slotlock_hold_id: reaped, slotlock_tenant: tenantDigest('someone-else') } });
+    expect(await payments.confirmPaymentIntent('pi_theirs')).toEqual({ status: 'not_paid', reason: 'other_tenant' });
+
+    // A refund Stripe does not make fails the delivery, so it comes again, and is made then.
+    const late = await hold(11);
+    await sql`UPDATE slotlock.reservations SET expires_at = statement_timestamp() - interval '1 second' WHERE id = ${late}`;
+    paying('pi_late2', late);
+    refundFails = 500;
+    expect((await stripeDelivery('pi_late2')).status).toBe(500);
+    refundFails = null;
+    expect(await (await stripeDelivery('pi_late2')).json()).toEqual({ status: 'refused', code: 'hold_expired', refunded: true });
+
+    // Paid, then let expire without a booking: Slotlock's webhook says so, and the payment is
+    // refunded; told again, Slotlock answers hold_ended.
+    const unbooked = await hold(13);
+    paying('pi_unbooked', unbooked);
+    expect(await payments.confirmPaymentIntent('pi_unbooked')).toMatchObject({ status: 'paid', replayed: false });
+    await sql`UPDATE slotlock.reservations SET expires_at = statement_timestamp() - interval '1 second' WHERE id = ${unbooked}`;
+    await sql`DELETE FROM slotlock.reservations WHERE id = ${unbooked}`;
+    // Paid, then let go by the application: the same.
+    const released = await hold(15);
+    paying('pi_released', released);
+    expect(await payments.confirmPaymentIntent('pi_released')).toMatchObject({ status: 'paid' });
+    expect((await call('DELETE', `/v1/holds/${released}`)).body).toEqual({ released: true });
+    // Paid and confirmed: applied, never refunded.
+    const booked = await hold(17);
+    paying('pi_booked', booked);
+    expect(await payments.confirmPaymentIntent('pi_booked')).toMatchObject({ status: 'paid' });
+    expect((await call('POST', `/v1/holds/${booked}/confirm`, {})).status).toBe(200);
+    const passed = await deliverSlotlockWebhooks({
+      feed: store,
+      tenantRef,
+      send: async (request) => {
+        const answered = await http(new Request(request.url, { method: 'POST', headers: request.headers, body: request.body }));
+        return { status: answered.status };
+      },
+    });
+    expect(passed.failed).toBe(0);
+    expect(refunds).toEqual(['pi_reaped', 'pi_late2', 'pi_unbooked', 'pi_released']);
+    expect(await payments.confirmPaymentIntent('pi_unbooked')).toMatchObject({ status: 'refused', code: 'hold_ended', refunded: true });
+    expect(await payments.confirmPaymentIntent('pi_booked')).toMatchObject({ status: 'paid', replayed: true });
+
+    // Recorded under another reference than a PaymentIntent (a Checkout Session, say): the
+    // PaymentIntent that arrives may be that very payment, so it is left for a person, and said.
+    const session = await hold(19);
+    expect((await call('POST', `/v1/holds/${session}/paid`, { payment_ref: 'cs_test_abc', received: { amount_minor: 4500, currency: 'GBP' } })).status).toBe(200);
+    paying('pi_session', session);
+    expect(await (await stripeDelivery('pi_session')).json()).toEqual({ status: 'refused', code: 'payment_conflict', refunded: false });
+    expect(refunds).not.toContain('pi_session');
+    expect(logged.filter((entry) => entry.level === 'error').map((entry) => [entry.message, entry.fields.code])).toEqual([
+      ['delivery failed; it comes again', undefined],
+      ['payment refused and kept: a person must look at it', 'payment_conflict'],
+    ]);
   });
 });

@@ -255,6 +255,21 @@ describe('the HTTP surface', () => {
     // The state is kept as a digest, used once.
     const state = provider.searchParams.get('state') as string;
     expect(await store.takeOAuthState(state, new Date())).toBeNull();
+    // A link is followed once: opened again (forwarded, or found in a history), it is refused.
+    expect((await handler(new Request(link.url))).status).toBe(400);
+    // The flow is finished only in the browser that began it: without its cookie, or with
+    // another's, the callback is refused, and the state is spent.
+    const again = (await (await call('POST', '/v1/tenants/fleet/connect-links', { provider: 'google', write_back: false })).json()) as { url: string };
+    const begun = await handler(new Request(again.url));
+    const theirs = new URL(begun.headers.get('location') as string).searchParams.get('state') as string;
+    const elsewhere = await handler(new Request(`https://sync.example/oauth/callback?state=${theirs}&code=c`));
+    expect(elsewhere.status).toBe(400);
+    expect(await elsewhere.text()).toContain('Open the link in this browser');
+    expect(
+      (await handler(new Request(`https://sync.example/oauth/callback?state=${theirs}&code=c`, { headers: { cookie: 'slotlock_sync_flow=another' } })))
+        .status,
+    ).toBe(400);
+    expect(begun.headers.get('set-cookie')).toContain('; Secure');
     const tampered = link.url.replace(/link=([^.]+)\./, (_, payload: string) => `link=${payload.slice(0, -2)}AA.`);
     expect((await handler(new Request(tampered))).status).toBe(400);
     const page = await handler(new Request('https://sync.example/oauth/callback?state=unknown&code=c'));

@@ -48,6 +48,10 @@ The answer is a link, signed and valid for 30 minutes, for the tenant's person. 
 Google or Microsoft (OAuth code flow with PKCE and a state the sync keeps, used once), back to
 `/oauth/callback`, and to a page listing the account's calendars beside the tenant's resources: they
 choose which calendar's busy time blocks which resource. That form is signed for the connection.
+A link is followed once: opened again (forwarded, or found in a browser's history) it is refused, so
+send it to that person only and make a new one if they need it again. The flow is finished only in
+the browser that followed the link, which holds a cookie for it (`HttpOnly`, sent to the callback
+alone), so the provider's page cannot be handed to someone else.
 The sync asks for the calendar list and free/busy, and events only to write back.
 
 Other operator routes: `POST /v1/tenants/{tenant}/ics` (`{"url"}`, an iCalendar URL, read only),

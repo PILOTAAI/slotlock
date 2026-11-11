@@ -3502,6 +3502,15 @@ BEGIN
       'contact_ref', changed.contact_ref,
       'notify', CASE WHEN NOT changed.notify THEN false END,
       'payment_required', CASE WHEN changed.payment_required THEN true END,
+      -- A paid hold that ended without a booking (expired, let go, or left when another of its
+      -- group was booked): its payment was never applied, and is the integrator's to refund (RFC
+      -- 0004 C3). Booked from (slotlock.ending = 'confirmed') or taken over by an approval, it was.
+      'payment_unapplied', CASE
+        WHEN TG_OP = 'DELETE' AND OLD.status = 'held' AND OLD.payment_ref IS NOT NULL
+             AND COALESCE(current_setting('slotlock.ending', true), '') NOT IN ('confirmed', 'approval')
+        THEN jsonb_strip_nulls(jsonb_build_object(
+          'payment_ref', OLD.payment_ref, 'amount_minor', OLD.paid_amount_minor, 'currency', OLD.paid_currency))
+      END,
       -- A cancellation's fee and an admin's reason for going past a cutoff (RFC 0004 B5).
       'cancellation_fee', CASE WHEN kind = 'reservation.cancelled'
                                THEN NULLIF(current_setting('slotlock.cancellation_fee', true), '')::jsonb END,
@@ -6293,6 +6302,24 @@ CREATE TABLE IF NOT EXISTS slotlock.hold_payments (
   CONSTRAINT slotlock_hold_payments_resource_fkey FOREIGN KEY (resource_id, tenant_ref)
     REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE
 );
+-- Whether a paid hold was booked (RFC 0004 C3): confirmed, or booked from by a write that named it
+-- (booked_at), or taken over by an approval (approval_id) and so booked as that approval goes. A
+-- payment whose hold ended any other way was never applied: markHoldPaid answers it hold_ended, and
+-- the feed's hold.expired or hold.released says so (payment_unapplied), for the payment to be
+-- refunded. Payments recorded before this was kept are taken as applied: none is refunded unasked.
+DO $slotlock_hold_payments_outcome$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'slotlock' AND table_name = 'hold_payments' AND column_name = 'booked_at'
+  ) THEN
+    ALTER TABLE slotlock.hold_payments ADD COLUMN booked_at timestamptz, ADD COLUMN approval_id uuid;
+    UPDATE slotlock.hold_payments payment SET booked_at = payment.paid_at
+     WHERE NOT EXISTS (SELECT 1 FROM slotlock.reservations hold
+                        WHERE hold.id = payment.hold_id AND hold.status = 'held');
+  END IF;
+END
+$slotlock_hold_payments_outcome$;
 -- When each channel's consent was last given or withdrawn, as proof of it.
 ALTER TABLE slotlock.contacts ADD COLUMN IF NOT EXISTS consent_at jsonb NOT NULL DEFAULT '{}'::jsonb;
 
@@ -6316,6 +6343,9 @@ CREATE INDEX IF NOT EXISTS slotlock_source_busy_resource_idx
   ON slotlock.source_busy (resource_id, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_source_busy_source_idx
   ON slotlock.source_busy (resource_id, source, starts_at);
+-- Busy time that ended long ago goes in retention (pruneBookingRetention), tenant by tenant.
+CREATE INDEX IF NOT EXISTS slotlock_source_busy_ended_idx
+  ON slotlock.source_busy (tenant_ref, ends_at);
 
 -- A cancelled UID remains terminal. This blocks delayed create delivery after the event row and
 -- its derived reservations have been removed.

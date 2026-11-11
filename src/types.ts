@@ -365,6 +365,8 @@ export type ConfirmHoldResult =
   | { ok: false; code: 'hold_expired' }
   /** The hold waits for payment (RFC 0004 C3) and none is recorded yet (markHoldPaid). */
   | { ok: false; code: 'payment_required' }
+  /** A calendar reported its time busy (RFC 0004 C1) after the hold was made. */
+  | { ok: false; code: 'overlap' }
   /** A cancellation of the hold's reference (its id) arrived first and retired it. */
   | { ok: false; code: 'reservation_cancelled' }
   /** Another booking of the tenant already uses the hold's id as its reference. */
@@ -416,10 +418,12 @@ export type MarkHoldPaidResult =
   /** Less than the hold's payment, in another currency, or not said when the hold names one. */
   | { ok: false; code: 'payment_amount_mismatch' }
   | { ok: false; code: 'hold_not_found' | 'hold_expired' }
+  /** Paid, but the hold ended without a booking: the payment was never applied. */
+  | { ok: false; code: 'hold_ended' }
   /** The hold does not wait for payment. */
   | { ok: false; code: 'payment_not_required' }
-  /** It was already paid by another payment. */
-  | { ok: false; code: 'payment_conflict' };
+  /** It was already paid by another payment, `paymentRef`. */
+  | { ok: false; code: 'payment_conflict'; paymentRef: string };
 
 /** RFC 5545 TRANSP projection. Transparent events remain visible but never occupy a resource. */
 export type CalendarTransparency = 'opaque' | 'transparent';

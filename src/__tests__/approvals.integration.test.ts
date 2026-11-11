@@ -412,6 +412,74 @@ describe.skipIf(!url)('approval policies (real Postgres)', () => {
     await call('admin', 'DELETE', '/v1/approval-policies/staff-free');
   });
 
+  it('judges an update that books time in place: made opaque, or given occurrences', async () => {
+    const van = await resource();
+    await policy('vip', { applies_to: { resource_ids: [van] }, outcome: 'refuse' });
+    // A transparent event takes no time, so no policy holds it...
+    const ghost = await call('agent', 'POST', '/v1/events', {
+      resource_id: van,
+      starts_at: at(9),
+      ends_at: at(10),
+      timezone: 'UTC',
+      transparency: 'transparent',
+      idempotency_key: `g-${randomUUID()}`,
+    });
+    expect(ghost.status).toBe(200);
+    const event = ghost.body.event as { id: string; revision: number };
+    // ...but made opaque it books that time, and the policy refuses it as it refuses the booking.
+    const flip = await call('agent', 'PATCH', `/v1/events/${event.id}`, {
+      expected_revision: event.revision,
+      transparency: 'opaque',
+      idempotency_key: `f-${randomUUID()}`,
+    });
+    expect(flip.body).toMatchObject({ code: 'approval_policy_refused', policy_ref: 'vip' });
+    // Details book nothing.
+    const renamed = await call('agent', 'PATCH', `/v1/events/${event.id}`, {
+      expected_revision: event.revision,
+      title: 'Renamed',
+      idempotency_key: `t-${randomUUID()}`,
+    });
+    expect(renamed.status).toBe(200);
+    await call('admin', 'DELETE', '/v1/approval-policies/vip');
+
+    // A one-off a person granted cannot become a series without one.
+    await policy('gate', { applies_to: { resource_ids: [van] } });
+    const key = `one-${randomUUID()}`;
+    const asked = await book('agent', van, 12, 13, key);
+    expect(asked.body).toMatchObject({ code: 'approval_pending' });
+    expect((await decide(asked.body.approval_id as string, 'grant')).status).toBe(200);
+    const booked = (await book('agent', van, 12, 13, key)).body.event as { id: string; revision: number };
+    const widened = await call('agent', 'PATCH', `/v1/events/${booked.id}`, {
+      expected_revision: booked.revision,
+      recurrence_rule: 'FREQ=DAILY;COUNT=30',
+      idempotency_key: `w-${randomUUID()}`,
+    });
+    expect(widened.body).toMatchObject({ code: 'approval_series_unsupported', policy_ref: 'gate' });
+    const [occupied] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM slotlock.reservations WHERE resource_id = ${van} AND status = 'confirmed'`;
+    expect(occupied?.n).toBe(1);
+    await call('admin', 'DELETE', '/v1/approval-policies/gate');
+  });
+
+  it('answers a granted key only for the request a person approved', async () => {
+    const [car, driver, otherCar, otherDriver] = [await resource(), await resource(), await resource(), await resource()];
+    await policy('bundle-gate', { conditions: { kinds: ['bundle'] } });
+    const key = `b-${randomUUID()}`;
+    const bundle = { resource_ids: [car, driver], starts_at: at(14), ends_at: at(15), timezone: 'UTC', idempotency_key: key };
+    const asked = await call('agent', 'POST', '/v1/bundles', bundle);
+    expect(asked.body).toMatchObject({ code: 'approval_pending' });
+    expect((await decide(asked.body.approval_id as string, 'grant')).status).toBe(200);
+    // Its retry is the booking made...
+    expect((await call('agent', 'POST', '/v1/bundles', bundle)).status).toBe(200);
+    // ...and the same key never books another set, however the store would key it.
+    const other = await call('agent', 'POST', '/v1/bundles', { ...bundle, resource_ids: [otherCar, otherDriver] });
+    expect(other).toMatchObject({ status: 422, body: { code: 'idempotency_conflict' } });
+    const [taken] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM slotlock.reservations WHERE resource_id IN (${otherCar}, ${otherDriver})`;
+    expect(taken?.n).toBe(0);
+    await call('admin', 'DELETE', '/v1/approval-policies/bundle-gate');
+  });
+
   it('refuses a series under a policy, which cannot hold every occurrence', async () => {
     const van = await resource();
     await policy('series-gate', { applies_to: { resource_ids: [van] } });

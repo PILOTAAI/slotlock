@@ -207,4 +207,61 @@ describe('holiday calendars', () => {
   it('refuses text that is not a calendar', () => {
     expect(() => parseHolidayCalendar('hello', { from: '2027-01-01', to: '2027-12-31' })).toThrow(/not iCalendar/);
   });
+
+  // ical.js steps a DAILY rule day by day until it finds a day of the month that may never come, and
+  // never returns: 129 bytes held a server for good. Such rules, and rules more often than daily, are
+  // refused before they are expanded.
+  it('refuses at once a rule ical.js would follow forever, or one more often than daily', () => {
+    const span = { from: '2027-01-01', to: '2028-12-31' };
+    for (const rule of [
+      'FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30',
+      'FREQ=DAILY;INTERVAL=2;BYMONTHDAY=31;BYMONTH=6',
+      'FREQ=DAILY;BYDAY=MO;BYMONTH=2;BYMONTHDAY=30',
+      'FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30',
+      'FREQ=MINUTELY',
+    ]) {
+      const started = performance.now();
+      expect(() =>
+        parseHolidayCalendar(calendar(`BEGIN:VEVENT\r\nUID:x\r\nDTSTART;VALUE=DATE:20270101\r\nRRULE:${rule}\r\nEND:VEVENT`), span),
+      ).toThrow(expect.objectContaining({ code: 'invalid_holiday_calendar' }));
+      expect(performance.now() - started).toBeLessThan(1_000);
+    }
+    // Monthly and yearly rules, and daily ones on days of the week, are read as before.
+    const read = parseHolidayCalendar(
+      calendar(
+        'BEGIN:VEVENT\r\nUID:t\r\nDTSTART;VALUE=DATE:20271125\r\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=4TH\r\nSUMMARY:Thanksgiving\r\nEND:VEVENT',
+        'BEGIN:VEVENT\r\nUID:f\r\nDTSTART;VALUE=DATE:20270129\r\nRRULE:FREQ=MONTHLY;BYDAY=5FR;COUNT=2\r\nSUMMARY:Fifth Friday\r\nEND:VEVENT',
+        'BEGIN:VEVENT\r\nUID:m\r\nDTSTART;VALUE=DATE:20270104\r\nRRULE:FREQ=DAILY;BYDAY=MO;COUNT=2\r\nSUMMARY:Mondays\r\nEND:VEVENT',
+      ),
+      span,
+    );
+    expect(read.holidays.map((holiday) => holiday.startsOn)).toEqual([
+      '2027-11-25',
+      '2028-11-23',
+      '2027-01-29',
+      '2027-04-30',
+      '2027-01-04',
+      '2027-01-11',
+    ]);
+  });
+
+  it('reads a calendar of many events in time, and refuses one that repeats too much to read', () => {
+    const span = { from: '2027-01-01', to: '2027-12-31' };
+    const many = Array.from(
+      { length: 15_000 },
+      (_, index) => `BEGIN:VEVENT\r\nUID:e${index}\r\nDTSTART:20270101T100000Z\r\nEND:VEVENT`,
+    );
+    let started = performance.now();
+    // Each event once: ical.js looked through every event for each one (13 seconds for these).
+    expect(parseHolidayCalendar(calendar(...many), span).skipped).toBe(15_000);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // Weekly series from 1900, each stepping thousands of times before the span.
+    const old = Array.from(
+      { length: 100 },
+      (_, index) => `BEGIN:VEVENT\r\nUID:w${index}\r\nDTSTART;VALUE=DATE:19000101\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT`,
+    );
+    started = performance.now();
+    expect(() => parseHolidayCalendar(calendar(...old), span)).toThrow(/repeats too much/);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
 });

@@ -2161,13 +2161,15 @@ public sealed partial class SlotlockClient
     /// seconds; private addresses refused). Each all-day event closes the days it covers, and
     /// each occurrence of a recurring one within from to to (default today to two years on, at
     /// most three years); timed and cancelled events are skipped. The calendar is kept by name at
-    /// its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
-    /// Holidays): importing it again updates its closures instead of adding more, and deletes the
-    /// ones it made that it no longer names within the span (removed), so a holiday it dropped
-    /// goes too. With subscribe (and a url), the server keeps the url and imports it again every
-    /// 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
-    /// invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
-    /// the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
+    /// its scope (name, by default its own X-WR-CALNAME, else the url's host, else Holidays):
+    /// importing it again updates its closures instead of adding more, and deletes the ones it
+    /// made that it no longer names within the span (removed), so a holiday it dropped goes too.
+    /// With subscribe (and a url), the server keeps the url and imports it again every 30 days.
+    /// At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+    /// invalid_holiday_calendar for text that is not one, or one that repeats more often than
+    /// daily, daily on days of the month or year, or too much to read; 400
+    /// holiday_calendar_unreachable when the url cannot be read; 400 holiday_url_not_served where
+    /// the server fetches no urls.
     /// </remarks>
     /// <param name="icalendar">icalendar</param>
     /// <param name="url">url</param>
@@ -2451,13 +2453,17 @@ public sealed partial class SlotlockClient
     /// Record that a hold made with payment_required is paid, by the payment's reference at your
     /// processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then
     /// be confirmed. Slotlock records payment state and never moves money. The same reference
-    /// again answers the same hold (replayed: true), whatever became of it since (confirmed,
-    /// booked as an event, expired): the payment is kept apart from the hold. Another reference
-    /// answers 409 payment_conflict. When the hold names its payment, received must be at least
-    /// that amount in that currency (409 payment_amount_mismatch). The feed says so (hold.paid).
-    /// A hold that does not wait for payment answers 409 payment_not_required; one that expired
-    /// before it was paid, 409 hold_expired (refund the payment: its time may be someone else's);
-    /// one released before it was paid, or unknown, 404 hold_not_found.
+    /// again answers the same hold (replayed: true) while it is held or once it is booked
+    /// (confirmed, or booked as an event), whatever became of the booking since: the payment is
+    /// kept apart from the hold. A hold that ended without a booking after it was paid (expired,
+    /// or let go) answers 409 hold_ended: the payment was never applied, so refund it; the feed's
+    /// hold.expired or hold.released says so too (payment_unapplied). Another reference answers
+    /// 409 payment_conflict, naming the one recorded (payment_ref). When the hold names its
+    /// payment, received must be at least that amount in that currency (409
+    /// payment_amount_mismatch). The feed says so (hold.paid). A hold that does not wait for
+    /// payment answers 409 payment_not_required; one that expired before it was paid, 409
+    /// hold_expired (refund the payment: its time may be someone else's); one released before it
+    /// was paid, or unknown, 404 hold_not_found.
     /// </remarks>
     /// <param name="holdId">hold_id</param>
     /// <param name="paymentRef">payment_ref</param>

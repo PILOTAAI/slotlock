@@ -86,6 +86,10 @@ slotlock rules clear --resource vehicle-42
   too, read within a day, of the slot and its turnaround, so it offers no slot they leave unproven.
 - A series is judged on its first occurrence for notice and advance, and on every occurrence for
   step and hours. Imported calendar events are not checked: they happened elsewhere.
+- An agent cannot get round the cutoffs and fee another way. Inside the reschedule cutoff, making a
+  one-off a series counts as a move. Making a booked one-off transparent, which lets its time go,
+  counts as a cancellation: it is refused inside the cancel cutoff, or once a cancellation fee is
+  due, since cancelling it records the fee (`booking_rule_cancel_cutoff`).
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
   offer only slots the rules allow, so an offered slot is one the write accepts. A length the
   duration rules refuse finds nothing; a search that names no length takes

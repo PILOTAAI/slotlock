@@ -723,12 +723,20 @@ export async function dueHolidayCalendars(
   sql: StoreSql,
   params: { tenantRef: string; limit: number },
 ): Promise<SlotlockHolidayCalendar[]> {
+  // Each is put off as a failure would put it off before it is read, so a pass that never finishes
+  // one (a process stopped on it) does not try it again at once, and two passes do not both read it.
+  // Importing it sets its next import; a failure says why.
   const rows = await sql<HolidayCalendarRow[]>`
-    SELECT ${sql.unsafe(HOLIDAY_CALENDAR_COLUMNS)} FROM slotlock.holiday_calendars calendar
-     WHERE calendar.tenant_ref = ${params.tenantRef} AND calendar.next_import_at <= statement_timestamp()
-     ORDER BY calendar.next_import_at, calendar.id
-     LIMIT ${params.limit}`;
-  return rows.map(toHolidayCalendar);
+    UPDATE slotlock.holiday_calendars calendar
+       SET next_import_at = statement_timestamp() + make_interval(hours => ${SLOTLOCK_HOLIDAY_RETRY_HOURS})
+     WHERE calendar.id IN (
+             SELECT id FROM slotlock.holiday_calendars
+              WHERE tenant_ref = ${params.tenantRef} AND next_import_at <= statement_timestamp()
+              ORDER BY next_import_at, id
+              LIMIT ${params.limit}
+              FOR UPDATE SKIP LOCKED)
+    RETURNING ${sql.unsafe(HOLIDAY_CALENDAR_COLUMNS)}`;
+  return rows.map(toHolidayCalendar).sort((left, right) => left.id.localeCompare(right.id));
 }
 
 /** Note why a subscription's import failed, and try again in SLOTLOCK_HOLIDAY_RETRY_HOURS. */

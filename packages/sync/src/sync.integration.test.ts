@@ -137,15 +137,20 @@ describe.skipIf(!url)('@slotlock/sync with Slotlock (real Postgres)', () => {
     // chooses the calendar for the van.
     expect((await operator('PUT', `/v1/tenants/${tenantRef}`, { api_key: 'admin-key-0123456789' })).status).toBe(200);
     const link = (await (await operator('POST', `/v1/tenants/${tenantRef}/connect-links`, { provider: 'google', write_back: true })).json()) as { url: string };
-    const toGoogle = new URL((await http(new Request(link.url))).headers.get('location') as string);
-    const callback = await http(new Request(`${SYNC}/oauth/callback?state=${toGoogle.searchParams.get('state')}&code=the-code`));
+    const followed = await http(new Request(link.url));
+    const toGoogle = new URL(followed.headers.get('location') as string);
+    // The browser that followed the link holds the flow's cookie, sent back only to the callback.
+    const cookie = (followed.headers.get('set-cookie') ?? '').split(';')[0] as string;
+    expect(followed.headers.get('set-cookie')).toMatch(/^slotlock_sync_flow=[\w-]{43}; Path=\/oauth\/callback; Max-Age=600; HttpOnly; SameSite=Lax/);
+    const back = (url: string, headers: Record<string, string> = { cookie }) => http(new Request(url, { headers }));
+    const callback = await back(`${SYNC}/oauth/callback?state=${toGoogle.searchParams.get('state')}&code=the-code`);
     const form = await callback.text();
     expect(callback.status).toBe(200);
     expect(form).toContain('Fleet (main calendar)');
     expect(form).toContain('Van 7');
     expect(form).not.toContain('google-token');
     // The state is used once.
-    expect((await http(new Request(`${SYNC}/oauth/callback?state=${toGoogle.searchParams.get('state')}&code=the-code`))).status).toBe(400);
+    expect((await back(`${SYNC}/oauth/callback?state=${toGoogle.searchParams.get('state')}&code=the-code`)).status).toBe(400);
     const action = /action="([^"]+)"/.exec(form)?.[1] as string;
     const fields = Object.fromEntries([...form.matchAll(/name="(expires|token)" value="([^"]+)"/g)].map((match) => [match[1], match[2]]));
     const saved = await http(

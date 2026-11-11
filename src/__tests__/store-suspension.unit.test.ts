@@ -21,7 +21,6 @@ const READS = [
   'holdGroup',
   'availabilityExceptionsFor',
   'listHolidayCalendars',
-  'dueHolidayCalendars',
   'listChanges',
   'listWebhookEndpoints',
   'getResource',
@@ -60,6 +59,7 @@ const READS = [
   'getAssistantChat',
 ];
 const UPKEEP = [
+  'dueHolidayCalendars',
   'rollCalendarEventHorizon',
   'pruneCalendarEventRetention',
   'pruneBookingRetention',

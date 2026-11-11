@@ -32,6 +32,35 @@ versioning.
   `serve` and the hosted dashboard run), every session carries its person's epoch: sessions from
   before this release have none, so everyone signs in once more after it.
 
+### Security
+
+From a review of RFC 0004's T2 changes, in five areas, each finding reproduced against a real
+database first. This was not a human review, so it does not count as the independent review
+GOVERNANCE.md requires.
+
+- **Approvals could be got round by an update.** An agent's update that kept its event's time and
+  resource skipped every policy. A transparent event made opaque, or a granted booking given a
+  recurrence rule, booked that time unasked. A granted approval's idempotency key also booked any
+  other bundle. Updates are now judged by the time they would add, and a key answers only the
+  request a person approved.
+- **A 129-byte holiday calendar could hang the server.** A daily rule on a day that never comes held
+  it for every tenant, again after each restart once subscribed. A 1 MB calendar held it for a
+  minute. Such rules are refused, a calendar's work is bounded, and a subscription due for import
+  is put off as it is taken. A subscription named after its URL shows the host only.
+- **Payments a hold never used could be kept.** These were not refunded: a late payment for a
+  hold already cleared away, a refund Stripe did not make, and a paid hold that expired or was let go
+  before its booking. Slotlock now records whether a paid hold was booked. It answers the payment for
+  one that ended unbooked with `hold_ended`, and says so on the feed (`payment_unapplied`).
+  `@slotlock/payments-stripe` names the tenant on each PaymentIntent and refunds each such payment,
+  retrying a refund that failed. It logs at level error each payment it keeps.
+- **An agent could let a booking go past its cutoffs another way:** by making it transparent, or a
+  series. Both are now refused as the cancel or move they are.
+- **Busy time from calendars missed a composite's parts, and two booking paths.** A hall's busy time
+  is now counted on its rooms and a room's on the hall. A hold's confirmation and a series' roll
+  refuse it too. Busy time that ended a month ago goes.
+- **A `@slotlock/sync` connect link could be reused** by anyone who had it for 30 minutes. A link is
+  now followed once, and its flow is finished only in the browser that followed it.
+
 ## 0.9.1 - 2026-11-11
 
 ### Fixed
