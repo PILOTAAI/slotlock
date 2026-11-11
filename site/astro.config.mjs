@@ -237,6 +237,8 @@ export default defineConfig({
         // menu (SocialIcons), and beside the menu button in the narrow header (Header).
         Header: './src/components/docs/Header.astro',
         SocialIcons: './src/components/docs/SocialIcons.astro',
+        // The site's main links in the header's middle column, where search would go.
+        Search: './src/components/docs/SiteNav.astro',
       },
       plugins: [
         starlightLlmsTxt({

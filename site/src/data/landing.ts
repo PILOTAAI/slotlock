@@ -642,23 +642,70 @@ export const source = {
   ],
 };
 
+/** What a plan costs, in words, from facts.plans; "free while in preview" before plans exist. */
+const priceAnswer =
+  developerPlan && teamPlan
+    ? `Slotlock Cloud starts free, with no card. Developer is $${developerPlan.monthly} a month and Team $${teamPlan.monthly} a month for the whole organization; running it yourself costs nothing ([pricing](/pricing/)).`
+    : 'Slotlock Cloud is free while it is in preview, and running it yourself costs nothing ([pricing](/pricing/)).';
+
+/**
+ * The questions people ask before they try it, most asked first. Each answer stands alone (search
+ * engines and AI answers quote them one at a time) and links the page that says more. The landing
+ * page also gives them as FAQPage data (src/pages/index.astro).
+ */
 export const faq = {
   id: 'faq',
   heading: { topic: 'FAQ', soft: 'Questions', strong: 'we expect first.' } satisfies Heading,
   items: [
     {
+      q: 'What is Slotlock?',
+      a: 'A booking API and calendar for AI agents. Each van, room, court or person is a calendar of its own: agents find free time, hold it while a person picks, and book it over MCP, A2A or REST, and PostgreSQL refuses any booking that overlaps another.',
+    },
+    {
+      q: 'How does it stop double bookings?',
+      a: 'A PostgreSQL exclusion constraint checks every booking, hold and event as it is written. When two agents race for one slot, one write wins and the other is refused with `overlap`, as data the agent can act on ([how it works](/blog/postgresql-exclusion-constraint-double-booking/)).',
+    },
+    {
+      q: 'Which agents can use it?',
+      a: `Any MCP client, such as Claude Code, Cursor or VS Code; any A2A ${facts.a2a} agent; and any code that calls REST. There are clients for ${clientList} ([connect an agent](/docs/connect/)).`,
+    },
+    {
+      q: 'What can I book with it?',
+      a: 'Things and staff hours that take one booking at a time: vehicles, rooms, courts, machines, a technician’s afternoon. For a meeting between two people, a scheduling link does that already ([use cases](/use-cases/)).',
+    },
+    {
+      q: 'Can a person approve what an agent books?',
+      a: `Yes. An agent holds up to ${facts.holdSlotsMax} options while a person picks one in the chat, and a hold nobody books lapses on its own. On your own server, each write can also wait for a person to confirm it.`,
+    },
+    {
+      q: 'Does it replace my booking system?',
+      a: 'No, it sits behind it. Your site, your phone agents and your AI agents all write through Slotlock, so each slot is sold once whichever channel sells it. [Pylota](/blog/pylota-car-rental-case-study/) runs it as a library inside its own database.',
+    },
+    {
       q: 'Does it sync with Google Calendar or Outlook?',
-      a: 'Not by itself: your adapters bring their feeds in as iCalendar, and Slotlock records how much of each it has read.',
+      a: 'Not by itself. Your adapter brings each feed in as iCalendar busy time, and Slotlock records how far it has read each one, so time no feed has proven is never offered as free ([external calendars](/docs/external-calendars/)).',
+    },
+    {
+      q: 'How is it different from Calendly or Cal.com?',
+      a: 'Those schedule meetings between people. Slotlock books resources for agents, holds options that lapse on their own, and refuses overlaps in the database ([comparisons](/compare/)).',
+    },
+    {
+      q: 'How much does it cost?',
+      a: priceAnswer,
+    },
+    {
+      q: 'Can I run it myself?',
+      a: `Yes. It is ${facts.license}: run the Docker image or the npm package on your own PostgreSQL 16 to 18, with the same tools as Slotlock Cloud ([self-hosting](/docs/self-host/)).`,
     },
     {
       q: 'Is it ready for production?',
       a: knownIssues
         ? `Not ${facts.version}: it can accept a double booking around a daylight-saving change. Read the [known issues](/docs/known-issues/) first.`
-        : `${facts.version} is a 0.x release: a minor release may change the API ([versioning](/docs/versioning/)).`,
+        : `Pylota checks every car rental booking with it. ${facts.version} is a 0.x release, so a minor release may change the API, and Slotlock Cloud gives 90 days’ notice before anything under \`/v1\` changes ([versioning](/docs/versioning/)).`,
     },
     {
       q: 'Where is my data?',
-      a: 'On Slotlock Cloud, in the United Kingdom, as the [privacy notice](/docs/privacy/) says. Self-hosted, on your PostgreSQL.',
+      a: 'On Slotlock Cloud, in the United Kingdom, as the [privacy notice](/docs/privacy/) says. Self-hosted, on your own PostgreSQL.',
     },
   ],
 };
