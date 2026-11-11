@@ -9,6 +9,7 @@ import {
   SLOTLOCK_MAX_WAITLIST_PER_TENANT,
   type SlotlockStore,
   type SlotlockTenantStore,
+  buildSlotlockTenantExport,
   calendarEventRollingHorizon,
 } from './store.js';
 import type { CalendarHorizonRollCursor, CalendarHorizonRollResult } from './types.js';
@@ -162,6 +163,13 @@ export async function maintainSlotlockTenant(
   );
   // Audit events past retention (SLOTLOCK_AUDIT_RETENTION_DAYS, 180).
   pruned += await withTenant((tenant) => tenant.pruneAuditEvents({ tenantRef }));
+  // Exports past their time go; one a stopped server left pending is built now (RFC 0004 D3).
+  const exports = await withTenant((tenant) => tenant.pruneTenantExports({ tenantRef }));
+  pruned += exports.deleted;
+  for (const exportId of exports.pending) {
+    options.signal?.throwIfAborted();
+    await buildSlotlockTenantExport(store, tenantRef, exportId);
+  }
   const zones = await withTenant((tenant) =>
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );

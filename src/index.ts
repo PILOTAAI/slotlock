@@ -447,12 +447,19 @@ export {
   SLOTLOCK_MAX_CONTACTS_PER_TENANT,
   SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS,
   SLOTLOCK_TENANT_WRITE_METHODS,
+  SLOTLOCK_TENANT_EXPORT_HOURS,
+  SLOTLOCK_TENANT_EXPORT_MAX_BYTES,
+  SLOTLOCK_TENANT_EXPORT_PART_ROWS,
+  SLOTLOCK_MAX_TENANT_EXPORTS,
+  buildSlotlockTenantExport,
   slotlockAuditEventRecord,
   type SlotlockAuditEvent,
   type SlotlockAuditEventInput,
   type SlotlockSubject,
   type SlotlockSubjectErasure,
   type SlotlockSubjectExport,
+  type SlotlockTenantExport,
+  type SlotlockTenantExportPartResult,
   type SlotlockHoldTenantOptions,
   type SlotlockMigrationOptions,
   type SlotlockSql,
@@ -511,5 +518,10 @@ export type {
   SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
   SlotlockSubjectTable,
+  SlotlockTenantExportTable,
 } from './types.js';
-export { SLOTLOCK_SUBJECT_TABLES } from './types.js';
+export {
+  SLOTLOCK_SUBJECT_TABLES,
+  SLOTLOCK_TENANT_EXPORT_LEFT_OUT,
+  SLOTLOCK_TENANT_EXPORT_TABLES,
+} from './types.js';

@@ -117,6 +117,11 @@ public sealed partial class SlotlockClient
         ["slotlock_verify_audit_log"] = new("GET", "/v1/audit/verify", [], []),
         ["slotlock_export_subject"] = new("POST", "/v1/subjects/export", [], []),
         ["slotlock_erase_subject"] = new("POST", "/v1/subjects/erase", [], []),
+        ["slotlock_list_tenant_exports"] = new("GET", "/v1/tenant/exports", [], []),
+        ["slotlock_create_tenant_export"] = new("POST", "/v1/tenant/exports", [], []),
+        ["slotlock_get_tenant_export"] = new("GET", "/v1/tenant/exports/{export_id}", ["export_id"], []),
+        ["slotlock_delete_tenant_export"] = new("DELETE", "/v1/tenant/exports/{export_id}", ["export_id"], ["dry_run"]),
+        ["slotlock_get_tenant_export_part"] = new("GET", "/v1/tenant/exports/{export_id}/parts/{part}", ["export_id", "part"], []),
         ["slotlock_list_approval_policies"] = new("GET", "/v1/approval-policies", [], []),
         ["slotlock_put_approval_policy"] = new("PUT", "/v1/approval-policies/{policy_ref}", ["policy_ref"], []),
         ["slotlock_delete_approval_policy"] = new("DELETE", "/v1/approval-policies/{policy_ref}", ["policy_ref"], ["dry_run"]),
@@ -3755,6 +3760,114 @@ public sealed partial class SlotlockClient
         if (reference.HasValue) values["reference"] = Json.ToNode(reference.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_erase_subject", values, cancellationToken);
+    }
+
+    /// <summary>List tenant exports.</summary>
+    /// <remarks>
+    /// The tenant's exports, newest first, until each is deleted: pending, ready (with how many
+    /// parts and rows) or failed.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListTenantExportsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_tenant_exports", values, cancellationToken);
+    }
+
+    /// <summary>Export the tenant.</summary>
+    /// <remarks>
+    /// Ask for a copy of everything the tenant keeps, to download: every table's rows as kept,
+    /// read at one moment (resources, locations, resource_groups, resource_group_members,
+    /// pool_settings, booking_rule_defaults, availability_defaults, availability_exceptions,
+    /// holiday_calendars, reservations, reservation_tombstones, reservation_conflict_archive,
+    /// hold_payments, calendar_events, calendar_event_attendees, calendar_event_reminders,
+    /// calendar_event_exceptions, calendar_event_tombstones, calendar_coverage, source_busy,
+    /// waitlist_entries, approval_policies, approvals, contacts, webhook_endpoints,
+    /// assistant_settings, api_keys, outbox, audit_events). Secrets stay out: webhooks' signing
+    /// secrets, the assistant's provider key and API keys' digests. 11 tables are left out as
+    /// derived, internal or one member's own (each member's conversations with the assistant). It
+    /// answers pending at once and is built in the background: slotlock_get_tenant_export says
+    /// when it is ready, then read its parts with slotlock_get_tenant_export_part. Kept 24 hours
+    /// once ready, then deleted. One is built at a time (409 export_in_progress) and five are
+    /// kept (409 export_limit_reached); one past 512 MB fails (error export_too_large) and its
+    /// operator runs slotlock tenant export. Recorded in the audit log (export.created).
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> CreateTenantExportAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_create_tenant_export", values, cancellationToken);
+    }
+
+    /// <summary>Get a tenant export.</summary>
+    /// <remarks>
+    /// One of the tenant's exports: whether it is ready, its parts, rows and bytes, and rows by
+    /// table. An unknown or deleted one answers 404 export_not_found.
+    /// </remarks>
+    /// <param name="exportId">export_id</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetTenantExportAsync(
+        string exportId,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["export_id"] = Json.ToNode(exportId);
+        return CallAsync("slotlock_get_tenant_export", values, cancellationToken);
+    }
+
+    /// <summary>Delete a tenant export.</summary>
+    /// <remarks>
+    /// Delete one of the tenant's exports at once, with every part, rather than waiting for it to
+    /// expire. deleted is false when there was none.
+    /// </remarks>
+    /// <param name="exportId">export_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteTenantExportAsync(
+        string exportId,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["export_id"] = Json.ToNode(exportId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_delete_tenant_export", values, cancellationToken);
+    }
+
+    /// <summary>Read a part of a tenant export.</summary>
+    /// <remarks>
+    /// One part of a ready export, 1 to its parts: one table's rows, each an object as Slotlock
+    /// keeps it (without the tenant). Write each part's rows as JSON lines to its table's file to
+    /// keep the export as NDJSON. 409 export_not_ready before it is ready; 404 export_not_found
+    /// or export_part_not_found.
+    /// </remarks>
+    /// <param name="exportId">export_id</param>
+    /// <param name="part">part</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetTenantExportPartAsync(
+        string exportId,
+        string part,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["export_id"] = Json.ToNode(exportId);
+        values["part"] = Json.ToNode(part);
+        return CallAsync("slotlock_get_tenant_export_part", values, cancellationToken);
     }
 
     /// <summary>List approval policies.</summary>

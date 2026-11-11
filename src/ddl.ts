@@ -3290,6 +3290,14 @@ BEGIN
   DELETE FROM slotlock.source_busy WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'tenant_export_parts';
+  DELETE FROM slotlock.tenant_export_parts WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'tenant_exports';
+  DELETE FROM slotlock.tenant_exports WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'reservations';
   DELETE FROM slotlock.reservations
    WHERE tenant_ref = requested_tenant_ref
@@ -3585,7 +3593,8 @@ BEGIN
     'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
     'availability_exceptions', 'holiday_calendars', 'availability_defaults', 'contacts', 'reminder_dispatches',
     'reservation_reminder_dispatches',
-    'hold_payments', 'source_busy', 'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
+    'hold_payments', 'source_busy', 'tenant_export_parts', 'tenant_exports',
+    'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
     'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
     'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
     'resources', 'resource_groups', 'outbox'
@@ -7698,6 +7707,53 @@ CREATE INDEX IF NOT EXISTS slotlock_source_busy_source_idx
 CREATE INDEX IF NOT EXISTS slotlock_source_busy_ended_idx
   ON slotlock.source_busy (tenant_ref, ends_at);
 
+-- A copy of everything a tenant keeps, for it to download (RFC 0004 D3, POST /v1/tenant/exports):
+-- read in one snapshot into parts of NDJSON, one table's rows to a part. Kept for
+-- SLOTLOCK_TENANT_EXPORT_HOURS once it is ready (or since it was asked for, if it never is), then
+-- deleted by maintenance; at once when the tenant deletes it or is erased.
+CREATE TABLE IF NOT EXISTS slotlock.tenant_exports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  requested_by text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  finished_at timestamptz,
+  expires_at timestamptz NOT NULL,
+  parts integer NOT NULL DEFAULT 0,
+  row_count bigint NOT NULL DEFAULT 0,
+  bytes bigint NOT NULL DEFAULT 0,
+  tables jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error text,
+  CONSTRAINT slotlock_tenant_exports_tenant_key UNIQUE (id, tenant_ref),
+  CONSTRAINT slotlock_tenant_exports_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND status IN ('pending', 'ready', 'failed')
+    AND (requested_by IS NULL OR octet_length(requested_by) BETWEEN 1 AND 200)
+    AND (error IS NULL OR octet_length(error) BETWEEN 1 AND 200)
+    AND parts >= 0 AND row_count >= 0 AND bytes >= 0
+    AND jsonb_typeof(tables) = 'object'
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_tenant_exports_tenant_idx
+  ON slotlock.tenant_exports (tenant_ref, created_at);
+CREATE INDEX IF NOT EXISTS slotlock_tenant_exports_expiry_idx
+  ON slotlock.tenant_exports (tenant_ref, expires_at);
+CREATE TABLE IF NOT EXISTS slotlock.tenant_export_parts (
+  export_id uuid NOT NULL,
+  tenant_ref text NOT NULL,
+  part integer NOT NULL,
+  table_name text NOT NULL,
+  row_count integer NOT NULL,
+  content text NOT NULL,
+  CONSTRAINT slotlock_tenant_export_parts_pkey PRIMARY KEY (export_id, part),
+  CONSTRAINT slotlock_tenant_export_parts_export_fkey FOREIGN KEY (export_id, tenant_ref)
+    REFERENCES slotlock.tenant_exports (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_tenant_export_parts_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND part >= 1 AND table_name ~ '^[a-z_]{1,63}$' AND row_count >= 1
+  )
+);
+
 -- A cancelled UID remains terminal. This blocks delayed create delivery after the event row and
 -- its derived reservations have been removed.
 CREATE TABLE IF NOT EXISTS slotlock.calendar_event_tombstones (
@@ -8068,6 +8124,8 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'reservation_reminder_dispatches',
   'hold_payments',
   'source_busy',
+  'tenant_exports',
+  'tenant_export_parts',
 ] as const);
 
 const POSTGRES_SETTING_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -8251,6 +8309,10 @@ ALTER TABLE slotlock.holiday_calendars ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.holiday_calendars FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.source_busy ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.source_busy FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.tenant_exports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.tenant_exports FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.tenant_export_parts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.tenant_export_parts FORCE ROW LEVEL SECURITY;
 
 -- One database must have one tenant-context contract. Re-applying with an adapter-specific
 -- setting deliberately rebinds the stable policies instead of silently keeping a prior setting.
@@ -8299,7 +8361,9 @@ BEGIN
          'reminder_dispatches',
          'reservation_reminder_dispatches',
          'hold_payments',
-         'source_busy'
+         'source_busy',
+         'tenant_exports',
+         'tenant_export_parts'
        )
   LOOP
     EXECUTE format(
@@ -8710,6 +8774,26 @@ BEGIN
       USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
       WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'tenant_exports'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.tenant_exports
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'tenant_export_parts'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.tenant_export_parts
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
 END
 $slotlock_rls$;
 
@@ -8787,6 +8871,10 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.holiday_calendars
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.source_busy
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.tenant_exports
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.tenant_export_parts
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
 
 INSERT INTO slotlock.rls_policy_contracts (
@@ -8847,7 +8935,9 @@ WHERE schemaname = 'slotlock'
     'reminder_dispatches',
     'reservation_reminder_dispatches',
     'hold_payments',
-    'source_busy'
+    'source_busy',
+    'tenant_exports',
+    'tenant_export_parts'
   )
   AND policyname = 'tenant_isolation_v1'
 ON CONFLICT (table_name) DO UPDATE

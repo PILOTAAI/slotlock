@@ -230,6 +230,8 @@ waits for a confirmation.
 | `DELETE /v1/tenant/events/{event_id}?expected_revision=…` | Cancel it, whichever key wrote it |
 | `GET /v1/tenant` | The key's tenant, and whether it is suspended |
 | `POST /v1/tenant/erase` | Erase the tenant, when the server allows it |
+| `POST /v1/tenant/exports` | Ask for a copy of everything the tenant keeps, read at one moment; `GET /v1/tenant/exports/{export_id}` says when it is ready |
+| `GET /v1/tenant/exports/{export_id}/parts/{part}` | One part of a ready export: one table's rows, as kept; `DELETE /v1/tenant/exports/{export_id}` deletes it |
 | `POST /v1/subjects/export` | `{"email"\|"holder"\|"contact"\|"reference"}`: what the tenant keeps about one person, by table |
 | `POST /v1/subjects/erase` | The same: take that person out; bookings stay as time taken |
 | `GET /v1/audit?limit=…&cursor=…&action=…` | The workspace audit log, newest first, with each event's place in its hash chain (Team plan where plans apply) |
@@ -266,6 +268,17 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `confirm_tenant_ref` to be the tenant's reference (`GET /v1/tenant`), deletes every key the tenant
   has, the caller's included, and is refused while the tenant is suspended. Suspending a tenant is
   never an API call: only the schema owner may, and a tenant could not lift its own.
+- A tenant export (RFC 0004 D3) is every table's rows as kept, read through one cursor, so all at
+  one moment, without the tenant and without secrets (webhooks' signing secrets, the assistant's
+  provider key, API keys' digests). Tables derived from others, internal records and each member's
+  own conversations with the assistant are left out (`SLOTLOCK_TENANT_EXPORT_LEFT_OUT` says why).
+  `POST /v1/tenant/exports` answers `pending` and the server builds it after answering; maintenance
+  builds one a stopped server left pending. Read `parts` parts, each one table's rows (up to 5,000,
+  about a megabyte), and write each part's rows as lines of its table's NDJSON file. One is built at
+  a time (`409 export_in_progress`) and five are kept (`409 export_limit_reached`); each is deleted
+  24 hours after it is ready. One past 512 MB fails (`error: export_too_large`): the operator runs
+  `slotlock tenant export --out <dir>`, which reads the same snapshot straight to one file a table
+  and stores nothing.
 - An access or erasure request about one person (RFC 0004 D3) names them by exactly one of
   `email` (contacts, event attendees and organizers, ignoring case), `holder` (holds, bookings and
   waitlist entries), `contact` (a contact's reference) or `reference` (a booking's or an event's).

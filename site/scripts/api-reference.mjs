@@ -162,6 +162,11 @@ export const GROUPS = [
       'slotlock_verify_audit_log',
       'slotlock_export_subject',
       'slotlock_erase_subject',
+      'slotlock_create_tenant_export',
+      'slotlock_list_tenant_exports',
+      'slotlock_get_tenant_export',
+      'slotlock_get_tenant_export_part',
+      'slotlock_delete_tenant_export',
     ],
   },
   {
@@ -417,6 +422,7 @@ const CLEAN_UP = new Set([
   'slotlock_delete_resource',
   'slotlock_erase_tenant',
   'slotlock_erase_subject',
+  'slotlock_delete_tenant_export',
 ]);
 
 /** Split example arguments into path values, query pairs and a JSON body. */

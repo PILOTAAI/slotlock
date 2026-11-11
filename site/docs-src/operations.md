@@ -41,6 +41,11 @@ In a process of your own:
   (provider and sync authority) are kept until you erase the tenant. After the window a retried
   command is evaluated afresh under its expected revision, and a pruned agent identity can be
   created again. `retentionDays` (1-3650) changes the window; keep it longer than any client retries.
+- **Export.** `slotlock tenant export --out <dir>` writes everything the tenant keeps, read at one
+  moment, as one `<table>.ndjson` file a table (owner-only files, in a new or empty directory);
+  without `--out` it prints `{"table": ..., "row": ...}` lines. Secrets stay out. Over the API,
+  `POST /v1/tenant/exports` builds the same into parts kept 24 hours; maintenance deletes expired
+  ones and builds any a stopped server left pending.
 - **One person.** `slotlock subject export --email <address>` (or `--holder`, `--contact`,
   `--reference`) prints what the tenant keeps about one person, a JSON line per row;
   `slotlock subject erase` with the same option takes them out, leaving bookings as time taken, and

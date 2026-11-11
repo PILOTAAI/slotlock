@@ -105,7 +105,8 @@ import {
   createSlotlockOtlpMetricsExporter,
   readSlotlockOtlpConfig,
 } from './otel.js';
-import { readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile } from 'node:fs/promises';
+import { join as joinPath } from 'node:path';
 import type { SlotlockAvailabilityException } from './hours.js';
 import type { SlotlockOverrideResources } from './availability-store.js';
 import { readSlotlockHolidayCalendar } from './holiday-import.js';
@@ -1673,6 +1674,51 @@ function hoursLine(resource: SlotlockResource): string {
 }
 
 /**
+ * `tenant export [--out <dir>]` (RFC 0004 D3): everything the tenant keeps, read in one snapshot and
+ * stored nowhere: JSON lines on stdout, or one NDJSON file a table in a new or empty directory.
+ * Prints what it wrote, and records it in the audit log.
+ */
+async function runTenantExport(
+  config: SlotlockDatabaseConfig,
+  io: { stdout: OutputStream; stderr: OutputStream },
+  out: string | undefined,
+): Promise<number> {
+  if (out !== undefined) {
+    await mkdir(out, { recursive: true });
+    if ((await readdir(out)).length > 0) {
+      io.stderr.write(`slotlock: ${out} is not empty: export into a new or empty directory\n`);
+      return 1;
+    }
+  }
+  const sql = connect(config.databaseUrl, 1);
+  try {
+    const store = createSlotlockStore(sql);
+    const tenantRef = config.tenantRef;
+    const totals = await store.withTenant(tenantRef, async (tenant) => {
+      const read = await tenant.streamTenantExport({
+        tenantRef,
+        onPart: async ({ table, lines }) => {
+          if (out !== undefined) {
+            await appendFile(joinPath(out, `${table}.ndjson`), `${lines.join('\n')}\n`, { mode: 0o600 });
+          } else {
+            io.stdout.write(lines.map((line) => `{"table":${JSON.stringify(table)},"row":${line}}\n`).join(''));
+          }
+        },
+      });
+      await tenant.recordAuditEvent({
+        tenantRef,
+        event: { action: 'export.created', actorType: 'system', actorRef: 'cli', targetType: 'export', metadata: { rows: read.rows } },
+      });
+      return read;
+    });
+    if (out !== undefined) io.stdout.write(`${JSON.stringify({ directory: out, ...totals })}\n`);
+    return 0;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+/**
  * `audit verify|export` (RFC 0004 D2): the tenant's workspace audit log. verify exits 1 when the
  * chain is broken; export prints every event kept, newest first, as JSON lines.
  */
@@ -2764,6 +2810,10 @@ Commands:
                            no new secret (as SLOTLOCK_MIGRATE_DATABASE_URL's role when set:
                            only the schema owner suspends)
   tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
+  tenant export [--out <dir>]
+                           Print everything the tenant keeps, read at one moment, one JSON line a
+                           row ({"table": ..., "row": ...}); with --out, one <table>.ndjson file a
+                           table in that directory (new or empty). Secrets stay out
   tenant erase --confirm <tenant>
                            Delete everything the tenant has, its API keys included, for good;
                            --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is
@@ -2968,6 +3018,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'resource restore': 2,
     'resource delete': 2,
     'tenant status': 1,
+    'tenant export': 1,
     'tenant suspend': 1,
     'tenant unsuspend': 1,
     'tenant erase': 1,
@@ -3072,6 +3123,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   if (subcommand.startsWith('subject ') && subjectOptions.length !== 1) {
     return usage(`${subcommand} needs exactly one of --email, --holder, --contact or --reference`);
   }
+  if (values.out !== undefined && subcommand !== 'tenant export') return usage('--out applies only to tenant export');
   if (subcommand === 'tenant erase' && values.confirm === undefined) {
     return usage('tenant erase needs --confirm <tenant>, the tenant it erases (SLOTLOCK_TENANT)');
   }
@@ -3345,6 +3397,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         }
         return 0;
       }
+      case 'tenant export':
+        return runTenantExport(readSlotlockDatabaseConfig(io.env), io, values.out);
       case 'tenant status':
       case 'tenant suspend':
       case 'tenant unsuspend':
@@ -3606,6 +3660,7 @@ function parseCliArguments(argv: readonly string[]) {
       open: { type: 'string' },
       reason: { type: 'string' },
       confirm: { type: 'string' },
+      out: { type: 'string' },
       email: { type: 'string' },
       holder: { type: 'string' },
       contact: { type: 'string' },

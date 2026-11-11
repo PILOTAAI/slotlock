@@ -26,6 +26,7 @@ import {
   createSlotlockTenantRlsDdl,
 } from '../ddl.js';
 import { SLOTLOCK_ADMIN_FUNCTIONS, SLOTLOCK_STAFF_TABLES } from '../staff-ddl.js';
+import { SLOTLOCK_TENANT_EXPORT_LEFT_OUT, SLOTLOCK_TENANT_EXPORT_TABLES } from '../types.js';
 
 describe('tenant RLS DDL', () => {
   it('persists bounded owner namespaces and upgrades legacy event identities idempotently', () => {
@@ -323,6 +324,20 @@ describe('application role grants', () => {
         `ALTER TABLE slotlock.${table} FORCE ROW LEVEL SECURITY`,
       );
     }
+  });
+
+  // A tenant table added later is exported or left out on purpose, never forgotten (RFC 0004 D3).
+  it('names every tenant table as exported or left out of a tenant export, with why', () => {
+    const exported: readonly string[] = SLOTLOCK_TENANT_EXPORT_TABLES;
+    const leftOut = Object.keys(SLOTLOCK_TENANT_EXPORT_LEFT_OUT);
+    for (const table of SLOTLOCK_TENANT_TABLES) {
+      expect(`${table}: ${Number(exported.includes(table)) + Number(leftOut.includes(table))}`).toBe(`${table}: 1`);
+    }
+    // API keys come from slotlock.list_api_keys, which holds no digest; every other is a tenant table.
+    for (const table of exported) {
+      if (table !== 'api_keys') expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
+    }
+    for (const table of leftOut) expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
   });
 
   it('grants schema usage, DML on those tables (only adding to and reading the append-only ones) and EXECUTE on the definer functions only', () => {
