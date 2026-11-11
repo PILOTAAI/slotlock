@@ -23,6 +23,7 @@ import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import { SLOTLOCK_CHANGE_TYPES, type SlotlockChange, type SlotlockWebhookEndpoint } from '../event-feed.js';
 import type { SlotlockTenantPlan } from '../plans.js';
 import type { SlotlockWaitlistEntry } from '../store.js';
+import { createSlotlockMemoryDashboardWorkspaces } from '../workspaces.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
@@ -1786,7 +1787,7 @@ describe('organizations', () => {
     const refused = await post(
       target,
       '/base/dashboard/keys',
-      { csrf: token, once: stale, name: 'Acme agent', access: 'full', expires: 'never' },
+      { csrf: token, once: stale, name: 'Acme agent', access: 'read_write', expires: 'never' },
       moved,
     );
     expect(refused.status).toBe(409);
@@ -1830,6 +1831,129 @@ describe('organizations', () => {
     const narrowed = dashboard({ fetch: github.fetch, organizations: [String(GLOBEX.id)] });
     const page = await get(narrowed, '/base/dashboard', session);
     expect(await page.text()).toContain('Continue with GitHub');
+  });
+
+  // Roles (workspace-roles.ts): every route needs a capability, checked from the role before
+  // anything is spent or changed. Without a membership store, GitHub's owners are Owners and its
+  // members Developers.
+  it("lets an organization's member create read-write keys, never Full-access ones, and change only their own", async () => {
+    const audited: unknown[] = [];
+    const target = orgDashboard([ACME], {
+      resources: { ...resources.store, audit: { record: async (_tenant: string, event: unknown) => void audited.push(event), list: async () => [] } },
+    });
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    const full = await post(target, '/base/dashboard/keys', { csrf: token, name: 'Agent', access: 'full', expires: 'never' }, session);
+    expect(full.status).toBe(403);
+    expect(await full.text()).toContain('As a Developer in this workspace, you can&#39;t create or change Full-access keys.');
+    expect(keys.store.create).not.toHaveBeenCalled();
+    expect(audited).toContainEqual(
+      expect.objectContaining({ action: 'authz.denied', outcome: 'denied', actorRef: `github:${GITHUB_USER.id}`, actorRole: 'developer' }),
+    );
+    const ok = await post(target, '/base/dashboard/keys', { csrf: token, name: 'Agent', access: 'read_write', expires: 'never' }, session);
+    expect(ok.status).toBe(200);
+    expect(audited).toContainEqual(expect.objectContaining({ action: 'api_key.created', metadata: { access: 'read_write', expires: 'never' } }));
+    // Someone else's key in the same workspace.
+    const theirs = await keys.store.create({ tenantRef: `github-org:${ACME.id}`, name: 'Owner key', scopes: ['read'], createdBy: 'github:1' });
+    const revoke = await post(target, '/base/dashboard/keys/revoke', { csrf: token, id: theirs.apiKey.id }, session);
+    expect(revoke.status).toBe(403);
+    expect(await revoke.text()).toContain('change a key someone else created');
+    expect(keys.store.revoke).not.toHaveBeenCalled();
+    for (const route of ['/webhooks', '/contacts/forget', '/settings/assistant', '/plan/manage']) {
+      const refused = await post(target, `/base/dashboard${route}`, { csrf: token }, session);
+      expect(refused.status, route).toBe(403);
+    }
+  });
+
+  it('asks an owner who signed in more than 15 minutes ago to sign in again, and comes back to the page', async () => {
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const token = await csrf(target, session);
+    now += 16 * 60_000;
+    const full = await post(target, '/base/dashboard/keys', { csrf: token, name: 'Agent', access: 'full', expires: 'never' }, session);
+    expect(full.status).toBe(403);
+    const page = await full.text();
+    expect(page).toContain('Confirm it’s you');
+    expect(page).toContain('href="/base/dashboard/sign-in?then=%2Fkeys"');
+    expect(keys.store.create).not.toHaveBeenCalled();
+    // What does not need it still works.
+    expect((await post(target, '/base/dashboard/keys', { csrf: token, name: 'Agent', access: 'read', expires: 'never' }, session)).status).toBe(200);
+    // Signing in again returns to the keys page, with a session that may.
+    const again = await get(target, '/base/dashboard/sign-in?then=%2Fkeys');
+    const state = new URL(again.headers.get('location') ?? '').searchParams.get('state');
+    const back = await get(target, `/base/dashboard/callback?code=fake-code&state=${state}`, cookie(again, '__Host-slotlock-oauth')?.pair);
+    expect(back.headers.get('location')).toBe('/base/dashboard/keys');
+    const fresh = cookie(back, '__Host-slotlock-session')?.pair as string;
+    const made = await post(target, '/base/dashboard/keys', { csrf: await csrf(target, fresh), name: 'Agent', access: 'full', expires: 'never' }, fresh);
+    expect(made.status).toBe(200);
+    // Only the dashboard's own pages: anything else lands on the overview.
+    const elsewhere = await get(target, '/base/dashboard/sign-in?then=https%3A%2F%2Fevil.example');
+    const away = await get(
+      target,
+      `/base/dashboard/callback?code=fake-code&state=${new URL(elsewhere.headers.get('location') ?? '').searchParams.get('state')}`,
+      cookie(elsewhere, '__Host-slotlock-oauth')?.pair,
+    );
+    expect(away.headers.get('location')).toBe('/base/dashboard');
+  });
+
+  it('reads the role from the membership store on every request: a change applies at the next one', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const target = orgDashboard([{ ...ACME, role: 'admin' }], { workspaces });
+    const { session } = await signIn(target);
+    const person = `github:${GITHUB_USER.id}`;
+    // GitHub's owner of the organization is its Owner, recorded at sign-in.
+    expect(await workspaces.standing(`github-org:${ACME.id}`, person)).toEqual({ role: 'owner', sessionEpoch: 0 });
+    const token = await csrf(target, session);
+    expect((await post(target, '/base/dashboard/keys', { csrf: token, name: 'A', access: 'full', expires: 'never' }, session)).status).toBe(200);
+    // Demoted in the database: the same cookie, the next request.
+    workspaces.setRole(`github-org:${ACME.id}`, person, 'developer');
+    expect((await post(target, '/base/dashboard/keys', { csrf: token, name: 'B', access: 'full', expires: 'never' }, session)).status).toBe(403);
+    // Removed: with a fixed list of organizations there is nowhere else to be, so signed out.
+    workspaces.remove(`github-org:${ACME.id}`, person);
+    const gone = await get(target, '/base/dashboard/keys', session);
+    expect(gone.status).toBe(303);
+    expect(gone.headers.get('location')).toBe('/base/dashboard');
+  });
+
+  it('signs a person out of every session at once', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const target = dashboard({ workspaces });
+    const laptop = (await signIn(target)).session;
+    const phone = (await signIn(target)).session;
+    expect((await get(target, '/base/dashboard/settings/account', phone)).status).toBe(200);
+    const page = await (await get(target, '/base/dashboard/settings/account', laptop)).text();
+    expect(page).toContain('action="/base/dashboard/sign-out-everywhere"');
+    expect(page).toContain('<span class="row-label">Role</span><div class="row-value">Owner</div>');
+    const out = await post(target, '/base/dashboard/sign-out-everywhere', { csrf: await csrf(target, laptop) }, laptop);
+    expect(out.status).toBe(303);
+    expect((await get(target, '/base/dashboard/keys', phone)).headers.get('location')).toBe('/base/dashboard');
+    expect((await get(target, '/base/dashboard/keys', laptop)).headers.get('location')).toBe('/base/dashboard');
+    // A new sign-in is a session of the new epoch.
+    const next = (await signIn(target)).session;
+    expect((await get(target, '/base/dashboard/keys', next)).status).toBe(200);
+  });
+
+  it('lets a viewer read and change nothing, and sends a billing manager to Usage', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const plans = { plan: vi.fn(async () => null), contact: 'mailto:founder@example.com' };
+    const target = orgDashboard([ACME], { workspaces, plans });
+    const { session } = await signIn(target);
+    const person = `github:${GITHUB_USER.id}`;
+    workspaces.setRole(`github-org:${ACME.id}`, person, 'viewer');
+    expect((await get(target, '/base/dashboard/keys', session)).status).toBe(200);
+    const token = await csrf(target, session);
+    const added = await post(target, '/base/dashboard/resources', { csrf: token, reference: 'van-1', timezone: 'UTC' }, session);
+    expect(added.status).toBe(403);
+    expect(await added.text()).toContain('As a Viewer in this workspace, you can&#39;t change resources.');
+    workspaces.setRole(`github-org:${ACME.id}`, person, 'billing');
+    const overview = await get(target, '/base/dashboard', session);
+    expect(overview.headers.get('location')).toBe('/base/dashboard/plan');
+    const usage = await get(target, '/base/dashboard/plan', session);
+    expect(usage.status).toBe(200);
+    const nav = /<nav class="nav"[^>]*>([\s\S]*?)<\/nav>/.exec(await usage.text())?.[1] ?? '';
+    expect(nav).toContain('/base/dashboard/plan');
+    expect(nav).not.toContain('/base/dashboard/keys');
+    expect((await get(target, '/base/dashboard/keys', session)).status).toBe(403);
   });
 });
 

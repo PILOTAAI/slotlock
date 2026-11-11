@@ -56,6 +56,7 @@ const READS = [
   'listWaitlist',
   'getAssistantSettings',
   'listAssistantChats',
+  'listAuditEvents',
   'getAssistantChat',
 ];
 const UPKEEP = [
@@ -74,6 +75,9 @@ const UPKEEP = [
   'expireApprovals',
   'offerWaitlist',
   'pruneAssistantConversations',
+  // The audit log records what happened, refusals included: a suspension does not stop that.
+  'recordAuditEvent',
+  'pruneAuditEvents',
   'sweepAssistantConversations',
   // Counting what was written already: a suspension stops new writes, not the count of old ones.
   'rollUpUsage',

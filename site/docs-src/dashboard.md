@@ -63,6 +63,33 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
   systems through the API), with the channels each agreed to, and forgets one for an erasure
   request.
 
+## Roles
+
+What each person may do in a workspace is their role, read from the database on every request
+(`slotlock.workspace_memberships`): a role changed or a membership ended applies at the next
+request, never at the next sign-in. Every page and form needs a capability, and one with none is
+refused.
+
+| Role | May |
+|---|---|
+| Owner | Everything: billing, and the workspace itself |
+| Admin | All but billing and the workspace itself: Full-access keys, webhooks, anyone's keys, contacts, the assistant's model |
+| Developer | Resources, booking rules, hours, the test environment, and read-only or read-write keys of their own |
+| Member | Bookings, approvals, the waitlist, hours and closures, and the assistant |
+| Viewer | Reads everything, changes nothing; their assistant only reads |
+| Billing | The plan, usage and billing |
+
+- A person is the Owner of their own workspace. In an organization's, GitHub's owners are its
+  Owners and its other members Developers, recorded at each sign-in.
+- Full-access keys, webhooks, billing and the assistant's model also need a sign-in in the last 15
+  minutes: past it, the dashboard asks the person to sign in again and comes back to the page.
+- A Developer rotates or limits only keys they created, and never a Full-access one.
+- **Sign out everywhere** (Settings, Account) ends every session of the person on every device.
+- An audit log (`slotlock.audit_events`, kept 180 days) records who created, rotated or revoked a
+  key, changed a webhook, the plan, billing or the assistant's model, forgot a contact, signed in or
+  out everywhere, and every refusal, with the address and browser it came from. The serving role
+  can only add to it and read it.
+
 ## Organizations
 
 For organizations instead of people, set `SLOTLOCK_DASHBOARD_ORGS` to the GitHub organization ids
@@ -72,8 +99,9 @@ that its members share: keys, resources and hours.
 - A person signs in to the served organizations they are an active owner or member of (a billing
   manager is neither), switching between them when there are several; someone in none of them is
   refused.
-- Every member has the same power: each can create, rotate and revoke the organization's keys, and
-  the key list says who created each one.
+- GitHub's owners of the organization are its Owners, and its members Developers (see Roles): a
+  member creates read-only or read-write keys and changes only their own; the key list says who
+  created each one.
 - Membership is read at each sign-in, so a person who leaves keeps the dashboard until their
   session ends (12 hours at most), and keys they made work until revoked. Removing an id from the
   list signs its sessions out and stops its keys at once.
