@@ -62,6 +62,11 @@ import {
 import { createSlotlockStore } from '../../src/store.js';
 import { createSlotlockDashboardTeams } from '../../src/teams.js';
 import { createSlotlockInvitationEmailSender } from '../../src/invitation-email.js';
+import { slotlockDomainResolvers } from '../../src/domains.js';
+import { createSlotlockSecretBox } from '../../src/oidc.js';
+import type { SlotlockWorkspaceDomains } from '../../src/workspace-domains.js';
+import type { SlotlockWorkspaceSso } from '../../src/workspace-sso.js';
+import type { SlotlockWorkspaceScim } from '../../src/workspace-scim.js';
 import {
   type SlotlockDashboardSessions,
   type SlotlockDashboardWorkspaces,
@@ -93,6 +98,13 @@ export interface SlotlockDashboardWorkerEnv {
    * did then, and the Worker logs a warning.
    */
   SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT?: SlotlockRateLimit;
+  /**
+   * SCIM calls from teams' identity providers, counted per client instead of in
+   * SLOTLOCK_CLIENT_RATE_LIMIT: a provider calls from addresses its other customers share, so in the
+   * dashboard's budget one team's sync would use up another's. Without it, with SCIM on, SCIM is
+   * counted in SLOTLOCK_CLIENT_RATE_LIMIT, as it was, and the Worker logs a warning.
+   */
+  SLOTLOCK_SCIM_RATE_LIMIT?: SlotlockRateLimit;
   [name: string]: unknown;
 }
 
@@ -254,16 +266,22 @@ function perRequest<T extends object>(current: () => T): T {
 }
 
 /**
- * The membership store through the request's client, its team workspaces and sessions too: the
- * dashboard reads `teams` and `sessions` once, as it is built, outside any request.
+ * The membership store through the request's client, its team workspaces, sessions and domains too:
+ * the dashboard reads `teams`, `sessions` and `domains` once, as it is built, outside any request.
  */
 function perRequestWorkspaces(current: () => SlotlockDashboardWorkspaces): SlotlockDashboardWorkspaces {
   const teams = perRequest(() => current().teams as SlotlockWorkspaceTeams);
   const sessions = perRequest(() => current().sessions as SlotlockDashboardSessions);
+  const domains = perRequest(() => current().domains as SlotlockWorkspaceDomains);
+  const sso = perRequest(() => current().sso as SlotlockWorkspaceSso);
+  const scim = perRequest(() => current().scim as SlotlockWorkspaceScim);
   return new Proxy({} as SlotlockDashboardWorkspaces, {
     get(_target, property) {
       if (property === 'teams') return teams;
       if (property === 'sessions') return sessions;
+      if (property === 'domains') return domains;
+      if (property === 'sso') return sso;
+      if (property === 'scim') return scim;
       const target = current();
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -311,6 +329,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         root: string;
         availability: ReturnType<typeof readAvailability>;
         signInPaths: Set<string>;
+        /** `<dashboard path>/scim/v2/` with SCIM on, counted in limits.scim; null with it off. */
+        scimPrefix: string | null;
         stripeWebhook: { path: string; secret: string; stripe: SlotlockStripe } | null;
         /** SLOTLOCK_USAGE=on: the assistant's operations are recorded (usage.ts). */
         usage: boolean;
@@ -321,6 +341,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           client: SlotlockRateLimit;
           signIn: SlotlockRateLimit;
           signInCeiling: SlotlockRateLimit | null;
+          scim: SlotlockRateLimit | null;
         };
       }
     | undefined;
@@ -350,9 +371,21 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     const publicUrl = readServerUrl(vars, 'SLOTLOCK_PUBLIC_URL');
     const serviceUrl = readServerUrl(vars, 'SLOTLOCK_SERVICE_URL');
     const config = readDashboardConfig(vars);
+    if (config?.verifiedDomains?.resolver === 'system') {
+      throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER=system needs a server: a Worker looks domains up over DNS-over-HTTPS (doh)');
+    }
     if (config === undefined) {
       throw new SlotlockConfigError(
         'SLOTLOCK_GITHUB_CLIENT_ID, SLOTLOCK_GITHUB_CLIENT_SECRET, SLOTLOCK_SESSION_SECRET and SLOTLOCK_DASHBOARD_USERS are required',
+      );
+    }
+    const scim = isRateLimit(env.SLOTLOCK_SCIM_RATE_LIMIT) ? env.SLOTLOCK_SCIM_RATE_LIMIT : null;
+    if (config.teamScim && !scim) {
+      console.warn(
+        JSON.stringify({
+          message:
+            "slotlock dashboard SCIM calls share each client's dashboard budget: add the SLOTLOCK_SCIM_RATE_LIMIT rate limiting binding to count them apart",
+        }),
       );
     }
     if (typeof env.HYPERDRIVE?.connectionString !== 'string') {
@@ -387,6 +420,16 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(config.name ? { name: config.name } : {}),
       ...(config.termsUrl ? { termsUrl: config.termsUrl } : {}),
       ...(config.teamWorkspaces ? { teamWorkspaces: true } : {}),
+      // Verified domains: an Owner's "Verify now" asks DNS over HTTPS, the one way a Worker reaches
+      // DNS; the daily check runs in the server's maintenance.
+      ...(config.verifiedDomains
+        ? { domains: { resolvers: slotlockDomainResolvers('doh', { fetch: (input, init) => fetch(input, init) }) } }
+        : {}),
+      // Teams' single sign-on: a Worker reaches no private network, so its own fetch.
+      ...(config.teamSso
+        ? { sso: { secretBox: createSlotlockSecretBox(config.teamSso.secret), fetch: (input, init) => fetch(input, init) } }
+        : {}),
+      ...(config.teamScim ? { scim: true } : {}),
       ...(config.invitationEmail
         ? {
             invitations: createSlotlockInvitationEmailSender(config.invitationEmail, {
@@ -494,6 +537,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       root,
       availability: readAvailability(vars),
       signInPaths: new Set([`${base}/sign-in`, `${base}/callback`]),
+      scimPrefix: config.teamScim ? `${base}/scim/v2/` : null,
       stripeWebhook:
         billing?.webhookSecret
           ? {
@@ -505,7 +549,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       usage: metering,
       quotas: quotaMode,
       overageStopPercent,
-      limits: { client, signIn, signInCeiling },
+      limits: { client, signIn, signInCeiling, scim },
     };
   }
 
@@ -528,7 +572,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           headers: { 'content-type': 'text/plain; charset=utf-8' },
         });
       }
-      const { dashboard, root, signInPaths, limits, availability, stripeWebhook, usage, quotas, overageStopPercent } = built;
+      const { dashboard, root, signInPaths, scimPrefix, limits, availability, stripeWebhook, usage, quotas, overageStopPercent } = built;
       const path = new URL(request.url).pathname;
       if (path === '/') return Response.redirect(root, 302);
       // Stripe's deliveries: the client connects only once the signature has been checked.
@@ -568,9 +612,13 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       }
       // Before any database client or GitHub request.
       const address = clientOf(request) ?? 'unknown';
-      if (!(await limits.client.limit({ key: `client:${address}` })).success) {
-        return tooManyRequests();
-      }
+      // A team's provider calls SCIM from addresses its other customers share: counted apart from
+      // the dashboard's budget, so neither people browsing nor another team's sync use it up.
+      const counted =
+        limits.scim && scimPrefix !== null && path.startsWith(scimPrefix)
+          ? await limits.scim.limit({ key: `scim:${address}` })
+          : await limits.client.limit({ key: `client:${address}` });
+      if (!counted.success) return tooManyRequests();
       // The dashboard routes a path with one trailing slash as the path without it, so a sign-in is
       // recognised as it recognises one: `/dashboard/sign-in/` is a sign-in too.
       const route = path.replace(/\/$/, '');

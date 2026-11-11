@@ -127,14 +127,18 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
   response is sent; Hyperdrive keeps the pool.
 - Anyone may start a sign-in, and each callback costs a database write and a request to GitHub
   with the app's client secret. An isolate runs at most eight at once, but Workers run many
-  isolates, so three rate limiting bindings bound them all:
+  isolates, so rate limiting bindings bound them all:
   - `SLOTLOCK_CLIENT_RATE_LIMIT` counts every dashboard request per client address (an IPv6
     client's /64, as `slotlock serve` counts it);
   - `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts sign-ins and callbacks per client network (an IPv6
     client's /48, a site's allocation, as `slotlock serve` counts its sign-ins), so a site rotating
     through its /64s cannot use up the ceiling;
   - `SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT` counts them from every client together, set far above one
-    client's limit so a few clients cannot use it up for everyone.
+    client's limit so a few clients cannot use it up for everyone;
+  - `SLOTLOCK_SCIM_RATE_LIMIT`, with SCIM, counts teams' SCIM calls per client address instead of
+    `SLOTLOCK_CLIENT_RATE_LIMIT`: an identity provider calls from addresses its other customers
+    share, so in the dashboard's budget one team's sync would use up another's. Without it, SCIM
+    is counted in `SLOTLOCK_CLIENT_RATE_LIMIT`, and the Worker logs a warning.
 
   Their counts are per Cloudflare location. Without either of the first two the Worker answers 503.
   Without the ceiling, as in a configuration from before it, `SLOTLOCK_SIGN_IN_RATE_LIMIT` counts
@@ -147,7 +151,13 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
 - With team workspaces, set `SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on` on both too: the server takes
   a team's keys only with it on, and only while the team exists. To send invitations by email, set
   `SLOTLOCK_INVITATION_EMAIL` and `SLOTLOCK_INVITATION_EMAIL_FROM` as variables and
-  `SLOTLOCK_INVITATION_EMAIL_KEY` as a secret (`wrangler secret put`) on the Worker.
+  `SLOTLOCK_INVITATION_EMAIL_KEY` as a secret (`wrangler secret put`) on the Worker. With verified
+  domains, set `SLOTLOCK_VERIFIED_DOMAINS=on` on both: the Worker looks a record up when an Owner
+  asks, over DNS-over-HTTPS, and the server's maintenance checks every domain daily. With single
+  sign-on, set `SLOTLOCK_TEAM_SSO=on` and `SLOTLOCK_SSO_SECRET` (a secret) on the Worker: signing
+  in is the dashboard's, so a server that does not serve the dashboard never reads them. With SCIM,
+  set `SLOTLOCK_TEAM_SCIM=on` on the Worker, with the `SLOTLOCK_SCIM_RATE_LIMIT` binding: the
+  identity provider calls the dashboard's `/scim/v2`.
 - Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
   keys only while its own list allows them, whether or not it serves the dashboard, so removing a
   person from both lists signs them out and stops their keys. A server without it takes every

@@ -146,6 +146,22 @@ export interface SlotlockServeDashboardConfig {
    * sends the link.
    */
   invitationEmail?: { provider: 'resend' | 'postmark'; key: string; from: string };
+  /**
+   * Verified domains (SLOTLOCK_VERIFIED_DOMAINS=on, with team workspaces): a team's Owner proves a
+   * domain with a DNS record, and the people whose verified address is at it may ask to join. Looked
+   * up over DNS-over-HTTPS, or with the system's resolver (SLOTLOCK_DNS_RESOLVER=system, a server only).
+   */
+  verifiedDomains?: { resolver: 'doh' | 'system' };
+  /**
+   * Single sign-on through each team's own identity provider (SLOTLOCK_TEAM_SSO=on, with verified
+   * domains): its client secrets sealed under SLOTLOCK_SSO_SECRET.
+   */
+  teamSso?: { secret: string };
+  /**
+   * SCIM provisioning (SLOTLOCK_TEAM_SCIM=on, with verified domains): each team's identity provider
+   * adds, deactivates and groups its people at the dashboard's /scim/v2.
+   */
+  teamScim?: boolean;
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -279,6 +295,9 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     );
   }
   const invitationEmail = readInvitationEmail(env, teamWorkspaces);
+  const verifiedDomains = readVerifiedDomains(env);
+  const teamSso = readTeamSso(env, verifiedDomains !== undefined);
+  const teamScim = readTeamScim(env, verifiedDomains !== undefined);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -298,6 +317,9 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(teamWorkspaces ? { teamWorkspaces: true } : {}),
     ...(invitationEmail ? { invitationEmail } : {}),
+    ...(verifiedDomains ? { verifiedDomains } : {}),
+    ...(teamSso ? { teamSso } : {}),
+    ...(teamScim ? { teamScim } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(termsUrl !== undefined ? { termsUrl } : {}),
     ...(privacyUrl !== undefined ? { privacyUrl } : {}),
@@ -405,6 +427,65 @@ function readInvitationEmail(
     throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL_FROM must be the sender the provider verified: team@example.com or Name <team@example.com>');
   }
   return { provider, key, from };
+}
+
+/**
+ * SLOTLOCK_VERIFIED_DOMAINS: on or off (the default), only with team workspaces; and
+ * SLOTLOCK_DNS_RESOLVER, how a domain's record is looked up: doh (the default: Cloudflare's
+ * DNS-over-HTTPS, cross-checked by Google's) or system (the server's own resolver, which follows
+ * split-horizon DNS). Read on its own as well: the server that runs maintenance checks the domains
+ * each day, wherever the dashboard runs.
+ */
+export function readVerifiedDomains(env: SlotlockEnv): { resolver: 'doh' | 'system' } | undefined {
+  const value = optional(env, 'SLOTLOCK_VERIFIED_DOMAINS') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_VERIFIED_DOMAINS must be on or off');
+  }
+  const resolver = optional(env, 'SLOTLOCK_DNS_RESOLVER');
+  if (resolver !== undefined && resolver !== 'doh' && resolver !== 'system') {
+    throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER must be doh or system');
+  }
+  if (value === 'off') {
+    if (resolver !== undefined) {
+      throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER looks up verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+    }
+    return undefined;
+  }
+  if (!readDashboardTeamWorkspaces(env)) {
+    throw new SlotlockConfigError('SLOTLOCK_VERIFIED_DOMAINS verifies team workspaces\' domains: it needs SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on');
+  }
+  return { resolver: resolver ?? 'doh' };
+}
+
+/**
+ * SLOTLOCK_TEAM_SSO: on or off (the default), only with verified domains; with it,
+ * SLOTLOCK_SSO_SECRET (32+ characters), which seals each team's client secret.
+ */
+function readTeamSso(env: SlotlockEnv, verifiedDomains: boolean): { secret: string } | undefined {
+  const value = optional(env, 'SLOTLOCK_TEAM_SSO') ?? 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_TEAM_SSO must be on or off');
+  const secret = optional(env, 'SLOTLOCK_SSO_SECRET');
+  if (value === 'off') {
+    if (secret !== undefined) throw new SlotlockConfigError('SLOTLOCK_SSO_SECRET seals teams\' client secrets: it needs SLOTLOCK_TEAM_SSO=on');
+    return undefined;
+  }
+  if (!verifiedDomains) {
+    throw new SlotlockConfigError('SLOTLOCK_TEAM_SSO trusts addresses only at verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+  }
+  if (secret === undefined || secret.length < 32 || /\s/.test(secret)) {
+    throw new SlotlockConfigError(`SLOTLOCK_SSO_SECRET must be 32 or more characters without spaces. ${SECRET_HINT}`);
+  }
+  return { secret };
+}
+
+/** SLOTLOCK_TEAM_SCIM: on or off (the default), only with verified domains. */
+function readTeamScim(env: SlotlockEnv, verifiedDomains: boolean): boolean {
+  const value = optional(env, 'SLOTLOCK_TEAM_SCIM') ?? 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_TEAM_SCIM must be on or off');
+  if (value === 'on' && !verifiedDomains) {
+    throw new SlotlockConfigError('SLOTLOCK_TEAM_SCIM adds people only at verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+  }
+  return value === 'on';
 }
 
 /**

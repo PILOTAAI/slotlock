@@ -27,6 +27,14 @@ import {
   SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
   legacyCoverageSourceDigestSql,
 } from './event-feed.js';
+import {
+  SLOTLOCK_IDENTITY_DDL,
+  SLOTLOCK_IDENTITY_FUNCTIONS,
+  SLOTLOCK_IDENTITY_TABLES,
+  SLOTLOCK_INVITE_DOMAIN_REFUSED,
+} from './ddl-identity.js';
+import { SLOTLOCK_SSO_DDL, SLOTLOCK_SSO_FUNCTIONS, SLOTLOCK_SSO_TABLES } from './ddl-sso.js';
+import { SLOTLOCK_SCIM_DDL, SLOTLOCK_SCIM_FUNCTIONS, SLOTLOCK_SCIM_TABLES } from './ddl-scim.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -259,6 +267,12 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   'workspaces',
   'workspace_invitations',
   'dashboard_sessions',
+  // Verified domains and requests to join (ddl-identity.ts).
+  ...SLOTLOCK_IDENTITY_TABLES,
+  // Single sign-on (ddl-sso.ts).
+  ...SLOTLOCK_SSO_TABLES,
+  // SCIM provisioning (ddl-scim.ts).
+  ...SLOTLOCK_SCIM_TABLES,
 ] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
@@ -269,7 +283,7 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.enable_organization(text, text, text)',
   'slotlock.disable_organization(text, text)',
   'slotlock.dashboard_sign_in(text, text)',
-  'slotlock.dashboard_standing(text, text)',
+  'slotlock.dashboard_standing(text, text, bytea)',
   'slotlock.dashboard_sign_out_everywhere(text)',
   'slotlock.prune_audit_events(text)',
   'slotlock.dashboard_display(text, text)',
@@ -300,6 +314,9 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.member_scope(text, text)',
   'slotlock.set_member_scope(text, text, text, jsonb)',
   'slotlock.member_scopes(text)',
+  ...SLOTLOCK_IDENTITY_FUNCTIONS,
+  ...SLOTLOCK_SSO_FUNCTIONS,
+  ...SLOTLOCK_SCIM_FUNCTIONS,
 ] as const);
 
 /**
@@ -1241,7 +1258,7 @@ CREATE TABLE IF NOT EXISTS slotlock.dashboard_people (
   last_sign_in_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   CONSTRAINT slotlock_dashboard_people_valid CHECK (
-    person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
     AND session_epoch > 0
   )
 );
@@ -1267,10 +1284,10 @@ CREATE TABLE IF NOT EXISTS slotlock.workspace_memberships (
   CONSTRAINT slotlock_workspace_memberships_pkey PRIMARY KEY (tenant_ref, person_ref),
   CONSTRAINT slotlock_workspace_memberships_valid CHECK (
     tenant_ref ~ '^(github-org:[1-9][0-9]{0,19}|team:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
-    AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
     AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
     AND status IN ('active', 'inactive')
-    AND source IN ('github_org', 'invitation', 'created')
+    AND source IN ('github_org', 'invitation', 'created', 'domain', 'sso', 'scim')
     AND (status = 'active') = (deactivated_at IS NULL)
   )
 );
@@ -1296,8 +1313,17 @@ DECLARE
   epoch integer;
 BEGIN
   IF requested_person IS NULL
-     OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+     OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
     RAISE EXCEPTION 'Slotlock dashboard: invalid person' USING ERRCODE = '22023';
+  END IF;
+  -- A person a team's provider made exists only while an identity of theirs does: one erased while
+  -- their sign-in was under way (ddl-sso.ts) is not made again. The identity is locked, so an
+  -- erasure waits for this, or this sees it.
+  IF requested_person ~ '^sso:' THEN
+    PERFORM 1 FROM slotlock.sso_identities identity WHERE identity.person_ref = requested_person FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Slotlock dashboard: that person is no longer here' USING ERRCODE = 'P0002';
+    END IF;
   END IF;
   INSERT INTO slotlock.dashboard_people AS person (person_ref) VALUES (requested_person)
   ON CONFLICT (person_ref) DO UPDATE SET last_sign_in_at = statement_timestamp()
@@ -1339,30 +1365,10 @@ END
 $slotlock_dashboard_sign_in$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[5]} FROM PUBLIC;
 
--- A person's standing in a workspace now: their role (Owner of their own; else an active
--- membership's, or none) and their sessions' epoch. A test environment is its live tenant's.
-CREATE OR REPLACE FUNCTION slotlock.dashboard_standing(requested_tenant text, requested_person text)
-RETURNS TABLE (role text, session_epoch integer)
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = pg_catalog, slotlock, pg_temp
-AS $slotlock_dashboard_standing$
-  WITH live AS (
-    SELECT pg_catalog.regexp_replace(requested_tenant, '~test$', '') AS tenant_ref
-  )
-  SELECT CASE
-           WHEN live.tenant_ref = requested_person THEN 'owner'
-           ELSE (SELECT member.role FROM slotlock.workspace_memberships member
-                  WHERE member.tenant_ref = live.tenant_ref
-                    AND member.person_ref = requested_person
-                    AND member.status = 'active')
-         END,
-         (SELECT person.session_epoch FROM slotlock.dashboard_people person
-           WHERE person.person_ref = requested_person)
-    FROM live;
-$slotlock_dashboard_standing$;
-REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[6]} FROM PUBLIC;
+-- A person's standing in a workspace now is slotlock.dashboard_standing(tenant, person, session),
+-- in ddl-sso.ts: it reads the single sign-on tables, so it is made after them. The form before
+-- single sign-on, without the session, is dropped, so every caller passes the session.
+DROP FUNCTION IF EXISTS slotlock.dashboard_standing(text, text);
 
 -- Sign a person out everywhere: a new epoch is drawn (never the old one), and every session sealed
 -- under the old is refused from now on. Returns the new epoch.
@@ -1377,7 +1383,7 @@ DECLARE
   epoch integer;
 BEGIN
   IF requested_person IS NULL
-     OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+     OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
     RAISE EXCEPTION 'Slotlock dashboard: invalid person' USING ERRCODE = '22023';
   END IF;
   INSERT INTO slotlock.dashboard_people AS person (person_ref) VALUES (requested_person)
@@ -1408,7 +1414,7 @@ CREATE TABLE IF NOT EXISTS slotlock.workspaces (
     AND char_length(name) BETWEEN 1 AND 80
     AND name !~ '[[:cntrl:]]'
     AND status IN ('active')
-    AND (created_by IS NULL OR created_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$')
+    AND (created_by IS NULL OR created_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$')
   )
 );
 ALTER TABLE slotlock.workspaces ENABLE ROW LEVEL SECURITY;
@@ -1459,8 +1465,8 @@ CREATE TABLE IF NOT EXISTS slotlock.workspace_invitations (
     AND (github_ref IS NULL OR github_ref ~ '^github:[1-9][0-9]{0,19}$')
     AND (github_login IS NULL OR github_login ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$')
     AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
-    AND inviter_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
-    AND (accepted_by IS NULL OR accepted_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$')
+    AND inviter_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+    AND (accepted_by IS NULL OR accepted_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$')
     AND expires_at > created_at
   )
 );
@@ -1519,8 +1525,13 @@ DECLARE
   created text := 'team:' || gen_random_uuid()::text;
   free_count integer;
 BEGIN
-  IF requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+  IF requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
     RAISE EXCEPTION 'Slotlock teams: invalid person' USING ERRCODE = '22023';
+  END IF;
+  -- A person a team's identity provider made (sso:) creates no team: their organization holds them.
+  IF requested_person ~ '^sso:' THEN
+    RETURN QUERY SELECT NULL::text, 'not_allowed'::text;
+    RETURN;
   END IF;
   IF requested_handle IS NULL OR requested_handle !~ '^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$' THEN
     RETURN QUERY SELECT NULL::text, 'invalid_handle'::text;
@@ -1676,6 +1687,12 @@ BEGIN
   IF (email_normalized IS NULL) = (requested_github IS NULL) THEN
     RAISE EXCEPTION 'Slotlock teams: invite an email or a GitHub account' USING ERRCODE = '22023';
   END IF;
+  -- Held to the team's verified domains (ddl-identity.ts): only addresses at one, and so no GitHub
+  -- account, which carries none.
+  IF ${SLOTLOCK_INVITE_DOMAIN_REFUSED('requested_tenant', 'email_normalized', 'requested_github')} THEN
+    RETURN QUERY SELECT NULL::uuid, 'domain_restricted'::text;
+    RETURN;
+  END IF;
   IF requested_github IS NOT NULL AND EXISTS (
     SELECT 1 FROM slotlock.workspace_memberships member
      WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_github AND member.status = 'active'
@@ -1771,7 +1788,7 @@ DECLARE
   inviter_role text;
   members integer;
 BEGIN
-  IF requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+  IF requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
     RAISE EXCEPTION 'Slotlock teams: invalid person' USING ERRCODE = '22023';
   END IF;
   SELECT found.id, found.tenant_ref INTO found_id, found_tenant FROM slotlock.workspace_invitations found
@@ -1791,6 +1808,11 @@ BEGIN
   -- Sent again while this waited: the old token no longer opens it.
   IF NOT FOUND OR (requested_token IS NOT NULL AND invitation.token_sha256 <> requested_token) THEN
     RETURN QUERY SELECT NULL::text, 'not_found'::text;
+    RETURN;
+  END IF;
+  -- An Owner signs in with GitHub or Google too, for when the team's provider is down (ddl-sso.ts).
+  IF invitation.role = 'owner' AND requested_person ~ '^sso:' THEN
+    RETURN QUERY SELECT NULL::text, 'not_for_you'::text;
     RETURN;
   END IF;
   IF invitation.revoked_at IS NOT NULL THEN
@@ -1835,11 +1857,12 @@ BEGIN
       RETURN;
     END IF;
   END IF;
-  INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, source)
-  VALUES (invitation.tenant_ref, requested_person, invitation.role, 'invitation')
+  INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, source, joined_email)
+  VALUES (invitation.tenant_ref, requested_person, invitation.role, 'invitation', invitation.email)
   ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
-    SET role = EXCLUDED.role, status = 'active', source = 'invitation', deactivated_at = NULL,
-        updated_at = statement_timestamp();
+    SET role = EXCLUDED.role, status = 'active', source = 'invitation', deactivated_at = NULL, deactivated_by = NULL,
+        joined_email = coalesce(EXCLUDED.joined_email, member.joined_email), joined_via_domain = NULL,
+        role_managed_by = 'manual', updated_at = statement_timestamp();
   UPDATE slotlock.workspace_invitations
      SET accepted_at = statement_timestamp(), accepted_by = requested_person WHERE id = invitation.id;
   RETURN QUERY SELECT invitation.tenant_ref, NULL::text;
@@ -1890,6 +1913,8 @@ AS $slotlock_resend_invitation$
 DECLARE
   actor_role text;
   invitation_role text;
+  invitation_email text;
+  invitation_github text;
 BEGIN
   IF requested_days IS NULL OR requested_days NOT BETWEEN 1 AND 30 THEN
     RAISE EXCEPTION 'Slotlock teams: invitations last 1-30 days' USING ERRCODE = '22023';
@@ -1900,7 +1925,8 @@ BEGIN
   END IF;
   SELECT member.role INTO actor_role FROM slotlock.workspace_memberships member
    WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
-  SELECT invitation.role INTO invitation_role FROM slotlock.workspace_invitations invitation
+  SELECT invitation.role, invitation.email, invitation.github_ref INTO invitation_role, invitation_email, invitation_github
+    FROM slotlock.workspace_invitations invitation
    WHERE invitation.id = requested_id AND invitation.tenant_ref = requested_tenant
      AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
    FOR UPDATE;
@@ -1909,6 +1935,10 @@ BEGIN
   END IF;
   IF actor_role IS NULL OR NOT slotlock.workspace_may_grant(actor_role, invitation_role) THEN
     RETURN 'not_allowed';
+  END IF;
+  -- Sent again only where it could be sent now (ddl-identity.ts).
+  IF ${SLOTLOCK_INVITE_DOMAIN_REFUSED('requested_tenant', 'invitation_email', 'invitation_github')} THEN
+    RETURN 'domain_restricted';
   END IF;
   IF requested_daily_limit IS NOT NULL AND (
     (SELECT count(*) FROM slotlock.workspace_invitations sent
@@ -1973,6 +2003,11 @@ BEGIN
      OR NOT slotlock.workspace_may_grant(actor_role, requested_role) THEN
     RETURN 'not_allowed';
   END IF;
+  -- Every Owner can sign in with GitHub or Google, for when the team's provider is down: so the
+  -- Owner a team always keeps is one who may bypass single sign-on (ddl-sso.ts).
+  IF requested_role = 'owner' AND requested_person ~ '^sso:' THEN
+    RETURN 'sso_owner';
+  END IF;
   IF current_role_of = 'owner' AND requested_role <> 'owner' AND NOT EXISTS (
     SELECT 1 FROM slotlock.workspace_memberships other
      WHERE other.tenant_ref = requested_tenant AND other.status = 'active' AND other.role = 'owner'
@@ -1980,9 +2015,10 @@ BEGIN
   ) THEN
     RETURN 'last_owner';
   END IF;
+  -- A role set by hand stays: the team's provider no longer recomputes it at sign-in.
   UPDATE slotlock.workspace_memberships member
      SET role = requested_role, source = CASE WHEN member.source = 'github_org' THEN 'created' ELSE member.source END,
-         updated_at = statement_timestamp()
+         role_managed_by = 'manual', updated_at = statement_timestamp()
    WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person;
   RETURN NULL;
 END
@@ -2148,13 +2184,40 @@ BEGIN
   ) THEN
     RETURN 'last_owner';
   END IF;
+  -- Removed by someone else, the address they came by joins at once no more (ddl-identity.ts),
+  -- nor do those their sign-ins through the team's provider carried (ddl-sso.ts).
+  IF requested_actor <> requested_person THEN
+    INSERT INTO slotlock.workspace_join_blocks (tenant_ref, email_sha256)
+    SELECT requested_tenant, sha256(convert_to(address.email, 'UTF8'))
+      FROM (SELECT member.joined_email AS email FROM slotlock.workspace_memberships member
+             WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person
+            UNION
+            SELECT identity.email_last FROM slotlock.sso_identities identity
+              JOIN slotlock.sso_connections linked ON linked.id = identity.connection_id AND linked.tenant_ref = requested_tenant
+             WHERE identity.person_ref = requested_person) address
+     WHERE address.email IS NOT NULL
+    ON CONFLICT ON CONSTRAINT slotlock_workspace_join_blocks_pkey DO NOTHING;
+  END IF;
   UPDATE slotlock.workspace_memberships member
      SET status = 'inactive', source = 'created', deactivated_at = statement_timestamp(),
+         deactivated_by = CASE WHEN requested_actor = requested_person THEN 'self' ELSE 'team' END,
          updated_at = statement_timestamp()
    WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person;
+  -- Their pending invitations go with them: those they sent, and those sent to them (their account,
+  -- or an address they joined with or signed in through the team's provider with), which would
+  -- otherwise let them back in.
   UPDATE slotlock.workspace_invitations invitation SET revoked_at = statement_timestamp()
-   WHERE invitation.tenant_ref = requested_tenant AND invitation.inviter_ref = requested_person
-     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL;
+   WHERE invitation.tenant_ref = requested_tenant AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
+     AND (invitation.inviter_ref = requested_person
+          OR (requested_actor <> requested_person AND (
+                invitation.github_ref = requested_person
+                OR invitation.email IN (
+                  SELECT member.joined_email FROM slotlock.workspace_memberships member
+                   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person
+                  UNION
+                  SELECT identity.email_last FROM slotlock.sso_identities identity
+                    JOIN slotlock.sso_connections linked ON linked.id = identity.connection_id AND linked.tenant_ref = requested_tenant
+                   WHERE identity.person_ref = requested_person))));
   RETURN NULL;
 END
 $slotlock_remove_member$;
@@ -2242,7 +2305,7 @@ CREATE TABLE IF NOT EXISTS slotlock.dashboard_sessions (
   ip_address text,
   CONSTRAINT slotlock_dashboard_sessions_valid CHECK (
     octet_length(sid_sha256) = 32
-    AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
     AND (user_agent IS NULL OR char_length(user_agent) BETWEEN 1 AND 256)
     AND (ip_address IS NULL OR char_length(ip_address) BETWEEN 1 AND 64)
     AND expires_at > started_at
@@ -2264,6 +2327,12 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_dashboard_session_started$
 BEGIN
+  IF requested_person ~ '^sso:' THEN
+    PERFORM 1 FROM slotlock.sso_identities identity WHERE identity.person_ref = requested_person FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Slotlock dashboard: that person is no longer here' USING ERRCODE = 'P0002';
+    END IF;
+  END IF;
   INSERT INTO slotlock.dashboard_sessions (sid_sha256, person_ref, expires_at, user_agent, ip_address)
   VALUES (requested_sid, requested_person, requested_expires,
           NULLIF(left(requested_agent, 256), ''), NULLIF(left(requested_address, 64), ''))
@@ -2271,9 +2340,11 @@ BEGIN
   DELETE FROM slotlock.dashboard_sessions old
    WHERE old.person_ref = requested_person
      AND (old.expires_at <= statement_timestamp()
+          -- The 50 newest are kept, sessions through a team's provider alone going first: a
+          -- provider signing in as a linked member cannot push out the sessions they began.
           OR old.sid_sha256 IN (SELECT kept.sid_sha256 FROM slotlock.dashboard_sessions kept
                                  WHERE kept.person_ref = requested_person
-                                 ORDER BY kept.started_at DESC OFFSET 50));
+                                 ORDER BY (kept.sso_connection_id IS NULL) DESC, kept.started_at DESC OFFSET 50));
 END
 $slotlock_dashboard_session_started$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[25]} FROM PUBLIC;
@@ -2376,7 +2447,7 @@ BEGIN
       AND handle ~ '^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$'
       AND char_length(name) BETWEEN 1 AND 80
       AND name !~ '[[:cntrl:]]'
-      AND (created_by IS NULL OR created_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$')
+      AND (created_by IS NULL OR created_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$')
     );
     ALTER TABLE slotlock.workspaces ADD CONSTRAINT slotlock_workspaces_status_valid CHECK (
       status IN ('active', 'deleting') AND (status = 'deleting') = (delete_after IS NOT NULL)
@@ -3305,6 +3376,8 @@ DECLARE
   previous jsonb := '{}'::jsonb;
   tested record;
   cleared_rows bigint;
+  sso_people text[] := ARRAY[]::text[];
+  departing text;
 BEGIN
   IF requested_tenant_ref IS NULL OR octet_length(requested_tenant_ref) NOT BETWEEN 1 AND 500 THEN
     RAISE EXCEPTION 'Slotlock tenant reference must be 1-500 UTF-8 bytes'
@@ -3331,7 +3404,7 @@ BEGIN
                               AND mine.role = 'owner')
    ORDER BY ws.tenant_ref
    FOR UPDATE;
-  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' AND EXISTS (
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' AND EXISTS (
     SELECT 1 FROM slotlock.workspace_memberships mine
       JOIN slotlock.workspaces ws ON ws.tenant_ref = mine.tenant_ref AND ws.status = 'active'
      WHERE mine.person_ref = requested_tenant_ref AND mine.status = 'active' AND mine.role = 'owner'
@@ -3593,18 +3666,102 @@ BEGIN
   )
   SELECT count(*) INTO erased_rows FROM erased;
   RETURN NEXT;
+  -- A team's directory goes with it; a person comes off the directory users bound to them.
+  erased_table := 'scim_users';
+  DELETE FROM slotlock.scim_users directory WHERE directory.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.scim_users directory SET person_ref = NULL WHERE directory.person_ref = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
+  erased_table := 'scim_groups';
+  DELETE FROM slotlock.scim_groups grouped WHERE grouped.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'scim_tokens';
+  DELETE FROM slotlock.scim_tokens token WHERE token.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.scim_tokens token SET created_by = NULL WHERE token.created_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
+  -- A team's single sign-on goes with it (its identities, mappings, proofs and the sessions signed in
+  -- through it alone with the connection); a person takes their identities, and their bypasses.
+  erased_table := 'sso_bypasses';
+  DELETE FROM slotlock.sso_bypasses bypass
+   WHERE bypass.tenant_ref = requested_tenant_ref OR bypass.person_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- Who signed in only through the team's provider: erased below, with no way in left.
+  IF requested_tenant_ref ~ '^team:' THEN
+    SELECT coalesce(array_agg(DISTINCT identity.person_ref), ARRAY[]::text[]) INTO sso_people
+      FROM slotlock.sso_identities identity
+      JOIN slotlock.sso_connections linked ON linked.id = identity.connection_id AND linked.tenant_ref = requested_tenant_ref
+     WHERE identity.person_ref ~ '^sso:';
+  END IF;
+  erased_table := 'sso_identities';
+  DELETE FROM slotlock.sso_identities identity
+   WHERE identity.person_ref = requested_tenant_ref
+      OR identity.connection_id IN (SELECT linked.id FROM slotlock.sso_connections linked WHERE linked.tenant_ref = requested_tenant_ref);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'sso_connections';
+  DELETE FROM slotlock.sso_connections linked WHERE linked.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.sso_connections linked SET created_by = NULL WHERE linked.created_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+    -- What a test sign-in showed (the tester's email among it) goes with the tester.
+    UPDATE slotlock.sso_connections linked SET last_test_claims = NULL, tested_by = NULL
+     WHERE linked.tested_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
+  -- A team's requests to join and domains go with it; a person's own tenant takes their requests,
+  -- and their name off the domains they claimed and the requests they decided.
+  erased_table := 'workspace_join_requests';
+  DELETE FROM slotlock.workspace_join_requests asked
+   WHERE asked.tenant_ref = requested_tenant_ref
+      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+          AND asked.person_ref = requested_tenant_ref);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.workspace_join_requests asked SET decided_by = NULL WHERE asked.decided_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
+  erased_table := 'workspace_join_blocks';
+  DELETE FROM slotlock.workspace_join_blocks blocked WHERE blocked.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'workspace_domains';
+  DELETE FROM slotlock.workspace_domains claim WHERE claim.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.workspace_domains claim SET created_by = NULL WHERE claim.created_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
   -- A team workspace's record and invitations go with it.
   erased_table := 'workspace_invitations';
   DELETE FROM slotlock.workspace_invitations invitation
    WHERE invitation.tenant_ref = requested_tenant_ref
-      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
           AND (invitation.inviter_ref = requested_tenant_ref OR invitation.accepted_by = requested_tenant_ref));
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'workspaces';
   DELETE FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
-  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
     UPDATE slotlock.workspaces ws SET created_by = NULL WHERE ws.created_by = requested_tenant_ref;
     GET DIAGNOSTICS cleared_rows = ROW_COUNT;
     erased_rows := erased_rows + cleared_rows;
@@ -3615,7 +3772,7 @@ BEGIN
   erased_table := 'workspace_memberships';
   DELETE FROM slotlock.workspace_memberships member
    WHERE member.tenant_ref = requested_tenant_ref
-      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
           AND member.person_ref = requested_tenant_ref);
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
@@ -3668,6 +3825,22 @@ BEGIN
   FOR setting IN SELECT jsonb_object_keys(previous) LOOP
     PERFORM set_config(setting, coalesce(previous ->> setting, ''), true);
   END LOOP;
+
+  -- The people who signed in only through the erased team's provider (sso:), reported as one line:
+  -- they were members of no other team, and can no longer sign in to ask for their own erasure.
+  IF cardinality(sso_people) > 0 THEN
+    erased_table := 'sso_people';
+    erased_rows := 0;
+    FOREACH departing IN ARRAY sso_people LOOP
+      IF NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships other
+                      WHERE other.person_ref = departing AND other.status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM slotlock.sso_identities other WHERE other.person_ref = departing) THEN
+        PERFORM 1 FROM slotlock.erase_tenant(departing);
+        erased_rows := erased_rows + 1;
+      END IF;
+    END LOOP;
+    RETURN NEXT;
+  END IF;
 END
 $slotlock_erase_tenant$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[1]} FROM PUBLIC;
@@ -8095,7 +8268,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_IDENTITY_DDL}${SLOTLOCK_SSO_DDL}${SLOTLOCK_SCIM_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id

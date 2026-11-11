@@ -4351,7 +4351,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
    * Delete team workspace invitations finished (accepted, revoked or expired) more than 30 days ago,
-   * with the addresses they were sent to (slotlock.prune_workspace_invitations), and dashboard
+   * with the addresses they were sent to (slotlock.prune_workspace_invitations), requests to join
+   * decided a month ago and domain claims ended three months ago (slotlock.prune_workspace_domains), and dashboard
    * sessions ended or expired a day ago (slotlock.prune_dashboard_sessions), and erase the team
    * workspaces whose deletion came due (slotlock.erase_deleted_teams): how many.
    */
@@ -10890,7 +10891,8 @@ function buildSlotlockStore(
     async sweepDashboardRecords() {
       // Each its own statement: an erasure that runs long never takes the prunes with it.
       const [pruned] = await sql<{ deleted: string | number }[]>`
-        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions() AS deleted`;
+        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions()
+               + slotlock.prune_workspace_domains() + slotlock.prune_sso() AS deleted`;
       const [erased] = await sql<{ erased: string | number }[]>`SELECT slotlock.erase_deleted_teams() AS erased`;
       return Number(pruned?.deleted ?? 0) + Number(erased?.erased ?? 0);
     },

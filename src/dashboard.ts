@@ -13,7 +13,7 @@
 // once) and signed-out sessions (a copied cookie stays signed out). `createSlotlockDashboardState`
 // keeps these in Postgres, so they hold on every server that shares the database; the resource cap
 // is held in the database too.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
 import type { SlotlockDashboardTeams } from './teams.js';
 import {
@@ -32,6 +32,30 @@ import {
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
 import type { SlotlockDashboardWorkspaces, SlotlockTeamRefusal, SlotlockTeamWorkspace } from './workspaces.js';
+import { type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
+import {
+  SLOTLOCK_GOOGLE_ISSUERS,
+  type SlotlockSecretBox,
+  createSlotlockJwksCache,
+  discoverSlotlockOidc,
+  slotlockEntraIssuer,
+  slotlockOidcUrlAllowed,
+  slotlockReadJsonBody,
+  verifySlotlockIdToken,
+} from './oidc.js';
+import type { SlotlockSsoKind, SlotlockSsoRefusal } from './workspace-sso.js';
+import { handleSlotlockScimRequest } from './scim-server.js';
+import type { SlotlockScimRefusal } from './workspace-scim.js';
+import {
+  type SlotlockDomainChangeRefusal,
+  type SlotlockDomainCheckOutcome,
+  type SlotlockDomainJoinPolicy,
+  type SlotlockJoinEvidence,
+  SLOTLOCK_DOMAIN_AUDIT_ACTIONS,
+  slotlockDomainCheckEvent,
+  slotlockJoinRole,
+} from './workspace-domains.js';
+import { SLOTLOCK_WORKSPACE_DOMAIN_LIMIT } from './ddl-identity.js';
 import type { SlotlockAuditEvent, SlotlockAuditEventInput } from './store.js';
 import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
@@ -255,6 +279,27 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/members/scope',
   '/members/remove',
   '/members/leave',
+  '/members/requests',
+  '/join/request',
+  '/identity/domains',
+  '/identity/domains/verify',
+  '/identity/domains/remove',
+  '/identity/domains/policy',
+  '/identity/invites',
+  '/identity/sso',
+  '/identity/sso/test',
+  '/identity/sso/status',
+  '/identity/sso/delete',
+  '/identity/sso/provisioning',
+  '/identity/sso/mapping',
+  '/identity/sso/require',
+  '/identity/scim/enable',
+  '/identity/scim/disable',
+  '/identity/scim/token',
+  '/identity/scim/token/revoke',
+  '/identity/scim/group',
+  '/sso/proof',
+  '/sso/bypass',
   '/assistant',
   '/assistant/stream',
   '/assistant/approve',
@@ -314,7 +359,21 @@ const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = 
   'privacy.manage': "export the workspace's data or erase a person",
   'billing.manage': 'change the plan or billing',
   'workspace.own': 'change who owns this workspace',
+  'identity.manage': "change the team's domains",
 });
+/** What a session signed in through a team's provider alone may not do: anything beyond its team. */
+const SSO_SCOPED_REFUSED: ReadonlySet<string> = new Set([
+  '/organization',
+  '/teams/create',
+  '/teams/enable',
+  '/teams/disable',
+  '/invite/accept',
+  '/join/request',
+  '/sso/proof',
+  '/sso/bypass',
+  '/sessions/end',
+  '/sign-out-everywhere',
+]);
 /** The pages a sign-in may come back to: one made to confirm it's you, or to open an invitation. */
 const STEP_UP_PAGES: ReadonlySet<string> = new Set([
   '/settings/privacy',
@@ -324,6 +383,7 @@ const STEP_UP_PAGES: ReadonlySet<string> = new Set([
   '/settings',
   '/settings/members',
   '/settings/team',
+  '/settings/identity',
   '/teams',
   '/contacts',
   '/invite',
@@ -332,6 +392,8 @@ const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign 
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
 const GITHUB_TIMEOUT_MS = 10_000;
+/** The most a team's token endpoint may answer: an ID token and its companions fit well within. */
+const SSO_TOKEN_ANSWER_BYTES = 65_536;
 /** A Google account's subject: ASCII, at most 255 characters (OpenID Connect); Google's are digits. */
 const GOOGLE_SUBJECT = /^[A-Za-z0-9._-]{1,255}$/;
 /** The REST API version GitHub documents for GET /user (docs.github.com, read 2026-10-10). */
@@ -346,6 +408,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const DAY_MS = 86_400_000;
 /** The invitation link being opened, for the sign-in that accepts it: sealed, for 30 minutes. */
 const INVITE_COOKIE = '__Host-slotlock-invite';
+/** A sign-in through a team's identity provider, until its callback. */
+const SSO_COOKIE = '__Host-slotlock-sso';
 const INVITE_LINK_TTL_MS = 30 * 60_000;
 /** An invitation's token: 32 random bytes, base64url. Only its SHA-256 digest is stored. */
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -408,12 +472,43 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'member.scope_changed': 'changed what a member reaches',
   'member.removed': 'removed a member',
   'member.left': 'left',
+  'member.join_requested': 'asked to join',
+  'member.join_approved': 'let someone join',
+  'member.join_declined': 'declined a request to join',
+  'domain.claimed': 'added a domain',
+  'domain.verified': 'verified a domain',
+  'domain.record_missing': "found a domain's record gone",
+  'domain.lapsing': 'found a domain lapsing',
+  'domain.restored': 'verified a domain again',
+  'domain.lapsed': 'found a domain lapsed',
+  'domain.released': 'removed a domain',
+  'domain.join_policy_changed': 'changed who may join through a domain',
+  'workspace.invites_restricted': 'held invitations to verified domains',
+  'workspace.invites_unrestricted': 'let invitations go to any address',
+  'sso.connection_saved': 'saved the single sign-on connection',
+  'sso.connection_tested': 'tested single sign-on',
+  'sso.connection_activated': 'turned single sign-on on',
+  'sso.connection_disabled': 'turned single sign-on off',
+  'sso.connection_deleted': 'deleted the single sign-on connection',
+  'sso.provisioning_changed': 'changed who single sign-on adds',
+  'sso.mapping_changed': 'changed a group’s role',
+  'sso.required': 'required single sign-on',
+  'sso.not_required': 'stopped requiring single sign-on',
+  'sso.bypass_used': 'bypassed single sign-on',
+  'sso.signed_in': 'signed in with single sign-on',
+  'sso.linked': 'linked a single sign-on account',
   'authz.denied': 'was refused',
 });
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
   ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
-  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
+  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'member.join_requested', 'member.join_approved', 'member.join_declined', 'organization.enabled', 'organization.disabled']],
+  ['Identity', [
+    ...SLOTLOCK_DOMAIN_AUDIT_ACTIONS,
+    'sso.connection_saved', 'sso.connection_tested', 'sso.connection_activated', 'sso.connection_disabled',
+    'sso.connection_deleted', 'sso.provisioning_changed', 'sso.mapping_changed', 'sso.required', 'sso.not_required',
+    'sso.bypass_used', 'sso.signed_in', 'sso.linked',
+  ]],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
   ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
@@ -445,9 +540,11 @@ const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text
   expired: { status: 409, text: 'This invitation expired. Ask for a new one.' },
   not_for_you: { status: 403, text: 'This invitation is for another account.' },
   last_owner: { status: 409, text: 'A team keeps at least one owner. Make someone else an owner first.' },
+  sso_owner: { status: 409, text: 'An owner signs in with GitHub or Google too, for when the team’s provider is down. Ask them to link it first.' },
   confirm: { status: 400, text: "Type the team's handle to confirm." },
   subscription_live: { status: 409, text: 'Cancel its Team plan on Usage first.' },
   owner: { status: 409, text: 'An owner reaches the whole workspace. Change their role first.' },
+  domain_restricted: { status: 403, text: 'Invitations go only to addresses at this team’s verified domains.' },
 });
 
 /** A handle from a team's name: lower-case letters, digits and dashes; later attempts add a random end. */
@@ -1012,6 +1109,25 @@ export interface SlotlockDashboardOptions {
    * database, and no fixed list of organizations. Off unless set.
    */
   teamWorkspaces?: boolean;
+  /**
+   * Verified domains (workspace-domains.ts): a team's Owner proves a domain with a DNS record, and
+   * the people whose verified address is at it may ask to join. Needs team workspaces. The resolvers
+   * look the record up when an Owner asks (domains.ts slotlockDomainResolvers); the daily check runs
+   * in the server's maintenance. Off unless set.
+   */
+  domains?: { resolvers: readonly SlotlockDnsResolver[] };
+  /**
+   * Single sign-on through each team's own identity provider (OpenID Connect; workspace-sso.ts,
+   * oidc.ts): needs verified domains. `secretBox` seals the teams' client secrets; `fetch` reaches
+   * the URLs a team's Owner gives (on Node, one that refuses private addresses). Off unless set.
+   */
+  sso?: { secretBox: SlotlockSecretBox; fetch?: typeof fetch };
+  /**
+   * SCIM 2.0 provisioning (workspace-scim.ts, scim-server.ts): each team's identity provider adds,
+   * deactivates and groups its people at `<dashboard>/scim/v2/<team id>`, with a token an Owner
+   * makes on Settings, Identity. Needs verified domains. Off unless set.
+   */
+  scim?: boolean;
   /** Sends invitations by email; the person inviting is shown each link either way. */
   invitations?: SlotlockInvitationSender;
   keys: SlotlockApiKeyStore;
@@ -1533,14 +1649,24 @@ interface Session {
   org?: string;
   /** The test environment (RFC 0003 G9): the workspace's `<tenant>~test`. Live when absent. */
   env?: 'test';
-  /** Signed in with Google: `uid` is the Google subject, `login` the account's email. GitHub when absent. */
-  idp?: 'google';
+  /**
+   * Signed in with Google (`uid` the Google subject, `login` the account's email), or through a team's
+   * identity provider as a person it made (`sso`: `uid` the person's id). GitHub when absent.
+   */
+  idp?: 'google' | 'sso';
+  /** Signed in through a team's identity provider alone: that connection's id. The session acts in its team only. */
+  sc?: string;
   /** The person's session epoch when sealed (workspaces): "Sign out everywhere" moves it on. */
   ep?: number;
   /** The team workspace in use, by its id (`team:<id>`), with team workspaces; never with `org`. */
   team?: string;
   /** Addresses GitHub verified, kept only for the invitation being opened: at most its own. */
   em?: string[];
+  /**
+   * With Google: the Google Workspace domain the account belongs to (the ID token's `hd`), so its
+   * address is one the company controls now, not one it verified once.
+   */
+  hd?: string;
 }
 
 interface Organization {
@@ -1957,7 +2083,7 @@ function readCookies(request: Request): Map<string, string> {
     const index = part.indexOf('=');
     if (index <= 0) continue;
     const name = part.slice(0, index).trim();
-    if (name === SESSION_COOKIE || name === SIGN_IN_COOKIE || name === INVITE_COOKIE) {
+    if (name === SESSION_COOKIE || name === SIGN_IN_COOKIE || name === INVITE_COOKIE || name === SSO_COOKIE) {
       cookies.set(name, part.slice(index + 1).trim());
     }
   }
@@ -2180,6 +2306,17 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const workspaces = options.workspaces ?? null;
   // Team workspaces: with the membership store's database, where people have workspaces of their own.
   const teamStore = options.teamWorkspaces && !served ? (workspaces?.teams ?? null) : null;
+  /** Verified domains: a team workspace's, with the database. */
+  const domainStore = teamStore && options.domains ? (workspaces?.domains ?? null) : null;
+  const domainResolvers = options.domains?.resolvers ?? [];
+  /** Single sign-on: with verified domains and the database. */
+  const ssoStore = domainStore && options.sso ? (workspaces?.sso ?? null) : null;
+  const scimStore = domainStore && options.scim ? (workspaces?.scim ?? null) : null;
+  const ssoFetch: typeof fetch = (input, init) => (options.sso?.fetch ?? fetchImpl)(input, init);
+  /** Teams' providers' keys, fetched as their Owners' URLs are: through ssoFetch. */
+  const ssoJwks = createSlotlockJwksCache({ fetch: ssoFetch, now: () => now() });
+  /** A session's team that requires single sign-on, met while it held no proof: to say so. */
+  const ssoRequiredOf = new WeakMap<Session, { tenantRef: string; mayBypass: boolean }>();
   /** Each session's role in the workspace it acts in, as the database said when it was read. */
   const roles = new WeakMap<Session, SlotlockWorkspaceRole>();
   /** Where each request came from, for the audit log. */
@@ -2231,9 +2368,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const secret = Buffer.from(options.sessionSecret, 'utf8');
   // A list, or exactly '*': any other string would match ids by substring.
   // A GitHub person by their bare id, a Google one as google:<subject>.
-  const allowed = (uid: string, idp?: 'google') =>
+  const allowed = (uid: string, idp?: 'google' | 'sso') =>
     options.allowedUsers === '*' ||
-    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(idp === 'google' ? `google:${uid}` : uid));
+    // A person a team's provider made is no account a list names: only where everyone may sign in.
+    (idp !== 'sso' && Array.isArray(options.allowedUsers) && options.allowedUsers.includes(idp === 'google' ? `google:${uid}` : uid));
   const google = served ? null : (options.google ?? null);
   let signInsInFlight = 0;
   /** Sign-ins in flight by client address. */
@@ -2316,8 +2454,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.uid !== 'string' ||
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
-      (payload.idp !== undefined && (payload.idp !== 'google' || !google)) ||
-      !allowed(payload.uid, payload.idp as 'google' | undefined) ||
+      (payload.idp !== undefined && !((payload.idp === 'google' && google) || (payload.idp === 'sso' && ssoStore))) ||
+      (payload.sc !== undefined && (!ssoStore || typeof payload.sc !== 'string' || !UUID_PATTERN.test(payload.sc))) ||
+      !allowed(payload.uid, payload.idp as 'google' | 'sso' | undefined) ||
       !organizationsHold(payload) ||
       !teamHolds(payload) ||
       (payload.env !== undefined && payload.env !== 'test') ||
@@ -2350,7 +2489,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     }
     const person = personOf(session);
     const [standing, listed, alive, deleting, scope] = await Promise.all([
-      workspaces.standing(tenantOf(session), person),
+      workspaces.standing(tenantOf(session), person, session.sid),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
       workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
       teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
@@ -2363,15 +2502,20 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     if (!alive || session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
     if (standing.role !== null) {
       roles.set(session, standing.role);
-      teamListOf.set(session, listed);
+      // A session through a team's provider alone knows of no other team the person is in.
+      teamListOf.set(session, session.sc === undefined ? listed : listed.filter((team) => team.tenantRef === `team:${session.team}`));
       // Limited to some resources: what this request reads for them from now on keeps to those.
       const limited = scope && standing.role !== 'owner' ? scope : null;
       if (limited) scopes.set(session, limited);
       setSlotlockDashboardRequestScope(limited);
       return session;
     }
-    if ((session.org === undefined && session.team === undefined) || served) return null;
+    // Signed in through a team's provider alone, or as a person it made: no workspace to fall back to.
+    if ((session.org === undefined && session.team === undefined) || served || session.sc !== undefined || session.idp === 'sso') return null;
     const { org: _, team: _team, ...personal } = session;
+    if (standing.refusal === 'sso_required' && session.team !== undefined) {
+      ssoRequiredOf.set(personal, { tenantRef: `team:${session.team}`, mayBypass: standing.mayBypass === true });
+    }
     const enabled = enabledOf.get(session);
     if (enabled) enabledOf.set(personal, enabled);
     teamListOf.set(personal, listed);
@@ -2388,6 +2532,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ) {
       return false;
     }
+    if (payload.hd !== undefined && (payload.idp !== 'google' || typeof payload.hd !== 'string' || payload.hd.length > 253)) return false;
     if (payload.em === undefined) return true;
     return (
       Array.isArray(payload.em) &&
@@ -2404,7 +2549,23 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     session.team === undefined ? undefined : teamListOf.get(session)?.find((ws) => ws.tenantRef === `team:${session.team}`);
   /** Addresses the person holds verified: their Google account's, or those GitHub confirmed for an invitation. */
   const verifiedEmails = (session: Session): string[] =>
-    session.idp === 'google' ? (session.login.includes('@') ? [session.login.toLowerCase()] : []) : (session.em ?? []);
+    // A session through a team's provider alone holds no address verified for anything else.
+    session.sc !== undefined
+      ? []
+      : session.idp === 'google'
+        ? session.login.includes('@')
+          ? [session.login.toLowerCase()]
+          : []
+        : (session.em ?? []);
+  /**
+   * How those addresses were verified, for joining through a domain: by a Google Workspace account
+   * of the address's own domain (the company controls it now), or once, by Google or GitHub.
+   */
+  const joinEvidence = (session: Session): SlotlockJoinEvidence => {
+    if (session.idp !== 'google') return 'github';
+    const domain = slotlockEmailDomain(session.login);
+    return session.hd !== undefined && domain !== null && domain === slotlockEmailDomain(`x@${session.hd}`) ? 'google_workspace' : 'google';
+  };
 
   /**
    * Without a membership store: the Owner of one's own workspace; in an organization's, its GitHub
@@ -2470,10 +2631,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     }${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
   function personOf(session: Session): string {
-    return session.idp === 'google' ? `google:${session.uid}` : `github:${session.uid}`;
+    return session.idp === 'google' ? `google:${session.uid}` : session.idp === 'sso' ? `sso:${session.uid}` : `github:${session.uid}`;
   }
-  /** How the dashboard shows the person: their GitHub login, or their Google account's email. */
-  const shownAs = (session: Session) => (session.idp === 'google' ? session.login : `@${session.login}`);
+  /** How the dashboard shows the person: their GitHub login, their Google account's email, or their provider's. */
+  const shownAs = (session: Session) =>
+    session.idp === 'google' || session.idp === 'sso' || session.sc !== undefined ? session.login : `@${session.login}`;
 
   function respond(
     status: number,
@@ -2638,7 +2800,7 @@ ${live}
 ${noticeOf(notice, status)}
 <a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
       google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
-    }
+    }${ssoStore ? html`<a class="button wide" href="${root}/sso">Continue with single sign-on</a>` : html``}
 ${
       options.termsUrl
         ? html`<p class="fine">By continuing you agree to the <a href="${options.termsUrl}">Terms of Service</a>.${
@@ -3240,7 +3402,7 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
-  type SettingsSection = 'assistant' | 'members' | 'team' | 'audit' | 'privacy' | 'endpoints' | 'hours' | 'account';
+  type SettingsSection = 'assistant' | 'members' | 'team' | 'identity' | 'audit' | 'privacy' | 'endpoints' | 'hours' | 'account';
   /** An invitation's link, shown once to the person who made it. */
   type InvitationShown = { link: string; to: string; expiresAt: Date };
 
@@ -3252,6 +3414,7 @@ ${
     { id: 'assistant', label: 'Assistant', path: '/settings' },
     { id: 'members', label: 'Members', path: '/settings/members' },
     { id: 'team', label: 'Team', path: '/settings/team' },
+    { id: 'identity', label: 'Identity', path: '/settings/identity' },
     { id: 'audit', label: 'Audit log', path: '/settings/audit' },
     { id: 'privacy', label: 'Privacy', path: '/settings/privacy' },
     { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
@@ -3276,6 +3439,7 @@ ${
         (entry.id !== 'assistant' || store) &&
         (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
         (entry.id !== 'team' || (teamStore && session.team !== undefined && can(session, 'workspace.own'))) &&
+        (entry.id !== 'identity' || (domainStore && session.team !== undefined && can(session, 'identity.manage'))) &&
         (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))) &&
         (entry.id !== 'privacy' || (options.resources.privacy && can(session, 'privacy.manage'))) &&
         // Limited to some resources: one's account and the team's people, nothing of the workspace's.
@@ -3286,7 +3450,7 @@ ${
         ? 'account'
         : section === 'assistant' && !store
         ? 'endpoints'
-        : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy') &&
+        : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy' || section === 'identity') &&
             !sections.some((entry) => entry.id === section)
           ? 'account'
           : section;
@@ -3304,6 +3468,8 @@ ${
       body = await membersSection(session, status, notice, invitation);
     } else if (shown === 'team') {
       body = await teamSection(session, status, notice);
+    } else if (shown === 'identity') {
+      body = await identitySection(session, status, notice);
     } else if (shown === 'audit') {
       body = await auditSection(session, status, notice, query ?? new URLSearchParams());
     } else if (shown === 'privacy') {
@@ -3329,7 +3495,7 @@ ${
           ? html`<div class="row"><span class="row-label">Also a member of</span><div class="row-value">${others.map((org) => org.login).join(', ')}</div></div>`
           : html``
       }<div class="row"><span class="row-label">Role</span><div class="row-value">${SLOTLOCK_WORKSPACE_ROLE_NAMES[roleOf(session)]}</div></div><div class="row"><span class="row-label">Session ends</span><div class="row-value">${formatDate(new Date(session.exp))}</div></div>${
-        workspaces
+        workspaces && session.sc === undefined
           ? html`<div class="row"><span class="row-label">Sessions</span><div class="row-value"><form method="post" action="${root}/sign-out-everywhere"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Sign out everywhere</button></form></div></div>`
           : html``
       }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}${await sessionsList(session)}`;
@@ -3343,9 +3509,11 @@ ${
     const kept = workspaces?.sessions;
     if (!kept) return html``;
     const person = personOf(session);
-    const listed = await kept.list(person);
-    if (listed.length === 0) return html``;
     const mine = kept.idOf(session.sid);
+    // A session through a team's provider alone sees only itself: the person's other sessions (and
+    // where they were signed in from) are beyond its team.
+    const listed = (await kept.list(person)).filter((entry) => session.sc === undefined || entry.id === mine);
+    if (listed.length === 0) return html``;
     const rows = listed.map(
       (entry) =>
         html`<tr><td data-label="Device" class="strong">${deviceOf(entry.userAgent)}${entry.id === mine ? html` <span class="pill active">This device</span>` : html``}</td><td data-label="Address">${entry.ipAddress ?? '—'}</td><td data-label="Signed in">${formatDate(entry.startedAt)}</td><td data-label="Last seen">${formatDate(entry.lastSeenAt)}</td><td class="actions">${
@@ -5829,6 +5997,8 @@ ${
   /** The page a form's route belongs to, to go back to. */
   const backOf = (route: string) => {
     if (route.startsWith('/members/')) return '/settings/members';
+    if (route.startsWith('/identity/')) return '/settings/identity';
+    if (route.startsWith('/join/')) return '/teams';
     if (route === '/teams/delete' || route === '/teams/restore') return '/settings/team';
     if (route.startsWith('/settings/privacy')) return '/settings/privacy';
     const first = `/${route.split('/')[1] ?? ''}`;
@@ -5837,6 +6007,16 @@ ${
 
   /** Refuse a form the person's role does not allow, or ask them to sign in again for a fresh one. */
   async function authorizePost(session: Session, route: string, form: URLSearchParams): Promise<Response | null> {
+    // Signed in through a team's provider alone: the session acts in that team, and reaches no other
+    // (joining, invitations, switching, creating, proving oneself elsewhere). The provider is the
+    // team Owner's, so what it asserts must open nothing outside the team.
+    if (session.sc !== undefined && SSO_SCOPED_REFUSED.has(route)) {
+      await audit(session, { action: 'authz.denied', outcome: 'denied', reason: 'sso_scope', metadata: { route } });
+      return respond(
+        403,
+        layout('Not allowed', html`<p class="notice" role="alert">You signed in with your team’s single sign-on, which reaches this team only. Sign in with GitHub or Google to do that.</p>`, session),
+      );
+    }
     const needed = await capabilitiesOf(session, route, form);
     const missing = needed.length === 0 ? undefined : needed.find((capability) => !can(session, capability));
     const outOfScope = scopes.has(session) && !SLOTLOCK_SCOPED_DASHBOARD_POSTS.has(route);
@@ -5917,6 +6097,10 @@ ${
     if (route.startsWith('/members/') && teamStore) {
       return { path: '/settings/members', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'members') };
     }
+    if (route.startsWith('/identity/') && domainStore) {
+      return { path: '/settings/identity', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'identity') };
+    }
+    if (route.startsWith('/join/') && domainStore) return { path: '/teams', page: teamsPage };
     if (route.startsWith('/settings')) return { path: '/settings', page: settingsPage };
     if (route.startsWith('/plan') && plans) return { path: '/plan', page: planPage };
     if ((route.startsWith('/teams') || route.startsWith('/invite')) && (teams || teamStore)) return { path: '/teams', page: teamsPage };
@@ -6476,19 +6660,22 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
    * Teams on Cloud: the person's GitHub organizations, as read at sign-in, each on or off. An owner
    * turns one on or off; a member asks an owner; one that is on is a workspace to switch to.
    */
-  async function teamsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  async function teamsPage(session: Session, status = 200, notice?: string, checked = false): Promise<Response> {
     if (!teams && !teamStore) return nothingHere(session);
-    const own = teamStore ? await teamWorkspacesSection(session) : html``;
+    const own = teamStore ? await teamWorkspacesSection(session, checked) : html``;
     const organizations = teams ? await organizationsSection(session) : html``;
     const content = html`${noticeOf(notice, status)}${pageHead('Teams')}${own}${organizations}`;
     return respond(status, layout('Teams', content, session, 'teams'));
   }
 
   /** The person's team workspaces, the invitations open to them, and creating one. */
-  async function teamWorkspacesSection(session: Session): Promise<Html> {
+  async function teamWorkspacesSection(session: Session, checked = false): Promise<Html> {
     if (!teamStore) return html``;
     const listed = teamListOf.get(session) ?? [];
-    const offered = await teamStore.pendingFor(personOf(session), verifiedEmails(session));
+    const [offered, atDomain] = await Promise.all([
+      teamStore.pendingFor(personOf(session), verifiedEmails(session)),
+      domainTeamsSection(session, checked),
+    ]);
     const token = csrfToken(session);
     const hidden = () =>
       html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
@@ -6508,7 +6695,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       invitations.length > 0
         ? html`<div class="table"><table><caption class="visually-hidden">Invitations</caption><thead><tr><th>Invited to</th><th>From</th><th>As</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${invitations}</tbody></table></div>`
         : html``
-    }${
+    }${atDomain}${
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Team</th><th>Handle</th><th>You are</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``
@@ -6570,6 +6757,7 @@ ${
 
   async function createTeam(session: Session, form: URLSearchParams): Promise<Response> {
     if (!teamStore) return nothingHere(session);
+    if (session.idp === 'sso' || session.sc !== undefined) return teamsPage(session, 403, 'Sign in with GitHub or Google to create a team.');
     const name = (form.get('name') ?? '').trim();
     if (name.length === 0 || name.length > 80 || /\p{Cc}/u.test(name)) {
       return teamsPage(session, 400, TEAM_REFUSALS.invalid_name.text);
@@ -6607,12 +6795,14 @@ ${
     const grouping = options.resources.grouping;
     // Limiting people to locations and groups: by an Owner or Admin who is not limited themselves.
     const limits = manage && grouping !== undefined && (mine === 'owner' || mine === 'admin') && !scopes.has(session);
-    const [members, invitations, cap, limited, places] = await Promise.all([
+    const [members, invitations, cap, limited, places, requests, viaDomain] = await Promise.all([
       teamStore.members(tenantRef),
       manage ? teamStore.invitations(tenantRef) : Promise.resolve([]),
       memberCapOf(tenantRef),
       teamStore.scopes(tenantRef),
       limits && grouping ? Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]) : Promise.resolve(null),
+      manage && domainStore ? domainStore.requests(tenantRef) : Promise.resolve([]),
+      domainStore ? domainStore.domainMembers(tenantRef) : Promise.resolve(new Map<string, { domain: string; status: string }>()),
     ]);
     const open = invitations.filter((invitation) => invitation.expiresAt.getTime() > now());
     const seats = members.length + open.length;
@@ -6661,9 +6851,24 @@ ${
         action = html`${member.role !== 'owner' && places ? limitForm(member.person, name, index, limited.get(member.person) ?? null, places[0], places[1], hidden) : html``}<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
       }
       const reach = member.role === 'owner' ? undefined : limited.get(member.person);
-      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}</td><td data-label="Role">${role}</td><td data-label="Reaches">${reach ? scopeWords(reach) : 'All'}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+      const via = viaDomain.get(member.person);
+      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}${
+        via ? html` <span class="muted">via ${via.domain}${via.status === 'verified' ? '' : ', no longer verified'}</span>` : html``
+      }</td><td data-label="Role">${role}</td><td data-label="Reaches">${reach ? scopeWords(reach) : 'All'}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+    });
+    // Requests to join through a verified domain: approved as Viewer, Member or Developer.
+    const joinRoles = (['viewer', 'member', 'developer'] as const).filter((role) => slotlockRoleMayGrant(mine, role));
+    const requestRows = requests.map((request, index) => {
+      const name = request.display ?? request.email;
+      return html`<tr><td data-label="Asked" class="strong">${name}${request.display ? html` <span class="muted">${request.email}</span>` : html``} <span class="muted">${JOIN_EVIDENCE_WORDS[request.evidence]}</span></td><td data-label="Asked on">${formatDate(request.createdAt)}</td><td class="actions"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
+        (role) => html`<option value="${role}"${role === 'member' ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+      )}</select><button class="primary" type="submit" name="decision" value="approve">Approve<span class="visually-hidden"> ${name}</span></button><button type="submit" name="decision" value="decline">Decline<span class="visually-hidden"> ${name}</span></button></form></td></tr>`;
     });
     return html`${noticeOf(notice, status)}<h2>Members · ${String(cap === null ? members.length : seats)}${cap === null ? '' : ` of ${String(cap)}`}</h2>${invite}${link}${
+      requestRows.length > 0
+        ? html`<h3>Asking to join</h3><div class="table"><table><thead><tr><th>Asked</th><th>Asked on</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${requestRows}</tbody></table></div>`
+        : html``
+    }${
       pendingRows.length > 0
         ? html`<h3>Pending</h3><div class="table"><table><thead><tr><th>Invited</th><th>Role</th><th>By</th><th>Expires</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
         : html``
@@ -7100,6 +7305,922 @@ ${
     return redirect(303, `${root}/settings/team`);
   }
 
+  /** What a refused change to a team's domains, or a request to join, says, and its status. */
+  const DOMAIN_REFUSALS: Readonly<Record<SlotlockDomainChangeRefusal, { status: number; text: string }>> = Object.freeze({
+    invalid_domain: { status: 400, text: 'Enter a domain your organization owns, such as acme.com.' },
+    public_suffix: { status: 400, text: 'Nobody owns all of that domain. Enter your own domain under it.' },
+    consumer_domain: { status: 400, text: 'Anyone can get an address at that domain. Enter your organization’s own.' },
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s domains.' },
+    already_claimed: { status: 409, text: 'That domain is listed already.' },
+    domain_taken: { status: 409, text: 'Another team holds that domain.' },
+    domain_limit: { status: 403, text: `A team has up to ${String(SLOTLOCK_WORKSPACE_DOMAIN_LIMIT)} domains.` },
+    too_soon: { status: 429, text: 'Checked less than a minute ago. Try again shortly.' },
+    expired: { status: 409, text: 'That record expired after seven days. Add the domain again for a new one.' },
+    restricted: { status: 409, text: 'Invitations go only to verified domains: allow any address before removing the last one.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first.' },
+    already_member: { status: 409, text: 'You are a member already.' },
+    pending: { status: 409, text: 'You asked already. An owner or admin decides.' },
+    request_limit: { status: 429, text: 'You asked to join 20 teams in the last day. Try again tomorrow.' },
+    member_cap: TEAM_REFUSALS.member_cap,
+    role_not_allowed: { status: 400, text: 'Someone joining through a domain joins as Viewer, Member or Developer.' },
+    domain_not_verified: { status: 409, text: 'That domain is no longer verified, so the request cannot be approved.' },
+  });
+
+  /** How a request's address was verified, as the people deciding read it. */
+  const JOIN_EVIDENCE_WORDS: Readonly<Record<SlotlockJoinEvidence, string>> = Object.freeze({
+    google_workspace: 'verified by Google Workspace',
+    google: 'verified once by Google, not checked since',
+    github: 'verified once by GitHub, not checked since',
+  });
+
+  /** What a domain lets the people whose verified address is at it do, as the Identity page offers it. */
+  const JOIN_POLICY_WORDS: Readonly<Record<SlotlockDomainJoinPolicy, string>> = Object.freeze({
+    request: 'Ask to join',
+    auto: 'Join as Viewer',
+    off: 'Invitations only',
+  });
+
+  const identityPage = (session: Session, status: number, notice: string) =>
+    settingsPage(session, status, notice, undefined, 'identity');
+  const domainRefused = (session: Session, refusal: SlotlockDomainChangeRefusal) =>
+    identityPage(session, DOMAIN_REFUSALS[refusal].status, DOMAIN_REFUSALS[refusal].text);
+
+  /** A team's domains: each with its record until verified, who may join through it, and invitations. */
+  async function identitySection(session: Session, status: number, notice: string | undefined): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return noticeOf(notice, status);
+    const [listed, restricted] = await Promise.all([domainStore.list(tenantRef), domainStore.invitesRestricted(tenantRef)]);
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const cards = listed.map((domain, index) => {
+      const name = domain.unicode === domain.ascii ? html`${domain.unicode}` : html`${domain.unicode} <span class="muted">${domain.ascii}</span>`;
+      const [pill, word] = domain.expired
+        ? ['expired', 'Expired']
+        : domain.status === 'verified'
+          ? ['active', 'Verified']
+          : domain.status === 'lapsing'
+            ? ['revoked', 'Record missing']
+            : ['held', 'Pending'];
+      const record = slotlockDomainRecord(domain.ascii, domain.token);
+      const id = html`<input type="hidden" name="id" value="${domain.id}">`;
+      let rows: Html;
+      if (domain.status === 'verified') {
+        rows = html`<div class="row"><span class="row-label">Who may join</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains/policy">${hidden()}${id}<label class="visually-hidden" for="policy-${String(index)}">Who may join through ${domain.unicode}</label><select id="policy-${String(index)}" name="policy">${(['request', 'auto', 'off'] as const).map(
+          (policy) => html`<option value="${policy}"${policy === domain.joinPolicy ? html` selected` : html``}>${JOIN_POLICY_WORDS[policy]}</option>`,
+        )}</select><button type="submit">Save<span class="visually-hidden"> who may join through ${domain.unicode}</span></button></form></div></div>`;
+      } else if (domain.expired) {
+        rows = html`<div class="row"><span class="row-label">Record</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains">${hidden()}<input type="hidden" name="domain" value="${domain.ascii}"><button type="submit">Get a new record<span class="visually-hidden"> for ${domain.unicode}</span></button></form></div></div>`;
+      } else {
+        rows = html`${
+          domain.status === 'lapsing' && domain.lapseAfter
+            ? html`<div class="row"><span class="row-label">Lapses</span><div class="row-value">${formatDate(domain.lapseAfter)}, unless this new record is published</div></div>`
+            : html``
+        }<div class="row"><span class="row-label">TXT name</span><div class="row-value">${copyField(`record-name-${String(index)}`, record.name)}</div></div><div class="row"><span class="row-label">TXT value</span><div class="row-value">${copyField(`record-value-${String(index)}`, record.value)}</div></div><div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains/verify">${hidden()}${id}<button class="primary" type="submit">Verify now<span class="visually-hidden"> ${domain.unicode}</span></button></form></div></div>`;
+      }
+      const remove = html`<details class="act danger"><summary>Remove<span class="visually-hidden"> ${domain.unicode}</span></summary><div class="pop"><p>${
+        domain.status === 'pending' ? 'The claim is withdrawn.' : 'Nobody new joins through it. Members who joined through it stay.'
+      }</p><form method="post" action="${root}/identity/domains/remove">${hidden()}${id}<button class="danger" type="submit">Remove ${domain.unicode}</button></form></div></details>`;
+      return html`<div class="set-card"><div class="row"><span class="row-label">Domain</span><div class="row-value"><span class="strong">${name}</span> <span class="pill ${pill}">${word}</span> ${remove}</div></div>${rows}</div>`;
+    });
+    const add =
+      listed.length >= SLOTLOCK_WORKSPACE_DOMAIN_LIMIT
+        ? html``
+        : html`<form class="invite" method="post" action="${root}/identity/domains">${hidden()}<label for="domain">Domain</label><input id="domain" name="domain" maxlength="253" autocomplete="off" spellcheck="false" placeholder="acme.com" required><button class="primary" type="submit">Add domain</button></form>`;
+    const verified = listed.some((domain) => domain.status === 'verified');
+    const invites = html`<h2>Invitations</h2><div class="set-card"><div class="row"><span class="row-label">Go to</span><div class="row-value">${
+      restricted ? 'Addresses at verified domains' : 'Any address'
+    } ${
+      restricted || verified
+        ? html`<form class="inline" method="post" action="${root}/identity/invites">${hidden()}<input type="hidden" name="on" value="${restricted ? '0' : '1'}"><button type="submit">${
+            restricted ? 'Allow any address' : 'Only verified domains'
+          }</button></form>`
+        : html``
+    }</div></div></div>`;
+    return html`${noticeOf(notice, status)}<h2>Domains</h2>${add}${cards}${invites}${await ssoSection(session, tenantRef)}${await scimSection(session, tenantRef)}`;
+  }
+
+  async function claimDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const claimed = await domainStore.claim(tenantRef, personOf(session), (form.get('domain') ?? '').slice(0, 300));
+    if ('refusal' in claimed) return domainRefused(session, claimed.refusal);
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === claimed.id);
+    await audit(session, { action: 'domain.claimed', targetType: 'domain', targetRef: claimed.id, metadata: { domain: domain?.ascii ?? '' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** What an Owner's "Verify now" found, as the page says it. */
+  const VERIFY_ANSWERS: Readonly<Record<string, { status: number; text: (domain: string) => string }>> = Object.freeze({
+    verified: { status: 200, text: (domain: string) => `${domain} is verified.` },
+    restored: { status: 200, text: (domain: string) => `${domain} is verified again.` },
+    seen: { status: 200, text: (domain: string) => `${domain} is still verified.` },
+    absent: { status: 409, text: () => 'The record isn’t there yet. Slotlock also checks every hour for three days.' },
+    error: { status: 503, text: () => 'DNS didn’t answer. Try again shortly.' },
+    domain_taken: { status: 409, text: () => 'Another team verified that domain first.' },
+  });
+
+  async function verifyDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const found: SlotlockDomainCheckOutcome = await domainStore.verifyNow(tenantRef, personOf(session), form.get('id') ?? '', domainResolvers);
+    const event = slotlockDomainCheckEvent(found, false);
+    if (event) await audit(session, event, tenantRef);
+    const answer = VERIFY_ANSWERS[found.outcome];
+    if (answer) return identityPage(session, answer.status, answer.text(found.domain ?? 'The domain'));
+    if (found.outcome in DOMAIN_REFUSALS) return domainRefused(session, found.outcome as SlotlockDomainChangeRefusal);
+    return identityPage(session, 409, 'The record isn’t there.');
+  }
+
+  async function releaseDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === id);
+    const refusal = await domainStore.release(tenantRef, personOf(session), id);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(session, { action: 'domain.released', targetType: 'domain', targetRef: id, metadata: { domain: domain?.ascii ?? '' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function changeJoinPolicy(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const policy = form.get('policy') ?? '';
+    if (policy !== 'off' && policy !== 'request' && policy !== 'auto') return identityPage(session, 400, 'Choose who may join.');
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === id);
+    const refusal = await domainStore.setJoinPolicy(tenantRef, personOf(session), id, policy);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(
+      session,
+      { action: 'domain.join_policy_changed', targetType: 'domain', targetRef: id, metadata: { domain: domain?.ascii ?? '', policy } },
+      tenantRef,
+    );
+    return identityPage(session, 200, `${JOIN_POLICY_WORDS[policy]}: saved for ${domain?.unicode ?? 'the domain'}.`);
+  }
+
+  async function restrictInvites(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const on = form.get('on') === '1';
+    const refusal = await domainStore.restrictInvites(tenantRef, personOf(session), on);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(session, { action: on ? 'workspace.invites_restricted' : 'workspace.invites_unrestricted', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** Teams at the person's verified addresses' domains: ask to join, or join. */
+  async function domainTeamsSection(session: Session, checked: boolean): Promise<Html> {
+    if (!domainStore) return html``;
+    const emails = verifiedEmails(session);
+    const found = emails.length > 0 ? await domainStore.discoverable(personOf(session), emails) : [];
+    if (found.length === 0) {
+      // A GitHub sign-in carries no address until asked: one look with those GitHub verified.
+      if (session.idp === 'google') return html``;
+      return checked
+        ? html`<p class="muted">No team has verified the domain of an address GitHub verified for you.</p>`
+        : html`<p><a href="${root}/sign-in?then=%2Fteams&amp;email=1">${ICONS.github}Find your organization’s team</a></p>`;
+    }
+    const token = csrfToken(session);
+    const rows = found.map(
+      (team) =>
+        html`<tr><td data-label="Team" class="strong">${team.name}</td><td data-label="Domain" class="muted">${team.domain}</td><td class="actions">${
+          team.requested
+            ? html`<span class="pill held">Asked</span>`
+            : html`<form class="inline" method="post" action="${root}/join/request"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="team" value="${team.tenantRef}"><button class="primary" type="submit">${
+                team.joinPolicy === 'auto' && joinEvidence(session) === 'google_workspace'
+                  ? html`Join ${team.name}`
+                  : html`Ask to join<span class="visually-hidden"> ${team.name}</span>`
+              }</button></form>`
+        }</td></tr>`,
+    );
+    return html`<div class="table"><table><caption class="visually-hidden">Teams at your domain</caption><thead><tr><th>At your domain</th><th>Domain</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  async function requestToJoin(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!domainStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    const offered = (await domainStore.discoverable(personOf(session), verifiedEmails(session))).find((found) => found.tenantRef === team);
+    if (!offered) return teamsPage(session, 404, DOMAIN_REFUSALS.not_found.text);
+    const asked = await domainStore.requestToJoin(team, personOf(session), verifiedEmails(session), joinEvidence(session), await memberCapOf(team));
+    if ('refusal' in asked) return teamsPage(session, DOMAIN_REFUSALS[asked.refusal].status, DOMAIN_REFUSALS[asked.refusal].text);
+    const person = personOf(session);
+    if (asked.outcome === 'joined') {
+      await audit(
+        session,
+        { action: 'member.joined', actorRole: 'viewer', targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey } },
+        team,
+      );
+      return moveTo(session, team.slice('team:'.length), '');
+    }
+    await audit(
+      session,
+      { action: 'member.join_requested', actorRole: null, targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey, evidence: joinEvidence(session) } },
+      team,
+    );
+    return teamsPage(session, 200, `Asked to join ${offered.name}. An owner or admin decides.`);
+  }
+
+  async function decideJoinRequest(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const decision = form.get('decision');
+    if (decision !== 'approve' && decision !== 'decline') return refusalPage(session, 'not_found');
+    const role = slotlockJoinRole(form.get('role'));
+    if (decision === 'approve' && role === null) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const id = form.get('id') ?? '';
+    const decided = await domainStore.decide({ tenantRef, actor: personOf(session), id, decision, role, memberCap: await memberCapOf(tenantRef) });
+    if (decided.refusal) {
+      const { status, text } = DOMAIN_REFUSALS[decided.refusal];
+      return settingsPage(session, status, text, undefined, 'members');
+    }
+    await audit(
+      session,
+      {
+        action: decision === 'approve' ? 'member.join_approved' : 'member.join_declined',
+        targetType: 'person',
+        ...(decided.person ? { targetRef: decided.person } : {}),
+        ...(role && decision === 'approve' ? { metadata: { role } } : {}),
+      },
+      tenantRef,
+    );
+    return redirect(303, `${root}/settings/members`);
+  }
+
+  // ---- Single sign-on through a team's own identity provider (teams phase 5.3–5.5) ----
+
+  /** What a refused single sign-on change or sign-in says, and its status. */
+  const SSO_REFUSALS: Readonly<Record<SlotlockSsoRefusal, { status: number; text: string }>> = Object.freeze({
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s single sign-on.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first: single sign-on trusts addresses only there.' },
+    secret_required: { status: 400, text: 'Enter the client secret.' },
+    conflict: { status: 409, text: 'The connection changed since this page was opened. Reload it.' },
+    stale_config: { status: 409, text: 'The connection changed during the test. Test it again.' },
+    untested: { status: 409, text: 'Test the connection as it is now before turning it on.' },
+    no_breakglass_owner: { status: 409, text: 'Keep an owner who signs in with GitHub or Google first, for when the provider is down.' },
+    role_not_allowed: { status: 400, text: 'People the provider adds join as Viewer, Member or Developer.' },
+    owner_not_mappable: { status: 400, text: 'No group makes an owner: owners are made in Slotlock.' },
+    invalid_value: { status: 400, text: 'Enter the group as the provider sends it.' },
+    mapping_limit: { status: 403, text: 'A team maps up to 50 groups.' },
+    connection_inactive: { status: 409, text: 'That team’s single sign-on is off.' },
+    guest_refused: { status: 403, text: 'Guests of the directory cannot sign in to this team.' },
+    not_member: { status: 403, text: 'You are not a member of this team. Ask an owner to add you.' },
+    identity_taken: { status: 409, text: 'That account is linked to someone else in Slotlock.' },
+    identity_untrusted: { status: 403, text: 'Use your work account at the team’s verified domain.' },
+    hd_mismatch: { status: 403, text: 'Use a Google Workspace account at the team’s verified domain.' },
+    member_cap: TEAM_REFUSALS.member_cap,
+    invalid_max_age: { status: 400, text: 'Sessions last from 1 to 168 hours.' },
+    no_active_connection: { status: 409, text: 'Turn the connection on first.' },
+    stale_sso_proof: { status: 409, text: 'Sign in with the team’s single sign-on first, then turn this on within 10 minutes.' },
+  });
+
+  /** The providers, as the Identity page names them. */
+  const SSO_KIND_WORDS: Readonly<Record<SlotlockSsoKind, string>> = Object.freeze({
+    okta: 'Okta',
+    entra: 'Microsoft Entra ID',
+    google_workspace: 'Google Workspace',
+    oidc: 'Other OpenID Connect',
+  });
+
+  const ssoRedirectUri = (id: string) => `${publicRoot}/sso/callback/${id}`;
+  const ssoSecretContext = (tenantRef: string, id: string) => `${tenantRef}|${id}|v1`;
+  const ssoRefused = (session: Session, refusal: SlotlockSsoRefusal) =>
+    identityPage(session, SSO_REFUSALS[refusal].status, SSO_REFUSALS[refusal].text);
+
+  /** The team's connection on its Identity page: set it up, test it, turn it on, and who it lets in. */
+  async function ssoSection(session: Session, tenantRef: string): Promise<Html> {
+    if (!ssoStore) return html``;
+    const [connection, mappings] = await Promise.all([ssoStore.connection(tenantRef), ssoStore.mappings(tenantRef)]);
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const kinds = (selected: SlotlockSsoKind) =>
+      (['okta', 'entra', 'google_workspace', 'oidc'] as const).map(
+        (kind) => html`<option value="${kind}"${kind === selected ? html` selected` : html``}>${SSO_KIND_WORDS[kind]}</option>`,
+      );
+    const form = html`<form class="sso-form" method="post" action="${root}/identity/sso">${hidden()}<label for="sso-kind">Provider</label><select id="sso-kind" name="kind">${kinds(connection?.kind ?? 'okta')}</select><label for="sso-issuer">Issuer URL, or Entra tenant ID</label><input id="sso-issuer" name="issuer" maxlength="500" autocomplete="off" spellcheck="false" required value="${
+      connection ? (connection.kind === 'entra' ? (connection.entraTenant ?? '') : connection.issuer) : ''
+    }"><label for="sso-client">Client ID</label><input id="sso-client" name="client_id" maxlength="255" autocomplete="off" spellcheck="false" required value="${connection?.clientId ?? ''}"><label for="sso-secret">Client secret</label><input id="sso-secret" name="client_secret" type="password" maxlength="1024" autocomplete="off"${
+      connection ? html` placeholder="••••${connection.secretLast4 ?? ''}"` : html` required`
+    }><button class="primary" type="submit">${connection ? 'Save' : 'Connect'}</button></form>`;
+    if (!connection) return html`<h2>Single sign-on</h2>${form}`;
+    const tested = connection.testedVersion === connection.configVersion;
+    const [pill, word] =
+      connection.status === 'active' ? ['active', 'On'] : connection.status === 'disabled' ? ['revoked', 'Off'] : ['held', tested ? 'Tested' : 'Not tested'];
+    const id = html`<input type="hidden" name="id" value="${connection.id}">`;
+    const claims = connection.lastTestClaims;
+    const testRow = claims
+      ? html`<div class="row"><span class="row-label">Last test</span><div class="row-value"><code>${JSON.stringify(claims)}</code></div></div>`
+      : html``;
+    const status = html`<div class="set-card"><div class="row"><span class="row-label">${SSO_KIND_WORDS[connection.kind]}</span><div class="row-value"><span class="pill ${pill}">${word}</span> <span class="muted">${connection.issuer}</span></div></div><div class="row"><span class="row-label">Redirect URI</span><div class="row-value">${copyField('sso-redirect', ssoRedirectUri(connection.id))}</div></div>${testRow}<div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/sso/test">${hidden()}${id}<button type="submit">Test sign-in</button></form>${
+      connection.status === 'active'
+        ? html`<form class="inline" method="post" action="${root}/identity/sso/status">${hidden()}${id}<input type="hidden" name="status" value="disabled"><button type="submit">Turn off</button></form>`
+        : html`<form class="inline" method="post" action="${root}/identity/sso/status">${hidden()}${id}<input type="hidden" name="status" value="active"><button class="primary" type="submit"${tested ? html`` : html` disabled`}>Turn on</button></form>`
+    }</div></div></div>`;
+    const roleOptions = (selected: string, choices: readonly SlotlockWorkspaceRole[]) =>
+      choices.map((role) => html`<option value="${role}"${role === selected ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`);
+    const provisioning = html`<h3>Who joins</h3><form class="sso-form" method="post" action="${root}/identity/sso/provisioning">${hidden()}<label><input type="checkbox" name="jit" value="1"${connection.jitEnabled ? html` checked` : html``}> Add people at the verified domains on their first sign-in</label><label for="sso-default-role">As</label><select id="sso-default-role" name="default_role">${roleOptions(connection.defaultRole, ['viewer', 'member', 'developer'])}</select><label for="sso-groups-claim">Groups claim</label><input id="sso-groups-claim" name="groups_claim" maxlength="100" value="${connection.groupsClaim}"><button type="submit">Save</button></form>${
+      mappings.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Group</th><th>Role</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${mappings.map(
+            (mapping) =>
+              html`<tr><td data-label="Group" class="strong">${mapping.value}</td><td data-label="Role">${SLOTLOCK_WORKSPACE_ROLE_NAMES[mapping.role]}</td><td class="actions"><form class="inline" method="post" action="${root}/identity/sso/mapping">${hidden()}<input type="hidden" name="value" value="${mapping.value}"><input type="hidden" name="role" value=""><button class="danger" type="submit">Remove<span class="visually-hidden"> ${mapping.value}</span></button></form></td></tr>`,
+          )}</tbody></table></div>`
+        : html``
+    }<form class="invite" method="post" action="${root}/identity/sso/mapping">${hidden()}<label for="sso-group">Group</label><input id="sso-group" name="value" maxlength="255" autocomplete="off" required><label class="visually-hidden" for="sso-group-role">Role</label><select id="sso-group-role" name="role">${roleOptions('member', ['admin', 'developer', 'member', 'viewer', 'billing'])}</select><button type="submit">Map group</button></form>`;
+    const enforcement = html`<h3>Require single sign-on</h3><form class="sso-form" method="post" action="${root}/identity/sso/require">${hidden()}<input type="hidden" name="on" value="${connection.requireSso ? '0' : '1'}"><label for="sso-max-age">Sign in again every (hours)</label><input id="sso-max-age" name="max_age" type="number" min="1" max="168" value="${String(connection.maxAgeHours)}"><button type="submit"${connection.status === 'active' || connection.requireSso ? html`` : html` disabled`}>${
+      connection.requireSso ? 'Stop requiring it' : 'Require it'
+    }</button></form>${
+      connection.status === 'active' && !connection.requireSso && session.sc === undefined
+        ? html`<form class="inline" method="post" action="${root}/sso/proof">${hidden()}<input type="hidden" name="team" value="${tenantRef}"><button type="submit">Sign in with single sign-on</button></form>`
+        : html``
+    }`;
+    const remove = html`<details class="act danger"><summary>Delete connection</summary><div class="pop"><p>People who sign in only through it are erased with it.</p><form method="post" action="${root}/identity/sso/delete">${hidden()}${id}<button class="danger" type="submit">Delete connection</button></form></div></details>`;
+    return html`<h2>Single sign-on</h2>${status}${form}${provisioning}${enforcement}${remove}`;
+  }
+
+  async function saveSsoConnection(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || !options.sso || tenantRef === undefined) return nothingHere(session);
+    const kind = form.get('kind');
+    if (kind !== 'okta' && kind !== 'entra' && kind !== 'google_workspace' && kind !== 'oidc') return identityPage(session, 400, 'Choose the provider.');
+    const typed = (form.get('issuer') ?? '').trim();
+    const clientId = (form.get('client_id') ?? '').trim();
+    const secret = form.get('client_secret') ?? '';
+    if (clientId.length === 0 || clientId.length > 255 || /\s/.test(clientId)) return identityPage(session, 400, 'Enter the client ID.');
+    let issuer: string;
+    let entraTenant: string | null = null;
+    if (kind === 'entra') {
+      const pinned = slotlockEntraIssuer(typed);
+      if (!pinned) return identityPage(session, 400, 'Enter your Entra tenant ID (a GUID): common, organizations and consumers are not one tenant.');
+      issuer = pinned;
+      entraTenant = typed.toLowerCase();
+    } else if (kind === 'google_workspace') {
+      issuer = 'https://accounts.google.com';
+    } else {
+      if (!slotlockOidcUrlAllowed(typed)) return identityPage(session, 400, 'Enter the issuer URL: https, on a public host name.');
+      issuer = typed;
+    }
+    let provider: Awaited<ReturnType<typeof discoverSlotlockOidc>>;
+    try {
+      provider = await discoverSlotlockOidc(issuer, { fetch: ssoFetch });
+    } catch (error) {
+      return identityPage(session, 502, `The issuer’s discovery document did not check out: ${error instanceof Error ? error.message : 'no answer'}.`);
+    }
+    const existing = await ssoStore.connection(tenantRef);
+    const id = existing?.id ?? randomUUID();
+    if (!existing && secret.length === 0) return ssoRefused(session, 'secret_required');
+    if (secret.length > 1024 || /[\r\n]/.test(secret)) return identityPage(session, 400, 'That is not a client secret.');
+    const sealed = secret.length > 0 ? await options.sso.secretBox.seal(secret, ssoSecretContext(tenantRef, id)) : null;
+    const saved = await ssoStore.save({
+      tenantRef,
+      actor: personOf(session),
+      id,
+      kind,
+      issuer: provider.issuer,
+      clientId,
+      secretSealed: sealed,
+      secretLast4: secret.length > 0 ? secret.slice(-4) : null,
+      authorizationEndpoint: provider.authorizationEndpoint,
+      tokenEndpoint: provider.tokenEndpoint,
+      jwksUri: provider.jwksUri,
+      algorithms: provider.algorithms,
+      issParameter: provider.issParameter,
+      entraTenant,
+    });
+    if ('refusal' in saved) return ssoRefused(session, saved.refusal);
+    await audit(session, { action: 'sso.connection_saved', targetType: 'sso_connection', targetRef: saved.id, metadata: { kind, issuer: provider.issuer } }, tenantRef);
+    if (saved.enforcementOff) {
+      await audit(session, { action: 'sso.not_required', targetType: 'workspace', targetRef: tenantRef, metadata: { reason: 'connection_changed' } }, tenantRef);
+    }
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setSsoStatus(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const status = form.get('status') === 'active' ? 'active' : 'disabled';
+    const id = form.get('id') ?? '';
+    const refusal = await ssoStore.setStatus(tenantRef, personOf(session), id, status);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: status === 'active' ? 'sso.connection_activated' : 'sso.connection_disabled', targetType: 'sso_connection', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function deleteSsoConnection(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const refusal = await ssoStore.remove(tenantRef, personOf(session), id);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: 'sso.connection_deleted', targetType: 'sso_connection', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setSsoProvisioning(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const jit = form.get('jit') === '1';
+    const defaultRole = form.get('default_role') ?? '';
+    const groupsClaim = (form.get('groups_claim') ?? '').trim();
+    if (groupsClaim !== '' && !/^[A-Za-z0-9_:./-]{1,100}$/.test(groupsClaim)) return identityPage(session, 400, 'Enter the groups claim as the provider names it.');
+    const refusal = await ssoStore.setProvisioning(tenantRef, personOf(session), jit, defaultRole, groupsClaim);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: 'sso.provisioning_changed', targetType: 'workspace', targetRef: tenantRef, metadata: { jit, defaultRole } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setSsoMapping(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const value = (form.get('value') ?? '').trim();
+    const role = form.get('role') || null;
+    const refusal = await ssoStore.setMapping(tenantRef, personOf(session), value, role);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: 'sso.mapping_changed', targetType: 'workspace', targetRef: tenantRef, metadata: { group: value.slice(0, 100), role: role ?? 'none' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setRequireSso(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const on = form.get('on') === '1';
+    const maxAge = Number(form.get('max_age') ?? '');
+    const refusal = await ssoStore.requireSso(tenantRef, personOf(session), session.sid, on, Number.isSafeInteger(maxAge) ? maxAge : 0);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: on ? 'sso.required' : 'sso.not_required', targetType: 'workspace', targetRef: tenantRef, metadata: { maxAgeHours: maxAge } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** The page a member meets at a team that requires single sign-on: sign in through it, or (an Owner) bypass. */
+  function ssoRequiredPage(session: Session, tenantRef: string, name: string, mayBypass: boolean): Response {
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="team" value="${tenantRef}">`;
+    const content = html`${pageHead(name)}<p>${name} requires single sign-on.</p><p class="actions"><form class="inline" method="post" action="${root}/sso/proof">${hidden()}<button class="primary" type="submit">Sign in with single sign-on</button></form>${
+      mayBypass
+        ? html`<form class="inline" method="post" action="${root}/sso/bypass">${hidden()}<button type="submit">Use owner bypass</button></form>`
+        : html``
+    }</p>${mayBypass ? html`<p class="fine">An owner’s bypass lasts an hour, in this browser, and every other owner can see it in the audit log.</p>` : html``}`;
+    return respond(403, layout(name, content, session));
+  }
+
+  /** Start a sign-in through a team's provider: to sign in alone, prove oneself (or link) while signed in, or test it. */
+  async function startSsoSignIn(
+    connection: { id: string; authorizationEndpoint: string; clientId: string; kind: SlotlockSsoKind; tenantRef: string },
+    purpose: 'signin' | 'proof' | 'test',
+    person?: string,
+    version?: number,
+  ): Promise<Response> {
+    const state = randomBytes(32).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    const nonce = randomBytes(24).toString('base64url');
+    const target = new URL(connection.authorizationEndpoint);
+    target.search = new URLSearchParams({
+      client_id: connection.clientId,
+      redirect_uri: ssoRedirectUri(connection.id),
+      response_type: 'code',
+      scope: 'openid email profile',
+      state,
+      nonce,
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      ...(purpose === 'test' ? { prompt: 'login' } : {}),
+    }).toString();
+    const sealed = seal('slotlock-dashboard-sso-v1', {
+      state,
+      verifier,
+      nonce,
+      conn: connection.id,
+      purpose,
+      exp: now() + SIGN_IN_TTL_MS,
+      ...(person !== undefined ? { person } : {}),
+      ...(version !== undefined ? { version } : {}),
+    });
+    return redirect(302, target.href, [setCookie(SSO_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
+  }
+
+  async function testSsoConnection(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const connection = await ssoStore.connection(tenantRef);
+    if (!connection) return ssoRefused(session, 'not_found');
+    return startSsoSignIn({ ...connection, tenantRef }, 'test', personOf(session), connection.configVersion);
+  }
+
+  /** A signed-in member's sign-in through their team's provider: to link it, or prove themselves to a team that requires it. */
+  async function startSsoProof(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!ssoStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    const connection = TEAM_ID.test(team.replace(/^team:/, '')) ? await ssoStore.connection(team) : null;
+    if (!connection || connection.status !== 'active') return teamsPage(session, 409, SSO_REFUSALS.connection_inactive.text);
+    return startSsoSignIn({ ...connection, tenantRef: team }, 'proof', personOf(session));
+  }
+
+  const SCIM_REFUSALS: Readonly<Record<SlotlockScimRefusal, { status: number; text: string }>> = Object.freeze({
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s provisioning.' },
+    not_enabled: { status: 409, text: 'Turn on SCIM first.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first: the directory adds people only there.' },
+    key_policy: { status: 400, text: 'Choose what happens to a deactivated member’s API keys.' },
+    token_limit: { status: 403, text: 'A team keeps two tokens. Revoke one first.' },
+    bad_token: { status: 401, text: 'That token is not this team’s.' },
+    wrong_workspace: { status: 401, text: 'That token is not this team’s.' },
+    domain_not_verified: { status: 400, text: 'The directory adds people at the verified domains only.' },
+    uniqueness: { status: 409, text: 'That name is taken.' },
+    owner_protected: { status: 409, text: 'The directory never changes an owner.' },
+    invalid_member: { status: 400, text: 'That member is not in the directory.' },
+    owner_not_mappable: { status: 400, text: 'No group makes an owner: owners are made in Slotlock.' },
+    role_not_allowed: { status: 400, text: 'Choose a role.' },
+  });
+  const scimRefused = (session: Session, refusal: SlotlockScimRefusal) =>
+    identityPage(session, SCIM_REFUSALS[refusal].status, SCIM_REFUSALS[refusal].text);
+  /** A token just made: shown on the page that answers, once. */
+  const scimTokenShown = new WeakMap<Session, string>();
+  const scimBaseUrl = (tenantRef: string) => `${publicRoot}/scim/v2/${tenantRef.slice('team:'.length)}`;
+
+  /** A team's SCIM provisioning on its Identity page: off with the Owner's choice of key policy, or its address, tokens and groups. */
+  async function scimSection(session: Session, tenantRef: string): Promise<Html> {
+    if (!scimStore) return html``;
+    const state = await scimStore.state(tenantRef);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    if (!state.enabled) {
+      return html`<h2>Provisioning</h2><form class="sso-form" method="post" action="${root}/identity/scim/enable">${hidden()}<fieldset><legend>When the directory deactivates someone, their API keys</legend><label><input type="radio" name="keys" value="revoke" required> Are revoked</label><label><input type="radio" name="keys" value="keep" required> Keep working</label></fieldset><button class="primary" type="submit">Turn on SCIM</button></form>`;
+    }
+    const shown = scimTokenShown.get(session);
+    const tokens = state.tokens.map(
+      (token) =>
+        html`<tr><td data-label="Token" class="strong"><code>${token.prefix}…</code></td><td data-label="Made">${formatDate(token.createdAt)}</td><td data-label="Last used">${token.lastUsedAt ? formatDate(token.lastUsedAt) : 'Never'}</td><td class="actions"><form class="inline" method="post" action="${root}/identity/scim/token/revoke">${hidden()}<input type="hidden" name="id" value="${token.id}"><button class="danger" type="submit">Revoke<span class="visually-hidden"> ${token.prefix}</span></button></form></td></tr>`,
+    );
+    const card = html`<div class="set-card"><div class="row"><span class="row-label">SCIM URL</span><div class="row-value">${copyField('scim-url', scimBaseUrl(tenantRef))}</div></div>${
+      shown ? html`<div class="row"><span class="row-label">New token</span><div class="row-value">${copyField('scim-token', shown)}</div></div>` : html``
+    }<div class="row"><span class="row-label">Deactivated members’ keys</span><div class="row-value">${state.keyPolicy === 'revoke' ? 'Revoked' : 'Keep working'}</div></div></div>`;
+    const tokenTable =
+      tokens.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Token</th><th>Made</th><th>Last used</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${tokens}</tbody></table></div>`
+        : html``;
+    const { groups } = await scimStore.groups(tenantRef, null, 1, 100);
+    const roleChoices: readonly SlotlockWorkspaceRole[] = ['admin', 'developer', 'member', 'viewer', 'billing'];
+    const reserved = (name: string) => /^slotlock-role-(admin|developer|member|viewer|billing)$/i.test(name);
+    const groupRows = groups.map(
+      (group) =>
+        html`<tr><td data-label="Group" class="strong">${group.displayName}</td><td data-label="People">${String(group.members.length)}</td><td data-label="Role">${
+          reserved(group.displayName)
+            ? SLOTLOCK_WORKSPACE_ROLE_NAMES[group.displayName.slice('slotlock-role-'.length).toLowerCase() as SlotlockWorkspaceRole]
+            : html`<form class="inline" method="post" action="${root}/identity/scim/group">${hidden()}<input type="hidden" name="id" value="${group.id}"><label class="visually-hidden" for="scim-group-${group.id}">Role for ${group.displayName}</label><select id="scim-group-${group.id}" name="role"><option value="">None</option>${roleChoices.map(
+                (role) => html`<option value="${role}"${group.role === role ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+              )}</select><button type="submit">Save</button></form>`
+        }</td></tr>`,
+    );
+    const groupTable =
+      groupRows.length > 0
+        ? html`<h3>Groups</h3><div class="table"><table><thead><tr><th>Group</th><th>People</th><th>Role</th></tr></thead><tbody>${groupRows}</tbody></table></div>`
+        : html``;
+    const off = html`<details class="act danger"><summary>Turn off SCIM</summary><div class="pop"><p>Its tokens stop working. Members it added stay.</p><form method="post" action="${root}/identity/scim/disable">${hidden()}<button class="danger" type="submit">Turn off SCIM</button></form></div></details>`;
+    return html`<h2>Provisioning</h2>${card}${tokenTable}<form class="inline" method="post" action="${root}/identity/scim/token">${hidden()}<button type="submit">New token</button></form>${groupTable}${off}`;
+  }
+
+  async function enableScim(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const keys = form.get('keys');
+    if (keys !== 'keep' && keys !== 'revoke') return scimRefused(session, 'key_policy');
+    const refusal = await scimStore.enable(tenantRef, personOf(session), keys);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.enabled', targetType: 'workspace', targetRef: tenantRef, metadata: { keys } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function disableScim(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await scimStore.disable(tenantRef, personOf(session));
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.disabled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function createScimToken(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const made = await scimStore.createToken(tenantRef, personOf(session));
+    if ('refusal' in made) return scimRefused(session, made.refusal);
+    await audit(session, { action: 'scim.token_created', targetType: 'scim_token', targetRef: made.prefix }, tenantRef);
+    scimTokenShown.set(session, made.token);
+    return identityPage(session, 201, 'Copy the token into your identity provider now: it is not shown again.');
+  }
+
+  async function revokeScimToken(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const refusal = await scimStore.revokeToken(tenantRef, personOf(session), id);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.token_revoked', targetType: 'scim_token', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function mapScimGroup(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const role = form.get('role') || null;
+    const refusal = await scimStore.mapGroup(tenantRef, personOf(session), id, role);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.group_mapped', targetType: 'scim_group', targetRef: id, metadata: { role } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function useSsoBypass(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!ssoStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    if (!TEAM_ID.test(team.replace(/^team:/, ''))) return nothingHere(session);
+    // As fresh as any Owner's power: a sign-in in the last 15 minutes.
+    if (!freshlySignedIn(session)) return confirmPage(session, 'workspace.own', '/teams');
+    const refusal = await ssoStore.bypass(team, personOf(session), session.sid);
+    if (refusal) return teamsPage(session, 403, 'Only an owner who signs in with GitHub or Google can bypass single sign-on.');
+    await audit(session, { action: 'sso.bypass_used', actorRole: 'owner', targetType: 'workspace', targetRef: team }, team);
+    return moveTo(session, team.slice('team:'.length), '');
+  }
+
+  /** The claims a test sign-in shows the Owner: what decides who someone is and what they get, no token. */
+  function ssoTestClaims(claims: Record<string, unknown>, groupsClaim: string): Record<string, unknown> {
+    const pick = (name: string) => (claims[name] === undefined ? {} : { [name]: claims[name] });
+    const groups = claims[groupsClaim];
+    return {
+      ...pick('iss'),
+      ...pick('sub'),
+      ...pick('tid'),
+      ...pick('oid'),
+      ...pick('email'),
+      ...pick('email_verified'),
+      ...pick('xms_edov'),
+      ...pick('hd'),
+      ...pick('acct'),
+      ...(Array.isArray(groups) ? { groups: groups.slice(0, 20) } : isRecord(claims._claim_names) ? { groups: 'overage' } : {}),
+    };
+  }
+
+  /** The callback of a team's provider: the code exchanged, the ID token checked, then the purpose served. */
+  async function finishSsoSignIn(request: Request, url: URL, connectionId: string): Promise<Response> {
+    const clear = setCookie(SSO_COOKIE, '', 0);
+    const pending = unseal('slotlock-dashboard-sso-v1', readCookies(request).get(SSO_COOKIE));
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (
+      !ssoStore ||
+      !options.sso ||
+      url.searchParams.has('error') ||
+      !pending ||
+      pending.conn !== connectionId ||
+      typeof pending.state !== 'string' ||
+      typeof pending.verifier !== 'string' ||
+      typeof pending.nonce !== 'string' ||
+      code === null ||
+      code.length === 0 ||
+      code.length > 2048 ||
+      state === null ||
+      !safeEqual(state, pending.state)
+    ) {
+      return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+    }
+    const connection = await ssoStore.connectionById(connectionId);
+    if (!connection || (pending.purpose !== 'test' && connection.status !== 'active')) {
+      return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+    }
+    // RFC 9207: the issuer that answered, when it says, must be this connection's (mix-up defence).
+    const answeredBy = url.searchParams.get('iss');
+    if ((answeredBy !== null || connection.issParameter) && answeredBy !== connection.issuer) {
+      return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+    }
+    if (!(await options.state.use('sign_in', `sso.${pending.state}`, pending.exp as number))) return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+    const secret = connection.secretSealed ? await options.sso.secretBox.open(connection.secretSealed, ssoSecretContext(connection.tenantRef, connection.id)) : null;
+    if (secret === null) {
+      report('Single sign-on refused: the client secret does not open');
+      return signedOutPage(502, `${connection.name}’s single sign-on did not complete. Try again.`, [clear]);
+    }
+    let checked: Awaited<ReturnType<typeof verifySlotlockIdToken>> | null = null;
+    try {
+      // Okta and other providers take the client's secret by HTTP Basic (RFC 6749 2.3.1); Entra and
+      // Google, in the body.
+      const basic = connection.kind === 'okta' || connection.kind === 'oidc';
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: ssoRedirectUri(connection.id),
+        code_verifier: pending.verifier,
+        ...(basic ? {} : { client_id: connection.clientId, client_secret: secret }),
+      });
+      if (!slotlockOidcUrlAllowed(connection.tokenEndpoint)) throw new Error('token endpoint');
+      const response = await ssoFetch(connection.tokenEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+          ...(basic
+            ? { Authorization: `Basic ${btoa(`${encodeURIComponent(connection.clientId)}:${encodeURIComponent(secret)}`)}` }
+            : {}),
+        },
+        body: body.toString(),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+      });
+      // Read to 64 KB at most: the endpoint is the Owner's to choose, and a token answer is small.
+      const answer = response.ok ? await slotlockReadJsonBody(response, SSO_TOKEN_ANSWER_BYTES).catch(() => null) : null;
+      if (!response.ok) await response.body?.cancel().catch(() => undefined);
+      const token = answer !== null && typeof answer.id_token === 'string' ? answer.id_token : null;
+      if (token !== null) {
+        checked = await verifySlotlockIdToken(token, {
+          issuers: connection.kind === 'google_workspace' ? SLOTLOCK_GOOGLE_ISSUERS : [connection.issuer],
+          clientId: connection.clientId,
+          algorithms: connection.algorithms,
+          keys: ssoJwks.lookup(connection.jwksUri),
+          nonce: pending.nonce,
+          now: now(),
+        });
+      } else {
+        report(`Single sign-on token exchange failed: HTTP ${response.status}`);
+      }
+    } catch (error) {
+      report(`Single sign-on failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+    }
+    if (!checked || 'refusal' in checked) {
+      if (checked) report(`Single sign-on refused: the ID token did not check out (${checked.refusal})`);
+      return signedOutPage(502, `${connection.name}’s single sign-on did not complete. Try again.`, [clear]);
+    }
+    const claims = checked.claims;
+    const subject = claims.sub as string;
+    // Entra: the token's tenant is the one pinned, the object id is the stable key, guests stay out,
+    // and an email counts only when Entra says the domain's owner verified it (xms_edov).
+    if (connection.kind === 'entra' && (claims.tid !== connection.entraTenant || typeof claims.oid !== 'string')) {
+      return signedOutPage(403, `${connection.name}’s single sign-on did not complete. Try again.`, [clear]);
+    }
+    // The team's verified domains: an email is trusted only there, and a Google account only of one.
+    const verifiedDomains = domainStore
+      ? (await domainStore.list(connection.tenantRef)).filter((claim) => claim.status === 'verified').map((claim) => claim.ascii)
+      : [];
+    const hostedDomain = typeof claims.hd === 'string' ? slotlockEmailDomain(`x@${claims.hd}`) : null;
+    if (connection.kind === 'google_workspace' && (hostedDomain === null || !verifiedDomains.includes(hostedDomain))) {
+      // Any Google account can pass an "External" OAuth client: only the team's Workspace counts.
+      const refused = SSO_REFUSALS.hd_mismatch;
+      if (pending.purpose === 'signin') return signedOutPage(refused.status, refused.text, [clear]);
+      const session = await readSession(request);
+      if (!session) return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+      return pending.purpose === 'test' ? identityPage(session, refused.status, refused.text) : teamsPage(session, refused.status, refused.text);
+    }
+    const email = typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email) ? claims.email.toLowerCase() : null;
+    const emailDomain = email === null ? null : slotlockEmailDomain(email);
+    const emailOk =
+      email !== null &&
+      (connection.kind === 'entra'
+        ? claims.xms_edov === true || claims.xms_edov === 'true' || claims.xms_edov === 1
+        : connection.kind === 'google_workspace'
+          ? (claims.email_verified === true || claims.email_verified === 'true') && emailDomain !== null && emailDomain === hostedDomain
+          : // Okta and other providers: the team's directory vouches for its own domain's addresses,
+            // unless the token itself says the address is unverified.
+            claims.email_verified !== false && claims.email_verified !== 'false');
+    const groupsValue = claims[connection.groupsClaim];
+    const groups = Array.isArray(groupsValue) ? groupsValue.filter((group): group is string => typeof group === 'string').slice(0, 200) : [];
+    const overage = isRecord(claims._claim_names) && 'groups' in claims._claim_names;
+    const guest = connection.kind === 'entra' && (claims.acct === 1 || claims.acct === '1');
+    const entra = connection.kind === 'entra' ? { tid: claims.tid as string, oid: claims.oid as string } : null;
+    const session = pending.purpose === 'signin' ? null : await readSession(request);
+
+    if (pending.purpose === 'test') {
+      if (!session || personOf(session) !== pending.person || typeof pending.version !== 'number') return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+      const shown = { ...ssoTestClaims(claims, connection.groupsClaim), trusted_email: emailOk };
+      const refusal = await ssoStore.recordTest(connection.tenantRef, personOf(session), connection.id, pending.version, shown);
+      if (refusal) return identityPage(session, SSO_REFUSALS[refusal].status, SSO_REFUSALS[refusal].text);
+      await audit(session, { action: 'sso.connection_tested', targetType: 'sso_connection', targetRef: connection.id }, connection.tenantRef);
+      return redirect(303, `${root}/settings/identity`, [clear]);
+    }
+
+    if (pending.purpose === 'proof') {
+      // A session through one team's provider alone proves nothing to another's, nor links to it.
+      if (!session || personOf(session) !== pending.person || session.sc !== undefined) return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+      const result = await ssoStore.signIn({
+        connectionId: connection.id,
+        issuer: connection.issuer,
+        subject,
+        entraTid: entra?.tid ?? null,
+        entraOid: entra?.oid ?? null,
+        email,
+        emailOk,
+        groups,
+        overage,
+        guest,
+        sessionPerson: personOf(session),
+        memberCap: null,
+      });
+      if (result.refusal) return teamsPage(session, SSO_REFUSALS[result.refusal].status, SSO_REFUSALS[result.refusal].text);
+      // Recorded only while the connection is on as it was: turned off meanwhile, no proof.
+      if (!(await ssoStore.recordProof(session.sid, personOf(session), connection.id, false, connection.configVersion))) {
+        return teamsPage(session, SSO_REFUSALS.connection_inactive.status, SSO_REFUSALS.connection_inactive.text);
+      }
+      // The team's own provider vouched for the address: the directory's user there is this person.
+      if (scimStore && emailOk && email !== null && emailDomain !== null && verifiedDomains.includes(emailDomain)) {
+        await scimStore.bind(personOf(session), [email], plans ? FREE_TEAM_MEMBERS : null);
+      }
+      if (result.outcome === 'linked') {
+        await audit(session, { action: 'sso.linked', targetType: 'sso_connection', targetRef: connection.id }, connection.tenantRef);
+      }
+      return moveTo(session, connection.tenantRef.slice('team:'.length), '', [clear]);
+    }
+
+    // Through the provider alone.
+    const result = await ssoStore.signIn({
+      connectionId: connection.id,
+      issuer: connection.issuer,
+      subject,
+      entraTid: entra?.tid ?? null,
+      entraOid: entra?.oid ?? null,
+      email,
+      emailOk,
+      groups,
+      overage,
+      guest,
+      sessionPerson: null,
+      memberCap: await memberCapOf(connection.tenantRef),
+    });
+    if (result.refusal || result.person === null) {
+      const refusal = result.refusal ?? 'not_member';
+      return signedOutPage(SSO_REFUSALS[refusal].status, SSO_REFUSALS[refusal].text, [clear]);
+    }
+    const person = result.person;
+    const [idp, uid] = person.startsWith('github:')
+      ? [undefined, person.slice('github:'.length)]
+      : person.startsWith('google:')
+        ? (['google', person.slice('google:'.length)] as const)
+        : (['sso', person.slice('sso:'.length)] as const);
+    if (!allowed(uid, idp)) return signedOutPage(403, 'This Slotlock server does not let that account sign in.', [clear]);
+    const epoch = workspaces ? await workspaces.signedIn(person) : undefined;
+    // Named by the provider's email only where the team trusts it: at a domain it verified.
+    const trusted = emailOk && emailDomain !== null && verifiedDomains.includes(emailDomain);
+    if (scimStore && trusted && email !== null) await scimStore.bind(person, [email], plans ? FREE_TEAM_MEMBERS : null);
+    const login = trusted && email !== null ? email : 'SSO account';
+    if (teamStore && idp === 'sso') await teamStore.setDisplay(person, login === 'SSO account' ? null : login);
+    const sid = randomBytes(24).toString('base64url');
+    const expires = now() + SESSION_TTL_MS;
+    await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
+    // Scoped to this team for the session's life: the provider reaches nothing else of the person's.
+    if (!(await ssoStore.recordProof(sid, person, connection.id, true, connection.configVersion))) {
+      await workspaces?.sessions?.end(person, workspaces.sessions.idOf(sid));
+      return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+    }
+    const sealedSession = seal('slotlock-dashboard-session-v1', {
+      uid,
+      login,
+      sid,
+      exp: expires,
+      ...(idp !== undefined ? { idp } : {}),
+      ...(epoch !== undefined ? { ep: epoch } : {}),
+      team: connection.tenantRef.slice('team:'.length),
+      sc: connection.id,
+    });
+    if (options.resources.audit) {
+      await options.resources.audit
+        .record(connection.tenantRef, {
+          action: result.outcome === 'joined' ? 'member.joined' : 'sso.signed_in',
+          actorType: 'person',
+          actorRef: person,
+          actorRole: result.role,
+          ...requestOrigin(request),
+          ...(overage ? { metadata: { groups: 'overage' } } : {}),
+        })
+        .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
+    }
+    return redirect(303, root, [clear, setCookie(SESSION_COOKIE, sealedSession, SESSION_TTL_MS / 1000)]);
+  }
+
+  /**
+   * Where single sign-on starts without a session: the team's handle, or an address at its verified
+   * domain. A link only names the team; the person continues to its provider by a button here (a
+   * same-origin POST), so another site can neither sign someone in to a team they did not choose
+   * nor send them on to a provider's address through this one.
+   */
+  async function ssoStartPage(url: URL, handle?: string): Promise<Response> {
+    if (!ssoStore) return nothingHere404();
+    const email = (url.searchParams.get('email') ?? '').trim();
+    const team = (handle ?? url.searchParams.get('team') ?? '').trim();
+    if (team !== '' || email !== '') {
+      const domain = email === '' ? null : slotlockEmailDomain(email);
+      const route = await ssoStore.route(team !== '' ? { handle: team } : domain !== null ? { domain } : {});
+      if (route) {
+        const provider = new URL(route.authorizationEndpoint).host;
+        const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Sign in to ${route.name}</h1><form method="post" action="${root}/sso/start"><input type="hidden" name="team" value="${route.handle}"><button class="primary wide" type="submit">Continue to ${provider}</button></form><p class="fine"><a href="${root}">Other ways to sign in</a></p></section>`;
+        return respond(200, layout('Single sign-on', content, null));
+      }
+    }
+    const asked = team !== '' || email !== '';
+    const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Single sign-on</h1>${
+      asked ? html`<p class="notice" role="alert">No team signs in that way. Check the address, or ask your team’s owner.</p>` : html``
+    }<form method="get" action="${root}/sso"><label for="sso-email">Work email</label><input id="sso-email" name="email" type="email" maxlength="254" autocomplete="email" required><button class="primary wide" type="submit">Continue</button></form><p class="fine"><a href="${root}">Other ways to sign in</a></p></section>`;
+    return respond(asked ? 404 : 200, layout('Single sign-on', content, null));
+  }
+
   /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
   async function deliverInvitation(session: Session, to: string, role: SlotlockWorkspaceRole, link: string, expiresAt: Date): Promise<boolean> {
     if (!options.invitations) return false;
@@ -7434,7 +8555,7 @@ ${
     if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
     if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
     // And an Owner of its workspace in Slotlock: a GitHub owner Slotlock gave a lesser role may not.
-    if (workspaces && (await workspaces.standing(`github-org:${org.id}`, personOf(session))).role !== 'owner') {
+    if (workspaces && (await workspaces.standing(`github-org:${org.id}`, personOf(session), session.sid)).role !== 'owner') {
       return teamsPage(session, 403, `Only an owner of ${org.login}'s workspace can turn Slotlock ${on ? 'on' : 'off'} for it.`);
     }
     // Who owns it was read as the person signed in: only a recent sign-in is trusted to say so.
@@ -7459,8 +8580,15 @@ ${
     const teamId = /^team:(.+)$/.exec(wanted)?.[1];
     if (teamStore && (teamId !== undefined || (wanted === '' && !teams))) {
       // Their own tenant, or a team workspace they are a member of now.
-      if (teamId !== undefined && (!TEAM_ID.test(teamId) || !workspaces || (await workspaces.standing(wanted, personOf(session))).role === null)) {
-        return respond(400, layout('Refused', html`<p class="notice">You are not a member of that team.</p>`, session));
+      if (teamId !== undefined) {
+        const standing = TEAM_ID.test(teamId) && workspaces ? await workspaces.standing(wanted, personOf(session), session.sid) : null;
+        if (standing?.refusal === 'sso_required') {
+          const name = teamListOf.get(session)?.find((ws) => ws.tenantRef === wanted)?.name ?? 'This team';
+          return ssoRequiredPage(session, wanted, name, standing.mayBypass === true);
+        }
+        if (!standing || standing.role === null) {
+          return respond(400, layout('Refused', html`<p class="notice">You are not a member of that team.</p>`, session));
+        }
       }
       return moveTo(session, teamId, '');
     }
@@ -7687,50 +8815,8 @@ ${
     return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
   }
 
-  /** Google's signing keys by key id, kept for as long as its answer says (an hour by default). */
-  let googleKeys: { keys: Map<string, CryptoKey>; until: number } | null = null;
-
-  async function readGoogleKeys(provider: NonNullable<typeof google>, refresh: boolean): Promise<Map<string, CryptoKey>> {
-    if (googleKeys && !refresh && googleKeys.until > now()) return googleKeys.keys;
-    const response = await fetchImpl(provider.jwksUrl ?? 'https://www.googleapis.com/oauth2/v3/certs', {
-      headers: { Accept: 'application/json' },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
-    });
-    if (!response.ok) throw new Error(`Google keys answered HTTP ${response.status}`);
-    const body: unknown = await response.json();
-    const keys = new Map<string, CryptoKey>();
-    for (const jwk of isRecord(body) && Array.isArray(body.keys) ? body.keys : []) {
-      if (!isRecord(jwk) || jwk.kty !== 'RSA' || typeof jwk.kid !== 'string' || (jwk.alg !== undefined && jwk.alg !== 'RS256')) continue;
-      const key = await globalThis.crypto.subtle
-        .importKey('jwk', { kty: 'RSA', n: jwk.n as string, e: jwk.e as string, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'])
-        .catch(() => null);
-      if (key) keys.set(jwk.kid, key);
-    }
-    const maxAge = Number(/max-age=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1]);
-    googleKeys = { keys, until: now() + (Number.isFinite(maxAge) && maxAge > 0 ? Math.min(maxAge * 1000, 86_400_000) : GOOGLE_KEYS_DEFAULT_TTL_MS) };
-    return keys;
-  }
-
-  /** Whether an ID token's signature is Google's: RS256, by a key id Google publishes (read again once when unknown, as Google rotates them). */
-  async function googleSigned(provider: NonNullable<typeof google>, header: string, payload: string, signature: string): Promise<boolean> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'));
-    } catch {
-      return false;
-    }
-    if (!isRecord(parsed) || parsed.alg !== 'RS256' || typeof parsed.kid !== 'string') return false;
-    let key = (await readGoogleKeys(provider, false)).get(parsed.kid);
-    if (!key) key = (await readGoogleKeys(provider, true)).get(parsed.kid);
-    if (!key) return false;
-    return globalThis.crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5',
-      key,
-      Buffer.from(signature, 'base64url'),
-      Buffer.from(`${header}.${payload}`, 'ascii'),
-    );
-  }
+  /** Issuers' signing keys (Google's, and teams' identity providers'), by JWKS URL (oidc.ts). */
+  const jwks = createSlotlockJwksCache({ fetch: fetchImpl, now });
 
   /**
    * The person Google signed in, from the ID token its token endpoint returned for this code. The
@@ -7742,7 +8828,7 @@ ${
     code: string,
     verifier: string,
     nonce: string,
-  ): Promise<{ uid: string; login: string; idp: 'google' } | null> {
+  ): Promise<{ uid: string; login: string; idp: 'google'; hd?: string } | null> {
     try {
       const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -7764,38 +8850,31 @@ ${
       }
       const body: unknown = await response.json().catch(() => null);
       const token = isRecord(body) && typeof body.id_token === 'string' ? body.id_token : null;
-      const [header, payload, signature, ...extra] = token?.split('.') ?? [];
-      if (!header || !payload || !signature || extra.length > 0 || ![header, payload, signature].every((part) => BASE64URL.test(part))) {
+      if (token === null) return null;
+      // Signed by Google with a key it publishes (RS256), for this client, unexpired, with this
+      // sign-in's nonce (oidc.ts verifySlotlockIdToken: OpenID Connect Core 1.0, 3.1.3.7).
+      const checked = await verifySlotlockIdToken(token, {
+        issuers: SLOTLOCK_GOOGLE_ISSUERS,
+        clientId: provider.clientId,
+        algorithms: ['RS256'],
+        keys: jwks.lookup(provider.jwksUrl ?? 'https://www.googleapis.com/oauth2/v3/certs'),
+        nonce,
+        now: now(),
+      });
+      if ('refusal' in checked) {
+        report(`Google sign-in refused: the ID token did not check out (${checked.refusal})`);
         return null;
       }
-      // Signed by Google, with one of the keys it publishes (RS256), whichever way the token came.
-      if (!(await googleSigned(provider, header, payload, signature))) {
-        report('Google sign-in refused: the ID token is not signed by Google');
-        return null;
-      }
-      const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-      if (!isRecord(claims)) return null;
-      const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-      if (
-        (claims.iss !== 'https://accounts.google.com' && claims.iss !== 'accounts.google.com') ||
-        !audience.includes(provider.clientId) ||
-        (audience.length > 1 && claims.azp !== provider.clientId) ||
-        typeof claims.exp !== 'number' ||
-        claims.exp * 1000 <= now() ||
-        typeof claims.nonce !== 'string' ||
-        !safeEqual(claims.nonce, nonce) ||
-        typeof claims.sub !== 'string' ||
-        !GOOGLE_SUBJECT.test(claims.sub)
-      ) {
-        report('Google sign-in refused: the ID token did not check out');
-        return null;
-      }
+      const claims = checked.claims;
+      if (typeof claims.sub !== 'string' || !GOOGLE_SUBJECT.test(claims.sub)) return null;
       // The email names the person on the page only, and only once Google has verified it.
       const email =
         (claims.email_verified === true || claims.email_verified === 'true') && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
           ? claims.email
           : 'Google account';
-      return { uid: claims.sub, login: email, idp: 'google' };
+      // A Google Workspace account names its domain (hd); a consumer account names none.
+      const hd = typeof claims.hd === 'string' && /^[a-z0-9.-]{1,253}$/i.test(claims.hd) ? claims.hd.toLowerCase() : undefined;
+      return { uid: claims.sub, login: email, idp: 'google', ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
     } catch (error) {
       report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
       return null;
@@ -7857,7 +8936,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[] } | null;
+    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -7920,6 +8999,18 @@ ${
       const raw = inviteTokenOf(request);
       const invited = raw ? (await teamStore.preview(tokenDigest(raw)))?.email : null;
       if (invited && user.emails.includes(invited)) em = [invited];
+      else if (domainStore && pending.then === '/teams' && pending.emails === true) {
+        // Looking for a team at one's domain: only the addresses at a team one may ask to join.
+        const keys = new Set((await domainStore.discoverable(person, user.emails)).map((found) => found.domainKey));
+        const kept = user.emails.filter((email) => keys.has(slotlockEmailDomain(email) ?? '')).slice(0, 3);
+        if (kept.length > 0) em = kept;
+      }
+    }
+    // A Google Workspace account of its own domain binds the directory's user at that address (SCIM):
+    // the domain vouches for it. An address GitHub or a consumer Google account verified once does not.
+    if (scimStore && user.idp === 'google' && user.hd !== undefined && user.login.includes('@')) {
+      const address = user.login.toLowerCase();
+      if (slotlockEmailDomain(address) === slotlockEmailDomain(`x@${user.hd}`)) await scimStore.bind(person, [address], plans ? FREE_TEAM_MEMBERS : null);
     }
     const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
     const sid = randomBytes(24).toString('base64url');
@@ -7931,7 +9022,7 @@ ${
       login: user.login,
       sid,
       exp: expires,
-      ...(user.idp === 'google' ? { idp: 'google' } : {}),
+      ...(user.idp === 'google' ? { idp: 'google', ...(user.hd !== undefined ? { hd: user.hd } : {}) } : {}),
       ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
       ...(epoch !== undefined ? { ep: epoch } : {}),
       ...(em ? { em } : {}),
@@ -7944,7 +9035,7 @@ ${
         .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
     }
     const back = typeof pending.then === 'string' && STEP_UP_PAGES.has(pending.then) ? pending.then : '';
-    return redirect(303, `${root}${back}${back === '/invite' && pending.emails === true ? '?checked=1' : ''}`, [
+    return redirect(303, `${root}${back}${(back === '/invite' || back === '/teams') && pending.emails === true ? '?checked=1' : ''}`, [
       clearSignIn,
       setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
     ]);
@@ -8149,6 +9240,13 @@ ${
           null,
         ),
       );
+    }
+    // Single sign-on continues to the team's provider from its own page, with or without a session.
+    if (route === '/sso/start' && ssoStore) {
+      const form = await readForm(request);
+      const handle = form === null || form === 'too_large' ? '' : (form.get('team') ?? '');
+      const found = /^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$/.test(handle) ? await ssoStore.route({ handle }) : null;
+      return found ? startSsoSignIn(found, 'signin') : ssoStartPage(new URL(`${publicRoot}/sso?team=${encodeURIComponent(handle)}`));
     }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
@@ -8390,6 +9488,48 @@ ${
         return removeMember(session, form);
       case '/members/leave':
         return leaveTeam(session);
+      case '/members/requests':
+        return decideJoinRequest(session, form);
+      case '/join/request':
+        return requestToJoin(session, form);
+      case '/identity/domains':
+        return claimDomain(session, form);
+      case '/identity/domains/verify':
+        return verifyDomain(session, form);
+      case '/identity/domains/remove':
+        return releaseDomain(session, form);
+      case '/identity/domains/policy':
+        return changeJoinPolicy(session, form);
+      case '/identity/invites':
+        return restrictInvites(session, form);
+      case '/identity/sso':
+        return saveSsoConnection(session, form);
+      case '/identity/sso/test':
+        return testSsoConnection(session);
+      case '/identity/sso/status':
+        return setSsoStatus(session, form);
+      case '/identity/sso/delete':
+        return deleteSsoConnection(session, form);
+      case '/identity/sso/provisioning':
+        return setSsoProvisioning(session, form);
+      case '/identity/sso/mapping':
+        return setSsoMapping(session, form);
+      case '/identity/sso/require':
+        return setRequireSso(session, form);
+      case '/sso/proof':
+        return startSsoProof(session, form);
+      case '/sso/bypass':
+        return useSsoBypass(session, form);
+      case '/identity/scim/enable':
+        return enableScim(session, form);
+      case '/identity/scim/disable':
+        return disableScim(session);
+      case '/identity/scim/token':
+        return createScimToken(session);
+      case '/identity/scim/token/revoke':
+        return revokeScimToken(session, form);
+      case '/identity/scim/group':
+        return mapScimGroup(session, form);
       default:
         return respond(
           404,
@@ -8412,6 +9552,18 @@ ${
     const url = new URL(request.url);
     const route = url.pathname.slice(root.length).replace(/\/$/, '') || '/';
     try {
+        // A team's SCIM endpoint: its identity provider's, by bearer token, never a session or a form.
+        if (scimStore && route.startsWith('/scim/v2/')) {
+          const log = options.resources.audit;
+          return await handleSlotlockScimRequest(request, route.slice('/scim/v2/'.length), {
+            scim: scimStore,
+            publicRoot,
+            documentationUri: 'https://slotlock.pylota.io/docs/dashboard/#scim',
+            ...(log ? { record: (tenantRef: string, event: SlotlockAuditEventInput) => log.record(tenantRef, event) } : {}),
+            // Their keys go as the team chose when it turned SCIM on.
+            deactivated: (tenantRef, person, keyPolicy) => (keyPolicy === 'revoke' ? revokeKeysOf(tenantRef, person, 'scim') : Promise.resolve(0)),
+          });
+        }
       if (request.method === 'GET') {
         switch (route) {
           case '/': {
@@ -8437,12 +9589,13 @@ ${
           case '/settings/team':
           case '/settings/privacy':
           case '/settings/privacy/download':
+          case '/settings/identity':
           case '/settings': {
             const session = await readSession(request);
             if (!session) return redirect(303, root);
             const denied = authorizePage(session, route);
             if (denied) return denied;
-            if (route === '/teams') return await teamsPage(session);
+            if (route === '/teams') return await teamsPage(session, 200, undefined, url.searchParams.get('checked') === '1');
             if (route === '/plan') {
               return await planPage(
                 session,
@@ -8482,6 +9635,11 @@ ${
                 ? await settingsPage(session, 200, undefined, undefined, 'team')
                 : nothingHere(session);
             }
+            if (route === '/settings/identity') {
+              return domainStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'identity')
+                : nothingHere(session);
+            }
             if (route === '/settings/audit') {
               return options.resources.audit
                 ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
@@ -8510,7 +9668,10 @@ ${
             const back = STEP_UP_PAGES.has(then) ? then : undefined;
             return google && url.searchParams.get('with') === 'google'
               ? await startGoogleSignIn(google, back)
-              : await startSignIn(back, Boolean(teamStore) && back === '/invite' && url.searchParams.get('email') === '1');
+              : await startSignIn(
+                  back,
+                  Boolean(teamStore) && (back === '/invite' || (back === '/teams' && Boolean(domainStore))) && url.searchParams.get('email') === '1',
+                );
           }
           case '/invite': {
             if (!teamStore) return nothingHere404();
@@ -8530,6 +9691,8 @@ ${
           }
           case '/callback':
             return await finishSignIn(request, url);
+          case '/sso':
+            return await ssoStartPage(url);
           case '/hours': {
             const session = await readSession(request);
             if (!session) return redirect(303, root);
@@ -8552,6 +9715,11 @@ ${
             return authorizePage(session, route) ?? (await locationsPage(session));
           }
           default: {
+            // A team's provider's callback, by connection; and single sign-on by a team's handle.
+            const ssoCallback = /^\/sso\/callback\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(route)?.[1];
+            if (ssoCallback !== undefined && ssoStore) return await finishSsoSignIn(request, url, ssoCallback);
+            const ssoHandle = /^\/sso\/([a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?)$/.exec(route)?.[1];
+            if (ssoHandle !== undefined && ssoStore) return await ssoStartPage(url, ssoHandle);
             const resourceId = RESOURCE_PAGE.exec(route)?.[1];
             if (resourceId !== undefined) {
               const session = await readSession(request);

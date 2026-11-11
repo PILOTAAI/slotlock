@@ -1935,7 +1935,7 @@ describe('organizations', () => {
     const { session } = await signIn(target);
     const person = `github:${GITHUB_USER.id}`;
     // GitHub's owner of the organization is its Owner, recorded at sign-in.
-    expect((await workspaces.standing(`github-org:${ACME.id}`, person)).role).toBe('owner');
+    expect((await workspaces.standing(`github-org:${ACME.id}`, person, null)).role).toBe('owner');
     const token = await csrf(target, session);
     expect((await post(target, '/base/dashboard/keys', { csrf: token, name: 'A', access: 'full', expires: 'never' }, session)).status).toBe(200);
     // An Admin may change anyone's key, but rotating a Full-access one (which shows its new secret)
@@ -3454,7 +3454,9 @@ describe('Google sign-in', () => {
     for (const change of [
       { aud: 'someone-else.apps.googleusercontent.com' },
       { iss: 'https://evil.example' },
-      { exp: Math.floor(now / 1000) - 1 },
+      // Expired past the 60 seconds' skew clocks are allowed (oidc.ts).
+      { exp: Math.floor(now / 1000) - 61 },
+      { iat: Math.floor(now / 1000) - 3600 },
       { nonce: 'replayed' },
       { sub: 'has spaces' },
     ]) {

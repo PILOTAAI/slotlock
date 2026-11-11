@@ -68,6 +68,8 @@ export const SLOTLOCK_WORKSPACE_CAPABILITIES = Object.freeze([
   'billing.manage',
   /** Grant Owner or Billing, transfer, delete the workspace, link a GitHub organization. Fresh. */
   'workspace.own',
+  /** The team's identity: its verified domains and who may join through them. Owner only. Fresh. */
+  'identity.manage',
 ] as const);
 export type SlotlockWorkspaceCapability = (typeof SLOTLOCK_WORKSPACE_CAPABILITIES)[number];
 
@@ -79,6 +81,7 @@ export const SLOTLOCK_FRESH_CAPABILITIES: ReadonlySet<SlotlockWorkspaceCapabilit
   'billing.manage',
   'workspace.own',
   'privacy.manage',
+  'identity.manage',
 ]);
 
 const everyCapability = SLOTLOCK_WORKSPACE_CAPABILITIES;
@@ -88,7 +91,7 @@ const without = (...left: SlotlockWorkspaceCapability[]) => everyCapability.filt
 export const SLOTLOCK_ROLE_CAPABILITIES: Readonly<Record<SlotlockWorkspaceRole, ReadonlySet<SlotlockWorkspaceCapability>>> =
   Object.freeze({
     owner: new Set(everyCapability),
-    admin: new Set(without('billing.manage', 'workspace.own')),
+    admin: new Set(without('billing.manage', 'workspace.own', 'identity.manage')),
     developer: new Set<SlotlockWorkspaceCapability>([
       'account.use',
       'workspace.read',
@@ -162,6 +165,33 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   // Limiting a member to locations and groups (RFC 0004 D1), or giving them all of it again.
   '/members/scope': 'members.manage',
   '/members/remove': 'members.manage',
+  // Approving or declining a request to join through a verified domain.
+  '/members/requests': 'members.manage',
+  // Asking to join a team through a verified address: anyone signed in, for a team they are not in.
+  '/join/request': 'account.use',
+  // A team's domains, and holding invitations to them: its Owners only.
+  '/identity/domains': 'identity.manage',
+  '/identity/domains/verify': 'identity.manage',
+  '/identity/domains/remove': 'identity.manage',
+  '/identity/domains/policy': 'identity.manage',
+  '/identity/invites': 'identity.manage',
+  // A team's single sign-on: its Owners only.
+  '/identity/sso': 'identity.manage',
+  '/identity/sso/test': 'identity.manage',
+  '/identity/sso/status': 'identity.manage',
+  '/identity/sso/delete': 'identity.manage',
+  '/identity/sso/provisioning': 'identity.manage',
+  '/identity/sso/mapping': 'identity.manage',
+  '/identity/sso/require': 'identity.manage',
+  '/identity/scim/enable': 'identity.manage',
+  '/identity/scim/disable': 'identity.manage',
+  '/identity/scim/token': 'identity.manage',
+  '/identity/scim/token/revoke': 'identity.manage',
+  '/identity/scim/group': 'identity.manage',
+  // Signing in through one's team's provider (to link it or prove oneself), or an Owner's bypass:
+  // from wherever one is, for a team the handler and the database check one belongs to.
+  '/sso/proof': 'account.use',
+  '/sso/bypass': 'account.use',
   '/keys': 'keys.manage_own',
   '/keys/rotate': 'keys.manage_own',
   '/keys/revoke': 'keys.manage_own',
@@ -238,6 +268,7 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/team': 'workspace.own',
   '/settings/privacy': 'privacy.manage',
   '/settings/privacy/download': 'privacy.manage',
+  '/settings/identity': 'identity.manage',
 });
 
 /**

@@ -63,15 +63,15 @@ describe.skipIf(!url)('workspace memberships and the audit log (real Postgres)',
       { id: other, role: 'member' },
     ]);
     expect(epoch).toBeGreaterThan(0);
-    expect(await workspaces.standing(`github-org:${org}`, person)).toEqual({ role: 'owner', sessionEpoch: epoch });
-    expect(await workspaces.standing(`github-org:${other}`, person)).toEqual({ role: 'developer', sessionEpoch: epoch });
+    expect(await workspaces.standing(`github-org:${org}`, person, null)).toEqual({ role: 'owner', sessionEpoch: epoch, refusal: null, mayBypass: false });
+    expect(await workspaces.standing(`github-org:${other}`, person, null)).toEqual({ role: 'developer', sessionEpoch: epoch, refusal: null, mayBypass: false });
     // The test environment has the live workspace's members; one's own workspace is one's own.
-    expect((await workspaces.standing(`github-org:${other}~test`, person)).role).toBe('developer');
-    expect((await workspaces.standing(person, person)).role).toBe('owner');
-    expect((await workspaces.standing(`${person}~test`, person)).role).toBe('owner');
+    expect((await workspaces.standing(`github-org:${other}~test`, person, null)).role).toBe('developer');
+    expect((await workspaces.standing(person, person, null)).role).toBe('owner');
+    expect((await workspaces.standing(`${person}~test`, person, null)).role).toBe('owner');
     // Nobody else is a member, and nobody is Owner of another's workspace.
-    expect((await workspaces.standing(`github-org:${org}`, 'github:1')).role).toBeNull();
-    expect((await workspaces.standing(person, 'github:1')).role).toBeNull();
+    expect((await workspaces.standing(`github-org:${org}`, 'github:1', null)).role).toBeNull();
+    expect((await workspaces.standing(person, 'github:1', null)).role).toBeNull();
   });
 
   it('ends a membership GitHub no longer lists, and never changes a role given in Slotlock', async () => {
@@ -83,32 +83,32 @@ describe.skipIf(!url)('workspace memberships and the audit log (real Postgres)',
       { id: org, role: 'member' },
       { id: third, role: 'admin' },
     ]);
-    expect((await workspaces.standing(`github-org:${org}`, person)).role).toBe('developer');
-    expect((await workspaces.standing(`github-org:${other}`, person)).role).toBeNull();
-    expect((await workspaces.standing(`github-org:${third}`, person)).role).toBe('viewer');
+    expect((await workspaces.standing(`github-org:${org}`, person, null)).role).toBe('developer');
+    expect((await workspaces.standing(`github-org:${other}`, person, null)).role).toBeNull();
+    expect((await workspaces.standing(`github-org:${third}`, person, null)).role).toBe('viewer');
     const [row] = await admin<{ status: string; deactivated: boolean }[]>`
       SELECT status, deactivated_at IS NOT NULL AS deactivated FROM slotlock.workspace_memberships
        WHERE tenant_ref = ${`github-org:${other}`} AND person_ref = ${person}`;
     // Kept, inactive, so being added back restores the role.
     expect(row).toEqual({ status: 'inactive', deactivated: true });
     await workspaces.signedIn(person, [{ id: other, role: 'member' }]);
-    expect((await workspaces.standing(`github-org:${other}`, person)).role).toBe('developer');
+    expect((await workspaces.standing(`github-org:${other}`, person, null)).role).toBe('developer');
   });
 
   it('signs a person out everywhere by drawing a new epoch, and an erased person has none', async () => {
     const workspaces = createSlotlockDashboardWorkspaces(application);
-    const before = (await workspaces.standing(person, person)).sessionEpoch;
+    const before = (await workspaces.standing(person, person, null)).sessionEpoch;
     expect(before).toBeGreaterThan(0);
     const after = await workspaces.signOutEverywhere(person);
     expect(after).not.toBe(before);
-    expect((await workspaces.standing(person, person)).sessionEpoch).toBe(after);
+    expect((await workspaces.standing(person, person, null)).sessionEpoch).toBe(after);
     expect(await workspaces.signedIn(person)).toBe(after);
     // Erased, the person has no epoch, so no session of theirs passes; signing in again draws afresh.
     const someone = `github:${Number(uid) + 7}`;
     const first = await workspaces.signedIn(someone);
     await store.eraseTenant({ tenantRef: someone });
-    expect((await workspaces.standing(someone, someone)).sessionEpoch).toBeNull();
-    expect((await workspaces.standing('github:9', 'github:9')).sessionEpoch).toBeNull();
+    expect((await workspaces.standing(someone, someone, null)).sessionEpoch).toBeNull();
+    expect((await workspaces.standing('github:9', 'github:9', null)).sessionEpoch).toBeNull();
     const again = await workspaces.signedIn(someone);
     expect(again).toBeGreaterThan(0);
     expect(again).not.toBe(first);
@@ -189,12 +189,12 @@ describe.skipIf(!url)('workspace memberships and the audit log (real Postgres)',
     await workspaces.signedIn(someone, [{ id: org, role: 'member' }]);
     const erasedOrg = await store.eraseTenant({ tenantRef: `github-org:${org}` });
     expect(erasedOrg.rows.workspace_memberships).toBeGreaterThanOrEqual(2);
-    expect((await workspaces.standing(`github-org:${org}`, someone)).role).toBeNull();
+    expect((await workspaces.standing(`github-org:${org}`, someone, null)).role).toBeNull();
     await workspaces.signedIn(someone, [{ id: other, role: 'member' }]);
     const erasedPerson = await store.eraseTenant({ tenantRef: someone });
     expect(erasedPerson.rows.workspace_memberships).toBe(1);
     expect(erasedPerson.rows.dashboard_people).toBe(1);
-    expect((await workspaces.standing(`github-org:${other}`, someone)).role).toBeNull();
+    expect((await workspaces.standing(`github-org:${other}`, someone, null)).role).toBeNull();
   });
 
   it('pins the search path of every SECURITY DEFINER function and grants PUBLIC none of them', async () => {

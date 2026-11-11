@@ -67,6 +67,7 @@ import {
   readDashboardOrganizations,
   readDashboardTeamWorkspaces,
   readDashboardUsers,
+  readVerifiedDomains,
   readLimits,
   readSecret,
   readServerUrl,
@@ -95,6 +96,9 @@ import {
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
 import { createSlotlockDashboardWorkspaces, createSlotlockWorkspaceCheck } from './workspaces.js';
+import { createSlotlockWorkspaceDomains, runSlotlockDomainChecks } from './workspace-domains.js';
+import { slotlockDomainResolvers } from './domains.js';
+import { createSlotlockSecretBox } from './oidc.js';
 import { createSlotlockInvitationEmailSender } from './invitation-email.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import {
@@ -202,6 +206,11 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_INVITATION_EMAIL',
   'SLOTLOCK_INVITATION_EMAIL_KEY',
   'SLOTLOCK_INVITATION_EMAIL_FROM',
+  'SLOTLOCK_VERIFIED_DOMAINS',
+  'SLOTLOCK_DNS_RESOLVER',
+  'SLOTLOCK_TEAM_SSO',
+  'SLOTLOCK_SSO_SECRET',
+  'SLOTLOCK_TEAM_SCIM',
   'HOST',
   'PORT',
 ] as const);
@@ -320,6 +329,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * or a Worker does: their `team:<id>` keys act only while the workspace exists (workspace_active).
    */
   teamWorkspaces?: boolean;
+  /**
+   * Verified domains (SLOTLOCK_VERIFIED_DOMAINS=on), whether this server serves the dashboard or a
+   * Worker does: their daily check runs in this server's maintenance.
+   */
+  verifiedDomains?: { resolver: 'doh' | 'system' };
   /**
    * Serve the REST API under /v1, with the application API for admin keys, and its OpenAPI document
    * (SLOTLOCK_REST_API: on unless off).
@@ -588,6 +602,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const organizations = readDashboardOrganizations(env);
   if (organizations !== undefined) config.organizations = organizations;
   if (readDashboardTeamWorkspaces(env)) config.teamWorkspaces = true;
+  const verifiedDomains = readVerifiedDomains(env);
+  if (verifiedDomains !== undefined) config.verifiedDomains = verifiedDomains;
   const allowedUsers = dashboard?.allowedUsers ?? readDashboardUsers(env);
   if (allowedUsers !== undefined) config.allowedUsers = allowedUsers;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
@@ -903,6 +919,8 @@ export function slotlockServeAllowsTenant(
   // A test environment (RFC 0003 G9) is let through exactly as its live tenant.
   const live = slotlockLiveTenant(tenantRef);
   if (live.startsWith('team:')) return config.teamWorkspaces === true;
+  // A person a team's identity provider made has no workspace of their own, so no keys of one.
+  if (live.startsWith('sso:')) return false;
   const orgId = /^github-org:(\d+)$/.exec(live)?.[1];
   // With `enabled`, the database decides, as serve's authenticate asks (createSlotlockOrganizationCheck).
   if (orgId !== undefined) return config.organizations === 'enabled' || config.organizations?.includes(orgId) === true;
@@ -1324,6 +1342,14 @@ export async function startSlotlockServer(
               : {}),
             ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             ...(config.dashboard.teamWorkspaces ? { teamWorkspaces: true } : {}),
+            ...(config.dashboard.verifiedDomains
+              ? { domains: { resolvers: slotlockDomainResolvers(config.dashboard.verifiedDomains.resolver) } }
+              : {}),
+            // Teams' single sign-on: their Owners' URLs fetched never from a private address.
+            ...(config.dashboard.teamSso
+              ? { sso: { secretBox: createSlotlockSecretBox(config.dashboard.teamSso.secret), fetch: createSlotlockGuardedFetch() } }
+              : {}),
+            ...(config.dashboard.teamScim ? { scim: true } : {}),
             ...(config.dashboard.invitationEmail
               ? {
                   invitations: createSlotlockInvitationEmailSender(config.dashboard.invitationEmail, {
@@ -1406,6 +1432,23 @@ export async function startSlotlockServer(
       ...(config.usage ? { usage: true } : {}),
       // Holiday calendar subscriptions (RFC 0004 B1), never from a private address.
       holidayFetch: createSlotlockGuardedFetch(),
+      // Team workspaces' verified domains, looked up again each day; each change in the team's audit log.
+      ...(config.verifiedDomains
+        ? {
+            domainChecks: (() => {
+              const domains = createSlotlockWorkspaceDomains(sql);
+              const resolvers = slotlockDomainResolvers(config.verifiedDomains.resolver);
+              const audit = createSlotlockStore(sql, retention);
+              return () =>
+                runSlotlockDomainChecks({
+                  domains,
+                  resolvers,
+                  record: (tenantRef, event) =>
+                    audit.withTenant(tenantRef, (tenant) => tenant.recordAuditEvent({ tenantRef, event })).then(() => undefined),
+                });
+            })(),
+          }
+        : {}),
       // Counts only, never the tenant.
       onPass: (result) => {
         metrics?.maintenance(result);
@@ -2836,6 +2879,15 @@ Environment:
                                  workspaces; without it, the person inviting sends the link)
   SLOTLOCK_INVITATION_EMAIL_KEY  Resend's API key, or Postmark's server token
   SLOTLOCK_INVITATION_EMAIL_FROM The sender the provider verified: team@example.com or Name <...>
+  SLOTLOCK_VERIFIED_DOMAINS      on or off (default): team Owners verify their domain with a DNS
+                                 record, and people at it may ask to join (with team workspaces)
+  SLOTLOCK_DNS_RESOLVER          doh (default: Cloudflare, checked by Google) or system: how a
+                                 verified domain's record is looked up each day
+  SLOTLOCK_TEAM_SSO              on or off (default): each team signs in through its own identity
+                                 provider over OpenID Connect (with verified domains)
+  SLOTLOCK_SSO_SECRET            32+ characters: seals each team's client secret (with team SSO)
+  SLOTLOCK_TEAM_SCIM             on or off (default): each team's identity provider provisions its
+                                 people over SCIM 2.0 at /dashboard/scim/v2 (with verified domains)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 
