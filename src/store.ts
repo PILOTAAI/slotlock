@@ -2037,6 +2037,30 @@ async function rulesNow(tx: StoreSql, resourceId: string): Promise<{ rules: Slot
  * Mark what the next change of a booking records on the feed (RFC 0004 B5): a cancellation's fee
  * and an admin's reason for going past a cutoff. Cleared with nulls.
  */
+/**
+ * Whether a paid hold ended without a booking (RFC 0004 C3), so its payment was never applied:
+ * not booked (confirmed, or booked from), not still held, and not taken over by an approval that
+ * was granted or may still be.
+ */
+async function paidHoldEnded(
+  tx: StoreSql,
+  tenantRef: string,
+  payment: { id: string; booked_at: Date | null; approval_id: string | null },
+): Promise<boolean> {
+  if (payment.booked_at) return false;
+  const [hold] = await tx<{ status: string; live: boolean }[]>`
+    SELECT status, expires_at > statement_timestamp() AS live FROM slotlock.reservations WHERE id = ${payment.id}`;
+  if (hold) return hold.status === 'held' && !hold.live;
+  if (payment.approval_id) {
+    const [approval] = await tx<{ status: string; live: boolean }[]>`
+      SELECT status, expires_at > statement_timestamp() AS live FROM slotlock.approvals
+       WHERE id = ${payment.approval_id}::uuid AND tenant_ref = ${tenantRef}`;
+    if (approval?.status === 'granted') return false;
+    if (approval?.status === 'pending' && approval.live) return false;
+  }
+  return true;
+}
+
 async function noteEnding(
   tx: StoreSql,
   fee: { amount_minor: number; currency: string } | null,
@@ -3386,7 +3410,7 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * Record that a hold waiting for payment is paid (RFC 0004 C3), by the payment's reference at the
    * integrator's processor: the integrator says so, or an adapter that verified it. Once paid it
    * may be confirmed. The same reference again answers the same hold, whatever became of it since
-   * (confirmed, booked, expired: the payment is kept apart); another is `payment_conflict`. The feed says so (`hold.paid`). A hold that does not wait for payment is
+   * (confirmed or booked from: the payment is kept apart), unless the hold ended without a booking (`hold_ended`: never applied, so refunded); another is `payment_conflict`, naming the one recorded. The feed says so (`hold.paid`). A hold that does not wait for payment is
    * `payment_not_required`; an expired one `hold_expired`; one confirmed, released or unknown
    * `hold_not_found`.
    */
@@ -6778,16 +6802,21 @@ function buildSlotlockStore(
         // (a reloaded return page, a redelivered webhook) after the hold was booked is answered as
         // recorded, never as a refusal a payment adapter would refund.
         await lockExternalIdentity(tx, params.tenantRef, `hold-payment:${params.holdId}`);
-        const [recorded] = await tx<HoldRow[]>`
+        const [recorded] = await tx<(HoldRow & { booked_at: Date | null; approval_id: string | null })[]>`
           SELECT hold_id AS id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at,
                  NULL::text AS source, true AS payment_required, payment_ref, paid_at,
-                 payment_amount_minor, payment_currency, paid_amount_minor, paid_currency
+                 payment_amount_minor, payment_currency, paid_amount_minor, paid_currency,
+                 booked_at, approval_id
             FROM slotlock.hold_payments
            WHERE hold_id = ${params.holdId} AND tenant_ref = ${params.tenantRef}`;
         if (recorded) {
-          return recorded.payment_ref === params.paymentRef
-            ? { ok: true, hold: toHold(recorded), idempotent: true }
-            : { ok: false, code: 'payment_conflict' };
+          if (recorded.payment_ref !== params.paymentRef) {
+            // Named, so an adapter refunds only a payment it can tell is another.
+            return { ok: false, code: 'payment_conflict', paymentRef: recorded.payment_ref as string };
+          }
+          // Its hold ended without a booking: the payment was never applied, and is refunded.
+          if (await paidHoldEnded(tx, params.tenantRef, recorded)) return { ok: false, code: 'hold_ended' };
+          return { ok: true, hold: toHold(recorded), idempotent: true };
         }
         const [row] = await tx<(HoldRow & { status: string; live: boolean })[]>`
           SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
@@ -6805,7 +6834,7 @@ function buildSlotlockStore(
         if (row.payment_ref !== null && row.payment_ref !== undefined) {
           return row.payment_ref === params.paymentRef
             ? { ok: true, hold: toHold(row), idempotent: true }
-            : { ok: false, code: 'payment_conflict' };
+            : { ok: false, code: 'payment_conflict', paymentRef: row.payment_ref };
         }
         // Paid after it lapsed: the time may be someone else's by now. The integrator refunds.
         if (!row.live) return { ok: false, code: 'hold_expired' };
@@ -7076,10 +7105,15 @@ function buildSlotlockStore(
           const id = randomUUID();
           // The requester's own hold of the time gives way to the approval's.
           if (params.consumeHold && isValidResourceId(params.consumeHold.holdId)) {
+            // Taken over, not ended: its payment, if any, goes with the approval (booked if granted).
+            await tx`SELECT set_config('slotlock.ending', 'approval', true)`;
             await tx`
               DELETE FROM slotlock.reservations
                WHERE id = ${params.consumeHold.holdId} AND status = 'held'
                  AND holder_ref = ${params.consumeHold.holderRef}`;
+            await tx`SELECT set_config('slotlock.ending', '', true)`;
+            await tx`UPDATE slotlock.hold_payments SET approval_id = ${id}::uuid
+                      WHERE hold_id = ${params.consumeHold.holdId} AND tenant_ref = ${tenantRef}`;
           }
           const holds = [...params.holds].sort(
             (left, right) => left.resourceId.localeCompare(right.resourceId) || left.start.getTime() - right.start.getTime(),
@@ -7346,6 +7380,9 @@ function buildSlotlockStore(
           RETURNING id, resource_id, tenant_ref, external_ref, starts_at, ends_at,
                     buffer_after_ms, revision, source, contact_ref, notify, reminder_minutes`;
         if (!confirmed) throw new Error('slotlock: hold confirmation returned no row');
+        // Its payment, if any, is applied: never refunded as a hold that ended unbooked.
+        await tx`UPDATE slotlock.hold_payments SET booked_at = statement_timestamp()
+                  WHERE hold_id = ${holdId} AND booked_at IS NULL`;
         // Its linked alternatives (one group, one holder) are released with it, as booking one
         // from an agent releases the rest.
         if (row.hold_group_id !== null && row.holder_ref !== null) {
@@ -7655,6 +7692,9 @@ function buildSlotlockStore(
               await tx`SELECT set_config('slotlock.ending', 'confirmed', true)`;
               await tx`DELETE FROM slotlock.reservations WHERE id = ${holdId} AND status = 'held' AND holder_ref = ${holderRef}`;
               await tx`SELECT set_config('slotlock.ending', '', true)`;
+              // Its payment, if any, is applied to this booking.
+              await tx`UPDATE slotlock.hold_payments SET booked_at = statement_timestamp()
+                        WHERE hold_id = ${holdId} AND booked_at IS NULL`;
               // A set held together (RFC 0004 B7) is booked member by member: its other holds stay.
               await tx`
                 DELETE FROM slotlock.reservations

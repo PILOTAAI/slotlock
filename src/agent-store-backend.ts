@@ -3715,7 +3715,12 @@ export function createSlotlockStoreApplicationBackend(
           paymentRef: input.payment_ref as string,
           ...(input.received !== undefined ? { received: amountInput(input.received) as { amountMinor: number; currency: string } } : {}),
         });
-        if (!result.ok) throw applicationRefusal(result.code);
+        if (!result.ok) {
+          if (result.code === 'payment_conflict') {
+            throw new SlotlockAgentOperationError('payment_conflict', 409, { payment_ref: result.paymentRef });
+          }
+          throw applicationRefusal(result.code);
+        }
         return { hold: holdOutput(result.hold), replayed: result.idempotent };
       }, WRITE);
     },

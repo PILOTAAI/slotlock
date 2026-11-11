@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../../../src/agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../../../src/agent-store-backend.js';
 import { type SlotlockStore, createSlotlockStore } from '../../../src/store.js';
-import { STRIPE_API_VERSION, createPaymentsHttpHandler, createStripePayments } from './index.js';
+import { STRIPE_API_VERSION, createPaymentsHttpHandler, createStripePayments, tenantDigest } from './index.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const stripeKey = process.env.STRIPE_TEST_SECRET_KEY?.trim();
@@ -45,6 +45,7 @@ describe.skipIf(!url || !stripeKey)('@slotlock/payments-stripe against Stripe te
   }) as typeof fetch;
   const payments = () =>
     createStripePayments({
+      tenantRef: tenantA,
       stripeSecretKey: stripeKey as string,
       slotlock: { baseUrl: BASE, apiKey: 'admin-a' },
       refundRefused: true,
@@ -73,7 +74,10 @@ describe.skipIf(!url || !stripeKey)('@slotlock/payments-stripe against Stripe te
     currency: string;
     card?: string;
     manualCapture?: boolean;
+    /** The tenant the PaymentIntent names; by default the adapter's own (tenant A). */
+    metadata?: Record<string, string>;
   }): Promise<Json> {
+    const metadata = params.metadata ?? payments().metadataFor(params.holdId);
     const created = await stripe('POST', '/payment_intents', {
       amount: String(params.amount),
       currency: params.currency,
@@ -81,7 +85,7 @@ describe.skipIf(!url || !stripeKey)('@slotlock/payments-stripe against Stripe te
       payment_method: params.card ?? 'pm_card_visa',
       confirm: 'true',
       ...(params.manualCapture ? { capture_method: 'manual' } : {}),
-      [`metadata[slotlock_hold_id]`]: params.holdId,
+      ...Object.fromEntries(Object.entries(metadata).map(([key, value]) => [`metadata[${key}]`, value])),
       description: 'Slotlock payments e2e test',
     });
     if (created.status === 200) return created.body;
@@ -275,19 +279,33 @@ describe.skipIf(!url || !stripeKey)('@slotlock/payments-stripe against Stripe te
     });
   }, 120_000);
 
-  it("leaves another tenant's hold alone, and does not refund a payment it cannot place", async () => {
+  it("never touches another tenant's payment, and refunds its own that names a hold it does not have", async () => {
     const theirs = await hold('admin-b', roomB);
-    const intent = await pay({ holdId: theirs, amount: 4500, currency: 'gbp' });
-    // Tenant A's adapter, with tenant A's Slotlock key, cannot reach tenant B's hold.
-    expect(await payments().confirmPaymentIntent(intent.id as string)).toEqual({
+    // Tenant B's payment on a Stripe account both share: tenant A's adapter leaves it to B.
+    const shared = await pay({ holdId: theirs, amount: 4500, currency: 'gbp', metadata: { slotlock_hold_id: theirs, slotlock_tenant: tenantDigest(tenantB) } });
+    expect(await payments().confirmPaymentIntent(shared.id as string)).toEqual({ status: 'not_paid', reason: 'other_tenant' });
+    expect(await refundsOf(shared.id as string)).toEqual([]);
+    // A payment to tenant A naming a hold A does not have (B's): A's key cannot reach it, nothing
+    // was applied, and A refunds its customer.
+    const stray = await pay({ holdId: theirs, amount: 4500, currency: 'gbp' });
+    expect(await payments().confirmPaymentIntent(stray.id as string)).toEqual({
       status: 'refused',
       holdId: theirs,
-      paymentRef: intent.id,
+      paymentRef: stray.id,
       code: 'hold_not_found',
-      refunded: false,
+      refunded: true,
     });
-    expect(await refundsOf(intent.id as string)).toEqual([]);
+    expect(await refundsOf(stray.id as string)).toEqual(['succeeded']);
     expect((await call('admin-b', 'GET', `/v1/holds/${theirs}`)).body.hold).toMatchObject({ payment_ref: null });
     expect((await call('admin-b', 'POST', `/v1/holds/${theirs}/confirm`, {})).body).toMatchObject({ error: { code: 'payment_required' } });
+  }, 120_000);
+
+  it('refunds a payment whose hold ended without a booking', async () => {
+    const held = await hold();
+    const intent = await pay({ holdId: held, amount: 4500, currency: 'gbp' });
+    expect(await payments().confirmPaymentIntent(intent.id as string)).toMatchObject({ status: 'paid', replayed: false });
+    expect((await call('admin-a', 'DELETE', `/v1/holds/${held}`)).body).toEqual({ released: true });
+    expect(await payments().confirmPaymentIntent(intent.id as string)).toMatchObject({ status: 'refused', code: 'hold_ended', refunded: true });
+    expect(await refundsOf(intent.id as string)).toEqual(['succeeded']);
   }, 120_000);
 });

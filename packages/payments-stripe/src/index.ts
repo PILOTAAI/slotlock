@@ -4,9 +4,13 @@ export {
   HOLD_METADATA_KEY,
   type PaymentOutcome,
   STRIPE_API_VERSION,
+  SlotlockSignatureError,
   StripeSignatureError,
   type StripePaymentsOptions,
+  TENANT_METADATA_KEY,
   createStripePayments,
+  tenantDigest,
+  verifySlotlockWebhook,
   verifyStripeSignature,
 } from './payments.js';
 export { type PaymentsHttpOptions, type StripeTenant, createPaymentsHttpHandler } from './http.js';
