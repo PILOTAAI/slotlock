@@ -202,14 +202,13 @@ describe('client publishing', () => {
   );
 
   it('uses each registry trusted publishing where it has one, and no long-lived token there', () => {
-    // Pinned by commit at major version 1; Dependabot moves the patch, which this does not pin.
-    expect(job('pypi')).toMatch(/uses: pypa\/gh-action-pypi-publish@[0-9a-f]{40} # v1\.\d+\.\d+/);
+    // Pinned to a commit, on the major version these steps were written for: Dependabot moves the
+    // pin and its comment within it; a new major is a change to review here.
+    expect(job('pypi')).toMatch(/uses: pypa\/gh-action-pypi-publish@[0-9a-f]{40} # v1\.\d+\.\d+\n/);
     expect(job('pypi')).toContain('--require-hashes');
-    expect(job('crates-io')).toMatch(
-      /uses: rust-lang\/crates-io-auth-action@[0-9a-f]{40} # v1\.\d+\.\d+/,
-    );
+    expect(job('crates-io')).toMatch(/uses: rust-lang\/crates-io-auth-action@[0-9a-f]{40} # v1\.\d+\.\d+\n/);
     expect(job('crates-io')).toContain('CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}');
-    expect(job('nuget')).toMatch(/uses: NuGet\/login@[0-9a-f]{40} # v1\.\d+\.\d+/);
+    expect(job('nuget')).toMatch(/uses: NuGet\/login@[0-9a-f]{40} # v1\.\d+\.\d+\n/);
     expect(job('nuget')).toContain('--api-key "$NUGET_API_KEY"');
     for (const name of ['pypi', 'crates-io', 'nuget']) expect(job(name)).not.toContain('secrets.');
     // Maven Central has no trusted publishing: a user token uploads a deployment that waits in the

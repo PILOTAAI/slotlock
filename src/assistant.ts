@@ -5,7 +5,9 @@
 // Nothing the model says changes the list of tools.
 //
 // Request formats as the vendors' official TypeScript SDKs describe them: @anthropic-ai/sdk 1.3.0
-// and openai 7.45.1 (read from the npm registry 2026-10-28).
+// and openai 7.45.1 (read from the npm registry 2026-10-28). Streamed answers as Anthropic's
+// "Streaming messages" page, the Chat Completions chunk object, @anthropic-ai/sdk 1.8.0 and openai
+// 7.55.0 describe them, read as server-sent events by the WHATWG HTML standard (all read 2026-11-10).
 //
 // The API key is sealed with AES-256-GCM (WebCrypto) under a key HKDF-SHA-256-derived from
 // SLOTLOCK_ASSISTANT_SECRET, with the tenant as additional data: a sealed key copied to another
@@ -552,6 +554,11 @@ interface ModelRequest {
   force?: string;
   fetch: typeof fetch;
   signal: AbortSignal;
+  /**
+   * Stream the answer: called with each piece of its text as it arrives, in order; the pieces join
+   * to the answer's text. Without it the call asks for one JSON answer.
+   */
+  onText?: (delta: string) => void;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -700,14 +707,278 @@ async function readBounded(response: Response): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+type ProviderReason = SlotlockAssistantProviderError['reason'];
+
+/** What an HTTP status from a model call means. */
+function statusReason(status: number): ProviderReason {
+  return status === 401 || status === 403
+    ? 'refused_key'
+    : status === 404
+      ? 'not_found'
+      : status === 429
+        ? 'rate_limited'
+        : status === 408 || status === 504
+          ? 'timeout'
+          : 'unavailable';
+}
+
+/** The HTTP status each Anthropic error type stands for ("Claude API errors"), for one sent mid-stream. */
+const ANTHROPIC_ERROR_STATUS: ReadonlyMap<string, number> = new Map([
+  ['invalid_request_error', 400],
+  ['authentication_error', 401],
+  ['billing_error', 402],
+  ['permission_error', 403],
+  ['not_found_error', 404],
+  ['request_too_large', 413],
+  ['rate_limit_error', 429],
+  ['api_error', 500],
+  ['timeout_error', 504],
+  ['overloaded_error', 529],
+]);
+
+/**
+ * Server-sent events as the WHATWG HTML standard interprets them: lines end at CRLF, LF or CR; a
+ * line starting with `:` is a comment; one space after the field's colon is dropped; `data` values
+ * join with LF; a blank line dispatches; other fields are ignored. Text comes in any pieces; an
+ * event the stream ends inside is never dispatched. `push` is true once `dispatch` was (stop).
+ */
+function sseLines(dispatch: (event: string, data: string) => boolean): (text: string) => boolean {
+  let line = '';
+  let afterCR = false;
+  let event = '';
+  let data = '';
+  let done = false;
+  const take = (field: string): void => {
+    if (field === '') {
+      if (data !== '') done = dispatch(event || 'message', data.slice(0, -1));
+      event = '';
+      data = '';
+      return;
+    }
+    if (field.startsWith(':')) return;
+    const colon = field.indexOf(':');
+    const name = colon === -1 ? field : field.slice(0, colon);
+    const value = colon === -1 ? '' : field.slice(field.charCodeAt(colon + 1) === 0x20 ? colon + 2 : colon + 1);
+    if (name === 'event') event = value;
+    else if (name === 'data') data += `${value}\n`;
+  };
+  return (text) => {
+    let start = 0;
+    for (let index = 0; index < text.length && !done; index += 1) {
+      const code = text.charCodeAt(index);
+      if (code === 0x0a && afterCR) {
+        // The LF of a CRLF whose CR ended the line, perhaps in the previous piece.
+        afterCR = false;
+        start = index + 1;
+        continue;
+      }
+      afterCR = code === 0x0d;
+      if (code !== 0x0a && code !== 0x0d) continue;
+      take(line + text.slice(start, index));
+      line = '';
+      start = index + 1;
+    }
+    if (!done) line += text.slice(start);
+    return done;
+  };
+}
+
+/**
+ * A streamed body, decoded as its bytes arrive (a character split across chunks waits for the
+ * rest) and read to `onEvent` until it answers true, within MAX_RESPONSE_BYTES. An abort cancels
+ * the read at once and is a timeout, even with events still in hand.
+ */
+async function readEvents(
+  response: Response,
+  signal: AbortSignal,
+  onEvent: (event: string, data: string) => boolean,
+): Promise<void> {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  const cancel = () => {
+    reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener('abort', cancel, { once: true });
+  // UTF-8, without a leading byte order mark, as the standard decodes a stream.
+  const decoder = new TextDecoder();
+  const push = sseLines((event, data) => {
+    if (signal.aborted) throw new SlotlockAssistantProviderError('timeout');
+    return onEvent(event, data);
+  });
+  let size = 0;
+  try {
+    for (;;) {
+      if (signal.aborted) throw new SlotlockAssistantProviderError('timeout');
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        throw new SlotlockAssistantProviderError(signal.aborted ? 'timeout' : 'bad_answer');
+      }
+      if (chunk.done) {
+        if (signal.aborted) throw new SlotlockAssistantProviderError('timeout');
+        return;
+      }
+      size += chunk.value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) throw new SlotlockAssistantProviderError('bad_answer');
+      if (push(decoder.decode(chunk.value, { stream: true }))) return;
+    }
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    // Whatever follows the last event, or a body given up on, is not read.
+    cancel();
+  }
+}
+
+/** A provider's stream as it is read: each event, whether it ended as it should, and its calls. */
+interface StreamAnswer {
+  /** True to stop reading (the provider's last event). */
+  event(name: string, data: string): boolean;
+  complete(): boolean;
+  calls(): SlotlockAssistantCall[];
+}
+
+const parsedOr = (json: string, fallback: unknown): unknown => {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return fallback;
+  }
+};
+
+/**
+ * An Anthropic stream: content blocks by index, text from `text_delta`s, a `tool_use`'s input from
+ * its `input_json_delta` fragments, parsed once whole; ended by `message_stop`. `ping` and event
+ * types this does not know are passed over; `error` names its error as an HTTP status would.
+ */
+function anthropicStream(emit: (text: string) => void): StreamAnswer {
+  const blocks = new Map<number, 'text' | { id: string; name: string; input: unknown; json: string }>();
+  let stopped = false;
+  return {
+    event(name, data) {
+      const body = parsedOr(data, undefined);
+      if (name === 'error' || (isRecord(body) && body.type === 'error')) {
+        const type = isRecord(body) && isRecord(body.error) ? body.error.type : undefined;
+        const status = typeof type === 'string' ? ANTHROPIC_ERROR_STATUS.get(type) : undefined;
+        throw new SlotlockAssistantProviderError(status === undefined ? 'unavailable' : statusReason(status));
+      }
+      if (!isRecord(body)) {
+        if (name === 'ping') return false;
+        throw new SlotlockAssistantProviderError('bad_answer');
+      }
+      const index = typeof body.index === 'number' ? body.index : undefined;
+      if (body.type === 'content_block_start' && index !== undefined && isRecord(body.content_block)) {
+        const block = body.content_block;
+        if (block.type === 'text') {
+          blocks.set(index, 'text');
+          if (typeof block.text === 'string') emit(block.text);
+        } else if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
+          blocks.set(index, { id: block.id, name: block.name, input: block.input, json: '' });
+        }
+      } else if (body.type === 'content_block_delta' && index !== undefined && isRecord(body.delta)) {
+        const block = blocks.get(index);
+        const delta = body.delta;
+        if (block === 'text' && delta.type === 'text_delta' && typeof delta.text === 'string') emit(delta.text);
+        if (typeof block === 'object' && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+          block.json += delta.partial_json;
+        }
+      } else if (body.type === 'message_stop') {
+        stopped = true;
+      }
+      return stopped;
+    },
+    complete: () => stopped,
+    calls: () =>
+      [...blocks.entries()]
+        .sort(([a], [b]) => a - b)
+        .flatMap(([, block]) =>
+          block === 'text'
+            ? []
+            : [{ id: block.id, name: block.name, input: block.json === '' ? block.input : parsedOr(block.json, null) }],
+        ),
+  };
+}
+
+/**
+ * A Chat Completions stream: chunks whose first choice's delta carries `content` and `tool_calls`
+ * fragments, each call assembled by its `index` (id and name arrive once, arguments in pieces);
+ * complete at a `finish_reason`, ended by `data: [DONE]`. A chunk with an `error` is a failure.
+ */
+function openaiStream(emit: (text: string) => void): StreamAnswer {
+  const slots = new Map<number, { id?: string; name?: string; args: string }>();
+  let finished = false;
+  return {
+    event(name, data) {
+      if (data === '[DONE]') {
+        finished = true;
+        return true;
+      }
+      const body = parsedOr(data, undefined);
+      if (!isRecord(body)) throw new SlotlockAssistantProviderError('bad_answer');
+      if (name === 'error' || body.error) throw new SlotlockAssistantProviderError('unavailable');
+      for (const choice of Array.isArray(body.choices) ? body.choices : []) {
+        if (!isRecord(choice) || (choice.index ?? 0) !== 0) continue;
+        const delta = isRecord(choice.delta) ? choice.delta : {};
+        if (typeof delta.content === 'string') emit(delta.content);
+        for (const [position, fragment] of (Array.isArray(delta.tool_calls) ? delta.tool_calls : []).entries()) {
+          if (!isRecord(fragment)) continue;
+          // A server that sends whole calls without an index sends them in order.
+          const index =
+            typeof fragment.index === 'number' && Number.isSafeInteger(fragment.index) && fragment.index >= 0
+              ? fragment.index
+              : position;
+          const slot = slots.get(index) ?? { args: '' };
+          slots.set(index, slot);
+          const fn = isRecord(fragment.function) ? fragment.function : {};
+          if (typeof fragment.id === 'string' && fragment.id !== '') slot.id = fragment.id;
+          if (typeof fn.name === 'string' && fn.name !== '') slot.name = fn.name;
+          if (typeof fn.arguments === 'string') slot.args += fn.arguments;
+        }
+        if (typeof choice.finish_reason === 'string') finished = true;
+      }
+      return false;
+    },
+    complete: () => finished,
+    calls: () =>
+      [...slots.entries()]
+        .sort(([a], [b]) => a - b)
+        .flatMap(([index, slot]) =>
+          slot.name === undefined
+            ? []
+            : [{ id: slot.id ?? `call_${index}`, name: slot.name, input: parsedOr(slot.args || '{}', null) }],
+        ),
+  };
+}
+
+/** Text to `onText`, within MAX_MODEL_TEXT: what it was given is the answer's text. */
+function textSink(onText: (delta: string) => void): { emit: (delta: string) => void; text: () => string } {
+  let text = '';
+  return {
+    emit(delta) {
+      const kept = delta.slice(0, MAX_MODEL_TEXT - text.length);
+      if (kept === '') return;
+      text += kept;
+      try {
+        onText(kept);
+      } catch {
+        // Showing the answer never changes it.
+      }
+    },
+    text: () => text,
+  };
+}
+
+const isEventStream = (response: Response) =>
+  (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() === 'text/event-stream';
+
 /** One model call. Throws SlotlockAssistantProviderError, whose message never holds the key. */
 export async function callSlotlockAssistantModel(request: ModelRequest): Promise<SlotlockAssistantModelTurn> {
-  const { model } = request;
+  const { model, onText } = request;
   const anthropic = model.provider === 'anthropic';
   const url = anthropic ? `${model.baseUrl}/v1/messages` : `${model.baseUrl}/chat/completions`;
   const headers: Record<string, string> = {
     'content-type': 'application/json',
-    accept: 'application/json',
+    accept: onText ? 'text/event-stream' : 'application/json',
     'user-agent': 'slotlock-dashboard-assistant',
   };
   if (anthropic) {
@@ -716,12 +987,13 @@ export async function callSlotlockAssistantModel(request: ModelRequest): Promise
   } else if (model.apiKey) {
     headers.authorization = `Bearer ${model.apiKey}`;
   }
+  const body = anthropic ? anthropicBody(request) : openaiBody(request);
   let response: Response;
   try {
     response = await request.fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(anthropic ? anthropicBody(request) : openaiBody(request)),
+      body: JSON.stringify(onText ? { ...body, stream: true } : body),
       // Never follow a redirect: it would carry the key elsewhere.
       redirect: 'manual',
       signal: request.signal,
@@ -737,29 +1009,26 @@ export async function callSlotlockAssistantModel(request: ModelRequest): Promise
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    const status = response.status;
-    throw new SlotlockAssistantProviderError(
-      status === 401 || status === 403
-        ? 'refused_key'
-        : status === 404
-          ? 'not_found'
-          : status === 429
-            ? 'rate_limited'
-            : status === 408 || status === 504
-              ? 'timeout'
-              : 'unavailable',
-      status,
-    );
+    throw new SlotlockAssistantProviderError(statusReason(response.status), response.status);
   }
-  let body: unknown;
+  const sink = onText ? textSink(onText) : undefined;
+  if (sink && isEventStream(response)) {
+    const answer = anthropic ? anthropicStream(sink.emit) : openaiStream(sink.emit);
+    await readEvents(response, request.signal, answer.event);
+    if (!answer.complete()) throw new SlotlockAssistantProviderError('bad_answer');
+    return { text: sink.text(), calls: answer.calls() };
+  }
+  // One JSON answer: asked for, or sent by a server that does not stream.
+  let answer: unknown;
   try {
-    body = JSON.parse(await readBounded(response));
+    answer = JSON.parse(await readBounded(response));
   } catch (error) {
     if (error instanceof SlotlockAssistantProviderError) throw error;
     if (request.signal.aborted) throw new SlotlockAssistantProviderError('timeout');
     throw new SlotlockAssistantProviderError('bad_answer');
   }
-  const turn = anthropic ? readAnthropic(body) : readOpenai(body);
+  const turn = anthropic ? readAnthropic(answer) : readOpenai(answer);
+  sink?.emit(turn.text);
   return { text: turn.text.slice(0, MAX_MODEL_TEXT), calls: turn.calls };
 }
 
@@ -915,7 +1184,20 @@ export interface SlotlockAssistantTurnOptions {
     operation: SlotlockAgentOperation,
     input: unknown,
   ): Promise<{ ok: true; actionId: string } | { ok: false; code: string }>;
+  /** Stream the turn: each model call's text as it arrives, and each tool call before and after it runs. */
+  onEvent?: (event: SlotlockAssistantTurnEvent) => void;
+  /** The member's Stop: the turn ends at once, keeping what it has, and says it stopped. */
+  signal?: AbortSignal;
 }
+
+/**
+ * What a streamed turn tells as it goes, in order: text as the model writes it; then each tool call
+ * (`read` runs, `write` is proposed, `unknown` is refused) before it runs, and its result after.
+ */
+export type SlotlockAssistantTurnEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'call'; id: string; name: string; use: 'read' | 'write' | 'unknown' }
+  | { type: 'result'; id: string; name: string; ok: boolean; actionId?: string };
 
 export interface SlotlockAssistantTurnResult {
   /** The entries this turn added. */
@@ -929,10 +1211,13 @@ const toolText = (value: unknown) => {
   return text.length <= MAX_TOOL_RESULT ? text : `${text.slice(0, MAX_TOOL_RESULT)} …[truncated]`;
 };
 
+type SlotlockAssistantToolResult = Extract<SlotlockAssistantEntry, { role: 'tool' }>['results'][number];
+
 /**
  * One member message: call the model, run what it reads, keep what it would write, and call it
  * again with the results, up to `maxSteps` calls. Only the offered tools run, whatever the model
- * names; everything else is answered `tool_not_available`.
+ * names; everything else is answered `tool_not_available`. With `onEvent` each model call streams;
+ * once `signal` aborts, no model call or tool goes on, and every call kept has its result.
  */
 export async function runSlotlockAssistantTurn(
   options: SlotlockAssistantTurnOptions,
@@ -941,9 +1226,60 @@ export async function runSlotlockAssistantTurn(
   const byName = new Map(tools.map((tool) => [tool.name as string, tool]));
   const maxSteps = Math.max(1, Math.min(options.maxSteps ?? SLOTLOCK_ASSISTANT_MAX_STEPS, 20));
   const turnSignal = AbortSignal.timeout(options.turnTimeoutMs);
+  const { onEvent, signal: stop } = options;
   const added: SlotlockAssistantEntry[] = [];
+  const tell = (event: SlotlockAssistantTurnEvent) => {
+    try {
+      onEvent?.(event);
+    } catch {
+      // Showing the turn never changes it.
+    }
+  };
+  const stopped = (): SlotlockAssistantTurnResult => {
+    added.push({ role: 'note', text: 'Stopped.' });
+    return { added };
+  };
+  const run = async (
+    call: SlotlockAssistantCall,
+    tool: SlotlockAssistantTool | undefined,
+    index: number,
+  ): Promise<SlotlockAssistantToolResult> => {
+    if (!tool || index >= MAX_CALLS_PER_STEP) {
+      return {
+        id: call.id,
+        name: call.name,
+        content: toolText({ error: { code: tool ? 'too_many_calls' : 'tool_not_available' } }),
+        error: true,
+      };
+    }
+    if (tool.use === 'read') {
+      const outcome = await options.read(tool.name, call.input);
+      return {
+        id: call.id,
+        name: call.name,
+        content: toolText(outcome.ok ? outcome.data : { error: { code: outcome.code, ...(outcome.details ?? {}) } }),
+        error: !outcome.ok,
+      };
+    }
+    const proposed = await options.propose(tool.name, call.input);
+    return proposed.ok
+      ? {
+          id: call.id,
+          name: call.name,
+          content: toolText({
+            status: 'proposed',
+            action_id: proposed.actionId,
+            note: 'Not run. The member sees this change and may approve it; the result comes back as a dashboard note.',
+          }),
+          error: false,
+          action: proposed.actionId,
+        }
+      : { id: call.id, name: call.name, content: toolText({ error: { code: proposed.code } }), error: true };
+  };
   for (let step = 0; step < maxSteps; step += 1) {
+    if (stop?.aborted) return stopped();
     let turn: SlotlockAssistantModelTurn;
+    let streamed = '';
     try {
       turn = await callSlotlockAssistantModel({
         model: options.model,
@@ -951,9 +1287,22 @@ export async function runSlotlockAssistantTurn(
         entries: [...options.entries, ...added],
         tools,
         fetch: options.fetch,
-        signal: AbortSignal.any([turnSignal, AbortSignal.timeout(options.timeoutMs)]),
+        signal: AbortSignal.any([turnSignal, AbortSignal.timeout(options.timeoutMs), ...(stop ? [stop] : [])]),
+        ...(onEvent
+          ? {
+              onText: (delta: string) => {
+                streamed += delta;
+                tell({ type: 'text', delta });
+              },
+            }
+          : {}),
       });
     } catch (error) {
+      if (stop?.aborted) {
+        // The text shown so far stays; calls of a reply cut short do not, as none has a result.
+        if (streamed !== '') added.push({ role: 'assistant', text: streamed, calls: [] });
+        return stopped();
+      }
       added.push({ role: 'note', text: slotlockAssistantProviderMessage(error) });
       return { added, failure: error };
     }
@@ -964,54 +1313,29 @@ export async function runSlotlockAssistantTurn(
     }));
     added.push({ role: 'assistant', text: turn.text, calls });
     if (calls.length === 0) return { added };
-    const results: Extract<SlotlockAssistantEntry, { role: 'tool' }>['results'] = [];
+    const results: SlotlockAssistantToolResult[] = [];
     for (const [index, call] of calls.entries()) {
+      if (stop?.aborted) {
+        // Not run: answered, so the model is never sent a call without its result.
+        results.push({ id: call.id, name: call.name, content: toolText({ error: { code: 'stopped' } }), error: true });
+        continue;
+      }
       const tool = byName.get(call.name);
-      if (!tool || index >= MAX_CALLS_PER_STEP) {
-        results.push({
-          id: call.id,
-          name: call.name,
-          content: toolText({ error: { code: tool ? 'too_many_calls' : 'tool_not_available' } }),
-          error: true,
-        });
-        continue;
-      }
-      if (tool.use === 'read') {
-        const outcome = await options.read(tool.name, call.input);
-        results.push({
-          id: call.id,
-          name: call.name,
-          content: toolText(
-            outcome.ok ? outcome.data : { error: { code: outcome.code, ...(outcome.details ?? {}) } },
-          ),
-          error: !outcome.ok,
-        });
-        continue;
-      }
-      const proposed = await options.propose(tool.name, call.input);
-      results.push(
-        proposed.ok
-          ? {
-              id: call.id,
-              name: call.name,
-              content: toolText({
-                status: 'proposed',
-                action_id: proposed.actionId,
-                note: 'Not run. The member sees this change and may approve it; the result comes back as a dashboard note.',
-              }),
-              error: false,
-              action: proposed.actionId,
-            }
-          : {
-              id: call.id,
-              name: call.name,
-              content: toolText({ error: { code: proposed.code } }),
-              error: true,
-            },
-      );
+      const use = !tool ? 'unknown' : tool.use === 'read' ? 'read' : 'write';
+      tell({ type: 'call', id: call.id, name: call.name, use });
+      const result = await run(call, tool, index);
+      results.push(result);
+      tell({
+        type: 'result',
+        id: result.id,
+        name: result.name,
+        ok: !result.error,
+        ...(result.action !== undefined ? { actionId: result.action } : {}),
+      });
     }
     added.push({ role: 'tool', results });
   }
+  if (stop?.aborted) return stopped();
   added.push({
     role: 'note',
     text: `The assistant stopped after ${maxSteps} steps. Ask again, or more narrowly, to go on.`,

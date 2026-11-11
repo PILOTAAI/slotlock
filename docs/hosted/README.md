@@ -69,7 +69,7 @@ From 10 December 2026, each plan allows so many operations and bookings a calend
 - **A booking** is a reservation, a calendar event (a whole recurring series is one) or a confirmed
   hold.
 - At 80% and 100% of either, your account's change feed records `usage.threshold_reached`, which
-  your webhooks receive, and the Plan page says so.
+  your webhooks receive, and the dashboard's Overview and Usage pages say so.
 - **On Free**, past an allowance, calls are refused with `429 quota_exceeded` and a `Retry-After`
   header until the month ends: every call once the operations are used up, except reading your
   usage (`GET /v1/usage`) and erasing your account, and only new bookings and holds once the
@@ -77,7 +77,7 @@ From 10 December 2026, each plan allows so many operations and bookings a calend
   happens at 110% of an allowance. Nothing is charged for use past one.
 - Every answer to an operation lists what is left this month in its `RateLimit` and
   `RateLimit-Policy` headers (`"operations_month"` and `"bookings_month"`), and `GET /v1/usage`
-  and the Plan page show the month so far.
+  and the dashboard's Usage page show the month so far.
 
 ## Assistant
 
@@ -86,9 +86,9 @@ room-3?", "book it for Ana") with a model you bring:
 
 - **Connect your own model** in Settings, Assistant: the Anthropic Messages API, or any
   OpenAI-compatible API (OpenAI, OpenRouter, and others that answer tool calls), with its base
-  URL, the model name and your API key. A preset (Anthropic, OpenAI, OpenRouter, Google, Mistral,
-  Groq, Together) fills in the URL; **Load models** asks your provider which models it offers.
-  **Test connection** makes one real request. You pay your provider for what the model uses;
+  URL, the model name and your API key. Choosing a provider (Anthropic, OpenAI, OpenRouter, Google,
+  Mistral, Groq, Together) brings its URL and API format; Custom takes both. **Load models** asks
+  your provider which models it offers. **Test** makes one real request. You pay your provider for what the model uses;
   Slotlock does not charge for it.
 - **Your key** is stored encrypted (AES-256-GCM) and never shown again: only that it is set, and its
   last four characters.

@@ -20,7 +20,7 @@ import {
   createSlotlockMemoryDashboardState,
 } from '../dashboard.js';
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
-import type { SlotlockChange, SlotlockWebhookEndpoint } from '../event-feed.js';
+import { SLOTLOCK_CHANGE_TYPES, type SlotlockChange, type SlotlockWebhookEndpoint } from '../event-feed.js';
 import type { SlotlockTenantPlan } from '../plans.js';
 import type { SlotlockWaitlistEntry } from '../store.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
@@ -276,7 +276,7 @@ describe('dashboard routes and headers', () => {
     const response = await get(dashboard(), '/base/dashboard');
     expect(response.status).toBe(200);
     expect(response.headers.get('content-security-policy')).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     );
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('x-frame-options')).toBe('DENY');
@@ -407,11 +407,16 @@ describe('GitHub sign-in', () => {
       'user-agent': 'slotlock-dashboard',
     });
 
-    const page = await (await get(dashboard(), '/base/dashboard/settings', session)).text();
-    expect(page).toContain('@octocat');
-    expect(page).toContain('Mon–Fri: 09:00–17:00');
-    expect(page).toContain('https://slotlock.example.com/base/mcp');
-    expect(page).not.toContain('gho_fake');
+    // Settings is one page a section: the account, the server's hours, the endpoints.
+    const sections = await Promise.all(
+      ['/settings/account', '/settings/hours', '/settings'].map(async (path) =>
+        (await get(dashboard(), `/base/dashboard${path}`, session)).text(),
+      ),
+    );
+    expect(sections[0]).toContain('@octocat');
+    expect(sections[1]).toContain('Mon–Fri: 09:00–17:00');
+    expect(sections[2]).toContain('https://slotlock.example.com/base/mcp');
+    for (const page of sections) expect(page).not.toContain('gho_fake');
   });
 
   it.each([
@@ -930,7 +935,7 @@ describe('bookable hours in the dashboard', () => {
       'Mon–Fri 08:00–12:00, 13:00–18:00; Sat 22:00–08:00 next day; Sun all day',
     );
     expect(html).toContain('Mon, Wed 23:00–00:20 next day; Fri from 09:00 for 2 d 2 h 30 min');
-    const settings = await (await get(target, '/base/dashboard/settings', session)).text();
+    const settings = await (await get(target, '/base/dashboard/settings/hours', session)).text();
     expect(settings).toContain('Mon–Fri: 09:00–17:00');
     expect(html).not.toMatch(/\d\.\d+ h/);
   });
@@ -1523,6 +1528,27 @@ describe('organizations', () => {
     });
   };
 
+  it('tells a member who is not an owner that an owner changes the plan', async () => {
+    const plans = {
+      plan: vi.fn(async () => ({
+        plan: 'free' as const,
+        status: 'active' as const,
+        limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+        stripeCustomer: null,
+        stripeSubscription: null,
+        currentPeriodEnd: null,
+      })),
+      contact: 'mailto:founder@example.com',
+    };
+    const target = orgDashboard([{ ...ACME, role: 'member' }], { plans });
+    const { session } = await signIn(target);
+    const switched = await post(target, '/base/dashboard/organization', { csrf: await csrf(target, session), organization: String(ACME.id) }, session);
+    const inOrg = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    const html = await (await get(target, '/base/dashboard/plan', inOrg)).text();
+    expect(html).toContain('An owner of this organization can change its plan.');
+    expect(html).not.toContain('Talk to us about');
+  });
+
   it("leaves an organization's plan and billing to its owners", async () => {
     const billing = {
       plan: vi.fn(async () => ({
@@ -1864,10 +1890,11 @@ describe('the overview', () => {
     expect(html).toMatch(/<h3 class="day">Today<\/h3>[\s\S]*15:00[\s\S]*vehicle-42<\/span><span class="meta">rental-&lt;7&gt; · agent/);
     expect(html).toMatch(/<h3 class="day">Tomorrow<\/h3>[\s\S]*10:00[\s\S]*Held until 13:15/);
     expect(html).toContain('<span class="stat-value">1</span>');
-    // The activity names the key, not its id, and says when.
-    expect(html).toMatch(/Booking cancelled <span class="on">on<\/span> vehicle-42[\s\S]*Booking agent · <time[^>]*>5 min ago/);
-    expect(html).toMatch(/Hold expired<\/span><span class="meta">Slotlock · <time[^>]*>2 d ago/);
+    // The activity is sentences: who did what to which resource (by the key's name, not its id), and when.
+    expect(html).toMatch(/<strong>Booking agent<\/strong> cancelled a booking on <strong>vehicle-42<\/strong>[\s\S]*<time[^>]*>5 min ago/);
+    expect(html).toMatch(/The hold on <strong>a resource<\/strong> expired[\s\S]*<time[^>]*>2 d ago/);
     expect(html).not.toContain(created.apiKey.id);
+    expect(html).toContain('<span class="stat-label">Bookings, next 7 days</span>');
   });
 
   it('names the people who changed things from the dashboard', async () => {
@@ -1886,26 +1913,123 @@ describe('the overview', () => {
     const { target } = withFeed([], [change('github:4242', 'msg_2'), change('github:777', 'msg_1')]);
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard', session)).text();
-    expect(html).toMatch(/Hold released<\/span><span class="meta">You · /);
-    expect(html).toMatch(/Hold released<\/span><span class="meta">GitHub user 777 · /);
+    expect(html).toContain('<strong>You</strong> released the hold on <strong>a resource</strong>');
+    expect(html).toContain('<strong>GitHub user 777</strong> released the hold on <strong>a resource</strong>');
   });
 
-  it('walks a new tenant through its first steps, and hides them once done', async () => {
+  it('says every change in words, never by its type, and counts repeats as one line', async () => {
+    const change = (type: string, index: number, actor: string | null = 'github:4242') => ({
+      id: `msg_${String(index)}`,
+      type: type as SlotlockChange['type'],
+      resourceId: '11111111-1111-4111-8111-111111111111',
+      subject: 's',
+      data: type === 'usage.threshold_reached' ? { metric: 'operations', percent: 80 } : {},
+      occurredAt: new Date(now - index * 60_000),
+      actor,
+      origin: 'dashboard' as const,
+      keyId: null,
+      position: `p${String(index)}`,
+    });
+    resources.rows.push({
+      id: '11111111-1111-4111-8111-111111111111',
+      externalRef: 'room-1',
+      tenantRef: 'github:4242',
+      timezone: 'UTC',
+    });
+    const every = [...SLOTLOCK_CHANGE_TYPES, 'usage.period_closed'].map((type, index) => change(type, index + 3));
+    const { target } = withFeed([], [change('resource.updated', 0), change('resource.updated', 1), change('resource.updated', 2), ...every]);
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    const feed = /<ol class="feed">([\s\S]*?)<\/ol>/.exec(html)?.[1] ?? '';
+    for (const type of [...SLOTLOCK_CHANGE_TYPES, 'usage.period_closed']) {
+      expect(feed, type).not.toContain(type);
+    }
+    expect(feed).toContain('<strong>You</strong> edited <strong>room-1</strong> <span class="times">3 times</span>');
+    expect(feed).toContain('<strong>You</strong> held <strong>room-1</strong>');
+    expect(feed).toContain('<strong>You</strong> created an API key');
+    expect(feed).toContain('The hold on <strong>room-1</strong> expired');
+    expect(feed).toContain('80% of this month&#39;s operations used');
+    // One line per run of repeats, then one per change.
+    expect(feed.match(/<li class="event">/g)).toHaveLength(1 + every.length);
+  });
+
+  it('puts what needs a person first: approvals waiting, and the plan near its quota', async () => {
+    resources.rows.push({ id: '11111111-1111-4111-8111-111111111111', externalRef: 'room-1', tenantRef: 'github:4242', timezone: 'UTC' });
+    const approval = (status: 'pending' | 'granted') => ({ id: randomUUID(), status }) as never;
+    const store = {
+      ...resources.store,
+      approvals: { list: vi.fn(async () => [approval('pending'), approval('pending'), approval('granted')]), decide: vi.fn() },
+      usage: vi.fn(async () => [{ day: '2026-10-10', metric: 'operations' as const, keyId: '', origin: 'rest', count: 21_000 }]),
+    };
+    const plan = {
+      tenantRef: 'github:4242',
+      plan: 'free' as const,
+      status: 'active' as const,
+      limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+      stripeCustomer: null,
+      stripeSubscription: null,
+      currentPeriodEnd: null,
+    } as unknown as SlotlockTenantPlan;
+    const target = dashboard({
+      resources: store,
+      usage: true,
+      quotas: true,
+      plans: { plan: async () => plan, contact: 'mailto:sales@example.com' },
+    });
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard', session)).text();
+    const attention = /<ul class="attention-list"[^>]*>([\s\S]*?)<\/ul>/.exec(html)?.[1] ?? '';
+    expect(attention).toContain('You have used 84% of this month&#39;s operations.');
+    expect(attention).toContain('href="/base/dashboard/plan">Usage</a>');
+    expect(attention).toContain('2 bookings wait for your approval.');
+    expect(attention).toContain('href="/base/dashboard/approvals">Review</a>');
+    expect(html).toContain('<span class="stat-label">Waiting for approval</span><span class="stat-value">2</span>');
+    // The plan beside the activity, with the upgrade while a quota is pressing.
+    expect(html).toMatch(/<section class="panel plan-card">[\s\S]*<h2>Free<\/h2>[\s\S]*Operations this month[\s\S]*href="\/base\/dashboard\/plan#upgrade">Upgrade<\/a>/);
+    // Not in Test: the plan is Live's.
+    const switched = await post(target, '/base/dashboard/environment', { csrf: await csrf(target, session), environment: 'test' }, session);
+    const inTest = cookie(switched, '__Host-slotlock-session')?.pair as string;
+    expect(await (await get(target, '/base/dashboard', inTest)).text()).not.toContain('plan-card');
+  });
+
+  it('walks a new tenant through its first steps, folds them to a line half way, and hides them once done', async () => {
     const empty = withFeed([], []);
     const { session } = await signIn(empty.target);
     const first = await (await get(empty.target, '/base/dashboard', session)).text();
-    expect(first).toContain('Get started');
-    expect(first).toContain('Nothing booked in the next 7 days.');
-    expect(first).toContain('No activity yet.');
-    expect(first).toContain('href="/base/dashboard/resources">Add what your agents book</a>');
+    // Nothing yet: only the way in, with the one next step to take.
+    expect(first).toContain('<h2>Get started</h2><span class="meta">0 of 3</span>');
+    expect(first).toContain('<a class="button primary" href="/base/dashboard/resources">Add resource</a>');
+    expect(first.match(/class="button primary"/g)).toHaveLength(1);
+    expect(first).not.toContain('class="stats"');
+    expect(first).not.toContain('Upcoming');
+    resources.rows.push({ id: '11111111-1111-4111-8111-111111111111', externalRef: 'room-1', tenantRef: 'github:4242', timezone: 'UTC' });
+    const key = await keys.store.create({ tenantRef: 'github:4242', name: 'Agent', scopes: ['read'] });
+    const half = await (await get(empty.target, '/base/dashboard', session)).text();
+    expect(half).toContain('<a class="setup-row" href="/base/dashboard#connect">');
+    expect(half).toContain('Get started · 2 of 3 · <strong>Connect an agent</strong>');
+    expect(half).toContain('<section class="panel" id="connect"><h2>Connect an agent</h2>');
+    expect(half).toContain('claude mcp add --transport http slotlock https://slotlock.example.com/base/mcp');
+    expect(half).toContain('No activity yet.');
+    // An agent has used the key: every step is done.
+    const listed = keys.store.list;
+    keys.store.list = vi.fn(async (input: { tenantRef: string }) =>
+      (await listed(input)).map((row) => (row.id === key.apiKey.id ? { ...row, lastUsedAt: new Date(now) } : row)),
+    );
+    try {
+      const done = await (await get(empty.target, '/base/dashboard', session)).text();
+      expect(done).not.toContain('Get started');
+    } finally {
+      keys.store.list = listed;
+    }
   });
 
   it('leaves out the agenda and activity for resources without them', async () => {
+    resources.rows.push({ id: '11111111-1111-4111-8111-111111111111', externalRef: 'room-1', tenantRef: 'github:4242', timezone: 'UTC' });
     const target = dashboard();
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard', session)).text();
     expect(html).not.toContain('Upcoming');
-    expect(html).not.toContain('Agent activity');
+    expect(html).not.toContain('<h2>Activity</h2>');
     expect(html).toContain('Active keys');
   });
 
@@ -2383,7 +2507,7 @@ describe('the dashboard design', () => {
       const response = await get(target, `/base/dashboard${path}`, session);
       expect(response.status, path).toBe(200);
       expect(response.headers.get('content-security-policy'), path).toBe(
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       );
       const html = await response.text();
       expect(html, path).toContain('<a class="skip" href="#main">Skip to content</a>');
@@ -2426,7 +2550,18 @@ describe('the dashboard design', () => {
     expect(css).toContain(':focus-visible');
     // No web fonts, images or imports: the policy would refuse them, and the dashboard asks for none.
     expect(css).not.toMatch(/url\(|@import|@font-face|https?:/i);
-    expect(js).not.toMatch(/https?:|fetch\(|XMLHttpRequest|innerHTML|eval\(/);
+    expect(js).not.toMatch(/XMLHttpRequest|eval\(|new Function|sendBeacon|WebSocket|EventSource|import\(/);
+    // One request: the assistant's reply, from the page's own stream (connect-src 'self' holds it
+    // to this origin). The only absolute URLs are the http(s) links a reply may hold.
+    expect(js.match(/fetch\(/g)).toHaveLength(1);
+    expect(js).toContain("fetch(page.getAttribute('data-stream'), {");
+    expect(js.replaceAll('https?:\\/\\/', '')).not.toMatch(/https?:/);
+    // Markup it writes is the server's: its own Markdown renderer's, or the turn the server rendered.
+    const writes = js.split('\n').filter((line) => /innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(line));
+    expect(writes.map((line) => line.trim())).toEqual([
+      'if (prose) prose.innerHTML = renderMarkdown(proseText);',
+      "thread.insertAdjacentHTML('beforeend', e.html || '');",
+    ]);
   });
 
   it('opens a row’s confirmation in place, never floating where the table would clip it', async () => {
@@ -2563,7 +2698,8 @@ describe('the plan page', () => {
     );
     const html = await response.text();
     expect(html).toContain('href="/base/dashboard/plan"');
-    expect(html).toContain('Plan: Free');
+    expect(html).toContain('<h1>Usage</h1>');
+    expect(html).toContain('<div class="plan-head"><h2>Free</h2>');
     expect(html).toContain('<span class="meta"> of 10</span>');
     expect(html).toContain('action="/base/dashboard/plan/upgrade"');
     expect(html).toContain('Monthly, $10 a month');
@@ -2594,12 +2730,12 @@ describe('the plan page', () => {
     // Plans and billing are Live's: the Test plan page says so, and changes nothing.
     const plan = await (await get(target, '/base/dashboard/plan', test)).text();
     expect(plan).toContain('never billed');
-    expect(plan).not.toContain('Test usage this month'); // this dashboard does not meter
+    expect(plan).not.toContain('This month, in Test'); // this dashboard does not meter
     // With metering, the test environment's own use, read from its own tenant.
     const usage = vi.fn(async () => [{ day: '2026-10-10', metric: 'operations' as const, keyId: '', origin: 'rest', count: 7 }]);
     const metered = dashboard({ usage: true, resources: { ...resources.store, usage }, billing: { plan: async () => null, checkout: vi.fn(), portal: vi.fn(), prices: { month: '$10', year: '$100' }, contact: 'mailto:founder@example.com', formOrigins: ['https://checkout.stripe.com'] } as never });
     const testPage = await (await get(metered, '/base/dashboard/plan', test)).text();
-    expect(testPage).toContain('Test usage this month');
+    expect(testPage).toContain('<h2>This month, in Test</h2>');
     expect(usage).toHaveBeenCalledWith('github:4242~test', expect.any(String), expect.any(String));
     expect(plan).not.toContain('action="/base/dashboard/plan/upgrade"');
     for (const path of ['/base/dashboard/plan/upgrade', '/base/dashboard/plan/manage']) {
@@ -2637,7 +2773,7 @@ describe('the plan page', () => {
     const { target, calls } = billed(developer);
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard/plan', session)).text();
-    expect(html).toContain('Plan: Developer');
+    expect(html).toContain('<div class="plan-head"><h2>Developer</h2>');
     expect(html).toContain('Renews 2026-12-10 12:00 UTC');
     expect(html).not.toContain('Upgrade to Developer');
     const manage = await post(target, '/base/dashboard/plan/manage', { csrf: await csrf(target, session) }, session);
@@ -2713,19 +2849,19 @@ describe('the plan page', () => {
     const html = await (await get(metered, '/base/dashboard/plan', session)).text();
     // The month so far, by the server's UTC clock.
     expect(read).toHaveBeenCalledWith(tenantRef, '2026-10-01', '2026-10-10');
-    expect(html).toContain('<h2>Usage this month</h2>');
-    expect(html).toContain('<span class="stat-label">Operations</span><span class="stat-value">45</span>');
-    expect(html).toContain('<span class="stat-label">Bookings</span><span class="stat-value">3</span>');
-    expect(html).toContain('<span class="stat-label">Holds</span><span class="stat-value">2</span>');
-    expect(html).toContain('Since 2026-10-01, in UTC.');
-    expect(html).toContain('<td data-label="Used by">Booking agent</td><td data-label="Operations">40</td>');
-    expect(html).toContain('<td data-label="Used by">The dashboard and its assistant</td>');
-    expect(html).toContain('<td data-label="Used by">A deleted key</td>');
+    expect(html).toContain('<h2>Used by</h2>');
+    expect(html).toContain('<span>Operations</span><span class="meter-value">45</span>');
+    expect(html).toContain('<span>Bookings</span><span class="meter-value">3</span>');
+    expect(html).toContain('<span>Holds</span><span class="meter-value">2</span>');
+    expect(html).toContain('Since 2026-10-01 (UTC)');
+    expect(html).toContain('<td data-label="Key">Booking agent</td><td data-label="Operations">40</td>');
+    expect(html).toContain('<td data-label="Key">The dashboard and its assistant</td>');
+    expect(html).toContain('<td data-label="Key">A deleted key</td>');
     // Not metered: no usage, and the adapter is not asked.
     read.mockClear();
     const unmetered = dashboard({ billing, resources: { ...resources.store, usage: read } });
     const again = await signIn(unmetered);
-    expect(await (await get(unmetered, '/base/dashboard/plan', again.session)).text()).not.toContain('Usage this month');
+    expect(await (await get(unmetered, '/base/dashboard/plan', again.session)).text()).not.toContain('<h2>This month</h2>');
     expect(read).not.toHaveBeenCalled();
   });
 
@@ -2742,16 +2878,16 @@ describe('the plan page', () => {
     const page = async () => (await get(target, '/base/dashboard/plan', session)).text();
     let html = await page();
     expect(html).toContain(
-      '<span class="stat-label">Operations</span><span class="stat-value">20,400<span class="meta"> of 25,000</span>',
+      '<span>Operations</span><span class="meter-value">20,400<span class="meta"> of 25,000</span>',
     );
-    expect(html).toContain('<span class="stat-value">10<span class="meta"> of 1,000</span>');
-    expect(html).toContain("You have used 81% of this month's operations. They start again on 2026-11-01 00:00 UTC.");
+    expect(html).toContain('<span class="meter-value">10<span class="meta"> of 1,000</span>');
+    expect(html).toContain("You have used 81% of this month&#39;s operations. They start again on 2026-11-01 00:00 UTC.");
     expect(html).toContain('with 500,000 operations and 25,000 bookings a month');
     operations = 25_000;
     bookings = 1_000;
     html = await page();
-    expect(html).toContain("This month's operations are used up: Slotlock refuses every call but reading usage with quota_exceeded until 2026-11-01 00:00 UTC. Upgrade for more.");
-    expect(html).toContain("This month's bookings are used up: Slotlock refuses new bookings and holds with quota_exceeded until 2026-11-01 00:00 UTC.");
+    expect(html).toContain("This month&#39;s operations are used up: Slotlock refuses every call but reading usage with quota_exceeded until 2026-11-01 00:00 UTC. Upgrade for more.");
+    expect(html).toContain("This month&#39;s bookings are used up: Slotlock refuses new bookings and holds with quota_exceeded until 2026-11-01 00:00 UTC.");
     // Developer: past the quota, refused only a tenth further on.
     const developer = billed({ ...free, plan: 'developer', limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 } });
     const paid = dashboard({ billing: developer.billing, usage: true, quotas: true, resources: { ...resources.store, usage: read } });
@@ -2759,7 +2895,7 @@ describe('the plan page', () => {
     operations = 510_000;
     bookings = 0;
     html = await (await get(paid, '/base/dashboard/plan', signed.session)).text();
-    expect(html).toContain("You have used this month's 500,000 operations. Slotlock refuses every call but reading usage past 550,000, until 2026-11-01 00:00 UTC.");
+    expect(html).toContain("You have used this month&#39;s 500,000 operations. Slotlock refuses every call but reading usage past 550,000, until 2026-11-01 00:00 UTC.");
     // Without the setting, no quota is named.
     const plain = dashboard({ billing, usage: true, resources: { ...resources.store, usage: read } });
     const third = await signIn(plain);
@@ -2898,5 +3034,68 @@ describe('Google sign-in', () => {
     const orgs = dashboard({ google: GOOGLE, allowedUsers: '*', organizations: ['91'], fetch: fake.fetch });
     expect(await (await get(orgs, '/base/dashboard')).text()).not.toContain('Continue with Google');
     expect((await get(orgs, '/base/dashboard/sign-in?with=google')).headers.get('location')).toMatch(/^https:\/\/github\.com\//);
+  });
+});
+
+describe('usage and plans without Stripe', () => {
+  const free: SlotlockTenantPlan = {
+    plan: 'free',
+    status: 'active',
+    limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+    stripeCustomer: null,
+    stripeSubscription: null,
+    currentPeriodEnd: null,
+  };
+  const planned = (plan: SlotlockTenantPlan | null, extra: Record<string, unknown> = {}) => ({
+    plan: vi.fn(async (_tenantRef: string) => plan),
+    enrol: vi.fn(async (_tenantRef: string) => undefined),
+    contact: 'mailto:founder@example.com',
+    ...extra,
+  });
+
+  it('shows Usage with the plan and its limits, and offers the next plan by asking, with no Stripe', async () => {
+    const plans = planned(free);
+    const target = dashboard({ plans });
+    const { session } = await signIn(target);
+    const overview = await (await get(target, '/base/dashboard', session)).text();
+    expect(overview).toMatch(/<a href="\/base\/dashboard\/plan">(?:(?!<\/a>).)*<span>Usage<\/span><\/a>/s);
+    const response = await get(target, '/base/dashboard/plan', session);
+    expect(response.status).toBe(200);
+    // Nothing redirects to Stripe, so forms still go nowhere but here.
+    expect(response.headers.get('content-security-policy')).toContain("form-action 'self';");
+    const html = await response.text();
+    expect(html).toContain('<div class="plan-head"><h2>Free</h2>');
+    expect(html).toContain('<span>Resources</span><span class="meter-value">0<span class="meta"> of 10</span>');
+    expect(html).toContain('This server does not count use yet.');
+    expect(html).not.toContain('action="/base/dashboard/plan/upgrade"');
+    expect(html).toContain('<a class="button primary" href="mailto:founder@example.com">Talk to us about Developer</a>');
+  });
+
+  it('warns before the default plan starts what the workspace has over it, and that nothing is removed', async () => {
+    const plans = planned(null, {
+      planDefault: vi.fn(async () => ({ plan: 'free', limits: free.limits, appliesFrom: new Date('2026-12-09T00:00:00Z') })),
+    });
+    const store = { ...resources.store, count: vi.fn(async () => 14) };
+    const target = dashboard({ plans, resources: store });
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(html).toContain('<div class="plan-head"><h2>Free from 9 Dec 2026</h2>');
+    expect(html).toContain(
+      'From 2026-12-09 00:00 UTC, this workspace is on Free: 10 resources, 10 API keys and 2 webhooks. You have 14 resources: nothing is removed, but you cannot add more until you have fewer, or upgrade.',
+    );
+    expect(html).toContain('<span>Resources</span><span class="meter-value">14<span class="meta"> of 10</span>');
+    expect(html).toContain('<div class="meter bad">');
+  });
+
+  it('puts a new tenant on the default plan before its first key, with no Stripe', async () => {
+    const plans = planned(null);
+    const target = dashboard({ plans });
+    const { session } = await signIn(target);
+    await post(target, '/base/dashboard/keys', { csrf: await csrf(target, session), name: 'Agent', access: 'read', expires: '30' }, session);
+    expect(plans.enrol).toHaveBeenCalledWith('github:4242');
+  });
+
+  it('refuses a plan contact that is not https or mailto', () => {
+    expect(() => dashboard({ plans: planned(free, { contact: 'javascript:alert(1)' }) })).toThrow(/https or mailto/);
   });
 });
