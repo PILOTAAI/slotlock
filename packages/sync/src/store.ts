@@ -70,6 +70,11 @@ export interface SyncOAuthState {
   /** The PKCE verifier, sealed for `oauth:<stateHash>`. */
   sealedVerifier: string;
   writeBack: boolean;
+  /**
+   * SHA-256 (hex) of the secret the browser that started the flow was given in a cookie: the
+   * flow is finished only in that browser.
+   */
+  browserHash: string;
   expiresAt: Date;
 }
 
@@ -98,6 +103,8 @@ export interface SyncStore {
   putOAuthState(state: SyncOAuthState): Promise<void>;
   /** Take a flow's state once: deleted as it is read; null when unknown or expired. */
   takeOAuthState(stateHash: string, now: Date): Promise<SyncOAuthState | null>;
+  /** Use a connect link once: true the first time its id is claimed, false after. */
+  claimLink(linkId: string, expiresAt: Date): Promise<boolean>;
 }
 
 /** A store in memory, for tests and a single process that may forget. */
@@ -107,6 +114,7 @@ export function createMemorySyncStore(): SyncStore {
   const mappings = new Map<string, SyncMapping>();
   const writeBacks = new Map<string, SyncWriteBack>();
   const states = new Map<string, SyncOAuthState>();
+  const usedLinks = new Set<string>();
   const key = (mappingId: string, bookingKey: string) => `${mappingId}\n${bookingKey}`;
   const copy = <T extends object>(value: T | undefined): T | null => (value ? { ...value } : null);
   return {
@@ -184,6 +192,11 @@ export function createMemorySyncStore(): SyncStore {
       states.delete(stateHash);
       return state && state.expiresAt > now ? { ...state } : null;
     },
+    async claimLink(linkId) {
+      if (usedLinks.has(linkId)) return false;
+      usedLinks.add(linkId);
+      return true;
+    },
   };
 }
 
@@ -241,6 +254,14 @@ CREATE TABLE IF NOT EXISTS slotlock_sync.oauth_states (
   expires_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS oauth_states_expiry_idx ON slotlock_sync.oauth_states (expires_at);
+-- The browser a flow was started in: it is finished only there.
+ALTER TABLE slotlock_sync.oauth_states ADD COLUMN IF NOT EXISTS browser_hash text NOT NULL DEFAULT '';
+-- Connect links used: each is followed once.
+CREATE TABLE IF NOT EXISTS slotlock_sync.used_links (
+  link_id text PRIMARY KEY CHECK (link_id ~ '^[A-Za-z0-9_-]{16,64}$'),
+  expires_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS used_links_expiry_idx ON slotlock_sync.used_links (expires_at);
 `;
 
 /** A store in PostgreSQL (postgres.js), in schema slotlock_sync: apply SLOTLOCK_SYNC_DDL first. */
@@ -413,14 +434,23 @@ export function createPostgresSyncStore(sql: Sql): SyncStore & { applySchema(): 
       // Flows long abandoned go as new ones start.
       await sql`DELETE FROM slotlock_sync.oauth_states WHERE expires_at < now()`;
       await sql`
-        INSERT INTO slotlock_sync.oauth_states (state_hash, tenant_ref, provider, sealed_verifier, write_back, expires_at)
-        VALUES (${state.stateHash}, ${state.tenantRef}, ${state.provider}, ${state.sealedVerifier}, ${state.writeBack}, ${state.expiresAt})`;
+        INSERT INTO slotlock_sync.oauth_states (state_hash, tenant_ref, provider, sealed_verifier, write_back, browser_hash, expires_at)
+        VALUES (${state.stateHash}, ${state.tenantRef}, ${state.provider}, ${state.sealedVerifier}, ${state.writeBack},
+                ${state.browserHash}, ${state.expiresAt})`;
     },
     async takeOAuthState(stateHash, now) {
       const [row] = await sql<
-        { state_hash: string; tenant_ref: string; provider: 'google' | 'microsoft'; sealed_verifier: string; write_back: boolean; expires_at: Date }[]
+        {
+          state_hash: string;
+          tenant_ref: string;
+          provider: 'google' | 'microsoft';
+          sealed_verifier: string;
+          write_back: boolean;
+          browser_hash: string;
+          expires_at: Date;
+        }[]
       >`DELETE FROM slotlock_sync.oauth_states WHERE state_hash = ${stateHash}
-        RETURNING state_hash, tenant_ref, provider, sealed_verifier, write_back, expires_at`;
+        RETURNING state_hash, tenant_ref, provider, sealed_verifier, write_back, browser_hash, expires_at`;
       if (!row || row.expires_at <= now) return null;
       return {
         stateHash: row.state_hash,
@@ -428,8 +458,16 @@ export function createPostgresSyncStore(sql: Sql): SyncStore & { applySchema(): 
         provider: row.provider,
         sealedVerifier: row.sealed_verifier,
         writeBack: row.write_back,
+        browserHash: row.browser_hash,
         expiresAt: row.expires_at,
       };
+    },
+    async claimLink(linkId, expiresAt) {
+      await sql`DELETE FROM slotlock_sync.used_links WHERE expires_at < now()`;
+      const claimed = await sql`
+        INSERT INTO slotlock_sync.used_links (link_id, expires_at) VALUES (${linkId}, ${expiresAt})
+        ON CONFLICT (link_id) DO NOTHING RETURNING link_id`;
+      return claimed.length === 1;
     },
   };
 }
