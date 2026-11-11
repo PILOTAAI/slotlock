@@ -6,8 +6,9 @@ versioning.
 ## Unreleased
 
 This release gives a workspace its people and an audit trail. It brings six roles read from the
-database on every request, team workspaces with invitations, sign-out everywhere and a hash-chained
-audit log, and lets a member be limited to locations or groups (RFC 0004 D1). The change history
+database on every request, team workspaces with invitations, verified domains that let colleagues
+find and ask to join their team, sign-out everywhere and a hash-chained audit log, and lets a
+member be limited to locations or groups (RFC 0004 D1). The change history
 becomes append-only and is kept by plan (D2). A person's data can be exported or erased, and a whole
 tenant exported (D3), from the API, the command line and the dashboard's new Privacy page. It closes
 the four questions the security review left open, and fixes what a review of RFC 0004's T2 changes
