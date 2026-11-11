@@ -289,7 +289,11 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(page.headers.get('x-robots-tag')).toBe('noindex, nofollow');
     expect(page.headers.get('cache-control')).toBe('no-store');
     expect(page.headers.get('strict-transport-security')).toContain('max-age=');
-    expect(await page.text()).not.toMatch(/<script>|style="/);
+    // No inline script or style: every script is a file of the console's own, and no element has a
+    // style attribute.
+    const markup = (await page.text()).toLowerCase();
+    expect(markup.split('<script').length).toBe(markup.split('<script src="/').length);
+    expect(markup).not.toContain(' style=');
   });
 
   it('refuses a GitHub callback whose state is not the one it sent', async () => {
