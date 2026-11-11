@@ -94,9 +94,11 @@ refused.
   serving role can only add to it and read it. Owners and Admins read it on Settings, Audit log, 50
   events a page, filtered by action, and export it as CSV or JSON (on the Team plan where plans
   apply; up to 10,000 events, the filter kept). Each tenant's events are chained: each holds the
-  SHA-256 of the one before it with its own content, so an event changed or removed outside
-  Slotlock shows where (**Check the log**, `slotlock.verify_audit_chain`). Retention removes only the
-  start of the chain.
+  SHA-256 of the one before it with its own content, and the database stamps its time. An event
+  changed, removed or taken off the chain in the middle shows where (**Check the log**,
+  `slotlock.verify_audit_chain`); someone who rewrites every later hash, or the newest events,
+  as the database's owner is not caught by the chain alone, so an export (which carries each
+  hash) kept elsewhere is the proof. Retention removes only the start of the chain.
 - **Settings, Account** lists where the person is signed in (browser, address, when signed in and
   last seen, to five minutes), and signs any other device out at its next request. Only a digest of
   each session's id is kept (`slotlock.dashboard_sessions`), deleted a day after the session ends.

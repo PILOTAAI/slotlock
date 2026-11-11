@@ -340,7 +340,7 @@ const AUDIT_EXPORT_EMPTY = Object.freeze({
 
 /** A CSV cell, quoted; one a spreadsheet would read as a formula starts with an apostrophe. */
 function csvCell(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const safe = /^[\s]*[=+\-@]|^[\t\r\n]/.test(value) ? `'${value}` : value;
   return `"${safe.replaceAll('"', '""')}"`;
 }
 /** What each audited action did, as the audit log says it. */
@@ -6399,6 +6399,10 @@ ${
     const name = (form.get('name') ?? '').trim();
     if (name.length === 0 || name.length > 80 || /\p{Cc}/u.test(name)) {
       return teamsPage(session, 400, TEAM_REFUSALS.invalid_name.text);
+    }
+    // A name goes into the invitations Slotlock sends: never a web or email address in it.
+    if (/:\/\/|www\.|@|\b[a-z0-9-]+\.(?:[a-z]{2,}|xn--[a-z0-9-]+)\b/i.test(name)) {
+      return teamsPage(session, 400, "A team's name can't hold a web or email address.");
     }
     const person = personOf(session);
     const cap = plans ? FREE_TEAMS_PER_PERSON : null;

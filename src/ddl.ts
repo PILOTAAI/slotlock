@@ -2127,8 +2127,10 @@ END
 $slotlock_dashboard_session_started$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[25]} FROM PUBLIC;
 
--- Whether the person's session may go on (not signed out from another device), noting it seen at
--- most every five minutes. A session from before these records has none, and goes on.
+-- Whether the person's session may go on: recorded for them, not signed out from another device,
+-- not expired. A session with no record (one the 50 kept dropped, one from before these records)
+-- does not, so a session signed out stays out however many sign-ins follow. Noted seen at most
+-- every five minutes.
 CREATE OR REPLACE FUNCTION slotlock.dashboard_session_seen(requested_person text, requested_sid bytea)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -2140,10 +2142,10 @@ BEGIN
   UPDATE slotlock.dashboard_sessions seen SET last_seen_at = statement_timestamp()
    WHERE seen.sid_sha256 = requested_sid AND seen.person_ref = requested_person AND seen.ended_at IS NULL
      AND seen.last_seen_at < statement_timestamp() - interval '5 minutes';
-  RETURN NOT EXISTS (
-    SELECT 1 FROM slotlock.dashboard_sessions ended
-     WHERE ended.sid_sha256 = requested_sid
-       AND (ended.ended_at IS NOT NULL OR ended.person_ref <> requested_person));
+  RETURN EXISTS (
+    SELECT 1 FROM slotlock.dashboard_sessions alive
+     WHERE alive.sid_sha256 = requested_sid AND alive.person_ref = requested_person
+       AND alive.ended_at IS NULL AND alive.expires_at > statement_timestamp());
 END
 $slotlock_dashboard_session_seen$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[26]} FROM PUBLIC;
@@ -4367,6 +4369,9 @@ BEGIN
   SELECT kept.chain_index, kept.hash INTO last_index, last_hash FROM slotlock.audit_events kept
    WHERE kept.tenant_ref = NEW.tenant_ref AND kept.chain_index IS NOT NULL
    ORDER BY kept.chain_index DESC LIMIT 1;
+  -- The time is the database's, whatever the insert said: an event dated in the past would have
+  -- retention take the events after it.
+  NEW.occurred_at := statement_timestamp();
   NEW.chain_index := coalesce(last_index, 0) + 1;
   NEW.prev_hash := last_hash;
   NEW.hash := sha256(coalesce(last_hash, ''::bytea) || convert_to(slotlock.audit_event_text(NEW), 'UTF8'));
@@ -4391,7 +4396,21 @@ DECLARE
   expected_index bigint;
   expected_prev bytea;
   seen bigint := 0;
+  loose_at timestamptz;
 BEGIN
+  -- An event with no place in the chain, written after the chain began, was taken off it: broken
+  -- where it stood, the first chained event after it (or past the last).
+  SELECT min(loose.occurred_at) INTO loose_at FROM slotlock.audit_events loose
+   WHERE loose.tenant_ref = requested_tenant AND loose.chain_index IS NULL
+     AND loose.occurred_at >= (SELECT min(first.occurred_at) FROM slotlock.audit_events first
+                                WHERE first.tenant_ref = requested_tenant AND first.chain_index IS NOT NULL);
+  IF loose_at IS NOT NULL THEN
+    RETURN QUERY SELECT 0::bigint, coalesce(
+      (SELECT min(after.chain_index) FROM slotlock.audit_events after
+        WHERE after.tenant_ref = requested_tenant AND after.chain_index IS NOT NULL AND after.occurred_at > loose_at),
+      (SELECT max(last.chain_index) + 1 FROM slotlock.audit_events last WHERE last.tenant_ref = requested_tenant));
+    RETURN;
+  END IF;
   FOR event IN
     SELECT * FROM slotlock.audit_events kept
      WHERE kept.tenant_ref = requested_tenant AND kept.chain_index IS NOT NULL

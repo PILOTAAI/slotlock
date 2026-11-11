@@ -506,6 +506,12 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const team = await teamOf(ada);
     tenants.push(team);
     expect(await (await ada.get('/dashboard/plan')).text()).toContain('$40');
+    // A name that would carry an address into the invitations sent is refused.
+    for (const name of ['Claim at evil.example', 'Visit https://x.io', 'Mail me@x.io', 'www.x co']) {
+      const refusedName = await ada.post('/dashboard/teams', '/teams/create', { name });
+      expect(refusedName.status, name).toBe(400);
+      expect(await refusedName.text()).toContain('can&#39;t hold a web or email address');
+    }
     // A second free team is refused, with what to do.
     const second = await ada.post('/dashboard/teams', '/teams/create', { name: 'Again' });
     expect(second.status).toBe(403);
@@ -559,6 +565,11 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(lines[0]).toBe('occurred_at,action,outcome,actor_type,actor_ref,actor_role,target_type,target_ref,reason,ip_address,user_agent,metadata,chain_index,hash');
     const denied = lines.find((line) => line.includes('"authz.denied"')) as string;
     expect(denied).toContain(`"'=HYPERLINK(""https://evil.example"")"`);
+    // Whitespace before a formula is no way round it.
+    await admin`
+      INSERT INTO slotlock.audit_events (tenant_ref, action, actor_type, actor_ref, outcome, reason)
+      VALUES (${team}, 'authz.denied', 'person', ${`github:${base + 6}`}, 'denied', ' =1+1')`;
+    expect(await (await gus.get('/dashboard/settings/audit/export?format=csv')).text()).toContain(`"' =1+1"`);
     expect(lines.some((line) => line.includes('"workspace.created"'))).toBe(true);
     const json = (await (await gus.get('/dashboard/settings/audit/export?format=json&action=workspace.created')).json()) as {
       action: string;
