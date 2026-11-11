@@ -6081,6 +6081,9 @@ CREATE INDEX IF NOT EXISTS slotlock_source_busy_resource_idx
   ON slotlock.source_busy (resource_id, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_source_busy_source_idx
   ON slotlock.source_busy (resource_id, source, starts_at);
+-- Busy time that ended long ago goes in retention (pruneBookingRetention), tenant by tenant.
+CREATE INDEX IF NOT EXISTS slotlock_source_busy_ended_idx
+  ON slotlock.source_busy (tenant_ref, ends_at);
 
 -- A cancelled UID remains terminal. This blocks delayed create delivery after the event row and
 -- its derived reservations have been removed.

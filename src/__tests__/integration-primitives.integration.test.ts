@@ -6,7 +6,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer, invokeSlotlockAgentOperation } from '../agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
-import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { type SlotlockStore, calendarEventRollingHorizon, createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const BASE = 'http://localhost/slotlock';
@@ -142,6 +142,70 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     expect((await call('DELETE', `/v1/resources/${van}/coverage/google%3Avan`)).body).toEqual({ deleted: true });
     const [left] = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM slotlock.source_busy WHERE resource_id = ${van}`;
     expect(left?.count).toBe(0);
+  });
+
+  it("holds a calendar's busy time through a composite, at a hold's confirmation and in a series' roll, and lets it go once old", async () => {
+    const hall = await resource('hall-busy');
+    const roomA = await resource('room-a-busy');
+    const roomB = await resource('room-b-busy');
+    for (const part of [roomA, roomB]) {
+      await store.withTenant(tenantRef, (tenant) => tenant.setResourceParent({ tenantRef, id: part, parentId: hall }));
+    }
+    const busy = (resourceId: string, start: string, end: string) =>
+      call('PUT', `/v1/resources/${resourceId}/coverage/google%3Ab/busy`, { start: at(0), end: at(48), revision: 1, busy: [{ start, end }] });
+    const book = (resourceId: string, ref: string, start: string, end: string) =>
+      call('PUT', `/v1/reservations/${ref}`, { resource_id: resourceId, start, end, revision: 1 });
+
+    // The whole busy keeps each part busy, in reads and writes...
+    expect((await busy(hall, at(10), at(12))).status).toBe(200);
+    expect((await book(roomA, 'part-under-whole', at(10), at(11))).body).toMatchObject({ error: { code: 'overlap' } });
+    const roomFree = await store.getFreeBusy({ tenantRef, resourceId: roomA, window: { start: new Date(at(0)), end: new Date(at(24)) } });
+    expect(roomFree.busy.map((each) => [each.start.toISOString(), each.end.toISOString()])).toEqual([[at(10), at(12)]]);
+    // ...and a part busy keeps the whole busy, but not its sibling.
+    expect((await busy(roomA, at(30), at(32))).status).toBe(200);
+    expect((await book(hall, 'whole-over-part', at(30), at(31))).body).toMatchObject({ error: { code: 'overlap' } });
+    expect((await book(roomB, 'sibling', at(30), at(31))).status).toBe(200);
+
+    // A hold made before the busy time came is not confirmed over it.
+    const desk = await resource('desk-busy');
+    const held = (await call('POST', '/v1/holds', { resource_id: desk, start: at(20), end: at(21), ttl_seconds: 600 })).body.hold as { id: string };
+    expect((await busy(desk, at(20), at(22))).status).toBe(200);
+    expect((await call('POST', `/v1/holds/${held.id}/confirm`, {})).body).toMatchObject({ error: { code: 'overlap' } });
+
+    // A series rolled on into reported busy time is a conflict: nothing booked over it.
+    const DAY = 86_400_000;
+    const room = await resource('room-roll');
+    const horizon = calendarEventRollingHorizon();
+    const first = new Date(horizon.start.getTime() + 2 * DAY + 10 * HOUR);
+    const series = await store.withTenant(tenantRef, (tenant) =>
+      tenant.putCalendarEvent({
+        tenantRef, ownerRef: `agent:${'b'.repeat(64)}`, externalRef: 'daily', idempotencyKey: 'daily', expectedRevision: 0,
+        resourceId: room, start: first, end: new Date(first.getTime() + HOUR), timezone: 'UTC', summary: 'Daily',
+        recurrence: { rrule: 'FREQ=DAILY' }, materializationWindow: horizon, enforceBookingRules: true,
+      }),
+    );
+    expect(series.ok).toBe(true);
+    const beyond = new Date(Date.UTC(horizon.end.getUTCFullYear(), horizon.end.getUTCMonth(), horizon.end.getUTCDate()) + 5 * DAY);
+    const blocked = { start: beyond, end: new Date(beyond.getTime() + 5 * DAY) };
+    await store.withTenant(tenantRef, (tenant) =>
+      tenant.replaceSourceBusy({ tenantRef, resourceId: room, source: 'google:room', window: blocked, revision: 1, busy: [blocked] }),
+    );
+    const rolled = await store.withTenant(tenantRef, (tenant) =>
+      tenant.rollCalendarEventHorizon({ tenantRef, window: calendarEventRollingHorizon(new Date(Date.now() + 12 * DAY)) }),
+    );
+    expect(rolled).toMatchObject({ extended: 0, conflicts: 1 });
+    const [over] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM slotlock.reservations booking JOIN slotlock.source_busy busy
+          ON busy.resource_id = booking.resource_id AND busy.starts_at < booking.ends_at AND busy.ends_at > booking.starts_at
+       WHERE booking.resource_id = ${room}`;
+    expect(over?.n).toBe(0);
+
+    // Busy time that ended a month ago goes in retention.
+    await sql`UPDATE slotlock.source_busy SET starts_at = now() - interval '40 days', ends_at = now() - interval '39 days'
+               WHERE resource_id = ${desk}`;
+    await store.withTenant(tenantRef, (tenant) => tenant.pruneBookingRetention({ tenantRef }));
+    const [left] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM slotlock.source_busy WHERE resource_id = ${desk}`;
+    expect(left?.n).toBe(0);
   });
 
   it('names whom to tell on a booking, and forgets the person with their contact', async () => {

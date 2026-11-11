@@ -1893,9 +1893,23 @@ async function localStartFor(
 async function sourceBusyLoss(tx: StoreSql, resourceId: string, start: Date, end: Date): Promise<boolean> {
   const [hit] = await tx`
     SELECT 1 FROM slotlock.source_busy
-     WHERE resource_id = ${resourceId} AND starts_at < ${end} AND ends_at > ${start}
+     WHERE resource_id IN (${compositeKin(tx, resourceId)}) AND starts_at < ${end} AND ends_at > ${start}
      LIMIT 1`;
   return hit !== undefined;
+}
+
+/**
+ * The resources whose busy time keeps this one busy (RFC 0003 G8, RFC 0004 C1), as a subquery: it,
+ * its composite if it is a part (the whole is in use), and its parts if it is a composite (a part
+ * in use takes the whole). Never its sibling parts, which are booked apart.
+ */
+function compositeKin(executor: StoreSql, resourceId: string) {
+  return executor`
+    SELECT ${resourceId}::uuid
+    UNION ALL
+    SELECT parent_id FROM slotlock.resources WHERE id = ${resourceId}::uuid AND parent_id IS NOT NULL
+    UNION ALL
+    SELECT id FROM slotlock.resources WHERE parent_id = ${resourceId}::uuid`;
 }
 
 /**
@@ -2099,6 +2113,9 @@ async function eventEnding(
   await noteEnding(tx, fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null, note);
   return { ok: true, fee };
 }
+
+/** How long busy time a calendar reported is kept after it ended: the feed's retention. */
+const SOURCE_BUSY_RETENTION_DAYS = 30;
 
 /** How recently a sync must have read a resource whose booking rules require certainty. */
 const CERTAIN_COVERAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -2717,6 +2734,23 @@ async function rollStoredSeries(
     cursor: row.recurrence_cursor ?? null,
     stored: true,
   });
+  // Busy time a calendar reported (RFC 0004 C1) is refused to a rolled occurrence as an overlap is:
+  // nothing is written, the series is put off, and the roll counts it a conflict.
+  if ((event.transparency ?? 'opaque') === 'opaque' && occurrences.length > 0) {
+    const beforeMs = Number(row.buffer_before_ms ?? 0);
+    const afterMs = Number(row.buffer_after_ms ?? 0);
+    const [met] = await tx`
+      SELECT 1
+        FROM slotlock.source_busy busy
+        JOIN ROWS FROM (
+               pg_catalog.unnest(${occurrences.map((each) => new Date(each.start.getTime() - beforeMs).toISOString())}::text[]::timestamptz[]),
+               pg_catalog.unnest(${occurrences.map((each) => new Date(each.end.getTime() + afterMs).toISOString())}::text[]::timestamptz[]))
+             AS occurrence(starts_at, ends_at)
+          ON busy.starts_at < occurrence.ends_at AND busy.ends_at > occurrence.starts_at
+       WHERE busy.resource_id IN (${compositeKin(tx, row.resource_id)})
+       LIMIT 1`;
+    if (met) throw Object.assign(new Error('slotlock: a rolled occurrence meets reported busy time'), { code: EXCLUSION_VIOLATION });
+  }
   await replaceCalendarEventOccurrences(tx, {
     tenantRef,
     eventId: row.id,
@@ -4547,7 +4581,7 @@ function sourceBusy(executor: StoreSql, resourceId: string, window: Interval) {
   return executor`
     SELECT busy.starts_at AS occupied_starts_at, busy.ends_at AS occupied_ends_at
       FROM slotlock.source_busy busy
-     WHERE busy.resource_id = ${resourceId}
+     WHERE busy.resource_id IN (${compositeKin(executor, resourceId)})
        AND busy.starts_at < ${window.end} AND busy.ends_at > ${window.start}`;
 }
 
@@ -7356,6 +7390,13 @@ function buildSlotlockStore(
         // A hold that waits for payment is booked only once it is paid (RFC 0004 C3).
         if (row.unpaid) return { ok: false, code: 'payment_required' };
         if (resource?.archived !== false) return { ok: false, code: 'resource_archived' };
+        // Busy time a calendar reported since the hold was made (RFC 0004 C1) is refused, as an
+        // agent's confirmation of its hold refuses it: the source's time is not to be booked.
+        if (
+          await sourceBusyLoss(tx, row.resource_id, row.starts_at, new Date(row.ends_at.getTime() + Number(row.buffer_after_ms)))
+        ) {
+          return { ok: false, code: 'overlap' };
+        }
         if (bookingTenant !== null) {
           const [retired] = await tx<{ revision: string }[]>`
             SELECT revision FROM slotlock.reservation_tombstones
@@ -8690,6 +8731,18 @@ function buildSlotlockStore(
           )
           SELECT count(*)::int AS deleted FROM deleted`;
         const tombstonesDeleted = Number(tombstones?.deleted ?? 0);
+        // Busy time a calendar reported (RFC 0004 C1) that ended a month ago keeps nothing out any
+        // more: it goes, as the feed's changes do, so a person's schedule is not kept for good.
+        const [busy] = await tx<{ deleted: number }[]>`
+          WITH ended AS (
+            SELECT ctid FROM slotlock.source_busy
+             WHERE tenant_ref = ${params.tenantRef}
+               AND ends_at < statement_timestamp() - make_interval(days => ${SOURCE_BUSY_RETENTION_DAYS})
+             LIMIT ${limit}
+          ), deleted AS (
+            DELETE FROM slotlock.source_busy busy USING ended WHERE busy.ctid = ended.ctid RETURNING 1
+          )
+          SELECT count(*)::int AS deleted FROM deleted`;
         return {
           expiredHoldsDeleted,
           holdCommandsDeleted,
@@ -8698,7 +8751,8 @@ function buildSlotlockStore(
             legacy.length === limit ||
             expiredHoldsDeleted === limit ||
             holdCommandsDeleted === limit ||
-            tombstonesDeleted === limit,
+            tombstonesDeleted === limit ||
+            Number(busy?.deleted ?? 0) === limit,
         };
       });
     },
@@ -8936,7 +8990,7 @@ function buildSlotlockStore(
                  reported.starts_at AS busy_start, reported.ends_at AS busy_end
             FROM slotlock.reservations booking
             JOIN reported ON booking.starts_at < reported.ends_at AND booking.ends_at > reported.starts_at
-           WHERE booking.resource_id = ${params.resourceId}
+           WHERE booking.resource_id IN (${compositeKin(tx, params.resourceId)})
              AND booking.status = 'confirmed'
              AND booking.starts_at < ${window.end} AND booking.ends_at > ${window.start}
              AND NOT EXISTS (

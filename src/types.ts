@@ -365,6 +365,8 @@ export type ConfirmHoldResult =
   | { ok: false; code: 'hold_expired' }
   /** The hold waits for payment (RFC 0004 C3) and none is recorded yet (markHoldPaid). */
   | { ok: false; code: 'payment_required' }
+  /** A calendar reported its time busy (RFC 0004 C1) after the hold was made. */
+  | { ok: false; code: 'overlap' }
   /** A cancellation of the hold's reference (its id) arrived first and retired it. */
   | { ok: false; code: 'reservation_cancelled' }
   /** Another booking of the tenant already uses the hold's id as its reference. */
