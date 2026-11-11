@@ -6247,7 +6247,7 @@ CREATE TABLE IF NOT EXISTS slotlock.reminder_dispatches (
   ordinal integer NOT NULL,
   due_at timestamptz NOT NULL,
   dispatched_at timestamptz NOT NULL DEFAULT statement_timestamp(),
-  PRIMARY KEY (event_id, recurrence_id, ordinal),
+  PRIMARY KEY (event_id, recurrence_id, due_at),
   CONSTRAINT slotlock_reminder_dispatches_event_fkey FOREIGN KEY (event_id, tenant_ref)
     REFERENCES slotlock.calendar_events (id, tenant_ref) ON DELETE CASCADE
 );
@@ -6275,10 +6275,43 @@ CREATE TABLE IF NOT EXISTS slotlock.reservation_reminder_dispatches (
   ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 4),
   due_at timestamptz NOT NULL,
   dispatched_at timestamptz NOT NULL DEFAULT statement_timestamp(),
-  PRIMARY KEY (reservation_id, ordinal),
+  PRIMARY KEY (reservation_id, due_at),
   CONSTRAINT slotlock_reservation_reminder_dispatches_fkey FOREIGN KEY (reservation_id, tenant_ref)
     REFERENCES slotlock.reservations (id, tenant_ref) ON DELETE CASCADE
 );
+-- A reminder said is kept by when it was due, not by its place in the list: one added, removed or
+-- reordered (so every place has another time) says nothing again that was said, and a booking or
+-- occurrence moved has new times, said again. Reminders due at the same time are said once. Kept by
+-- place before, so the key moves, each time said kept once.
+DO $slotlock_reminder_dispatch_keys$
+DECLARE
+  dispatches text;
+  kept_by_place text;
+BEGIN
+  FOREACH dispatches IN ARRAY ARRAY['reminder_dispatches', 'reservation_reminder_dispatches'] LOOP
+    SELECT key.conname INTO kept_by_place
+      FROM pg_catalog.pg_constraint key
+     WHERE key.conrelid = pg_catalog.format('slotlock.%I', dispatches)::regclass AND key.contype = 'p'
+       AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute column_
+                    WHERE column_.attrelid = key.conrelid AND column_.attnum = ANY (key.conkey)
+                      AND column_.attname = 'ordinal');
+    IF kept_by_place IS NOT NULL THEN
+      IF dispatches = 'reminder_dispatches' THEN
+        DELETE FROM slotlock.reminder_dispatches sent USING slotlock.reminder_dispatches other
+         WHERE other.event_id = sent.event_id AND other.recurrence_id = sent.recurrence_id
+           AND other.due_at = sent.due_at AND other.ordinal < sent.ordinal;
+        EXECUTE pg_catalog.format('ALTER TABLE slotlock.reminder_dispatches DROP CONSTRAINT %I', kept_by_place);
+        ALTER TABLE slotlock.reminder_dispatches ADD PRIMARY KEY (event_id, recurrence_id, due_at);
+      ELSE
+        DELETE FROM slotlock.reservation_reminder_dispatches sent USING slotlock.reservation_reminder_dispatches other
+         WHERE other.reservation_id = sent.reservation_id AND other.due_at = sent.due_at AND other.ordinal < sent.ordinal;
+        EXECUTE pg_catalog.format('ALTER TABLE slotlock.reservation_reminder_dispatches DROP CONSTRAINT %I', kept_by_place);
+        ALTER TABLE slotlock.reservation_reminder_dispatches ADD PRIMARY KEY (reservation_id, due_at);
+      END IF;
+    END IF;
+  END LOOP;
+END
+$slotlock_reminder_dispatch_keys$;
 CREATE INDEX IF NOT EXISTS slotlock_reservation_reminder_dispatches_tenant_idx
   ON slotlock.reservation_reminder_dispatches (tenant_ref, due_at);
 

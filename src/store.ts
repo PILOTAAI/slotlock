@@ -9242,8 +9242,11 @@ function buildSlotlockStore(
         throw new RangeError('limit must be a whole number from 1 to 5000');
       }
       const rows = await sql<{ count: number }[]>`
-        WITH due AS (
-          SELECT occurrence.event_id, occurrence.recurrence_id, reminder.ordinal, reminder.action,
+        WITH candidates AS (
+          -- Reminders due at the same time are said once (the first in the list).
+          SELECT DISTINCT ON (occurrence.event_id, occurrence.recurrence_id,
+                              occurrence.starts_at - make_interval(mins => reminder.minutes_before_start))
+                 occurrence.event_id, occurrence.recurrence_id, reminder.ordinal, reminder.action,
                  reminder.minutes_before_start, occurrence.starts_at, occurrence.ends_at,
                  event.resource_id,
                  occurrence.starts_at - make_interval(mins => reminder.minutes_before_start) AS due_at
@@ -9259,21 +9262,21 @@ function buildSlotlockStore(
                  <= statement_timestamp()
              AND occurrence.starts_at - make_interval(mins => reminder.minutes_before_start)
                  > statement_timestamp() - interval '1 day'
-             -- Said once per time it is due: an occurrence moved since is reminded again.
+             -- Said once per time it is due, whatever its place in the list: one added or
+             -- reordered says nothing again; an occurrence moved since is reminded again.
              AND NOT EXISTS (
                SELECT 1 FROM slotlock.reminder_dispatches sent
                 WHERE sent.event_id = occurrence.event_id AND sent.recurrence_id = occurrence.recurrence_id
-                  AND sent.ordinal = reminder.ordinal
                   AND sent.due_at = occurrence.starts_at - make_interval(mins => reminder.minutes_before_start))
-           ORDER BY due_at, occurrence.event_id, occurrence.recurrence_id, reminder.ordinal
-           LIMIT ${limit}
+           ORDER BY occurrence.event_id, occurrence.recurrence_id,
+                    occurrence.starts_at - make_interval(mins => reminder.minutes_before_start), reminder.ordinal
+        ), due AS (
+          SELECT * FROM candidates ORDER BY due_at, event_id, recurrence_id LIMIT ${limit}
         ), dispatched AS (
           INSERT INTO slotlock.reminder_dispatches (tenant_ref, event_id, recurrence_id, ordinal, due_at)
           SELECT ${params.tenantRef}, event_id, recurrence_id, ordinal, due_at FROM due
-          ON CONFLICT (event_id, recurrence_id, ordinal) DO UPDATE
-             SET due_at = EXCLUDED.due_at, dispatched_at = statement_timestamp()
-           WHERE slotlock.reminder_dispatches.due_at <> EXCLUDED.due_at
-          RETURNING event_id, recurrence_id, ordinal
+          ON CONFLICT (event_id, recurrence_id, due_at) DO NOTHING
+          RETURNING event_id, recurrence_id, due_at
         ), reported AS (
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
           SELECT ${params.tenantRef}, due.resource_id, 'reminder.due', due.event_id::text,
@@ -9283,7 +9286,7 @@ function buildSlotlockStore(
                    'minutes_before_start', due.minutes_before_start, 'due_at', due.due_at,
                    'start', due.starts_at, 'end', due.ends_at),
                  'slotlock:maintenance'
-            FROM due JOIN dispatched USING (event_id, recurrence_id, ordinal)
+            FROM due JOIN dispatched USING (event_id, recurrence_id, due_at)
           RETURNING 1
         )
         SELECT count(*)::int AS count FROM reported`;
@@ -9291,8 +9294,9 @@ function buildSlotlockStore(
       if (events >= limit) return events;
       // A booking's reminders too, named by its reference, with whom to tell.
       const [bookings] = await sql<{ count: number }[]>`
-        WITH due AS (
-          SELECT booking.id, booking.external_ref, booking.resource_id, booking.contact_ref,
+        WITH candidates AS (
+          SELECT DISTINCT ON (booking.id, booking.starts_at - make_interval(mins => reminder.minutes))
+                 booking.id, booking.external_ref, booking.resource_id, booking.contact_ref,
                  booking.starts_at, booking.ends_at, (reminder.ordinal - 1)::int AS ordinal,
                  reminder.minutes,
                  booking.starts_at - make_interval(mins => reminder.minutes) AS due_at
@@ -9304,19 +9308,19 @@ function buildSlotlockStore(
              AND booking.starts_at > statement_timestamp()
              AND booking.starts_at - make_interval(mins => reminder.minutes) <= statement_timestamp()
              AND booking.starts_at - make_interval(mins => reminder.minutes) > statement_timestamp() - interval '1 day'
+             -- Said once per time it is due, as an event's reminders are.
              AND NOT EXISTS (
                SELECT 1 FROM slotlock.reservation_reminder_dispatches sent
-                WHERE sent.reservation_id = booking.id AND sent.ordinal = reminder.ordinal - 1
+                WHERE sent.reservation_id = booking.id
                   AND sent.due_at = booking.starts_at - make_interval(mins => reminder.minutes))
-           ORDER BY due_at, booking.id, reminder.ordinal
-           LIMIT ${limit - events}
+           ORDER BY booking.id, booking.starts_at - make_interval(mins => reminder.minutes), reminder.ordinal
+        ), due AS (
+          SELECT * FROM candidates ORDER BY due_at, id LIMIT ${limit - events}
         ), dispatched AS (
           INSERT INTO slotlock.reservation_reminder_dispatches (tenant_ref, reservation_id, ordinal, due_at)
           SELECT ${params.tenantRef}, id, ordinal, due_at FROM due
-          ON CONFLICT (reservation_id, ordinal) DO UPDATE
-             SET due_at = EXCLUDED.due_at, dispatched_at = statement_timestamp()
-           WHERE slotlock.reservation_reminder_dispatches.due_at <> EXCLUDED.due_at
-          RETURNING reservation_id AS id, ordinal
+          ON CONFLICT (reservation_id, due_at) DO NOTHING
+          RETURNING reservation_id AS id, due_at
         ), reported AS (
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
           SELECT ${params.tenantRef}, due.resource_id, 'reminder.due', due.external_ref,
@@ -9326,7 +9330,7 @@ function buildSlotlockStore(
                    'ordinal', due.ordinal, 'minutes_before_start', due.minutes, 'due_at', due.due_at,
                    'start', due.starts_at, 'end', due.ends_at)),
                  'slotlock:maintenance'
-            FROM due JOIN dispatched USING (id, ordinal)
+            FROM due JOIN dispatched USING (id, due_at)
           RETURNING 1
         )
         SELECT count(*)::int AS count FROM reported`;

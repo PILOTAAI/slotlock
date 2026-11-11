@@ -347,6 +347,28 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     expect(await maintain()).toBe(0);
     const [booked] = (await feed('reminder.due')).filter((change) => change.subject === 'bk-remind');
     expect(booked?.data).toMatchObject({ reference: 'bk-remind', contact_ref: 'guest-1', minutes_before_start: 240, ordinal: 0 });
+
+    // A reminder added, the booking not moved: what was said is not said again. Kept by its place
+    // in the list, every reminder after the new one was said a second time.
+    const remindedOf = async () =>
+      (await feed('reminder.due')).filter((change) => change.subject === 'bk-remind').map((change) => change.data.minutes_before_start);
+    const rebook = (revision: number, startIn: number, reminders: number[]) =>
+      call('PUT', '/v1/reservations/bk-remind', {
+        resource_id: studio.id,
+        start: soon(startIn).toISOString(),
+        end: soon(startIn + 30).toISOString(),
+        revision,
+        contact_ref: 'guest-1',
+        reminder_minutes: reminders,
+      });
+    expect((await rebook(2, 200, [1_380, 240, 15])).status).toBe(200);
+    expect(await maintain()).toBe(1);
+    expect(await maintain()).toBe(0);
+    expect(await remindedOf()).toEqual([240, 1_380]);
+    // Moved: due at other times, said again.
+    expect((await rebook(3, 210, [1_380, 240, 15])).status).toBe(200);
+    expect(await maintain()).toBe(2);
+    expect(await remindedOf()).toEqual([240, 1_380, 1_380, 240]);
   });
   it('checks what a hold is paid, and lets an agent hold time that waits for payment', async () => {
     const bay = await resource('bay-pay');
