@@ -2703,12 +2703,12 @@ ${
       const rules = options.availability ?? [];
       body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Default hours</span><div class="row-value${rules.length === 0 ? ' muted' : ''}">${
         rules.length === 0
-          ? 'None. Agents find free time only on resources with hours of their own.'
+          ? "None. Agents find free time only on resources with hours of their own, their location's or yours."
           : html`${rules.map(
               (rule, index) =>
                 html`${index > 0 ? html`<br>` : html``}${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}`,
             )}`
-      }</div></div></div><p class="fine">In each resource's own time zone, for resources without hours of their own. Set by the server's operator.</p>`;
+      }</div></div></div><p class="fine">In each resource's own time zone, for resources with no hours of their own, their location's or <a href="${root}/hours">yours</a>. Set by the server's operator.</p>`;
     } else {
       const current = session.orgs?.find((org) => org.id === session.org);
       const others = (session.orgs ?? []).filter((org) => org.id !== current?.id);
@@ -3700,6 +3700,7 @@ ${
     external_ref: 'Reference',
     event_id: 'Booking',
     hold_id: 'Hold',
+    hold_group_id: 'Held together',
     ttl_seconds: 'Held for',
     notes: 'Note',
     description: 'Note',
@@ -3721,7 +3722,7 @@ ${
     if (name === 'ttl_seconds' && typeof value === 'number') {
       return html`${value >= 60 ? `${Math.round(value / 60)} min` : `${value} s`}`;
     }
-    if ((name === 'event_id' || name === 'hold_id') && typeof value === 'string') return html`<code>${value}</code>`;
+    if ((name === 'event_id' || name === 'hold_id' || name === 'hold_group_id') && typeof value === 'string') return html`<code>${value}</code>`;
     if (typeof value === 'string') return html`<span class="wrap">${value}</span>`;
     if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
       return html`<span class="wrap">${(value as string[]).join(', ')}</span>`;

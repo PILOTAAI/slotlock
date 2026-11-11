@@ -10,6 +10,7 @@ const STEP_WORDS: Readonly<Record<string, readonly [string, string, string]>> = 
   slotlock_get_free_busy: ['Checking free and busy time', 'Checked free and busy time', 'check free and busy time'],
   slotlock_find_next_available: ['Finding the next free time', 'Found the next free time', 'find the next free time'],
   slotlock_find_available_slots: ['Checking availability', 'Checked availability', 'check availability'],
+  slotlock_find_available_ranges: ['Finding free ranges', 'Found free ranges', 'find free ranges'],
   slotlock_get_pool_availability: ['Checking the pool', 'Checked the pool', 'check the pool'],
   slotlock_get_event: ['Reading a booking', 'Read a booking', 'read the booking'],
   slotlock_list_events: ['Reading bookings', 'Read bookings', 'read bookings'],
@@ -46,6 +47,7 @@ export function slotlockAssistantActionVerb(operation: string): { verb: string; 
     case 'slotlock_delete_event':
       return { verb: 'Delete booking', busy: 'Deleting…', done: 'Deleted', danger: true };
     case 'slotlock_hold_slots':
+    case 'slotlock_hold_together':
       return { verb: 'Hold', busy: 'Holding…', done: 'Held', danger: false };
     case 'slotlock_release_slots':
       return { verb: 'Release', busy: 'Releasing…', done: 'Released', danger: true };

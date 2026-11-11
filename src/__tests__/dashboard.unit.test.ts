@@ -937,6 +937,8 @@ describe('bookable hours in the dashboard', () => {
     expect(html).toContain('Mon, Wed 23:00–00:20 next day; Fri from 09:00 for 2 d 2 h 30 min');
     const settings = await (await get(target, '/base/dashboard/settings/hours', session)).text();
     expect(settings).toContain('Mon–Fri: 09:00–17:00');
+    // The server's hours come last: after a resource's own, its location's and the tenant's.
+    expect(settings).toContain(`for resources with no hours of their own, their location's or <a href="/base/dashboard/hours">yours</a>`);
     expect(html).not.toMatch(/\d\.\d+ h/);
   });
 
