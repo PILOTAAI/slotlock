@@ -98,6 +98,7 @@ import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from '.
 import { createSlotlockDashboardWorkspaces, createSlotlockWorkspaceCheck } from './workspaces.js';
 import { createSlotlockWorkspaceDomains, runSlotlockDomainChecks } from './workspace-domains.js';
 import { slotlockDomainResolvers } from './domains.js';
+import { createSlotlockSecretBox } from './oidc.js';
 import { createSlotlockInvitationEmailSender } from './invitation-email.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import {
@@ -207,6 +208,8 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_INVITATION_EMAIL_FROM',
   'SLOTLOCK_VERIFIED_DOMAINS',
   'SLOTLOCK_DNS_RESOLVER',
+  'SLOTLOCK_TEAM_SSO',
+  'SLOTLOCK_SSO_SECRET',
   'HOST',
   'PORT',
 ] as const);
@@ -915,6 +918,8 @@ export function slotlockServeAllowsTenant(
   // A test environment (RFC 0003 G9) is let through exactly as its live tenant.
   const live = slotlockLiveTenant(tenantRef);
   if (live.startsWith('team:')) return config.teamWorkspaces === true;
+  // A person a team's identity provider made has no workspace of their own, so no keys of one.
+  if (live.startsWith('sso:')) return false;
   const orgId = /^github-org:(\d+)$/.exec(live)?.[1];
   // With `enabled`, the database decides, as serve's authenticate asks (createSlotlockOrganizationCheck).
   if (orgId !== undefined) return config.organizations === 'enabled' || config.organizations?.includes(orgId) === true;
@@ -1338,6 +1343,10 @@ export async function startSlotlockServer(
             ...(config.dashboard.teamWorkspaces ? { teamWorkspaces: true } : {}),
             ...(config.dashboard.verifiedDomains
               ? { domains: { resolvers: slotlockDomainResolvers(config.dashboard.verifiedDomains.resolver) } }
+              : {}),
+            // Teams' single sign-on: their Owners' URLs fetched never from a private address.
+            ...(config.dashboard.teamSso
+              ? { sso: { secretBox: createSlotlockSecretBox(config.dashboard.teamSso.secret), fetch: createSlotlockGuardedFetch() } }
               : {}),
             ...(config.dashboard.invitationEmail
               ? {
@@ -2872,6 +2881,9 @@ Environment:
                                  record, and people at it may ask to join (with team workspaces)
   SLOTLOCK_DNS_RESOLVER          doh (default: Cloudflare, checked by Google) or system: how a
                                  verified domain's record is looked up each day
+  SLOTLOCK_TEAM_SSO              on or off (default): each team signs in through its own identity
+                                 provider over OpenID Connect (with verified domains)
+  SLOTLOCK_SSO_SECRET            32+ characters: seals each team's client secret (with team SSO)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 

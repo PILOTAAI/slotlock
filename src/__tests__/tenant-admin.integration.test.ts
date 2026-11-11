@@ -666,6 +666,9 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         'workspace_domains',
         'workspace_join_requests',
         'workspace_join_blocks',
+        // A team's single sign-on: workspace-sso.integration covers its erasure, and a person's.
+        'sso_connections',
+        'sso_bypasses',
       ]);
       const owned = tables.filter(
         (table) => table !== 'tenant_suspensions' && table !== 'partner_accounts' && !teamOnly.has(table),

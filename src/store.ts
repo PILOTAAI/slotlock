@@ -10892,7 +10892,7 @@ function buildSlotlockStore(
       // Each its own statement: an erasure that runs long never takes the prunes with it.
       const [pruned] = await sql<{ deleted: string | number }[]>`
         SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions()
-               + slotlock.prune_workspace_domains() AS deleted`;
+               + slotlock.prune_workspace_domains() + slotlock.prune_sso() AS deleted`;
       const [erased] = await sql<{ erased: string | number }[]>`SELECT slotlock.erase_deleted_teams() AS erased`;
       return Number(pruned?.deleted ?? 0) + Number(erased?.erased ?? 0);
     },

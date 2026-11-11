@@ -54,7 +54,7 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     expect(await teams.accept({ tokenSha256: digest, person, emails: [], memberCap: null })).toEqual({ tenantRef });
   };
   const roleIn = async (tenantRef: string, person: string) =>
-    (await createSlotlockDashboardWorkspaces(application).standing(tenantRef, person)).role;
+    (await createSlotlockDashboardWorkspaces(application).standing(tenantRef, person, null)).role;
 
   beforeAll(async () => {
     admin = postgres(url as string, { max: 1, onnotice: () => {} });
