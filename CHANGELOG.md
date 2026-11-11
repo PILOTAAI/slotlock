@@ -43,10 +43,11 @@ versioning.
   so sessions from before this release sign in once more, and a person's 50 most recent are kept.
 - **Team for team workspaces**: a team's Owners and Billing managers buy the Team plan on Usage, as
   an organization's do.
-- **Deleting a team** (Settings, Team): an Owner types its handle; its keys stop at once, every
-  member sees the date, and maintenance erases it seven days later unless an Owner keeps it
-  (`slotlock.schedule_team_deletion`, `cancel_team_deletion`, `erase_deleted_teams`). Refused while
-  the team has a subscription.
+- **Deleting a team** (Settings, Team): an Owner types its handle; its keys stop (on every server
+  within 30 seconds), every member sees the date, and maintenance erases it seven days later unless
+  an Owner keeps it (`slotlock.schedule_team_deletion`, `cancel_team_deletion`,
+  `erase_deleted_teams`). Refused while the team has a subscription, and never erased while it has
+  one.
 - **Invitations by email**: `SLOTLOCK_INVITATION_EMAIL` (`resend` or `postmark`), with
   `SLOTLOCK_INVITATION_EMAIL_KEY` and `SLOTLOCK_INVITATION_EMAIL_FROM`
   (`createSlotlockInvitationEmailSender`). Each person is held to 50 invitations a day across their
