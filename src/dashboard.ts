@@ -37,6 +37,17 @@ import type {
   SlotlockTeamRefusal,
   SlotlockTeamWorkspace,
 } from './workspaces.js';
+import { type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
+import {
+  type SlotlockDomainChangeRefusal,
+  type SlotlockDomainCheckOutcome,
+  type SlotlockDomainJoinPolicy,
+  type SlotlockJoinEvidence,
+  SLOTLOCK_DOMAIN_AUDIT_ACTIONS,
+  slotlockDomainCheckEvent,
+  slotlockJoinRole,
+} from './workspace-domains.js';
+import { SLOTLOCK_WORKSPACE_DOMAIN_LIMIT } from './ddl-identity.js';
 import type { SlotlockAuditEvent, SlotlockAuditEventInput } from './store.js';
 import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
@@ -260,6 +271,13 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/members/scope',
   '/members/remove',
   '/members/leave',
+  '/members/requests',
+  '/join/request',
+  '/identity/domains',
+  '/identity/domains/verify',
+  '/identity/domains/remove',
+  '/identity/domains/policy',
+  '/identity/invites',
   '/assistant',
   '/assistant/stream',
   '/assistant/approve',
@@ -319,6 +337,7 @@ const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = 
   'privacy.manage': "export the workspace's data or erase a person",
   'billing.manage': 'change the plan or billing',
   'workspace.own': 'change who owns this workspace',
+  'identity.manage': "change the team's domains",
 });
 /** The pages a sign-in may come back to: one made to confirm it's you, or to open an invitation. */
 const STEP_UP_PAGES: ReadonlySet<string> = new Set([
@@ -329,6 +348,7 @@ const STEP_UP_PAGES: ReadonlySet<string> = new Set([
   '/settings',
   '/settings/members',
   '/settings/team',
+  '/settings/identity',
   '/teams',
   '/contacts',
   '/invite',
@@ -413,6 +433,19 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'member.scope_changed': 'changed what a member reaches',
   'member.removed': 'removed a member',
   'member.left': 'left',
+  'member.join_requested': 'asked to join',
+  'member.join_approved': 'let someone join',
+  'member.join_declined': 'declined a request to join',
+  'domain.claimed': 'added a domain',
+  'domain.verified': 'verified a domain',
+  'domain.record_missing': "found a domain's record gone",
+  'domain.lapsing': 'found a domain lapsing',
+  'domain.restored': 'verified a domain again',
+  'domain.lapsed': 'found a domain lapsed',
+  'domain.released': 'removed a domain',
+  'domain.join_policy_changed': 'changed who may join through a domain',
+  'workspace.invites_restricted': 'held invitations to verified domains',
+  'workspace.invites_unrestricted': 'let invitations go to any address',
   'authz.denied': 'was refused',
   'staff.account_suspended': 'suspended the account',
   'staff.account_unsuspended': "lifted the account's suspension",
@@ -422,7 +455,8 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
   ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
-  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
+  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'member.join_requested', 'member.join_approved', 'member.join_declined', 'organization.enabled', 'organization.disabled']],
+  ['Identity', [...SLOTLOCK_DOMAIN_AUDIT_ACTIONS]],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
   ['Slotlock staff', ['staff.account_suspended', 'staff.account_unsuspended', 'staff.key_revoked', 'staff.sessions_ended']],
@@ -458,6 +492,7 @@ const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text
   confirm: { status: 400, text: "Type the team's handle to confirm." },
   subscription_live: { status: 409, text: 'Cancel its Team plan on Usage first.' },
   owner: { status: 409, text: 'An owner reaches the whole workspace. Change their role first.' },
+  domain_restricted: { status: 403, text: 'Invitations go only to addresses at this team’s verified domains.' },
 });
 
 /** A handle from a team's name: lower-case letters, digits and dashes; later attempts add a random end. */
@@ -1022,6 +1057,13 @@ export interface SlotlockDashboardOptions {
    * database, and no fixed list of organizations. Off unless set.
    */
   teamWorkspaces?: boolean;
+  /**
+   * Verified domains (workspace-domains.ts): a team's Owner proves a domain with a DNS record, and
+   * the people whose verified address is at it may ask to join. Needs team workspaces. The resolvers
+   * look the record up when an Owner asks (domains.ts slotlockDomainResolvers); the daily check runs
+   * in the server's maintenance. Off unless set.
+   */
+  domains?: { resolvers: readonly SlotlockDnsResolver[] };
   /** Sends invitations by email; the person inviting is shown each link either way. */
   invitations?: SlotlockInvitationSender;
   keys: SlotlockApiKeyStore;
@@ -1551,6 +1593,11 @@ interface Session {
   team?: string;
   /** Addresses GitHub verified, kept only for the invitation being opened: at most its own. */
   em?: string[];
+  /**
+   * With Google: the Google Workspace domain the account belongs to (the ID token's `hd`), so its
+   * address is one the company controls now, not one it verified once.
+   */
+  hd?: string;
 }
 
 interface Organization {
@@ -2191,6 +2238,9 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const workspaces = options.workspaces ?? null;
   // Team workspaces: with the membership store's database, where people have workspaces of their own.
   const teamStore = options.teamWorkspaces && !served ? (workspaces?.teams ?? null) : null;
+  /** Verified domains: a team workspace's, with the database. */
+  const domainStore = teamStore && options.domains ? (workspaces?.domains ?? null) : null;
+  const domainResolvers = options.domains?.resolvers ?? [];
   /** Each session's role in the workspace it acts in, as the database said when it was read. */
   const roles = new WeakMap<Session, SlotlockWorkspaceRole>();
   /** Where each request came from, for the audit log. */
@@ -2403,6 +2453,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ) {
       return false;
     }
+    if (payload.hd !== undefined && (payload.idp !== 'google' || typeof payload.hd !== 'string' || payload.hd.length > 253)) return false;
     if (payload.em === undefined) return true;
     return (
       Array.isArray(payload.em) &&
@@ -2420,6 +2471,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   /** Addresses the person holds verified: their Google account's, or those GitHub confirmed for an invitation. */
   const verifiedEmails = (session: Session): string[] =>
     session.idp === 'google' ? (session.login.includes('@') ? [session.login.toLowerCase()] : []) : (session.em ?? []);
+  /**
+   * How those addresses were verified, for joining through a domain: by a Google Workspace account
+   * of the address's own domain (the company controls it now), or once, by Google or GitHub.
+   */
+  const joinEvidence = (session: Session): SlotlockJoinEvidence => {
+    if (session.idp !== 'google') return 'github';
+    const domain = slotlockEmailDomain(session.login);
+    return session.hd !== undefined && domain !== null && domain === slotlockEmailDomain(`x@${session.hd}`) ? 'google_workspace' : 'google';
+  };
 
   /**
    * Without a membership store: the Owner of one's own workspace; in an organization's, its GitHub
@@ -3261,7 +3321,7 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
-  type SettingsSection = 'assistant' | 'members' | 'team' | 'audit' | 'privacy' | 'endpoints' | 'hours' | 'account';
+  type SettingsSection = 'assistant' | 'members' | 'team' | 'identity' | 'audit' | 'privacy' | 'endpoints' | 'hours' | 'account';
   /** An invitation's link, shown once to the person who made it. */
   type InvitationShown = { link: string; to: string; expiresAt: Date };
 
@@ -3273,6 +3333,7 @@ ${
     { id: 'assistant', label: 'Assistant', path: '/settings' },
     { id: 'members', label: 'Members', path: '/settings/members' },
     { id: 'team', label: 'Team', path: '/settings/team' },
+    { id: 'identity', label: 'Identity', path: '/settings/identity' },
     { id: 'audit', label: 'Audit log', path: '/settings/audit' },
     { id: 'privacy', label: 'Privacy', path: '/settings/privacy' },
     { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
@@ -3297,6 +3358,7 @@ ${
         (entry.id !== 'assistant' || store) &&
         (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
         (entry.id !== 'team' || (teamStore && session.team !== undefined && can(session, 'workspace.own'))) &&
+        (entry.id !== 'identity' || (domainStore && session.team !== undefined && can(session, 'identity.manage'))) &&
         (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))) &&
         (entry.id !== 'privacy' || (options.resources.privacy && can(session, 'privacy.manage'))) &&
         // Limited to some resources: one's account and the team's people, nothing of the workspace's.
@@ -3307,7 +3369,7 @@ ${
         ? 'account'
         : section === 'assistant' && !store
         ? 'endpoints'
-        : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy') &&
+        : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy' || section === 'identity') &&
             !sections.some((entry) => entry.id === section)
           ? 'account'
           : section;
@@ -3325,6 +3387,8 @@ ${
       body = await membersSection(session, status, notice, invitation);
     } else if (shown === 'team') {
       body = await teamSection(session, status, notice);
+    } else if (shown === 'identity') {
+      body = await identitySection(session, status, notice);
     } else if (shown === 'audit') {
       body = await auditSection(session, status, notice, query ?? new URLSearchParams());
     } else if (shown === 'privacy') {
@@ -5850,6 +5914,8 @@ ${
   /** The page a form's route belongs to, to go back to. */
   const backOf = (route: string) => {
     if (route.startsWith('/members/')) return '/settings/members';
+    if (route.startsWith('/identity/')) return '/settings/identity';
+    if (route.startsWith('/join/')) return '/teams';
     if (route === '/teams/delete' || route === '/teams/restore') return '/settings/team';
     if (route.startsWith('/settings/privacy')) return '/settings/privacy';
     const first = `/${route.split('/')[1] ?? ''}`;
@@ -5938,6 +6004,10 @@ ${
     if (route.startsWith('/members/') && teamStore) {
       return { path: '/settings/members', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'members') };
     }
+    if (route.startsWith('/identity/') && domainStore) {
+      return { path: '/settings/identity', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'identity') };
+    }
+    if (route.startsWith('/join/') && domainStore) return { path: '/teams', page: teamsPage };
     if (route.startsWith('/settings')) return { path: '/settings', page: settingsPage };
     if (route.startsWith('/plan') && plans) return { path: '/plan', page: planPage };
     if ((route.startsWith('/teams') || route.startsWith('/invite')) && (teams || teamStore)) return { path: '/teams', page: teamsPage };
@@ -6497,19 +6567,22 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
    * Teams on Cloud: the person's GitHub organizations, as read at sign-in, each on or off. An owner
    * turns one on or off; a member asks an owner; one that is on is a workspace to switch to.
    */
-  async function teamsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  async function teamsPage(session: Session, status = 200, notice?: string, checked = false): Promise<Response> {
     if (!teams && !teamStore) return nothingHere(session);
-    const own = teamStore ? await teamWorkspacesSection(session) : html``;
+    const own = teamStore ? await teamWorkspacesSection(session, checked) : html``;
     const organizations = teams ? await organizationsSection(session) : html``;
     const content = html`${noticeOf(notice, status)}${pageHead('Teams')}${own}${organizations}`;
     return respond(status, layout('Teams', content, session, 'teams'));
   }
 
   /** The person's team workspaces, the invitations open to them, and creating one. */
-  async function teamWorkspacesSection(session: Session): Promise<Html> {
+  async function teamWorkspacesSection(session: Session, checked = false): Promise<Html> {
     if (!teamStore) return html``;
     const listed = teamListOf.get(session) ?? [];
-    const offered = await teamStore.pendingFor(personOf(session), verifiedEmails(session));
+    const [offered, atDomain] = await Promise.all([
+      teamStore.pendingFor(personOf(session), verifiedEmails(session)),
+      domainTeamsSection(session, checked),
+    ]);
     const token = csrfToken(session);
     const hidden = () =>
       html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
@@ -6529,7 +6602,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       invitations.length > 0
         ? html`<div class="table"><table><caption class="visually-hidden">Invitations</caption><thead><tr><th>Invited to</th><th>From</th><th>As</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${invitations}</tbody></table></div>`
         : html``
-    }${
+    }${atDomain}${
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Team</th><th>Handle</th><th>You are</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``
@@ -6628,12 +6701,14 @@ ${
     const grouping = options.resources.grouping;
     // Limiting people to locations and groups: by an Owner or Admin who is not limited themselves.
     const limits = manage && grouping !== undefined && (mine === 'owner' || mine === 'admin') && !scopes.has(session);
-    const [members, invitations, cap, limited, places] = await Promise.all([
+    const [members, invitations, cap, limited, places, requests, viaDomain] = await Promise.all([
       teamStore.members(tenantRef),
       manage ? teamStore.invitations(tenantRef) : Promise.resolve([]),
       memberCapOf(tenantRef),
       teamStore.scopes(tenantRef),
       limits && grouping ? Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]) : Promise.resolve(null),
+      manage && domainStore ? domainStore.requests(tenantRef) : Promise.resolve([]),
+      domainStore ? domainStore.domainMembers(tenantRef) : Promise.resolve(new Map<string, { domain: string; status: string }>()),
     ]);
     const open = invitations.filter((invitation) => invitation.expiresAt.getTime() > now());
     const seats = members.length + open.length;
@@ -6682,9 +6757,24 @@ ${
         action = html`${member.role !== 'owner' && places ? limitForm(member.person, name, index, limited.get(member.person) ?? null, places[0], places[1], hidden) : html``}<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
       }
       const reach = member.role === 'owner' ? undefined : limited.get(member.person);
-      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}</td><td data-label="Role">${role}</td><td data-label="Reaches">${reach ? scopeWords(reach) : 'All'}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+      const via = viaDomain.get(member.person);
+      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}${
+        via ? html` <span class="muted">via ${via.domain}${via.status === 'verified' ? '' : ', no longer verified'}</span>` : html``
+      }</td><td data-label="Role">${role}</td><td data-label="Reaches">${reach ? scopeWords(reach) : 'All'}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+    });
+    // Requests to join through a verified domain: approved as Viewer, Member or Developer.
+    const joinRoles = (['viewer', 'member', 'developer'] as const).filter((role) => slotlockRoleMayGrant(mine, role));
+    const requestRows = requests.map((request, index) => {
+      const name = request.display ?? request.email;
+      return html`<tr><td data-label="Asked" class="strong">${name}${request.display ? html` <span class="muted">${request.email}</span>` : html``} <span class="muted">${JOIN_EVIDENCE_WORDS[request.evidence]}</span></td><td data-label="Asked on">${formatDate(request.createdAt)}</td><td class="actions"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
+        (role) => html`<option value="${role}"${role === 'member' ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+      )}</select><button class="primary" type="submit" name="decision" value="approve">Approve<span class="visually-hidden"> ${name}</span></button><button type="submit" name="decision" value="decline">Decline<span class="visually-hidden"> ${name}</span></button></form></td></tr>`;
     });
     return html`${noticeOf(notice, status)}<h2>Members · ${String(cap === null ? members.length : seats)}${cap === null ? '' : ` of ${String(cap)}`}</h2>${invite}${link}${
+      requestRows.length > 0
+        ? html`<h3>Asking to join</h3><div class="table"><table><thead><tr><th>Asked</th><th>Asked on</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${requestRows}</tbody></table></div>`
+        : html``
+    }${
       pendingRows.length > 0
         ? html`<h3>Pending</h3><div class="table"><table><thead><tr><th>Invited</th><th>Role</th><th>By</th><th>Expires</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
         : html``
@@ -7124,6 +7214,250 @@ ${
     if (refusal) return settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'team');
     await audit(session, { action: 'workspace.deletion_cancelled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
     return redirect(303, `${root}/settings/team`);
+  }
+
+  /** What a refused change to a team's domains, or a request to join, says, and its status. */
+  const DOMAIN_REFUSALS: Readonly<Record<SlotlockDomainChangeRefusal, { status: number; text: string }>> = Object.freeze({
+    invalid_domain: { status: 400, text: 'Enter a domain your organization owns, such as acme.com.' },
+    public_suffix: { status: 400, text: 'Nobody owns all of that domain. Enter your own domain under it.' },
+    consumer_domain: { status: 400, text: 'Anyone can get an address at that domain. Enter your organization’s own.' },
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s domains.' },
+    already_claimed: { status: 409, text: 'That domain is listed already.' },
+    domain_taken: { status: 409, text: 'Another team holds that domain.' },
+    domain_limit: { status: 403, text: `A team has up to ${String(SLOTLOCK_WORKSPACE_DOMAIN_LIMIT)} domains.` },
+    too_soon: { status: 429, text: 'Checked less than a minute ago. Try again shortly.' },
+    expired: { status: 409, text: 'That record expired after seven days. Add the domain again for a new one.' },
+    restricted: { status: 409, text: 'Invitations go only to verified domains: allow any address before removing the last one.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first.' },
+    already_member: { status: 409, text: 'You are a member already.' },
+    pending: { status: 409, text: 'You asked already. An owner or admin decides.' },
+    request_limit: { status: 429, text: 'You asked to join 20 teams in the last day. Try again tomorrow.' },
+    member_cap: TEAM_REFUSALS.member_cap,
+    role_not_allowed: { status: 400, text: 'Someone joining through a domain joins as Viewer, Member or Developer.' },
+    domain_not_verified: { status: 409, text: 'That domain is no longer verified, so the request cannot be approved.' },
+  });
+
+  /** How a request's address was verified, as the people deciding read it. */
+  const JOIN_EVIDENCE_WORDS: Readonly<Record<SlotlockJoinEvidence, string>> = Object.freeze({
+    google_workspace: 'verified by Google Workspace',
+    google: 'verified once by Google, not checked since',
+    github: 'verified once by GitHub, not checked since',
+  });
+
+  /** What a domain lets the people whose verified address is at it do, as the Identity page offers it. */
+  const JOIN_POLICY_WORDS: Readonly<Record<SlotlockDomainJoinPolicy, string>> = Object.freeze({
+    request: 'Ask to join',
+    auto: 'Join as Viewer',
+    off: 'Invitations only',
+  });
+
+  const identityPage = (session: Session, status: number, notice: string) =>
+    settingsPage(session, status, notice, undefined, 'identity');
+  const domainRefused = (session: Session, refusal: SlotlockDomainChangeRefusal) =>
+    identityPage(session, DOMAIN_REFUSALS[refusal].status, DOMAIN_REFUSALS[refusal].text);
+
+  /** A team's domains: each with its record until verified, who may join through it, and invitations. */
+  async function identitySection(session: Session, status: number, notice: string | undefined): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return noticeOf(notice, status);
+    const [listed, restricted] = await Promise.all([domainStore.list(tenantRef), domainStore.invitesRestricted(tenantRef)]);
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const cards = listed.map((domain, index) => {
+      const name = domain.unicode === domain.ascii ? html`${domain.unicode}` : html`${domain.unicode} <span class="muted">${domain.ascii}</span>`;
+      const [pill, word] = domain.expired
+        ? ['expired', 'Expired']
+        : domain.status === 'verified'
+          ? ['active', 'Verified']
+          : domain.status === 'lapsing'
+            ? ['revoked', 'Record missing']
+            : ['held', 'Pending'];
+      const record = slotlockDomainRecord(domain.ascii, domain.token);
+      const id = html`<input type="hidden" name="id" value="${domain.id}">`;
+      let rows: Html;
+      if (domain.status === 'verified') {
+        rows = html`<div class="row"><span class="row-label">Who may join</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains/policy">${hidden()}${id}<label class="visually-hidden" for="policy-${String(index)}">Who may join through ${domain.unicode}</label><select id="policy-${String(index)}" name="policy">${(['request', 'auto', 'off'] as const).map(
+          (policy) => html`<option value="${policy}"${policy === domain.joinPolicy ? html` selected` : html``}>${JOIN_POLICY_WORDS[policy]}</option>`,
+        )}</select><button type="submit">Save<span class="visually-hidden"> who may join through ${domain.unicode}</span></button></form></div></div>`;
+      } else if (domain.expired) {
+        rows = html`<div class="row"><span class="row-label">Record</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains">${hidden()}<input type="hidden" name="domain" value="${domain.ascii}"><button type="submit">Get a new record<span class="visually-hidden"> for ${domain.unicode}</span></button></form></div></div>`;
+      } else {
+        rows = html`${
+          domain.status === 'lapsing' && domain.lapseAfter
+            ? html`<div class="row"><span class="row-label">Lapses</span><div class="row-value">${formatDate(domain.lapseAfter)}, unless this new record is published</div></div>`
+            : html``
+        }<div class="row"><span class="row-label">TXT name</span><div class="row-value">${copyField(`record-name-${String(index)}`, record.name)}</div></div><div class="row"><span class="row-label">TXT value</span><div class="row-value">${copyField(`record-value-${String(index)}`, record.value)}</div></div><div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains/verify">${hidden()}${id}<button class="primary" type="submit">Verify now<span class="visually-hidden"> ${domain.unicode}</span></button></form></div></div>`;
+      }
+      const remove = html`<details class="act danger"><summary>Remove<span class="visually-hidden"> ${domain.unicode}</span></summary><div class="pop"><p>${
+        domain.status === 'pending' ? 'The claim is withdrawn.' : 'Nobody new joins through it. Members who joined through it stay.'
+      }</p><form method="post" action="${root}/identity/domains/remove">${hidden()}${id}<button class="danger" type="submit">Remove ${domain.unicode}</button></form></div></details>`;
+      return html`<div class="set-card"><div class="row"><span class="row-label">Domain</span><div class="row-value"><span class="strong">${name}</span> <span class="pill ${pill}">${word}</span> ${remove}</div></div>${rows}</div>`;
+    });
+    const add =
+      listed.length >= SLOTLOCK_WORKSPACE_DOMAIN_LIMIT
+        ? html``
+        : html`<form class="invite" method="post" action="${root}/identity/domains">${hidden()}<label for="domain">Domain</label><input id="domain" name="domain" maxlength="253" autocomplete="off" spellcheck="false" placeholder="acme.com" required><button class="primary" type="submit">Add domain</button></form>`;
+    const verified = listed.some((domain) => domain.status === 'verified');
+    const invites = html`<h2>Invitations</h2><div class="set-card"><div class="row"><span class="row-label">Go to</span><div class="row-value">${
+      restricted ? 'Addresses at verified domains' : 'Any address'
+    } ${
+      restricted || verified
+        ? html`<form class="inline" method="post" action="${root}/identity/invites">${hidden()}<input type="hidden" name="on" value="${restricted ? '0' : '1'}"><button type="submit">${
+            restricted ? 'Allow any address' : 'Only verified domains'
+          }</button></form>`
+        : html``
+    }</div></div></div>`;
+    return html`${noticeOf(notice, status)}<h2>Domains</h2>${add}${cards}${invites}`;
+  }
+
+  async function claimDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const claimed = await domainStore.claim(tenantRef, personOf(session), (form.get('domain') ?? '').slice(0, 300));
+    if ('refusal' in claimed) return domainRefused(session, claimed.refusal);
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === claimed.id);
+    await audit(session, { action: 'domain.claimed', targetType: 'domain', targetRef: claimed.id, metadata: { domain: domain?.ascii ?? '' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** What an Owner's "Verify now" found, as the page says it. */
+  const VERIFY_ANSWERS: Readonly<Record<string, { status: number; text: (domain: string) => string }>> = Object.freeze({
+    verified: { status: 200, text: (domain: string) => `${domain} is verified.` },
+    restored: { status: 200, text: (domain: string) => `${domain} is verified again.` },
+    seen: { status: 200, text: (domain: string) => `${domain} is still verified.` },
+    absent: { status: 409, text: () => 'The record isn’t there yet. Slotlock also checks every hour for three days.' },
+    error: { status: 503, text: () => 'DNS didn’t answer. Try again shortly.' },
+    domain_taken: { status: 409, text: () => 'Another team verified that domain first.' },
+  });
+
+  async function verifyDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const found: SlotlockDomainCheckOutcome = await domainStore.verifyNow(tenantRef, personOf(session), form.get('id') ?? '', domainResolvers);
+    const event = slotlockDomainCheckEvent(found, false);
+    if (event) await audit(session, event, tenantRef);
+    const answer = VERIFY_ANSWERS[found.outcome];
+    if (answer) return identityPage(session, answer.status, answer.text(found.domain ?? 'The domain'));
+    if (found.outcome in DOMAIN_REFUSALS) return domainRefused(session, found.outcome as SlotlockDomainChangeRefusal);
+    return identityPage(session, 409, 'The record isn’t there.');
+  }
+
+  async function releaseDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === id);
+    const refusal = await domainStore.release(tenantRef, personOf(session), id);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(session, { action: 'domain.released', targetType: 'domain', targetRef: id, metadata: { domain: domain?.ascii ?? '' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function changeJoinPolicy(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const policy = form.get('policy') ?? '';
+    if (policy !== 'off' && policy !== 'request' && policy !== 'auto') return identityPage(session, 400, 'Choose who may join.');
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === id);
+    const refusal = await domainStore.setJoinPolicy(tenantRef, personOf(session), id, policy);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(
+      session,
+      { action: 'domain.join_policy_changed', targetType: 'domain', targetRef: id, metadata: { domain: domain?.ascii ?? '', policy } },
+      tenantRef,
+    );
+    return identityPage(session, 200, `${JOIN_POLICY_WORDS[policy]}: saved for ${domain?.unicode ?? 'the domain'}.`);
+  }
+
+  async function restrictInvites(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const on = form.get('on') === '1';
+    const refusal = await domainStore.restrictInvites(tenantRef, personOf(session), on);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(session, { action: on ? 'workspace.invites_restricted' : 'workspace.invites_unrestricted', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** Teams at the person's verified addresses' domains: ask to join, or join. */
+  async function domainTeamsSection(session: Session, checked: boolean): Promise<Html> {
+    if (!domainStore) return html``;
+    const emails = verifiedEmails(session);
+    const found = emails.length > 0 ? await domainStore.discoverable(personOf(session), emails) : [];
+    if (found.length === 0) {
+      // A GitHub sign-in carries no address until asked: one look with those GitHub verified.
+      if (session.idp === 'google') return html``;
+      return checked
+        ? html`<p class="muted">No team has verified the domain of an address GitHub verified for you.</p>`
+        : html`<p><a href="${root}/sign-in?then=%2Fteams&amp;email=1">${ICONS.github}Find your organization’s team</a></p>`;
+    }
+    const token = csrfToken(session);
+    const rows = found.map(
+      (team) =>
+        html`<tr><td data-label="Team" class="strong">${team.name}</td><td data-label="Domain" class="muted">${team.domain}</td><td class="actions">${
+          team.requested
+            ? html`<span class="pill held">Asked</span>`
+            : html`<form class="inline" method="post" action="${root}/join/request"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="team" value="${team.tenantRef}"><button class="primary" type="submit">${
+                team.joinPolicy === 'auto' && joinEvidence(session) === 'google_workspace'
+                  ? html`Join ${team.name}`
+                  : html`Ask to join<span class="visually-hidden"> ${team.name}</span>`
+              }</button></form>`
+        }</td></tr>`,
+    );
+    return html`<div class="table"><table><caption class="visually-hidden">Teams at your domain</caption><thead><tr><th>At your domain</th><th>Domain</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  async function requestToJoin(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!domainStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    const offered = (await domainStore.discoverable(personOf(session), verifiedEmails(session))).find((found) => found.tenantRef === team);
+    if (!offered) return teamsPage(session, 404, DOMAIN_REFUSALS.not_found.text);
+    const asked = await domainStore.requestToJoin(team, personOf(session), verifiedEmails(session), joinEvidence(session), await memberCapOf(team));
+    if ('refusal' in asked) return teamsPage(session, DOMAIN_REFUSALS[asked.refusal].status, DOMAIN_REFUSALS[asked.refusal].text);
+    const person = personOf(session);
+    if (asked.outcome === 'joined') {
+      await audit(
+        session,
+        { action: 'member.joined', actorRole: 'viewer', targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey } },
+        team,
+      );
+      return moveTo(session, team.slice('team:'.length), '');
+    }
+    await audit(
+      session,
+      { action: 'member.join_requested', actorRole: null, targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey, evidence: joinEvidence(session) } },
+      team,
+    );
+    return teamsPage(session, 200, `Asked to join ${offered.name}. An owner or admin decides.`);
+  }
+
+  async function decideJoinRequest(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const decision = form.get('decision');
+    if (decision !== 'approve' && decision !== 'decline') return refusalPage(session, 'not_found');
+    const role = slotlockJoinRole(form.get('role'));
+    if (decision === 'approve' && role === null) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const id = form.get('id') ?? '';
+    const decided = await domainStore.decide({ tenantRef, actor: personOf(session), id, decision, role, memberCap: await memberCapOf(tenantRef) });
+    if (decided.refusal) {
+      const { status, text } = DOMAIN_REFUSALS[decided.refusal];
+      return settingsPage(session, status, text, undefined, 'members');
+    }
+    await audit(
+      session,
+      {
+        action: decision === 'approve' ? 'member.join_approved' : 'member.join_declined',
+        targetType: 'person',
+        ...(decided.person ? { targetRef: decided.person } : {}),
+        ...(role && decision === 'approve' ? { metadata: { role } } : {}),
+      },
+      tenantRef,
+    );
+    return redirect(303, `${root}/settings/members`);
   }
 
   /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
@@ -7768,7 +8102,7 @@ ${
     code: string,
     verifier: string,
     nonce: string,
-  ): Promise<{ uid: string; login: string; idp: 'google' } | null> {
+  ): Promise<{ uid: string; login: string; idp: 'google'; hd?: string } | null> {
     try {
       const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -7821,7 +8155,9 @@ ${
         (claims.email_verified === true || claims.email_verified === 'true') && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
           ? claims.email
           : 'Google account';
-      return { uid: claims.sub, login: email, idp: 'google' };
+      // A Google Workspace account names its domain (hd); a consumer account names none.
+      const hd = typeof claims.hd === 'string' && /^[a-z0-9.-]{1,253}$/i.test(claims.hd) ? claims.hd.toLowerCase() : undefined;
+      return { uid: claims.sub, login: email, idp: 'google', ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
     } catch (error) {
       report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
       return null;
@@ -7883,7 +8219,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[] } | null;
+    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -7946,6 +8282,12 @@ ${
       const raw = inviteTokenOf(request);
       const invited = raw ? (await teamStore.preview(tokenDigest(raw)))?.email : null;
       if (invited && user.emails.includes(invited)) em = [invited];
+      else if (domainStore && pending.then === '/teams' && pending.emails === true) {
+        // Looking for a team at one's domain: only the addresses at a team one may ask to join.
+        const keys = new Set((await domainStore.discoverable(person, user.emails)).map((found) => found.domainKey));
+        const kept = user.emails.filter((email) => keys.has(slotlockEmailDomain(email) ?? '')).slice(0, 3);
+        if (kept.length > 0) em = kept;
+      }
     }
     const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
     const sid = randomBytes(24).toString('base64url');
@@ -7957,7 +8299,7 @@ ${
       login: user.login,
       sid,
       exp: expires,
-      ...(user.idp === 'google' ? { idp: 'google' } : {}),
+      ...(user.idp === 'google' ? { idp: 'google', ...(user.hd !== undefined ? { hd: user.hd } : {}) } : {}),
       ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
       ...(epoch !== undefined ? { ep: epoch } : {}),
       ...(em ? { em } : {}),
@@ -7970,7 +8312,7 @@ ${
         .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
     }
     const back = typeof pending.then === 'string' && STEP_UP_PAGES.has(pending.then) ? pending.then : '';
-    return redirect(303, `${root}${back}${back === '/invite' && pending.emails === true ? '?checked=1' : ''}`, [
+    return redirect(303, `${root}${back}${(back === '/invite' || back === '/teams') && pending.emails === true ? '?checked=1' : ''}`, [
       clearSignIn,
       setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
     ]);
@@ -8416,6 +8758,20 @@ ${
         return removeMember(session, form);
       case '/members/leave':
         return leaveTeam(session);
+      case '/members/requests':
+        return decideJoinRequest(session, form);
+      case '/join/request':
+        return requestToJoin(session, form);
+      case '/identity/domains':
+        return claimDomain(session, form);
+      case '/identity/domains/verify':
+        return verifyDomain(session, form);
+      case '/identity/domains/remove':
+        return releaseDomain(session, form);
+      case '/identity/domains/policy':
+        return changeJoinPolicy(session, form);
+      case '/identity/invites':
+        return restrictInvites(session, form);
       default:
         return respond(
           404,
@@ -8463,12 +8819,13 @@ ${
           case '/settings/team':
           case '/settings/privacy':
           case '/settings/privacy/download':
+          case '/settings/identity':
           case '/settings': {
             const session = await readSession(request);
             if (!session) return redirect(303, root);
             const denied = authorizePage(session, route);
             if (denied) return denied;
-            if (route === '/teams') return await teamsPage(session);
+            if (route === '/teams') return await teamsPage(session, 200, undefined, url.searchParams.get('checked') === '1');
             if (route === '/plan') {
               return await planPage(
                 session,
@@ -8508,6 +8865,11 @@ ${
                 ? await settingsPage(session, 200, undefined, undefined, 'team')
                 : nothingHere(session);
             }
+            if (route === '/settings/identity') {
+              return domainStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'identity')
+                : nothingHere(session);
+            }
             if (route === '/settings/audit') {
               return options.resources.audit
                 ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
@@ -8536,7 +8898,10 @@ ${
             const back = STEP_UP_PAGES.has(then) ? then : undefined;
             return google && url.searchParams.get('with') === 'google'
               ? await startGoogleSignIn(google, back)
-              : await startSignIn(back, Boolean(teamStore) && back === '/invite' && url.searchParams.get('email') === '1');
+              : await startSignIn(
+                  back,
+                  Boolean(teamStore) && (back === '/invite' || (back === '/teams' && Boolean(domainStore))) && url.searchParams.get('email') === '1',
+                );
           }
           case '/invite': {
             if (!teamStore) return nothingHere404();

@@ -153,8 +153,8 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
   locations and groups"). Keys they created reached the whole workspace, so limiting them revokes
   those unless the form keeps them. **All of the workspace** gives it back. Each change is in the
   audit log (`member.scope_changed`); Members shows what each person reaches. Made an Owner, a
-  limited person reaches all of it; their limit returns if they stop being one, until it is
-  changed. A dashboard whose
+  limited person reaches all of it, and their limit is cleared: it does not return if they stop
+  being one. A dashboard whose
   resources are not `createSlotlockDashboardResources`'s (no `keepsToScope`) gives a limited person
   only their own account.
 - **Limits**: a team sends at most 50 invitations a day, and so does each person across their
@@ -171,6 +171,40 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
   to show them to the others in their teams. Invitations keep the address they were sent to until
   30 days after they are accepted, revoked or expire. Erasing a person refuses while they are a
   team's only Owner; erasing a team takes its members and invitations with it.
+
+### Verified domains
+
+Set `SLOTLOCK_VERIFIED_DOMAINS=on` (with team workspaces, on the server and on the Worker) for a
+team to prove it owns its organization's email domain. Its Owners manage it on Settings, Identity,
+with a sign-in in the last 15 minutes.
+
+- **Add a domain**, then publish the TXT record the page shows: `_slotlock-challenge.<domain>`
+  holding `slotlock-verification=<token>`, a token of 128 random bits drawn for that one claim.
+  Slotlock looks for it every hour for three days, and at once on Verify now (once a minute);
+  a claim not verified in seven days needs a new record. Public suffixes (`co.uk`, `github.io`),
+  special-use names and consumer mail domains (`gmail.com`, `outlook.com`, …) are refused, and one
+  team holds a domain at a time: the first to verify it.
+- **Keep the record.** Each day the server's maintenance looks it up again over DNS-over-HTTPS
+  (Cloudflare's, cross-checked by Google's), or with its own resolver
+  (`SLOTLOCK_DNS_RESOLVER=system`, for split-horizon DNS; a Worker always uses DNS-over-HTTPS).
+  Absent from both on two checks a day apart (or 14 days of nothing but resolver errors), the
+  domain is lapsing and its token is replaced: only the new record restores it, so whoever holds
+  the domain next cannot revive it from DNS history. Fourteen days later it has lapsed and another
+  team may claim it. A record reached through an alias (a CNAME) does not count. Every change is in
+  the team's audit log.
+- **Who may join through it**: anyone whose address at it is verified (by Google, or by GitHub
+  when the person asks GitHub for their verified addresses on the Teams page) may ask to join, and
+  an Owner or Admin approves them, as Viewer, Member or Developer, on Members, which says how the
+  address was verified; or nobody, for invitations only. Where the Owner chooses, a Google
+  Workspace account of the domain joins at once as a Viewer: an address Google or GitHub verified
+  once (a former employee's personal account, say) only ever asks, and so does an address the team
+  removed or declined, under any account. Only an exact domain matches (`sub.acme.com` is not `acme.com`), only while it is verified,
+  and members who joined through a domain that lapses stay, marked on Members.
+- **Invitations only to verified domains**, when an Owner turns it on: invitations to other
+  addresses, and to GitHub accounts, are refused.
+- A claim names its domain and who added it; a request to join keeps the address it came by until
+  30 days after it is decided or expires. Claims that ended go three months later. An address the
+  team removed or declined is remembered by its SHA-256 for a year.
 
 ## Organizations
 

@@ -5,6 +5,56 @@ versioning.
 
 ## Unreleased
 
+This release gives a workspace its people and an audit trail. It brings six roles read from the
+database on every request, team workspaces with invitations, verified domains that let colleagues
+find and ask to join their team, sign-out everywhere and a hash-chained audit log, and lets a
+member be limited to locations or groups (RFC 0004 D1). The change history
+becomes append-only and is kept by plan (D2). A person's data can be exported or erased, and a whole
+tenant exported (D3), from the API, the command line and the dashboard's new Privacy page. It closes
+the four questions the security review left open, and fixes what a review of RFC 0004's T2 changes
+found; that review was not the independent human review GOVERNANCE.md requires. Read the upgrade
+notes first.
+
+### Upgrade notes
+
+- **Run `slotlock migrate` before serving this release, on every server at once.**
+  - The schema becomes version 5, which a 0.9 server refuses (`schema_newer`), so a server still on
+    0.9 stops serving once the database is migrated.
+  - It adds eight tables (`audit_events`, `dashboard_people`, `dashboard_sessions`, `workspaces`,
+    `workspace_memberships`, `workspace_invitations`, `tenant_exports`, `tenant_export_parts`), new
+    columns (among them `cutoff_anchor` on bookings and events, and the audit log's chain) and 39
+    functions.
+  - Verified domains add three more tables (`workspace_domains`, `workspace_join_requests`,
+    `workspace_join_blocks`), with their functions, unused until turned on.
+  - It grants the serving role what this release needs; a library user runs
+    `grantApplicationRole` again.
+- **The change history can no longer be edited by the serving role.** It may only add to
+  `slotlock.outbox` and read it. Maintenance prunes it through `slotlock.prune_changes`, so code of
+  your own that deleted or changed change rows directly must stop.
+- **Everyone signs in again once.** Sessions from before this release carry no session epoch and no
+  session record, so the dashboard asks for a new sign-in.
+- **An organization's members become Developers.** They keep read-only and read-write keys of
+  their own, but no longer create Full-access keys, add webhooks or revoke others' keys. Keys they
+  made before keep working: review the Full-access keys your organization's members created.
+- **Set each resource's hold price before upgrading if its agent holds take payment.** An agent's
+  hold now takes its price from the resource's `holdPrice` booking rule (`hold_price`).
+  - An agent that names a `payment` the rule does not have is refused `payment_price_mismatch`.
+    That includes any payment on a resource without a price.
+  - An agent books a priced resource only from a paid hold (`payment_required`).
+- **A key's caps count its pending approvals.** An agent close to its `max_holds` or
+  `max_held_hours` may be refused sooner (`hold_limit_reached`, `held_time_limit_reached`).
+- **`@slotlock/sync`:** connect calendars connected before this release again (their seals are
+  now bound to their tenant). A library user who reads iCalendar URLs must pass the guarded fetch.
+- **`@slotlock/payments-stripe` with ISK or UGX:** create PaymentIntents for
+  `stripeAmount(amountMinor, currency)`. A payment read back is converted with `isoMinorUnits`, and
+  one that is not a whole ISO amount is refused.
+- **New and off until set:**
+  - team workspaces (`SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on`);
+  - invitations by email (`SLOTLOCK_INVITATION_EMAIL`, `SLOTLOCK_INVITATION_EMAIL_KEY`,
+    `SLOTLOCK_INVITATION_EMAIL_FROM`);
+  - verified domains, with team workspaces (`SLOTLOCK_VERIFIED_DOMAINS=on`; the server's maintenance
+    checks each domain daily, so set it on the server too).
+
 ### Added
 
 - **slotlock.pylota.io, for search engines** ([RFC 0005](docs/rfc/0005-search.md)). A page per
@@ -88,8 +138,10 @@ versioning.
   for theirs alone, and their assistant is limited the same way. They keep only reading, the desk
   and the assistant (`SLOTLOCK_SCOPED_CAPABILITIES`, `SLOTLOCK_SCOPED_DASHBOARD_PAGES`,
   `SLOTLOCK_SCOPED_DASHBOARD_POSTS`); the keys they created are revoked unless kept. Audited as
-  `member.scope_changed`. Custom resource adapters declare `keepsToScope`; without it a limited
-  person reaches only their own account. Rerun `slotlock migrate` and the role grants.
+  `member.scope_changed`. Made an Owner by any path, a person's limit is cleared (a trigger on
+  `workspace_memberships`), so it does not return if they stop being one. Custom resource adapters
+  declare `keepsToScope`; without it a limited person reaches only their own account. Rerun
+  `slotlock migrate` and the role grants.
 - **Exporting a whole tenant** (RFC 0004 D3). `POST /v1/tenant/exports` asks for a copy of
   everything the tenant keeps, read through one cursor so at one moment; the server builds it after
   answering into parts of one table's rows (new tables `tenant_exports` and `tenant_export_parts`),
@@ -115,6 +167,22 @@ versioning.
     suspension lasts (`slotlock.tenant_suspension_notice`; `SlotlockDashboardWorkspaces.suspension`).
   - `slotlock tenant suspend`, `unsuspend` and `erase`, and `slotlock plan default`, are recorded in
     the staff log by `cli:<user>`.
+- **Verified domains** (`SLOTLOCK_VERIFIED_DOMAINS=on`, with team workspaces): a team's Owners add
+  their organization's domain on Settings, Identity and publish a TXT record
+  (`_slotlock-challenge.<domain>`, a 128-bit token per claim). The server's maintenance looks it up
+  daily over DNS-over-HTTPS, Cloudflare's cross-checked by Google's (`SLOTLOCK_DNS_RESOLVER=system`
+  uses the server's own resolver); a record gone on two checks a day apart makes the domain lapse
+  in 14 days, with a new token, so a domain that changes hands cannot be revived from DNS history.
+  One team holds a domain at a time; public suffixes, special-use names and consumer mail domains
+  are refused (the Public Suffix List through `tldts`, pinned). People whose verified address is at
+  a team's domain find it on the Teams page and ask to join, approved by an Owner or Admin as
+  Viewer, Member or Developer; an Owner may let Google Workspace accounts of the domain join at once
+  as a Viewer (an address verified once by Google or GitHub, or one the team removed or declined,
+  only asks), or turn joining off. A record behind a CNAME does not count, and 14 days of resolver
+  errors lapse a domain too.
+  An Owner may also hold invitations to the team's verified domains. New capability
+  `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,
+  `runSlotlockDomainChecks`, `normalizeSlotlockDomain`, `createSlotlockDohResolver`.
 
 ### Changed
 
@@ -130,21 +198,15 @@ versioning.
   (`SLOTLOCK_CHANGE_RETENTION_BY_PLAN`), or `retentionDays` if longer; a tenant with no plan keeps
   `retentionDays`. The workspace audit log keeps 180 days, or 400 on Team. The privacy notice says
   so, and how an account holder answers a person's request themselves.
-
 - **The privacy notice lists contacts, busy time from other calendars, and payments for holds**,
   with how long each is kept: a contact until it is deleted; busy time 30 days after it ends; a
   payment record until its resource or account goes. It says hosted Slotlock sends nothing to
   contacts, holds no calendar or payment provider's token, and that the integrations that do run
   under the tenant's own agreements. Erasure lists all three.
-
 - **An organization's members no longer have every power.** Before, any member could create a
   Full-access key (which reaches contacts, webhooks, history and erasure), revoke anyone's key and
   add webhooks. Members are now Developers: read-only and read-write keys of their own, resources,
   rules and hours. Review the Full-access keys your organization's members created.
-- Run `slotlock migrate`: five new tables and twenty functions; the schema version becomes 5, which
-  a 0.9 release refuses. With the membership store (as
-  `serve` and the hosted dashboard run), every session carries its person's epoch: sessions from
-  before this release have none, so everyone signs in once more after it.
 
 ### Security
 

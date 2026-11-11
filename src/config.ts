@@ -146,6 +146,12 @@ export interface SlotlockServeDashboardConfig {
    * sends the link.
    */
   invitationEmail?: { provider: 'resend' | 'postmark'; key: string; from: string };
+  /**
+   * Verified domains (SLOTLOCK_VERIFIED_DOMAINS=on, with team workspaces): a team's Owner proves a
+   * domain with a DNS record, and the people whose verified address is at it may ask to join. Looked
+   * up over DNS-over-HTTPS, or with the system's resolver (SLOTLOCK_DNS_RESOLVER=system, a server only).
+   */
+  verifiedDomains?: { resolver: 'doh' | 'system' };
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -279,6 +285,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     );
   }
   const invitationEmail = readInvitationEmail(env, teamWorkspaces);
+  const verifiedDomains = readVerifiedDomains(env);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -298,6 +305,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(teamWorkspaces ? { teamWorkspaces: true } : {}),
     ...(invitationEmail ? { invitationEmail } : {}),
+    ...(verifiedDomains ? { verifiedDomains } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(termsUrl !== undefined ? { termsUrl } : {}),
     ...(privacyUrl !== undefined ? { privacyUrl } : {}),
@@ -405,6 +413,34 @@ function readInvitationEmail(
     throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL_FROM must be the sender the provider verified: team@example.com or Name <team@example.com>');
   }
   return { provider, key, from };
+}
+
+/**
+ * SLOTLOCK_VERIFIED_DOMAINS: on or off (the default), only with team workspaces; and
+ * SLOTLOCK_DNS_RESOLVER, how a domain's record is looked up: doh (the default: Cloudflare's
+ * DNS-over-HTTPS, cross-checked by Google's) or system (the server's own resolver, which follows
+ * split-horizon DNS). Read on its own as well: the server that runs maintenance checks the domains
+ * each day, wherever the dashboard runs.
+ */
+export function readVerifiedDomains(env: SlotlockEnv): { resolver: 'doh' | 'system' } | undefined {
+  const value = optional(env, 'SLOTLOCK_VERIFIED_DOMAINS') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_VERIFIED_DOMAINS must be on or off');
+  }
+  const resolver = optional(env, 'SLOTLOCK_DNS_RESOLVER');
+  if (resolver !== undefined && resolver !== 'doh' && resolver !== 'system') {
+    throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER must be doh or system');
+  }
+  if (value === 'off') {
+    if (resolver !== undefined) {
+      throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER looks up verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+    }
+    return undefined;
+  }
+  if (!readDashboardTeamWorkspaces(env)) {
+    throw new SlotlockConfigError('SLOTLOCK_VERIFIED_DOMAINS verifies team workspaces\' domains: it needs SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on');
+  }
+  return { resolver: resolver ?? 'doh' };
 }
 
 /**

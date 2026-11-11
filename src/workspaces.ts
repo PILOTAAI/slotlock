@@ -4,6 +4,7 @@
 // Owner. GitHub organizations' members are recorded at each sign-in from what GitHub lists.
 import { createHash } from 'node:crypto';
 import type { SlotlockSql } from './store.js';
+import { type SlotlockWorkspaceDomains, createSlotlockWorkspaceDomains } from './workspace-domains.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
 
@@ -54,6 +55,8 @@ export interface SlotlockDashboardWorkspaces {
    * staff left. Null while it is not suspended. Only with the database.
    */
   suspension?(tenantRef: string): Promise<SlotlockSuspensionNotice | null>;
+  /** Teams' verified domains and requests to join through them (workspace-domains.ts): only with the database. */
+  domains?: SlotlockWorkspaceDomains;
 }
 
 /** A suspended workspace's notice: never the internal reason. */
@@ -146,6 +149,7 @@ export type SlotlockTeamRefusal =
   | 'last_owner'
   | 'confirm'
   | 'subscription_live'
+  | 'domain_restricted'
   /** An Owner reaches the whole workspace: never limited. */
   | 'owner';
 
@@ -288,6 +292,7 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
         throw error;
       }
     },
+    domains: createSlotlockWorkspaceDomains(sql),
   };
 }
 

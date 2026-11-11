@@ -2085,12 +2085,18 @@ async function bookingRuling(
   resourceId: string,
   interval: Interval,
   defaultHours: readonly WeeklyAvailabilityRule[],
-): Promise<{ rule: SlotlockBookingRule | null; turnaroundMs: number; bufferBeforeMs: number }> {
+): Promise<{
+  rule: SlotlockBookingRule | null;
+  turnaroundMs: number;
+  bufferBeforeMs: number;
+  holdPrice: SlotlockBookingRules['holdPrice'];
+}> {
   const judge = await bookingJudge(tx, resourceId, defaultHours);
   return {
     rule: judge.broken(interval),
     turnaroundMs: judge.turnaroundMs,
     bufferBeforeMs: judge.bufferBeforeMs,
+    holdPrice: judge.holdPrice,
   };
 }
 
@@ -2387,6 +2393,8 @@ async function bookingJudge(
   broken: (interval: Interval, checks?: { first: boolean }) => SlotlockBookingRule | null;
   turnaroundMs: number;
   bufferBeforeMs: number;
+  /** The resource's hold price (RFC 0004 C3), read with its other rules. */
+  holdPrice: SlotlockBookingRules['holdPrice'];
 }> {
   const [row] = await tx<
     {
@@ -2406,7 +2414,7 @@ async function bookingJudge(
            to_char((statement_timestamp() AT TIME ZONE 'UTC')::date - 2, 'YYYY-MM-DD') AS today
       FROM slotlock.resources WHERE id = ${resourceId}`;
   if (!row || row.effective_booking_rules === null || row.effective_booking_rules === undefined) {
-    return { broken: () => null, turnaroundMs: 0, bufferBeforeMs: 0 };
+    return { broken: () => null, turnaroundMs: 0, bufferBeforeMs: 0, holdPrice: undefined };
   }
   const resource = toResource({
     id: resourceId,
@@ -2467,6 +2475,7 @@ async function bookingJudge(
       }) ?? (uncertain(interval) ? 'uncertain' : null),
     turnaroundMs,
     bufferBeforeMs,
+    holdPrice: rules?.holdPrice,
   };
 }
 
@@ -4349,7 +4358,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
    * Delete team workspace invitations finished (accepted, revoked or expired) more than 30 days ago,
-   * with the addresses they were sent to (slotlock.prune_workspace_invitations), and dashboard
+   * with the addresses they were sent to (slotlock.prune_workspace_invitations), requests to join
+   * decided a month ago and domain claims ended three months ago (slotlock.prune_workspace_domains), and dashboard
    * sessions ended or expired a day ago (slotlock.prune_dashboard_sessions), and erase the team
    * workspaces whose deletion came due (slotlock.erase_deleted_teams): how many.
    */
@@ -7166,8 +7176,10 @@ function buildSlotlockStore(
             let holdPaymentRequired = paymentRequired;
             let holdPayment = params.payment;
             let holdTtlSeconds = ttlSeconds;
+            // The resource's rules, read once: its price here, the rest judged below.
+            const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (params.priceFromRules === true) {
-              const price = (await rulesNow(tx, params.resourceId)).rules?.holdPrice;
+              const price = ruling.holdPrice;
               if (
                 params.payment !== undefined &&
                 (!price || price.amountMinor !== params.payment.amountMinor || price.currency !== params.payment.currency)
@@ -7195,7 +7207,6 @@ function buildSlotlockStore(
               }
               if (heldHoursCap !== undefined) heldSeconds = held.seconds;
             }
-            const ruling = await bookingRuling(tx, params.resourceId, params, defaultHours);
             if (ruling.rule) return { ok: false, code: 'booking_rule_violated', rule: ruling.rule };
             written = Math.max(bufferAfterMs, ruling.turnaroundMs);
             writtenBefore = ruling.bufferBeforeMs;
@@ -8718,19 +8729,17 @@ function buildSlotlockStore(
             }
             let turnaroundMs = 0;
             let bufferBeforeMs = 0;
+            // The resource's rules, read once, for its price and the rest alike.
+            const judge =
+              params.enforceBookingRules === true && (event.transparency ?? 'opaque') === 'opaque'
+                ? await bookingJudge(tx, params.resourceId, defaultHours)
+                : null;
             // A resource with a hold price (RFC 0004 C3) is booked by an agent only from its own
             // hold, once paid: new time on it, or time moved onto it from another resource.
-            if (
-              params.enforceBookingRules === true &&
-              (event.transparency ?? 'opaque') === 'opaque' &&
-              (!found || found.resource_id !== params.resourceId) &&
-              !heldPaid &&
-              (await rulesNow(tx, params.resourceId)).rules?.holdPrice !== undefined
-            ) {
+            if (judge && (!found || found.resource_id !== params.resourceId) && !heldPaid && judge.holdPrice !== undefined) {
               return { ok: false, code: 'payment_required' };
             }
-            if (params.enforceBookingRules === true && (event.transparency ?? 'opaque') === 'opaque') {
-              const judge = await bookingJudge(tx, params.resourceId, defaultHours);
+            if (judge) {
               for (const [index, occurrence] of occurrences.entries()) {
                 // A held time's notice and advance were judged when it was held.
                 const rule = judge.broken(occurrence, { first: index === 0 && !params.fromHold });
@@ -10905,7 +10914,8 @@ function buildSlotlockStore(
     async sweepDashboardRecords() {
       // Each its own statement: an erasure that runs long never takes the prunes with it.
       const [pruned] = await sql<{ deleted: string | number }[]>`
-        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions() AS deleted`;
+        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions()
+               + slotlock.prune_workspace_domains() AS deleted`;
       const [erased] = await sql<{ erased: string | number }[]>`SELECT slotlock.erase_deleted_teams() AS erased`;
       return Number(pruned?.deleted ?? 0) + Number(erased?.erased ?? 0);
     },
