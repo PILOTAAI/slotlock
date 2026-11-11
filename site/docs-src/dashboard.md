@@ -191,9 +191,10 @@ its own model.
 
 On hosted Slotlock, **Usage** shows the workspace's plan (or the plan it moves to, and when) against
 its limits, this month's operations, bookings and holds against its quotas, and which key used what.
-It says what needs doing first: a failed payment, a quota at 80%, at 100% or used up, or more
-resources, keys or webhooks than the coming plan allows (nothing is removed; adding stops). An owner
-can move up: **Upgrade** where Stripe sells plans (paid through Stripe, in your currency, with tax
+It says what needs doing first: a failed payment, a quota at 80%, at 100% or used up, or as many
+resources, keys or webhooks as the plan (or the coming plan) allows, or more (nothing is removed;
+adding another is refused). Each of these, and an add refused at a limit, offers an owner the
+upgrade; the Overview says the same. An owner can move up: **Upgrade** where Stripe sells plans (paid through Stripe, in your currency, with tax
 added where it applies; **Manage billing** for invoices, the payment method and cancelling), else
 **Talk to us**. Free allows 10 resources, 10 API keys and 2 webhook endpoints; Developer 100, 100
 and 10. In Test, it shows Test's own use. A self-hosted dashboard has no Usage page.

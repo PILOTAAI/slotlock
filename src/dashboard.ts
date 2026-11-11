@@ -2105,7 +2105,7 @@ ${live}
 
   // A notice is an alert only when the page answers with an error: a done or saved message is a
   // status, so success is never painted in the error colour.
-  const noticeOf = (notice?: string, status = 200) =>
+  const noticeOf = (notice?: string | Html, status = 200) =>
     notice
       ? status >= 400
         ? html`<p class="notice" role="alert">${notice}</p>`
@@ -2523,7 +2523,7 @@ ${
   const accessOf = (key: SlotlockApiKey) =>
     key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only';
 
-  async function keysPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  async function keysPage(session: Session, status = 200, notice?: string | Html): Promise<Response> {
     const tenantRef = tenantOf(session);
     const grouping = options.resources.grouping;
     const [keys, locations, groups] = await Promise.all([
@@ -2594,7 +2594,7 @@ ${
     };
   }
 
-  async function resourcesPage(session: Session, status = 200, notice?: string, ownHoursOnly = false): Promise<Response> {
+  async function resourcesPage(session: Session, status = 200, notice?: string | Html, ownHoursOnly = false): Promise<Response> {
     const every = await options.resources.list(tenantOf(session));
     const allowance = await resourceAllowance(tenantOf(session), every);
     // `?hours=own`: those that keep hours of their own, which the tenant's hours do not reach.
@@ -3225,7 +3225,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     return { text: 'Delivering', tone: 'active' };
   }
 
-  async function webhooksPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  async function webhooksPage(session: Session, status = 200, notice?: string | Html): Promise<Response> {
     const hooks = options.resources.webhooks;
     if (!hooks) return notFound(session);
     const endpoints = await hooks.list(tenantOf(session));
@@ -3294,7 +3294,9 @@ ${
     if (!created.ok) {
       const message =
         created.code === 'webhook_limit_reached'
-          ? `You have ${String(created.limit)} webhooks, as many as ${plans ? 'your plan' : 'Slotlock'} allows. Delete one first${plans ? ', or see Usage' : ''}.`
+          ? plans
+            ? html`You have ${String(created.limit)} webhooks, as many as your plan allows. Delete one first, or ${await pastLimit(session)}.`
+            : `You have ${String(created.limit)} webhooks, as many as Slotlock allows. Delete one first.`
           : created.code === 'invalid_webhook_url'
             ? 'Give an https URL, with no user name, password or #fragment.'
             : 'Choose events from the list.';
@@ -4818,8 +4820,10 @@ ${
     const counted = (value: number) => value.toLocaleString('en-GB');
     const usagePage = `${root}/plan`;
     const upgradeAt = here === 'usage' ? '#upgrade' : `${usagePage}#upgrade`;
-    const canUpgrade = !paying && admin && Boolean(billing || active.contact);
-    const upgradeHint = paying ? '' : admin ? ' Upgrade for more.' : ' An owner of this organization can upgrade.';
+    // Only where the deployment sells plans (Stripe) or arranges them (a contact) is there an upgrade.
+    const offersPlans = Boolean(billing || active.contact);
+    const canUpgrade = !paying && admin && offersPlans;
+    const upgradeHint = paying || !offersPlans ? '' : admin ? ' Upgrade for more.' : ' An owner of this organization can upgrade.';
     const attention: Html[] = [];
     // Whether anything is near or past a limit: the overview then offers the upgrade.
     let pressing = false;
@@ -4856,31 +4860,49 @@ ${
             attentionItem(
               'warn',
               `You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${metric}. They start again on ${resets}.`,
-              here === 'overview' ? { href: usagePage, label: 'Usage' } : undefined,
+              upgrade,
             ),
           );
         }
       }
     }
+    // What the workspace has against its plan's limits (or the coming plan's): at one, adding another
+    // is refused; past one (a plan that allows less than it has), nothing is removed.
+    const full = limits
+      ? (
+          [
+            ['resources', resourceCount, limits.resources],
+            ['active API keys', keyCount, limits.apiKeys],
+            ...(webhooks ? ([['webhooks', webhooks.length, limits.webhookEndpoints]] as const) : []),
+          ] as const
+        ).filter(([, have, allowed]) => have >= allowed)
+      : [];
+    const over = full.filter(([, have, allowed]) => have > allowed);
+    const holding = full.map(([what, have, allowed]) => `${counted(have)} of ${counted(allowed)} ${what}`).join(' and ');
+    if (full.length > 0) pressing = true;
+    const limitAction = canUpgrade
+      ? { href: upgradeAt, label: 'Upgrade' }
+      : here === 'overview'
+        ? { href: usagePage, label: 'Usage' }
+        : undefined;
     if (upcoming) {
-      // What the workspace has that its coming plan will not allow: nothing is removed; adding stops.
-      const over = (
-        [
-          ['resources', resourceCount, upcoming.limits.resources],
-          ['active API keys', keyCount, upcoming.limits.apiKeys],
-          ['webhooks', webhooks?.length ?? 0, upcoming.limits.webhookEndpoints],
-        ] as const
-      ).filter(([, have, allowed]) => have > allowed);
-      if (over.length > 0) pressing = true;
       attention.push(
         attentionItem(
-          over.length > 0 ? 'warn' : 'info',
+          full.length > 0 ? 'warn' : 'info',
           `From ${formatDate(upcoming.appliesFrom)}, this workspace is on ${PLAN_NAMES[upcoming.plan]}: ${String(upcoming.limits.resources)} resources, ${String(upcoming.limits.apiKeys)} API keys and ${String(upcoming.limits.webhookEndpoints)} webhooks.${
-            over.length > 0
-              ? ` You have ${over.map(([what, have]) => `${String(have)} ${what}`).join(', ')}: nothing is removed, but you cannot add more until you have fewer${paying || !admin ? '' : ', or upgrade'}.`
+            full.length > 0
+              ? ` You have ${holding}: ${over.length > 0 ? 'nothing is removed, but ' : ''}from then, adding another is refused.${upgradeHint}`
               : ''
           }`,
-          canUpgrade && over.length > 0 ? { href: upgradeAt, label: 'See plans' } : undefined,
+          full.length > 0 ? limitAction : undefined,
+        ),
+      );
+    } else if (plan && full.length > 0) {
+      attention.push(
+        attentionItem(
+          over.length > 0 ? 'bad' : 'warn',
+          `On ${PLAN_NAMES[plan.plan]}, you have ${holding}: ${over.length > 0 ? 'nothing is removed, but ' : ''}adding another is refused.${upgradeHint}`,
+          limitAction,
         ),
       );
     }
@@ -4922,6 +4944,18 @@ ${
       canUpgrade,
       pressing,
     };
+  }
+
+  /**
+   * What resolves an add refused at a plan limit, as a link: the upgrade on Usage, for an owner of a
+   * workspace that does not pay yet where the deployment sells or arranges plans; else Usage.
+   */
+  async function pastLimit(session: Session): Promise<Html> {
+    const plan = plans ? await plans.plan(tenantOf(session)).catch(() => null) : null;
+    const paying = plan !== null && plan.plan !== 'free';
+    return !paying && isAdmin(session) && Boolean(options.billing || plans?.contact)
+      ? html`<a href="${root}/plan#upgrade">upgrade</a>`
+      : html`see <a href="${root}/plan">Usage</a>`;
   }
 
   /** One thing that needs a person: a sentence, its tone, and what resolves it. */
@@ -6217,7 +6251,7 @@ ${
           session,
           409,
           plans
-            ? 'You have as many active keys as your plan allows. Revoke one first, or see Usage.'
+            ? html`You have as many active keys as your plan allows. Revoke one first, or ${await pastLimit(session)}.`
             : 'You have as many keys as Slotlock allows. Revoke one first.',
         );
       }
@@ -6294,7 +6328,7 @@ ${
           session,
           409,
           typeof limit === 'number' && limit < SLOTLOCK_DASHBOARD_MAX_RESOURCES
-            ? `You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or see Usage.`
+            ? html`You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or ${await pastLimit(session)}.`
             : `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
         );
       }
