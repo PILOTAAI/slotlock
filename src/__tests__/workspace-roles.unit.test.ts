@@ -62,10 +62,12 @@ describe('workspace roles', () => {
     }
   });
 
-  it('asks a fresh sign-in for credentials that reach everything, money, the workspace itself, and its data whole or a person', () => {
+  it('asks a fresh sign-in for credentials that reach everything, money, the workspace itself, its data whole or a person, and its identity', () => {
     expect([...SLOTLOCK_FRESH_CAPABILITIES].sort()).toEqual(
-      ['assistant.settings', 'billing.manage', 'keys.full', 'privacy.manage', 'webhooks.manage', 'workspace.own'].sort(),
+      ['assistant.settings', 'billing.manage', 'identity.manage', 'keys.full', 'privacy.manage', 'webhooks.manage', 'workspace.own'].sort(),
     );
+    // A team's domains, and who joins through them, are its Owners' alone.
+    expect(SLOTLOCK_WORKSPACE_ROLES.filter((role) => slotlockRoleCan(role, 'identity.manage'))).toEqual(['owner']);
   });
 
   it('keeps a member limited to locations and groups to their desk and their own account (RFC 0004 D1)', () => {

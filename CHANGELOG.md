@@ -101,6 +101,22 @@ versioning.
 - **The audit log over the API and the command line** (RFC 0004 D2): `GET /v1/audit` (on the Team
   plan where plans apply, as the dashboard's export) and `GET /v1/audit/verify`;
   `slotlock audit export` and `slotlock audit verify` (exit 1 when the chain breaks).
+- **Verified domains** (`SLOTLOCK_VERIFIED_DOMAINS=on`, with team workspaces): a team's Owners add
+  their organization's domain on Settings, Identity and publish a TXT record
+  (`_slotlock-challenge.<domain>`, a 128-bit token per claim). The server's maintenance looks it up
+  daily over DNS-over-HTTPS, Cloudflare's cross-checked by Google's (`SLOTLOCK_DNS_RESOLVER=system`
+  uses the server's own resolver); a record gone on two checks a day apart makes the domain lapse
+  in 14 days, with a new token, so a domain that changes hands cannot be revived from DNS history.
+  One team holds a domain at a time; public suffixes, special-use names and consumer mail domains
+  are refused (the Public Suffix List through `tldts`, pinned). People whose verified address is at
+  a team's domain find it on the Teams page and ask to join, approved by an Owner or Admin as
+  Viewer, Member or Developer; an Owner may let Google Workspace accounts of the domain join at once
+  as a Viewer (an address verified once by Google or GitHub, or one the team removed or declined,
+  only asks), or turn joining off. A record behind a CNAME does not count, and 14 days of resolver
+  errors lapse a domain too.
+  An Owner may also hold invitations to the team's verified domains. New capability
+  `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,
+  `runSlotlockDomainChecks`, `normalizeSlotlockDomain`, `createSlotlockDohResolver`.
 
 ### Changed
 

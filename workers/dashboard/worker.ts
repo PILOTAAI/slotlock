@@ -62,6 +62,8 @@ import {
 import { createSlotlockStore } from '../../src/store.js';
 import { createSlotlockDashboardTeams } from '../../src/teams.js';
 import { createSlotlockInvitationEmailSender } from '../../src/invitation-email.js';
+import { slotlockDomainResolvers } from '../../src/domains.js';
+import type { SlotlockWorkspaceDomains } from '../../src/workspace-domains.js';
 import {
   type SlotlockDashboardSessions,
   type SlotlockDashboardWorkspaces,
@@ -254,16 +256,18 @@ function perRequest<T extends object>(current: () => T): T {
 }
 
 /**
- * The membership store through the request's client, its team workspaces and sessions too: the
- * dashboard reads `teams` and `sessions` once, as it is built, outside any request.
+ * The membership store through the request's client, its team workspaces, sessions and domains too:
+ * the dashboard reads `teams`, `sessions` and `domains` once, as it is built, outside any request.
  */
 function perRequestWorkspaces(current: () => SlotlockDashboardWorkspaces): SlotlockDashboardWorkspaces {
   const teams = perRequest(() => current().teams as SlotlockWorkspaceTeams);
   const sessions = perRequest(() => current().sessions as SlotlockDashboardSessions);
+  const domains = perRequest(() => current().domains as SlotlockWorkspaceDomains);
   return new Proxy({} as SlotlockDashboardWorkspaces, {
     get(_target, property) {
       if (property === 'teams') return teams;
       if (property === 'sessions') return sessions;
+      if (property === 'domains') return domains;
       const target = current();
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -350,6 +354,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
     const publicUrl = readServerUrl(vars, 'SLOTLOCK_PUBLIC_URL');
     const serviceUrl = readServerUrl(vars, 'SLOTLOCK_SERVICE_URL');
     const config = readDashboardConfig(vars);
+    if (config?.verifiedDomains?.resolver === 'system') {
+      throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER=system needs a server: a Worker looks domains up over DNS-over-HTTPS (doh)');
+    }
     if (config === undefined) {
       throw new SlotlockConfigError(
         'SLOTLOCK_GITHUB_CLIENT_ID, SLOTLOCK_GITHUB_CLIENT_SECRET, SLOTLOCK_SESSION_SECRET and SLOTLOCK_DASHBOARD_USERS are required',
@@ -387,6 +394,11 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(config.name ? { name: config.name } : {}),
       ...(config.termsUrl ? { termsUrl: config.termsUrl } : {}),
       ...(config.teamWorkspaces ? { teamWorkspaces: true } : {}),
+      // Verified domains: an Owner's "Verify now" asks DNS over HTTPS, the one way a Worker reaches
+      // DNS; the daily check runs in the server's maintenance.
+      ...(config.verifiedDomains
+        ? { domains: { resolvers: slotlockDomainResolvers('doh', { fetch: (input, init) => fetch(input, init) }) } }
+        : {}),
       ...(config.invitationEmail
         ? {
             invitations: createSlotlockInvitationEmailSender(config.invitationEmail, {
