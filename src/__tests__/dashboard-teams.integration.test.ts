@@ -601,7 +601,30 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(asked.status).toBe(303);
     const banner = await (await hal.get('/dashboard')).text();
     expect(banner).toContain('This team is deleted on');
-    expect(banner).toContain('its keys have stopped.');
+    expect(banner).toContain('its keys are refused.');
+    // Being deleted, it takes no plan: kept first.
+    const checkouts: unknown[] = [];
+    const billed = build({
+      billing: {
+        plan: async () => null,
+        enrol: async () => undefined,
+        checkout: async (input) => {
+          checkouts.push(input);
+          return 'https://checkout.stripe.com/c/pay/cs_test_deleting';
+        },
+        portal: async () => 'https://billing.stripe.com/p/session/test',
+        prices: { month: '$10', year: '$100' },
+        teamPrices: { month: '$40', year: '$400' },
+        contact: 'mailto:founder@example.com',
+        formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+      },
+    });
+    const paying = new Browser(billed);
+    for (const [name, value] of hal.cookies) paying.cookies.set(name, value);
+    const upgrade = await paying.post('/dashboard/plan', '/plan/upgrade', { interval: 'month' });
+    expect(upgrade.status).toBe(409);
+    expect(await upgrade.text()).toContain('This team is being deleted.');
+    expect(checkouts).toEqual([]);
     expect(await createSlotlockDashboardWorkspaces(application).teams?.isActive(team)).toBe(false);
     expect((await hal.post('/dashboard/settings/team', '/teams/restore', {})).status).toBe(303);
     expect(await (await hal.get('/dashboard')).text()).not.toContain('This team is deleted on');

@@ -384,6 +384,60 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     expect(plan?.count).toBe(0);
   });
 
+  it('never erases a team an Owner kept while the sweep was erasing another', async () => {
+    const first = await team(ada);
+    const second = await team(ada);
+    for (const tenantRef of [first, second]) {
+      expect(await teams.scheduleDeletion(tenantRef, ada, (await teams.info(tenantRef))?.handle as string)).toBeNull();
+    }
+    await admin`UPDATE slotlock.workspaces SET delete_after = now() - interval '2 minutes' WHERE tenant_ref = ${first}`;
+    await admin`UPDATE slotlock.workspaces SET delete_after = now() - interval '1 minute' WHERE tenant_ref = ${second}`;
+    // A slow erasure of the first, stood in for by its tenant's lock held elsewhere.
+    const held = postgres(url as string, { max: 1, onnotice: () => {} });
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const blocking = held.begin(async (sql) => {
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:tenant:${first}~test`}, 0))`;
+      await gate;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const sweeping = store().sweepDashboardRecords();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Kept while the sweep waits on the first: committed, and told so.
+    expect(await teams.cancelDeletion(second, ada)).toBeNull();
+    release();
+    await blocking;
+    await held.end();
+    await sweeping;
+    expect(await teams.info(first)).toBeNull();
+    expect(await teams.info(second)).not.toBeNull();
+    expect(await teams.isActive(second)).toBe(true);
+  });
+
+  it('is not held up by teams that cannot be erased yet', async () => {
+    // Twenty-one due teams that took a subscription after asking, and one plain one due last.
+    const stuck: string[] = [];
+    for (let index = 0; index < 21; index++) {
+      const tenantRef = await team(kim);
+      stuck.push(tenantRef);
+      expect(await teams.scheduleDeletion(tenantRef, kim, (await teams.info(tenantRef))?.handle as string)).toBeNull();
+      await admin`
+        INSERT INTO slotlock.tenant_plans (tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints, stripe_customer, stripe_subscription)
+        VALUES (${tenantRef}, 'team', 'active', 500, 100, 25, ${`cus_Stuck${String(index)}`}, ${`sub_Stuck${String(index)}`})`;
+    }
+    const plain = await team(kim);
+    expect(await teams.scheduleDeletion(plain, kim, (await teams.info(plain))?.handle as string)).toBeNull();
+    await admin`UPDATE slotlock.workspaces SET delete_after = now() - interval '1 hour' WHERE tenant_ref = ANY(${stuck})`;
+    await admin`UPDATE slotlock.workspaces SET delete_after = now() - interval '1 minute' WHERE tenant_ref = ${plain}`;
+    await store().sweepDashboardRecords();
+    expect(await teams.info(plain)).toBeNull();
+    // The ones with a subscription stay, being deleted, for when it is cancelled.
+    expect(await teams.info(stuck[0] as string)).not.toBeNull();
+    for (const tenantRef of stuck) await admin`UPDATE slotlock.tenant_plans SET stripe_subscription = NULL WHERE tenant_ref = ${tenantRef}`;
+  });
+
   it("keeps team tables to their functions: the serving role can't read or write them", async () => {
     for (const table of ['workspaces', 'workspace_invitations']) {
       await expect(application.unsafe(`SELECT 1 FROM slotlock.${table} LIMIT 1`)).rejects.toMatchObject({ code: '42501' });

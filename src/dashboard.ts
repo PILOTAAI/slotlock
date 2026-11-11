@@ -2483,7 +2483,7 @@ ${skip}
         : html``
     }${
       deletingOf.has(session)
-        ? html`<p class="test-banner deleting-banner">This team is deleted on ${formatDate(deletingOf.get(session) as Date)}; its keys have stopped.${
+        ? html`<p class="test-banner deleting-banner">This team is deleted on ${formatDate(deletingOf.get(session) as Date)}; its keys are refused.${
             can(session, 'workspace.own') ? html` <a href="${root}/settings/team">Keep it</a>` : html``
           }</p>`
         : html``
@@ -5541,6 +5541,8 @@ ${
     if (!billing) return notFound(session);
     if (session.env === 'test') return planPage(session, 400, 'Plans are changed in Live.');
     if (!mayBill(session)) return planPage(session, 403, 'Only an owner or a billing manager of this workspace can change its plan.');
+    // A team being deleted takes no plan: kept first, so it is never billed while it waits to go.
+    if (deletingOf.has(session)) return planPage(session, 409, 'This team is being deleted. Keep it on Settings, Team before choosing a plan.');
     const interval = form.get('interval') === 'year' ? 'year' : 'month';
     const tenantRef = tenantOf(session);
     const plan = await billing.plan(tenantRef);

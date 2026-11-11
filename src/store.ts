@@ -10013,10 +10013,11 @@ function buildSlotlockStore(
     },
 
     async sweepDashboardRecords() {
-      const [row] = await sql<{ deleted: string | number }[]>`
-        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions()
-               + slotlock.erase_deleted_teams() AS deleted`;
-      return Number(row?.deleted ?? 0);
+      // Each its own statement: an erasure that runs long never takes the prunes with it.
+      const [pruned] = await sql<{ deleted: string | number }[]>`
+        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions() AS deleted`;
+      const [erased] = await sql<{ erased: string | number }[]>`SELECT slotlock.erase_deleted_teams() AS erased`;
+      return Number(pruned?.deleted ?? 0) + Number(erased?.erased ?? 0);
     },
 
     async deleteAssistantChat(params) {

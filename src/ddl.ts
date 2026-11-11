@@ -2298,8 +2298,9 @@ END
 $slotlock_cancel_team_deletion$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[31]} FROM PUBLIC;
 
--- Erase the teams whose seven days have passed, live and test, each on its own: one that cannot be
--- erased yet (a plan still paid) is left for the next pass. How many went.
+-- Erase the teams whose seven days have passed, live and test, each on its own. One with a
+-- subscription is left until it is cancelled; one that fails otherwise is tried again a day later,
+-- so neither holds up the rest. How many went.
 CREATE OR REPLACE FUNCTION slotlock.erase_deleted_teams()
 RETURNS integer
 LANGUAGE plpgsql
@@ -2314,15 +2315,26 @@ BEGIN
   FOR due IN
     SELECT ws.tenant_ref FROM slotlock.workspaces ws
      WHERE ws.status = 'deleting' AND ws.delete_after <= statement_timestamp()
+       AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans billed
+                        WHERE billed.tenant_ref = ws.tenant_ref AND billed.stripe_subscription IS NOT NULL)
      ORDER BY ws.delete_after
      LIMIT 20
   LOOP
     BEGIN
-      PERFORM * FROM slotlock.erase_tenant(due || '~test');
-      PERFORM * FROM slotlock.erase_tenant(due);
-      erased := erased + 1;
+      -- Read again, and locked, as it is now: a team an Owner kept since the list was read (while
+      -- an earlier one was being erased) is left, and keeping it waits for this erasure to finish.
+      PERFORM 1 FROM slotlock.workspaces ws
+       WHERE ws.tenant_ref = due AND ws.status = 'deleting' AND ws.delete_after <= statement_timestamp()
+       FOR UPDATE;
+      IF FOUND THEN
+        PERFORM * FROM slotlock.erase_tenant(due || '~test');
+        PERFORM * FROM slotlock.erase_tenant(due);
+        erased := erased + 1;
+      END IF;
     EXCEPTION WHEN OTHERS THEN
-      RAISE WARNING 'Slotlock could not erase deleted team %: %', due, SQLERRM;
+      UPDATE slotlock.workspaces ws SET delete_after = statement_timestamp() + interval '1 day'
+       WHERE ws.tenant_ref = due AND ws.status = 'deleting';
+      RAISE WARNING 'Slotlock could not erase deleted team %, trying again in a day: %', due, SQLERRM;
     END;
   END LOOP;
   RETURN erased;

@@ -132,10 +132,11 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - **Limits**: a team sends at most 50 invitations a day, and so does each person across their
   teams. Where plans apply, each person may create one team on the Free plan, which has up to 3
   people, open invitations included; a team's Owners and Billing managers buy Team for it on Usage.
-- **Delete a team** on Settings, Team (its Owners, typing its handle): its keys stop at once, every
-  member sees when it goes, and seven days later maintenance erases it, live and test, with
-  everything in it. Until then any Owner keeps it. A team that still has a subscription is refused
-  until its Team plan is cancelled.
+- **Delete a team** on Settings, Team (its Owners, typing its handle): its keys stop (on every
+  server within 30 seconds), every member sees when it goes, and seven days later maintenance
+  erases it, live and test, with everything in it. Until then any Owner keeps it, and it takes no
+  plan. A team with a subscription is refused until its Team plan is cancelled, and is never
+  erased while it has one.
 - The server takes a team's keys only with the setting on, and only while the team exists and is
   not being deleted (checked in the database, kept 30 seconds).
 - Each person's GitHub login, or the email Google verified, is kept (`slotlock.dashboard_people`)
