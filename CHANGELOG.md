@@ -50,6 +50,12 @@ versioning.
 
 ### Changed
 
+- **The privacy notice lists contacts, busy time from other calendars, and payments for holds**,
+  with how long each is kept: a contact until it is deleted; busy time 30 days after it ends; a
+  payment record until its resource or account goes. It says hosted Slotlock sends nothing to
+  contacts, holds no calendar or payment provider's token, and that the integrations that do run
+  under the tenant's own agreements. Erasure lists all three.
+
 - **An organization's members no longer have every power.** Before, any member could create a
   Full-access key (which reaches contacts, webhooks, history and erasure), revoke anyone's key and
   add webhooks. Members are now Developers: read-only and read-write keys of their own, resources,
