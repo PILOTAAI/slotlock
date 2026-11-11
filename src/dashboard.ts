@@ -20,11 +20,14 @@ import {
   SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,
   SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
   SLOTLOCK_FRESH_CAPABILITIES,
+  SLOTLOCK_SCOPED_DASHBOARD_PAGES,
+  SLOTLOCK_SCOPED_DASHBOARD_POSTS,
   SLOTLOCK_WORKSPACE_ROLE_NAMES,
   SLOTLOCK_WORKSPACE_ROLES,
   type SlotlockWorkspaceCapability,
   type SlotlockWorkspaceRole,
   isSlotlockWorkspaceRole,
+  slotlockMemberCan,
   slotlockRoleCan,
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
@@ -88,6 +91,11 @@ import { SLOTLOCK_ASSISTANT_CHAT_ID, SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
+import {
+  runSlotlockDashboardRequest,
+  setSlotlockDashboardRequestScope,
+  slotlockDashboardRequestScope,
+} from './dashboard-scope.js';
 import { SLOTLOCK_SETTINGS_CSS } from './dashboard-settings-ui.js';
 import { renderSlotlockMarkdown } from './dashboard-markdown.js';
 import {
@@ -108,6 +116,9 @@ import {
   type SlotlockResourceGroup,
   type SlotlockResourceKind,
   type SlotlockResourceProfileInput,
+  type SlotlockResourceScope,
+  SLOTLOCK_MAX_KEY_SCOPE_REFS,
+  isSlotlockResourceScope,
 } from './resource-profile.js';
 import { slotlockQuotaPeriod } from './quotas.js';
 import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
@@ -121,6 +132,7 @@ import {
   type SlotlockAssistantChatSummary,
   type SlotlockSql,
   type SlotlockStore,
+  type SlotlockTenantStore,
   type SlotlockSubject,
   type SlotlockSubjectErasure,
   type SlotlockSubjectExport,
@@ -240,6 +252,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/members/resend',
   '/members/revoke',
   '/members/role',
+  '/members/scope',
   '/members/remove',
   '/members/leave',
   '/assistant',
@@ -392,6 +405,7 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'invitation.revoked': 'revoked an invitation',
   'member.joined': 'joined',
   'member.role_changed': "changed a member's role",
+  'member.scope_changed': 'changed what a member reaches',
   'member.removed': 'removed a member',
   'member.left': 'left',
   'authz.denied': 'was refused',
@@ -399,7 +413,7 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
   ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
-  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
+  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
   ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
@@ -433,6 +447,7 @@ const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text
   last_owner: { status: 409, text: 'A team keeps at least one owner. Make someone else an owner first.' },
   confirm: { status: 400, text: "Type the team's handle to confirm." },
   subscription_live: { status: 409, text: 'Cancel its Team plan on Usage first.' },
+  owner: { status: 409, text: 'An owner reaches the whole workspace. Change their role first.' },
 });
 
 /** A handle from a team's name: lower-case letters, digits and dashes; later attempts add a random end. */
@@ -530,6 +545,12 @@ function policyFor(billing: SlotlockDashboardBilling | undefined): string {
  * person who made it (`github:<user id>`) as `actor`, to record on the event feed.
  */
 export interface SlotlockDashboardResources {
+  /**
+   * These adapters keep each request to the locations and groups its member is limited to (RFC
+   * 0004 D1), as createSlotlockDashboardResources's do (dashboard-scope.ts). Without it, a limited
+   * member reaches only their own account.
+   */
+  keepsToScope?: boolean;
   list(tenantRef: string): Promise<SlotlockResource[]>;
   /** How many resources the tenant has, archived ones included, as a resource limit counts them. */
   count?(tenantRef: string): Promise<number>;
@@ -1041,7 +1062,7 @@ export interface SlotlockDashboard {
  * in the database (a READ COMMITTED transaction, under a per-tenant lock).
  */
 export function createSlotlockDashboardResources(
-  store: SlotlockStore,
+  given: SlotlockStore,
   options: {
     /**
      * The agent backend (`createSlotlockStoreAgentBackend`) a granted approval's booking is made
@@ -1055,11 +1076,32 @@ export function createSlotlockDashboardResources(
     holidayFetch?: typeof fetch;
   } = {},
 ): SlotlockDashboardResources {
+  // Every transaction keeps to the resources the request's member is limited to, if any.
+  const store: SlotlockStore = {
+    ...given,
+    withTenant(tenantRef, callback, options) {
+      const scope = slotlockDashboardRequestScope();
+      return given.withTenant(tenantRef, callback, scope ? { ...options, resourceScope: scope } : options);
+    },
+  };
   // Every change here is the dashboard's, made by the person signed in (actor) when known.
   const by = (actor: string | undefined) =>
     actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
   const agentBackend = options.agentBackend;
+  /**
+   * Approvals the request's member may see: every one, or under a scope those whose every resource
+   * the scope reaches (approvals are the tenant's, not a resource's, so the database cannot tell).
+   */
+  const reachable = async (tenant: SlotlockTenantStore, tenantRef: string, approvals: SlotlockApproval[]) => {
+    if (!slotlockDashboardRequestScope()) return approvals;
+    const reached = new Set<string>();
+    for (const id of new Set(approvals.flatMap((approval) => approval.resourceIds))) {
+      if (await tenant.getResource({ tenantRef, id })) reached.add(id);
+    }
+    return approvals.filter((approval) => approval.resourceIds.every((id) => reached.has(id)));
+  };
   return {
+    keepsToScope: true,
     sandbox: {
       seed: (tenantRef, scenario) => seedSlotlockSandbox(store, tenantRef, scenario),
       async reset(tenantRef) {
@@ -1074,9 +1116,17 @@ export function createSlotlockDashboardResources(
       ? {
           approvals: {
             list: (tenantRef: string, limit: number) =>
-              store.withTenant(tenantRef, (tenant) => tenant.listApprovals({ tenantRef, limit })),
+              store.withTenant(tenantRef, async (tenant) => reachable(tenant, tenantRef, await tenant.listApprovals({ tenantRef, limit }))),
             async decide(tenantRef: string, id: string, decision: 'grant' | 'decline', actor?: string, reason?: string) {
               const decidedBy = actor ?? 'dashboard';
+              // A member limited to some resources decides only what asks for theirs alone.
+              if (slotlockDashboardRequestScope()) {
+                const found = await store.withTenant(tenantRef, async (tenant) => {
+                  const approval = await tenant.getApproval({ tenantRef, id });
+                  return approval ? (await reachable(tenant, tenantRef, [approval])).length > 0 : false;
+                });
+                if (!found) return { ok: false as const, code: 'approval_not_found' };
+              }
               if (decision === 'decline') {
                 const declined = await store.withTenant(
                   tenantRef,
@@ -2159,6 +2209,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const teamListOf = new WeakMap<Session, readonly SlotlockTeamWorkspace[]>();
   /** When the session's team, being deleted, goes. */
   const deletingOf = new WeakMap<Session, Date>();
+  /** The locations and groups each session's member is limited to (RFC 0004 D1), read with their standing. */
+  const scopes = new WeakMap<Session, SlotlockResourceScope>();
   const brandName = options.name ?? 'Slotlock';
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
@@ -2297,11 +2349,12 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const person = personOf(session);
-    const [standing, listed, alive, deleting] = await Promise.all([
+    const [standing, listed, alive, deleting, scope] = await Promise.all([
       workspaces.standing(tenantOf(session), person),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
       workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
       teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
+      workspaces.scope && sharedWorkspace(session) ? workspaces.scope(tenantOf(session), person) : Promise.resolve(null),
     ]);
     if (deleting) deletingOf.set(session, deleting);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
@@ -2311,6 +2364,10 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     if (standing.role !== null) {
       roles.set(session, standing.role);
       teamListOf.set(session, listed);
+      // Limited to some resources: what this request reads for them from now on keeps to those.
+      const limited = scope && standing.role !== 'owner' ? scope : null;
+      if (limited) scopes.set(session, limited);
+      setSlotlockDashboardRequestScope(limited);
       return session;
     }
     if ((session.org === undefined && session.team === undefined) || served) return null;
@@ -2319,6 +2376,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     if (enabled) enabledOf.set(personal, enabled);
     teamListOf.set(personal, listed);
     roles.set(personal, 'owner');
+    setSlotlockDashboardRequestScope(null);
     return personal;
   }
 
@@ -2357,7 +2415,21 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     return session.orgs?.find((org) => org.id === session.org)?.role === 'admin' ? 'owner' : 'developer';
   }
   const roleOf = (session: Session): SlotlockWorkspaceRole => roles.get(session) ?? derivedRole(session);
-  const can = (session: Session, capability: SlotlockWorkspaceCapability) => slotlockRoleCan(roleOf(session), capability);
+  /**
+   * What the person may do: their role's capabilities, and limited to some resources only those
+   * SLOTLOCK_SCOPED_CAPABILITIES keeps, and only their own account's where the resource adapters
+   * cannot keep a request to their resources.
+   */
+  const can = (session: Session, capability: SlotlockWorkspaceCapability) => {
+    const limited = scopes.has(session);
+    if (limited && !options.resources.keepsToScope && capability !== 'account.use') return false;
+    return slotlockMemberCan(roleOf(session), limited, capability);
+  };
+  /** Whether the person reaches a page: its capability, and limited, the pages a limited member has. */
+  const reaches = (session: Session, page: string) => {
+    const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[page];
+    return capability !== undefined && can(session, capability) && (!scopes.has(session) || SLOTLOCK_SCOPED_DASHBOARD_PAGES.has(page));
+  };
   /** Signed in within the last 15 minutes: what a fresh capability needs. */
   const freshlySignedIn = (session: Session) => now() - (session.exp - SESSION_TTL_MS) <= FRESH_SIGN_IN_MS;
 
@@ -2518,7 +2590,7 @@ ${live}
 </html>`;
     }
     const links = nav()
-      .filter((item) => can(session, SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[item.path || '/'] ?? 'workspace.read'))
+      .filter((item) => reaches(session, item.path || '/'))
       .map(
       (item) =>
         html`<a href="${root}${item.path}"${item.section === section ? html` aria-current="page"` : html``}>${item.icon}<span>${item.label}</span></a>`,
@@ -2811,8 +2883,10 @@ ${
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
     const assistant = assistantStore();
+    // A member limited to some resources sees theirs: no keys, plan or setup, which are the workspace's.
+    const limited = scopes.has(session);
     const [keys, resources, agenda, changes, approvals, waitlist, model] = await Promise.all([
-      options.keys.list({ tenantRef }),
+      limited ? Promise.resolve([]) : options.keys.list({ tenantRef }),
       options.resources.list(tenantRef),
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, ACTIVITY_LIMIT),
@@ -2821,7 +2895,7 @@ ${
       assistant?.getSettings(tenantRef),
     ]);
     // The plan is Live's: the test environment has none of its own.
-    const standing = plans && session.env !== 'test' ? await planStanding(session, 'overview', keys) : null;
+    const standing = plans && session.env !== 'test' && !limited ? await planStanding(session, 'overview', keys) : null;
     const byId = new Map(resources.map((resource) => [resource.id, resource]));
     const active = keys.filter(
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
@@ -2843,7 +2917,7 @@ ${
         : []),
     ];
     const admin = isAdmin(session);
-    const steps: { done: boolean; title: string; action: { href: string; label: string } }[] = [
+    const steps: { done: boolean; title: string; action: { href: string; label: string } }[] = limited ? [] : [
       { done: resources.length > 0, title: 'Add a resource', action: { href: `${root}/resources`, label: 'Add resource' } },
       { done: active.length > 0, title: 'Create an API key', action: { href: `${root}/keys#new-key`, label: 'Create key' } },
       // Done once an agent has used a key.
@@ -2859,7 +2933,7 @@ ${
     const done = steps.filter((step) => step.done).length;
     const next = steps.findIndex((step) => !step.done);
     // Nothing made and nothing happened yet: only the way in.
-    const fresh = resources.length === 0 && active.length === 0 && (changes?.length ?? 0) === 0;
+    const fresh = !limited && resources.length === 0 && active.length === 0 && (changes?.length ?? 0) === 0;
     const setupCard =
       next === -1
         ? html``
@@ -2885,7 +2959,7 @@ ${
       ...(approvals ? [stat('Waiting for approval', String(waiting), `${root}/approvals`, waiting > 0 ? ' attention-stat' : '')] : []),
       ...(waitlist ? [stat('On the waitlist', String(waitlist.filter((entry) => entry.status !== 'expired').length), `${root}/waitlist`)] : []),
       stat('Resources', String(resources.length), `${root}/resources`),
-      stat('Active keys', String(active.length), `${root}/keys`),
+      ...(limited ? [] : [stat('Active keys', String(active.length), `${root}/keys`)]),
     ].slice(0, 4);
     const planCard = standing
       ? html`<section class="panel plan-card"><div class="panel-head"><h2>${standing.name}</h2><a href="${root}/plan">Usage</a></div><div class="meters stacked">${standing.meters}</div>${
@@ -2894,14 +2968,14 @@ ${
             : html``
         }</section>`
       : html``;
-    const connectCard = html`<section class="panel" id="connect"><h2>Connect an agent</h2>${connectAgent()}</section>`;
+    const connectCard = limited ? html`` : html`<section class="panel" id="connect"><h2>Connect an agent</h2>${connectAgent()}</section>`;
     const body = fresh
       ? standing
         ? html`<div class="split">${setupCard}<div class="column">${planCard}</div></div>`
         : setupCard
       : html`${done * 2 >= steps.length ? setupRow : setupCard}
 <div class="stats">${tiles}</div>
-${session.env === 'test' && options.resources.sandbox ? sandboxPanel(session, resources.length) : html``}
+${session.env === 'test' && options.resources.sandbox && can(session, 'sandbox.manage') ? sandboxPanel(session, resources.length) : html``}
 <div class="split">
 <div class="column">
 ${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
@@ -2912,7 +2986,7 @@ ${changes ? html`<section class="panel"><h2>Activity</h2>${activityPanel(changes
     const content = html`${noticeOf(notice, status)}
 ${pageHead('Overview')}
 ${attentionList(attention)}
-${fresh && session.env === 'test' && options.resources.sandbox ? sandboxPanel(session, resources.length) : html``}
+${fresh && session.env === 'test' && options.resources.sandbox && can(session, 'sandbox.manage') ? sandboxPanel(session, resources.length) : html``}
 ${body}`;
     return respond(status, layout('Overview', content, session, 'overview'));
   }
@@ -3203,10 +3277,14 @@ ${
         (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
         (entry.id !== 'team' || (teamStore && session.team !== undefined && can(session, 'workspace.own'))) &&
         (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))) &&
-        (entry.id !== 'privacy' || (options.resources.privacy && can(session, 'privacy.manage'))),
+        (entry.id !== 'privacy' || (options.resources.privacy && can(session, 'privacy.manage'))) &&
+        // Limited to some resources: one's account and the team's people, nothing of the workspace's.
+        (!scopes.has(session) || entry.id === 'account' || entry.id === 'members'),
     );
     const shown: SettingsSection =
-      section === 'assistant' && !store
+      scopes.has(session) && !sections.some((entry) => entry.id === section)
+        ? 'account'
+        : section === 'assistant' && !store
         ? 'endpoints'
         : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy') &&
             !sections.some((entry) => entry.id === section)
@@ -4178,6 +4256,8 @@ ${
     subject: assistantActor(session),
     tenantRef: tenantOf(session),
     scopes: can(session, 'operations.run') ? ['read', 'write'] : ['read'],
+    // Limited to some resources, as a key limited to them: nothing outside is found.
+    ...(scopes.has(session) ? { resourceScope: scopes.get(session) as SlotlockResourceScope } : {}),
   });
   /** The fixed list, then the embedder's check: nothing the model sends adds to it. */
   const assistantAuthorize: SlotlockAgentOperationDispatchOptions['authorize'] = async (args) =>
@@ -5759,11 +5839,12 @@ ${
   async function authorizePost(session: Session, route: string, form: URLSearchParams): Promise<Response | null> {
     const needed = await capabilitiesOf(session, route, form);
     const missing = needed.length === 0 ? undefined : needed.find((capability) => !can(session, capability));
-    if (needed.length === 0 || missing !== undefined) {
+    const outOfScope = scopes.has(session) && !SLOTLOCK_SCOPED_DASHBOARD_POSTS.has(route);
+    if (needed.length === 0 || missing !== undefined || outOfScope) {
       await audit(session, {
         action: 'authz.denied',
         outcome: 'denied',
-        reason: missing ? `needs ${missing}` : 'not a listed route',
+        reason: missing ? `needs ${missing}` : needed.length === 0 ? 'not a listed route' : 'limited to locations and groups',
         metadata: { route },
       });
       return deniedPage(session, missing, backOf(route));
@@ -5776,16 +5857,19 @@ ${
   /** Refuse a page the person's role does not reach; a billing manager's overview is Usage. */
   function authorizePage(session: Session, page: string): Response | null {
     const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[page];
-    if (capability !== undefined && can(session, capability)) return null;
+    if (reaches(session, page)) return null;
     if (page === '/' && plans && can(session, 'usage.read')) return redirect(303, `${root}/plan`);
     return deniedPage(session, capability, plans && can(session, 'usage.read') ? '/plan' : '');
   }
 
   function deniedPage(session: Session, capability: SlotlockWorkspaceCapability | undefined, back: string): Response {
     const role = SLOTLOCK_WORKSPACE_ROLE_NAMES[roleOf(session)];
-    const text = capability
-      ? `As ${/^[AEIOU]/.test(role) ? 'an' : 'a'} ${role} in this workspace, you can't ${CAPABILITY_WORDS[capability]}.`
-      : 'Nothing is here.';
+    const text =
+      scopes.has(session) && (capability === undefined || slotlockRoleCan(roleOf(session), capability))
+        ? 'Your access to this workspace is limited to some locations and groups, so this is not yours to see or change.'
+        : capability
+          ? `As ${/^[AEIOU]/.test(role) ? 'an' : 'a'} ${role} in this workspace, you can't ${CAPABILITY_WORDS[capability]}.`
+          : 'Nothing is here.';
     return respond(
       403,
       layout('Not allowed', html`<p class="notice" role="alert">${text}</p><p><a href="${root}${back}">Back</a></p>`, session),
@@ -6520,10 +6604,15 @@ ${
     const manage = can(session, 'members.manage');
     const me = personOf(session);
     const mine = roleOf(session);
-    const [members, invitations, cap] = await Promise.all([
+    const grouping = options.resources.grouping;
+    // Limiting people to locations and groups: by an Owner or Admin who is not limited themselves.
+    const limits = manage && grouping !== undefined && (mine === 'owner' || mine === 'admin') && !scopes.has(session);
+    const [members, invitations, cap, limited, places] = await Promise.all([
       teamStore.members(tenantRef),
       manage ? teamStore.invitations(tenantRef) : Promise.resolve([]),
       memberCapOf(tenantRef),
+      teamStore.scopes(tenantRef),
+      limits && grouping ? Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]) : Promise.resolve(null),
     ]);
     const open = invitations.filter((invitation) => invitation.expiresAt.getTime() > now());
     const seats = members.length + open.length;
@@ -6569,15 +6658,48 @@ ${
             ? html`<span class="muted">You’re the only owner. Make someone else an owner before leaving.</span>`
             : html`<details class="act danger"><summary>Leave</summary><div class="pop"><p>You lose access to ${team} at once. Keys you created keep working until an owner or admin revokes them.</p><form method="post" action="${root}/members/leave">${hidden()}<button class="danger" type="submit">Leave ${team}</button></form></div></details>`;
       } else if (changeable) {
-        action = html`<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
+        action = html`${member.role !== 'owner' && places ? limitForm(member.person, name, index, limited.get(member.person) ?? null, places[0], places[1], hidden) : html``}<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
       }
-      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}</td><td data-label="Role">${role}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+      const reach = member.role === 'owner' ? undefined : limited.get(member.person);
+      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}</td><td data-label="Role">${role}</td><td data-label="Reaches">${reach ? scopeWords(reach) : 'All'}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
     });
     return html`${noticeOf(notice, status)}<h2>Members · ${String(cap === null ? members.length : seats)}${cap === null ? '' : ` of ${String(cap)}`}</h2>${invite}${link}${
       pendingRows.length > 0
         ? html`<h3>Pending</h3><div class="table"><table><thead><tr><th>Invited</th><th>Role</th><th>By</th><th>Expires</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
         : html``
-    }<div class="table"><table><thead><tr><th>Member</th><th>Role</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${memberRows}</tbody></table></div>`;
+    }<div class="table"><table><thead><tr><th>Member</th><th>Role</th><th>Reaches</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${memberRows}</tbody></table></div>`;
+  }
+
+  /** What a limited member reaches, in words. */
+  const scopeWords = (scope: SlotlockResourceScope) =>
+    [
+      scope.locations.length > 0 ? `Locations ${scope.locations.join(', ')}` : '',
+      scope.groups.length > 0 ? `Groups ${scope.groups.join(', ')}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+  /** Limit a member to locations and groups, or give them all of the workspace. */
+  function limitForm(
+    person: string,
+    name: string,
+    index: number,
+    scope: SlotlockResourceScope | null,
+    locations: readonly SlotlockLocation[],
+    groups: readonly SlotlockResourceGroup[],
+    hidden: () => Html,
+  ): Html {
+    const id = `limit-${String(index)}`;
+    const options_ = (entries: readonly { ref: string; name: string }[], chosen: readonly string[]) =>
+      entries.map(
+        (entry) => html`<option value="${entry.ref}"${chosen.includes(entry.ref) ? html` selected` : html``}>${entry.name} (${entry.ref})</option>`,
+      );
+    const picker = (field: 'locations' | 'groups', label: string, entries: readonly { ref: string; name: string }[], chosen: readonly string[]) =>
+      entries.length === 0
+        ? html``
+        : html`<label for="${id}-${field}">${label}</label><select id="${id}-${field}" name="${field}" multiple size="${String(Math.min(6, entries.length))}">${options_(entries, chosen)}</select>`;
+    if (locations.length === 0 && groups.length === 0 && scope === null) return html``;
+    return html`<details class="act"><summary>Limit<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} reaches only the resources at these locations (and the locations in them) and in these groups: their bookings, holds, waitlist and approvals. Keys, webhooks, contacts, hours, usage and settings are not theirs.</p><form method="post" action="${root}/members/scope">${hidden()}<input type="hidden" name="person" value="${person}">${picker('locations', 'Locations', locations, scope?.locations ?? [])}${picker('groups', 'Groups', groups, scope?.groups ?? [])}<fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them: they reach all of it</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button type="submit" name="access" value="limited">Limit ${name} to these</button>${scope === null ? html`` : html`<button type="submit" name="access" value="all">Give ${name} all of the workspace</button>`}</form></div></details>`;
   }
 
   /** Who did something, as the audit log names them: you, a member by their display, else their account. */
@@ -7095,6 +7217,83 @@ ${
     return settingsPage(session, 200, `${memberName(member)} is now ${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}.`, undefined, 'members');
   }
 
+  /** Revoke the keys a member created in a team's Live and Test environments: how many were. */
+  async function revokeKeysOf(tenantRef: string, person: string, actor: string): Promise<number> {
+    let revoked = 0;
+    for (const tenant of [tenantRef, `${tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}`]) {
+      for (const key of await options.keys.list({ tenantRef: tenant })) {
+        if (key.createdBy !== person || key.revokedAt !== null) continue;
+        if (await options.keys.revoke({ tenantRef: tenant, actor, origin: 'dashboard', id: key.id })) revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
+  /**
+   * Limit a member to locations and groups (RFC 0004 D1), or give them all of the workspace again.
+   * Keys they created reach all of it, so limiting them revokes those unless the form keeps them.
+   */
+  async function limitMember(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    const grouping = options.resources.grouping;
+    if (!teamStore || tenantRef === undefined || !grouping) return nothingHere(session);
+    const me = personOf(session);
+    const person = form.get('person') ?? '';
+    const member = (await teamStore.members(tenantRef)).find((candidate) => candidate.person === person);
+    if (!member) return refusalPage(session, 'not_found');
+    let scope: SlotlockResourceScope | null = null;
+    if (form.get('access') !== 'all') {
+      const chosen = { locations: [...new Set(form.getAll('locations'))].sort(), groups: [...new Set(form.getAll('groups'))].sort() };
+      if (chosen.locations.length + chosen.groups.length === 0) {
+        return settingsPage(session, 400, 'Choose at least one location or group, or all of the workspace.', undefined, 'members');
+      }
+      if (chosen.locations.length > SLOTLOCK_MAX_KEY_SCOPE_REFS || chosen.groups.length > SLOTLOCK_MAX_KEY_SCOPE_REFS) {
+        return settingsPage(
+          session,
+          400,
+          `Choose up to ${String(SLOTLOCK_MAX_KEY_SCOPE_REFS)} locations and ${String(SLOTLOCK_MAX_KEY_SCOPE_REFS)} groups.`,
+          undefined,
+          'members',
+        );
+      }
+      // Each one the workspace has.
+      const [locations, groups] = await Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]);
+      const known = (refs: readonly string[], kept: readonly { ref: string }[]) =>
+        refs.every((ref) => kept.some((entry) => entry.ref === ref));
+      if (!isSlotlockResourceScope(chosen) || !known(chosen.locations, locations) || !known(chosen.groups, groups)) {
+        return settingsPage(session, 400, 'Choose locations and groups this workspace has.', undefined, 'members');
+      }
+      scope = chosen;
+    }
+    const refusal = await teamStore.setScope(tenantRef, me, person, scope);
+    if (refusal) return refusalPage(session, refusal);
+    const keep = scope === null || form.get('keys') === 'keep';
+    const revoked = keep ? 0 : await revokeKeysOf(tenantRef, person, me);
+    await audit(
+      session,
+      {
+        action: 'member.scope_changed',
+        targetType: 'person',
+        targetRef: person,
+        metadata: scope
+          ? { locations: scope.locations, groups: scope.groups, keys: keep ? 'kept' : 'revoked', revoked }
+          : { reaches: 'all' },
+      },
+      tenantRef,
+    );
+    const name = memberName(member);
+    const team = currentTeam(session)?.name ?? 'this team';
+    return settingsPage(
+      session,
+      200,
+      scope
+        ? `${name} now reaches only the resources at those locations and in those groups${revoked > 0 ? `, and ${String(revoked)} key${revoked === 1 ? '' : 's'} they created ${revoked === 1 ? 'was' : 'were'} revoked` : ''}.`
+        : `${name} now reaches all of ${team}.`,
+      undefined,
+      'members',
+    );
+  }
+
   async function removeMember(session: Session, form: URLSearchParams): Promise<Response> {
     const tenantRef = teamTenantOf(session);
     if (!teamStore || tenantRef === undefined) return nothingHere(session);
@@ -7107,15 +7306,7 @@ ${
     if (refusal) return refusalPage(session, refusal);
     // Keys they created, Live and Test: revoked unless the form keeps them.
     const keep = form.get('keys') === 'keep';
-    let revoked = 0;
-    if (!keep) {
-      for (const tenant of [tenantRef, `${tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}`]) {
-        for (const key of await options.keys.list({ tenantRef: tenant })) {
-          if (key.createdBy !== person || key.revokedAt !== null) continue;
-          if (await options.keys.revoke({ tenantRef: tenant, actor: me, origin: 'dashboard', id: key.id })) revoked += 1;
-        }
-      }
-    }
+    const revoked = keep ? 0 : await revokeKeysOf(tenantRef, person, me);
     await audit(
       session,
       { action: 'member.removed', targetType: 'person', targetRef: person, metadata: { keys: keep ? 'kept' : 'revoked', revoked } },
@@ -8193,6 +8384,8 @@ ${
         return revokeInvitation(session, form);
       case '/members/role':
         return changeMemberRole(session, form);
+      case '/members/scope':
+        return limitMember(session, form);
       case '/members/remove':
         return removeMember(session, form);
       case '/members/leave':
@@ -8211,203 +8404,206 @@ ${
       return pathname === root || pathname.startsWith(`${root}/`);
     },
 
-    async fetch(request) {
-      const url = new URL(request.url);
-      const route = url.pathname.slice(root.length).replace(/\/$/, '') || '/';
-      try {
-        if (request.method === 'GET') {
-          switch (route) {
-            case '/': {
-              const session = await readSession(request);
-              if (!session) return signedOutPage(200);
-              return authorizePage(session, '/') ?? (await overviewPage(session));
-            }
-            case '/keys':
-            case '/resources':
-            case '/webhooks':
-            case '/waitlist':
-            case '/approvals':
-            case '/assistant':
-            case '/assistant/chats':
-            case '/plan':
-            case '/teams':
-            case '/settings/endpoints':
-            case '/settings/hours':
-            case '/settings/account':
-            case '/settings/members':
-            case '/settings/audit':
-            case '/settings/audit/export':
-            case '/settings/team':
-            case '/settings/privacy':
-            case '/settings/privacy/download':
-            case '/settings': {
-              const session = await readSession(request);
-              if (!session) return redirect(303, root);
-              const denied = authorizePage(session, route);
-              if (denied) return denied;
-              if (route === '/teams') return await teamsPage(session);
-              if (route === '/plan') {
-                return await planPage(
-                  session,
-                  200,
-                  url.searchParams.get('checkout') === 'done'
-                    ? 'Thank you. Your plan changes here once Stripe confirms the payment, usually within a minute.'
-                    : undefined,
-                  url.searchParams.get('checkout') === 'done',
-                );
-              }
-              if (route === '/keys') return await keysPage(session);
-              if (route === '/resources') {
-                return await resourcesPage(session, 200, undefined, url.searchParams.get('hours') === 'own');
-              }
-              if (route === '/webhooks') return await webhooksPage(session);
-              if (route === '/waitlist') return await waitlistPage(session);
-              if (route === '/approvals') return await approvalsPage(session);
-              if (route === '/assistant') return await assistantPage(session, 200, undefined, url.searchParams.get('c') ?? undefined);
-              if (route === '/assistant/chats') return await chatsPage(session);
-              if (route === '/settings/endpoints') return await settingsPage(session, 200, undefined, undefined, 'endpoints');
-              if (route === '/settings/hours') return await settingsPage(session, 200, undefined, undefined, 'hours');
-              if (route === '/settings/account') return await settingsPage(session, 200, undefined, undefined, 'account');
-              if (route === '/settings/members') {
-                return teamStore && session.team !== undefined
-                  ? await settingsPage(session, 200, undefined, undefined, 'members')
-                  : nothingHere(session);
-              }
-              if (route === '/settings/audit/export') return await exportAudit(session, url.searchParams);
-              if (route === '/settings/privacy') {
-                return options.resources.privacy
-                  ? await settingsPage(session, 200, undefined, undefined, 'privacy')
-                  : nothingHere(session);
-              }
-              if (route === '/settings/privacy/download') return await downloadPrivacyExport(session, url.searchParams);
-              if (route === '/settings/team') {
-                return teamStore && session.team !== undefined
-                  ? await settingsPage(session, 200, undefined, undefined, 'team')
-                  : nothingHere(session);
-              }
-              if (route === '/settings/audit') {
-                return options.resources.audit
-                  ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
-                  : nothingHere(session);
-              }
-              // A provider preset fills the assistant's form; nothing is saved until Save.
-              const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
-                (candidate) => candidate.id === url.searchParams.get('preset'),
-              );
-              return await settingsPage(
+    // Each request with its own scope (dashboard-scope.ts), set once the person's standing is read.
+    fetch: (request) => runSlotlockDashboardRequest(() => serve(request)),
+  };
+
+  async function serve(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const route = url.pathname.slice(root.length).replace(/\/$/, '') || '/';
+    try {
+      if (request.method === 'GET') {
+        switch (route) {
+          case '/': {
+            const session = await readSession(request);
+            if (!session) return signedOutPage(200);
+            return authorizePage(session, '/') ?? (await overviewPage(session));
+          }
+          case '/keys':
+          case '/resources':
+          case '/webhooks':
+          case '/waitlist':
+          case '/approvals':
+          case '/assistant':
+          case '/assistant/chats':
+          case '/plan':
+          case '/teams':
+          case '/settings/endpoints':
+          case '/settings/hours':
+          case '/settings/account':
+          case '/settings/members':
+          case '/settings/audit':
+          case '/settings/audit/export':
+          case '/settings/team':
+          case '/settings/privacy':
+          case '/settings/privacy/download':
+          case '/settings': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            const denied = authorizePage(session, route);
+            if (denied) return denied;
+            if (route === '/teams') return await teamsPage(session);
+            if (route === '/plan') {
+              return await planPage(
                 session,
                 200,
-                undefined,
-                preset ? { provider: preset.provider, baseUrl: preset.baseUrl } : undefined,
+                url.searchParams.get('checkout') === 'done'
+                  ? 'Thank you. Your plan changes here once Stripe confirms the payment, usually within a minute.'
+                  : undefined,
+                url.searchParams.get('checkout') === 'done',
               );
             }
-            case '/style.css':
-              return asset(DASHBOARD_ASSETS.css, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
-            case '/app.js':
-              return asset(DASHBOARD_ASSETS.js, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
-            case '/favicon.svg':
-              return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
-            case '/sign-in': {
-              // After signing in again to confirm it's you, back to the page that asked.
-              const then = url.searchParams.get('then') ?? '';
-              const back = STEP_UP_PAGES.has(then) ? then : undefined;
-              return google && url.searchParams.get('with') === 'google'
-                ? await startGoogleSignIn(google, back)
-                : await startSignIn(back, Boolean(teamStore) && back === '/invite' && url.searchParams.get('email') === '1');
+            if (route === '/keys') return await keysPage(session);
+            if (route === '/resources') {
+              return await resourcesPage(session, 200, undefined, url.searchParams.get('hours') === 'own');
             }
-            case '/invite': {
-              if (!teamStore) return nothingHere404();
-              // An invitation's link: its token (in the query, which request logs leave out) is kept
-              // in this browser for the sign-in that accepts it, and nothing else; opening it twice
-              // (a link scanner, a preview) consumes nothing.
-              const raw = url.searchParams.get('t');
-              if (raw !== null) {
-                if (!INVITE_TOKEN.test(raw)) return nothingHere404();
-                const opened = seal('slotlock-dashboard-invite-v1', { t: raw, exp: now() + INVITE_LINK_TTL_MS });
-                return respond(303, '', { Location: `${root}/invite`, 'Referrer-Policy': 'no-referrer' }, [
-                  setCookie(INVITE_COOKIE, opened, INVITE_LINK_TTL_MS / 1000),
-                ]);
-              }
-              const session = await readSession(request);
-              return await invitePage(session, inviteTokenOf(request), 200, undefined, url.searchParams.get('checked') === '1');
+            if (route === '/webhooks') return await webhooksPage(session);
+            if (route === '/waitlist') return await waitlistPage(session);
+            if (route === '/approvals') return await approvalsPage(session);
+            if (route === '/assistant') return await assistantPage(session, 200, undefined, url.searchParams.get('c') ?? undefined);
+            if (route === '/assistant/chats') return await chatsPage(session);
+            if (route === '/settings/endpoints') return await settingsPage(session, 200, undefined, undefined, 'endpoints');
+            if (route === '/settings/hours') return await settingsPage(session, 200, undefined, undefined, 'hours');
+            if (route === '/settings/account') return await settingsPage(session, 200, undefined, undefined, 'account');
+            if (route === '/settings/members') {
+              return teamStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'members')
+                : nothingHere(session);
             }
-            case '/callback':
-              return await finishSignIn(request, url);
-            case '/hours': {
+            if (route === '/settings/audit/export') return await exportAudit(session, url.searchParams);
+            if (route === '/settings/privacy') {
+              return options.resources.privacy
+                ? await settingsPage(session, 200, undefined, undefined, 'privacy')
+                : nothingHere(session);
+            }
+            if (route === '/settings/privacy/download') return await downloadPrivacyExport(session, url.searchParams);
+            if (route === '/settings/team') {
+              return teamStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'team')
+                : nothingHere(session);
+            }
+            if (route === '/settings/audit') {
+              return options.resources.audit
+                ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
+                : nothingHere(session);
+            }
+            // A provider preset fills the assistant's form; nothing is saved until Save.
+            const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
+              (candidate) => candidate.id === url.searchParams.get('preset'),
+            );
+            return await settingsPage(
+              session,
+              200,
+              undefined,
+              preset ? { provider: preset.provider, baseUrl: preset.baseUrl } : undefined,
+            );
+          }
+          case '/style.css':
+            return asset(DASHBOARD_ASSETS.css, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
+          case '/app.js':
+            return asset(DASHBOARD_ASSETS.js, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
+          case '/favicon.svg':
+            return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
+          case '/sign-in': {
+            // After signing in again to confirm it's you, back to the page that asked.
+            const then = url.searchParams.get('then') ?? '';
+            const back = STEP_UP_PAGES.has(then) ? then : undefined;
+            return google && url.searchParams.get('with') === 'google'
+              ? await startGoogleSignIn(google, back)
+              : await startSignIn(back, Boolean(teamStore) && back === '/invite' && url.searchParams.get('email') === '1');
+          }
+          case '/invite': {
+            if (!teamStore) return nothingHere404();
+            // An invitation's link: its token (in the query, which request logs leave out) is kept
+            // in this browser for the sign-in that accepts it, and nothing else; opening it twice
+            // (a link scanner, a preview) consumes nothing.
+            const raw = url.searchParams.get('t');
+            if (raw !== null) {
+              if (!INVITE_TOKEN.test(raw)) return nothingHere404();
+              const opened = seal('slotlock-dashboard-invite-v1', { t: raw, exp: now() + INVITE_LINK_TTL_MS });
+              return respond(303, '', { Location: `${root}/invite`, 'Referrer-Policy': 'no-referrer' }, [
+                setCookie(INVITE_COOKIE, opened, INVITE_LINK_TTL_MS / 1000),
+              ]);
+            }
+            const session = await readSession(request);
+            return await invitePage(session, inviteTokenOf(request), 200, undefined, url.searchParams.get('checked') === '1');
+          }
+          case '/callback':
+            return await finishSignIn(request, url);
+          case '/hours': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await hoursEditor(session, url));
+          }
+          case '/closures': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await closuresPage(session));
+          }
+          case '/contacts': {
+            const session = await readSession(request);
+            const after = url.searchParams.get('after') ?? undefined;
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await contactsPage(session, 200, undefined, after));
+          }
+          case '/locations': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await locationsPage(session));
+          }
+          default: {
+            const resourceId = RESOURCE_PAGE.exec(route)?.[1];
+            if (resourceId !== undefined) {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
-              return authorizePage(session, route) ?? (await hoursEditor(session, url));
+              return authorizePage(session, '/resources/:id') ?? (await resourceDetailPage(session, resourceId.toLowerCase()));
             }
-            case '/closures': {
-              const session = await readSession(request);
-              if (!session) return redirect(303, root);
-              return authorizePage(session, route) ?? (await closuresPage(session));
-            }
-            case '/contacts': {
-              const session = await readSession(request);
-              const after = url.searchParams.get('after') ?? undefined;
-              if (!session) return redirect(303, root);
-              return authorizePage(session, route) ?? (await contactsPage(session, 200, undefined, after));
-            }
-            case '/locations': {
-              const session = await readSession(request);
-              if (!session) return redirect(303, root);
-              return authorizePage(session, route) ?? (await locationsPage(session));
-            }
-            default: {
-              const resourceId = RESOURCE_PAGE.exec(route)?.[1];
-              if (resourceId !== undefined) {
-                const session = await readSession(request);
-                if (!session) return redirect(303, root);
-                return authorizePage(session, '/resources/:id') ?? (await resourceDetailPage(session, resourceId.toLowerCase()));
-              }
-              return respond(
-                404,
-                layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
-              );
-            }
+            return respond(
+              404,
+              layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
+            );
           }
         }
-        if (request.method === 'POST') return await handlePost(request, route);
+      }
+      if (request.method === 'POST') return await handlePost(request, route);
+      return respond(
+        405,
+        layout(
+          'Not allowed',
+          html`<p class="notice">Use the dashboard's pages and forms.</p>`,
+          null,
+        ),
+        {
+          Allow: 'GET, POST',
+        },
+      );
+    } catch (error) {
+      // A suspended tenant may look, not change: the store refuses its writes.
+      if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
         return respond(
-          405,
+          403,
           layout(
-            'Not allowed',
-            html`<p class="notice">Use the dashboard's pages and forms.</p>`,
-            null,
-          ),
-          {
-            Allow: 'GET, POST',
-          },
-        );
-      } catch (error) {
-        // A suspended tenant may look, not change: the store refuses its writes.
-        if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
-          return respond(
-            403,
-            layout(
-              'Suspended',
-              html`<p class="notice">This account is suspended: its data can be seen, not changed.</p>`,
-              null,
-            ),
-          );
-        }
-        try {
-          ignoreRejection(options.onError?.(error));
-        } catch {
-          // A failing reporter must not change the response.
-        }
-        return respond(
-          500,
-          layout(
-            'Error',
-            html`<p class="notice">Something went wrong. Try again in a moment.</p>`,
+            'Suspended',
+            html`<p class="notice">This account is suspended: its data can be seen, not changed.</p>`,
             null,
           ),
         );
       }
-    },
-  };
+      try {
+        ignoreRejection(options.onError?.(error));
+      } catch {
+        // A failing reporter must not change the response.
+      }
+      return respond(
+        500,
+        layout(
+          'Error',
+          html`<p class="notice">Something went wrong. Try again in a moment.</p>`,
+          null,
+        ),
+      );
+    }
+  }
 }
 
 // Progressive enhancement only, loaded as a file so the policy needs no inline code: copy buttons

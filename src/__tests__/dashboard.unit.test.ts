@@ -24,6 +24,7 @@ import { SLOTLOCK_CHANGE_TYPES, type SlotlockChange, type SlotlockWebhookEndpoin
 import type { SlotlockTenantPlan } from '../plans.js';
 import type { SlotlockWaitlistEntry } from '../store.js';
 import { createSlotlockMemoryDashboardWorkspaces } from '../workspaces.js';
+import { slotlockDashboardRequestScope } from '../dashboard-scope.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
 
 const PUBLIC_URL = 'https://slotlock.example.com/base';
@@ -2031,6 +2032,95 @@ describe('organizations', () => {
     const replayed = await post(target, '/base/dashboard/keys/revoke', { csrf: formToken, once, id: randomUUID() }, session);
     expect(replayed.status).toBe(409);
     expect(await replayed.text()).not.toContain('SECRET-PARTNER-KEY');
+  });
+});
+
+describe('a member limited to locations and groups (RFC 0004 D1)', () => {
+  const ACME_ORG = { id: 4101, login: 'acme' };
+  const signInTo = async (workspaces: ReturnType<typeof createSlotlockMemoryDashboardWorkspaces>, scoped: Partial<SlotlockDashboardResources>) => {
+    const github = fakeGitHub();
+    const orgs = vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+      String(input).startsWith('https://api.github.com/user/memberships/orgs')
+        ? Response.json([{ state: 'active', role: 'member', organization: ACME_ORG }])
+        : github.fetch(input, init),
+    );
+    const target = dashboard({
+      fetch: orgs,
+      organizations: [String(ACME_ORG.id)],
+      workspaces,
+      resources: { ...resources.store, ...scoped },
+    });
+    const { session } = await signIn(target);
+    return { target, session };
+  };
+
+  it('reaches only its resources, and nothing that is the whole workspace’s', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const tenantRef = `github-org:${ACME_ORG.id}`;
+    const person = `github:${GITHUB_USER.id}`;
+    const audited: { action: string; reason?: string }[] = [];
+    // The scope the store would run each transaction with, as each read saw it.
+    const seen: unknown[] = [];
+    const scoped = {
+      keepsToScope: true,
+      list: vi.fn(async (tenant: string) => {
+        seen.push(slotlockDashboardRequestScope());
+        return resources.store.list(tenant);
+      }),
+      audit: { record: async (_tenant: string, event: { action: string; reason?: string }) => void audited.push(event), list: async () => [] },
+    };
+    const { target, session } = await signInTo(workspaces, scoped);
+    workspaces.setRole(tenantRef, person, 'admin');
+    workspaces.limit(tenantRef, person, { locations: ['north'], groups: [] });
+
+    const overview = await get(target, '/base/dashboard', session);
+    expect(overview.status).toBe(200);
+    const page = await overview.text();
+    expect(seen.at(-1)).toEqual({ locations: ['north'], groups: [] });
+    // No keys, plan or setup on its overview; no keys, webhooks or usage in its menu.
+    expect(page).not.toContain('Active keys');
+    const nav = /<nav class="nav"[^>]*>([\s\S]*?)<\/nav>/.exec(page)?.[1] ?? '';
+    expect(nav).toContain('/base/dashboard/resources');
+    expect(nav).not.toContain('/base/dashboard/keys');
+    expect(nav).not.toContain('/base/dashboard/webhooks');
+    for (const path of ['/keys', '/webhooks', '/contacts', '/hours', '/closures', '/locations', '/settings/audit', '/settings/privacy']) {
+      const refused = await get(target, `/base/dashboard${path}`, session);
+      expect(refused.status, path).toBe(403);
+      expect(await refused.text(), path).toContain('limited to some locations and groups');
+    }
+    // Settings shows its account, never the workspace's endpoints or hours.
+    const settings = await (await get(target, '/base/dashboard/settings', session)).text();
+    expect(settings).not.toContain('/base/dashboard/settings/endpoints"');
+    expect((await get(target, '/base/dashboard/settings/endpoints', session)).status).toBe(403);
+    // An Admin's forms that reach the whole workspace are refused, and the refusal audited.
+    const token = await csrf(target, session);
+    for (const route of ['/keys', '/resources', '/hours', '/webhooks', '/members/invite']) {
+      expect((await post(target, `/base/dashboard${route}`, { csrf: token, name: 'x' }, session)).status, route).toBe(403);
+    }
+    expect(keys.store.create).not.toHaveBeenCalled();
+    expect(audited).toContainEqual(expect.objectContaining({ action: 'authz.denied', reason: 'limited to locations and groups' }));
+
+    // Given all of it again: the next request reads it, and the scope is gone.
+    workspaces.limit(tenantRef, person, null);
+    expect((await get(target, '/base/dashboard/keys', session)).status).toBe(200);
+    await get(target, '/base/dashboard', session);
+    expect(seen.at(-1)).toBeNull();
+    // An Owner is never limited.
+    workspaces.setRole(tenantRef, person, 'owner');
+    workspaces.limit(tenantRef, person, { locations: ['north'], groups: [] });
+    expect((await get(target, '/base/dashboard/keys', session)).status).toBe(200);
+  });
+
+  it('reaches only its own account where the resources cannot keep to a scope', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const tenantRef = `github-org:${ACME_ORG.id}`;
+    const person = `github:${GITHUB_USER.id}`;
+    const { target, session } = await signInTo(workspaces, {});
+    workspaces.setRole(tenantRef, person, 'member');
+    workspaces.limit(tenantRef, person, { locations: [], groups: ['vans'] });
+    expect((await get(target, '/base/dashboard', session)).status).toBe(403);
+    expect((await get(target, '/base/dashboard/resources', session)).status).toBe(403);
+    expect((await get(target, '/base/dashboard/settings/account', session)).status).toBe(200);
   });
 });
 

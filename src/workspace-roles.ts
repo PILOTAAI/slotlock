@@ -159,6 +159,8 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/members/resend': 'members.manage',
   '/members/revoke': 'members.manage',
   '/members/role': 'members.manage',
+  // Limiting a member to locations and groups (RFC 0004 D1), or giving them all of it again.
+  '/members/scope': 'members.manage',
   '/members/remove': 'members.manage',
   '/keys': 'keys.manage_own',
   '/keys/rotate': 'keys.manage_own',
@@ -237,3 +239,54 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/privacy': 'privacy.manage',
   '/settings/privacy/download': 'privacy.manage',
 });
+
+/**
+ * A member limited to some locations and groups (RFC 0004 D1) keeps at most these of their role's
+ * capabilities: they read and run the desk for those resources, and chat with an assistant that
+ * reaches only them. Nothing that reaches the whole workspace (keys, webhooks, people, money, its
+ * hours and closures, its data whole or a person's) is theirs.
+ */
+export const SLOTLOCK_SCOPED_CAPABILITIES: ReadonlySet<SlotlockWorkspaceCapability> = new Set([
+  'account.use',
+  'workspace.read',
+  'assistant.chat',
+  'operations.run',
+]);
+
+/**
+ * The pages a limited member reaches: what the store reads for them is held to their resources by
+ * the database (resource_scope_v1), and pages whose content is the whole workspace's (keys,
+ * webhooks, contacts, hours, closures, locations, usage, the audit log) are not among them.
+ */
+export const SLOTLOCK_SCOPED_DASHBOARD_PAGES: ReadonlySet<string> = new Set([
+  '/',
+  '/resources',
+  '/resources/:id',
+  '/waitlist',
+  '/approvals',
+  '/assistant',
+  '/assistant/chats',
+  '/teams',
+  '/settings',
+  '/settings/account',
+  '/settings/members',
+]);
+
+/** The forms a limited member may send: their own account's, and the desk's for their resources. */
+export const SLOTLOCK_SCOPED_DASHBOARD_POSTS: ReadonlySet<string> = new Set([
+  ...Object.entries(SLOTLOCK_DASHBOARD_POST_CAPABILITIES)
+    .filter(([, capability]) => capability === 'account.use' || capability === 'assistant.chat')
+    .map(([route]) => route),
+  '/waitlist/leave',
+  '/approvals/decide',
+  '/assistant/approve',
+]);
+
+/** Whether a role, limited (`scoped`) or not, may use a capability. */
+export function slotlockMemberCan(
+  role: SlotlockWorkspaceRole | null | undefined,
+  scoped: boolean,
+  capability: SlotlockWorkspaceCapability,
+): boolean {
+  return slotlockRoleCan(role, capability) && (!scoped || SLOTLOCK_SCOPED_CAPABILITIES.has(capability));
+}

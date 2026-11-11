@@ -141,6 +141,22 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - **Change a role, remove someone, or leave** on Members. A team always keeps an Owner: the last
   one makes another Owner first, then may step down or leave. Removing someone revokes the keys
   they created, Live and Test, unless the form keeps them. Their next request is refused.
+- **Limit someone to locations or groups** (Members, **Limit**; RFC 0004 D1): an Owner, or an Admin
+  not limited themselves, picks up to 20 locations and 20 groups for anyone but an Owner, in Live
+  and Test alike. From their next request the dashboard reads for them as a key limited to those
+  (RFC 0003 G6): the database's `resource_scope_v1` policies keep each transaction to the resources
+  at those locations (and the locations in them) or in those groups, their bookings, holds, history
+  and waitlist, and Approvals shows only what asks for theirs alone. Their assistant is limited the
+  same way. Whatever their role, they keep only reading, the desk (approvals, the waitlist) and the
+  assistant: keys, webhooks, contacts, hours, closures, locations, usage, the audit log, Privacy,
+  the test environment's sample and changing people are refused (`authz.denied`, "limited to
+  locations and groups"). Keys they created reached the whole workspace, so limiting them revokes
+  those unless the form keeps them. **All of the workspace** gives it back. Each change is in the
+  audit log (`member.scope_changed`); Members shows what each person reaches. Made an Owner, a
+  limited person reaches all of it; their limit returns if they stop being one, until it is
+  changed. A dashboard whose
+  resources are not `createSlotlockDashboardResources`'s (no `keepsToScope`) gives a limited person
+  only their own account.
 - **Limits**: a team sends at most 50 invitations a day, and so does each person across their
   teams. Where plans apply, each person may create one team on the Free plan, which has up to 3
   people, open invitations included; a team's Owners and Billing managers buy Team for it on Usage.

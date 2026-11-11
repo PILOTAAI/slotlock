@@ -79,6 +79,17 @@ versioning.
   table name them, download them as JSON, or erase them once confirmed. Every form posts, so the
   person is never in an address; the audit log records `export.created`, `export.downloaded`,
   `subject.exported` and `subject.erased` without them.
+- **People limited to locations or groups** (RFC 0004 D1). On a team's Members page an Owner, or an
+  Admin not limited themselves, limits anyone but an Owner to up to 20 locations and 20 groups
+  (new column `workspace_memberships.resource_scope`; definers `slotlock.member_scope`,
+  `slotlock.member_scopes` and `slotlock.set_member_scope`). From their next request every
+  transaction the dashboard runs for them carries that resource scope (`dashboard-scope.ts`), so
+  RFC 0003 G6's policies keep it to those resources; Approvals shows and decides only what asks
+  for theirs alone, and their assistant is limited the same way. They keep only reading, the desk
+  and the assistant (`SLOTLOCK_SCOPED_CAPABILITIES`, `SLOTLOCK_SCOPED_DASHBOARD_PAGES`,
+  `SLOTLOCK_SCOPED_DASHBOARD_POSTS`); the keys they created are revoked unless kept. Audited as
+  `member.scope_changed`. Custom resource adapters declare `keepsToScope`; without it a limited
+  person reaches only their own account. Rerun `slotlock migrate` and the role grants.
 - **Exporting a whole tenant** (RFC 0004 D3). `POST /v1/tenant/exports` asks for a copy of
   everything the tenant keeps, read through one cursor so at one moment; the server builds it after
   answering into parts of one table's rows (new tables `tenant_exports` and `tenant_export_parts`),
