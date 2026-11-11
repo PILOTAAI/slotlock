@@ -112,6 +112,11 @@ var operations = func() map[string]operation {
 		{name: "slotlock_verify_audit_log", method: "GET", path: "/v1/audit/verify", pathParams: nil, query: nil},
 		{name: "slotlock_export_subject", method: "POST", path: "/v1/subjects/export", pathParams: nil, query: nil},
 		{name: "slotlock_erase_subject", method: "POST", path: "/v1/subjects/erase", pathParams: nil, query: nil},
+		{name: "slotlock_list_tenant_exports", method: "GET", path: "/v1/tenant/exports", pathParams: nil, query: nil},
+		{name: "slotlock_create_tenant_export", method: "POST", path: "/v1/tenant/exports", pathParams: nil, query: nil},
+		{name: "slotlock_get_tenant_export", method: "GET", path: "/v1/tenant/exports/{export_id}", pathParams: []string{"export_id"}, query: nil},
+		{name: "slotlock_delete_tenant_export", method: "DELETE", path: "/v1/tenant/exports/{export_id}", pathParams: []string{"export_id"}, query: []string{"dry_run"}},
+		{name: "slotlock_get_tenant_export_part", method: "GET", path: "/v1/tenant/exports/{export_id}/parts/{part}", pathParams: []string{"export_id", "part"}, query: nil},
 		{name: "slotlock_list_approval_policies", method: "GET", path: "/v1/approval-policies", pathParams: nil, query: nil},
 		{name: "slotlock_put_approval_policy", method: "PUT", path: "/v1/approval-policies/{policy_ref}", pathParams: []string{"policy_ref"}, query: nil},
 		{name: "slotlock_delete_approval_policy", method: "DELETE", path: "/v1/approval-policies/{policy_ref}", pathParams: []string{"policy_ref"}, query: []string{"dry_run"}},
@@ -3963,6 +3968,116 @@ func (in EraseSubjectInput) values() map[string]any {
 // identifier. 400 invalid_subject when no identifier, or more than one, is given.
 func (c *Client) EraseSubject(ctx context.Context, in EraseSubjectInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_erase_subject", in.values())
+}
+
+// ListTenantExportsInput holds the arguments of [Client.ListTenantExports].
+type ListTenantExportsInput struct {
+}
+
+func (in ListTenantExportsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListTenantExports: List tenant exports. The tenant's exports, newest first, until each is
+// deleted: pending, ready (with how many parts and rows) or failed.
+func (c *Client) ListTenantExports(ctx context.Context, in ListTenantExportsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_tenant_exports", in.values())
+}
+
+// CreateTenantExportInput holds the arguments of [Client.CreateTenantExport].
+type CreateTenantExportInput struct {
+}
+
+func (in CreateTenantExportInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// CreateTenantExport: Export the tenant. Ask for a copy of everything the tenant keeps, to
+// download: every table's rows as kept, read at one moment (resources, locations,
+// resource_groups, resource_group_members, pool_settings, booking_rule_defaults,
+// availability_defaults, availability_exceptions, holiday_calendars, reservations,
+// reservation_tombstones, reservation_conflict_archive, hold_payments, calendar_events,
+// calendar_event_attendees, calendar_event_reminders, calendar_event_exceptions,
+// calendar_event_tombstones, calendar_coverage, source_busy, waitlist_entries, approval_policies,
+// approvals, contacts, webhook_endpoints, assistant_settings, api_keys, outbox, audit_events).
+// Secrets stay out: webhooks' signing secrets, the assistant's provider key and API keys'
+// digests. 11 tables are left out as derived, internal or one member's own (each member's
+// conversations with the assistant). It answers pending at once and is built in the background:
+// slotlock_get_tenant_export says when it is ready, then read its parts with
+// slotlock_get_tenant_export_part. Kept 24 hours once ready, then deleted. One is built at a time
+// (409 export_in_progress) and five are kept (409 export_limit_reached); one past 512 MB fails
+// (error export_too_large) and its operator runs slotlock tenant export. Recorded in the audit
+// log (export.created).
+func (c *Client) CreateTenantExport(ctx context.Context, in CreateTenantExportInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_create_tenant_export", in.values())
+}
+
+// GetTenantExportInput holds the arguments of [Client.GetTenantExport].
+type GetTenantExportInput struct {
+	ExportID string
+}
+
+func (in GetTenantExportInput) values() map[string]any {
+	values := map[string]any{}
+	values["export_id"] = in.ExportID
+	return values
+}
+
+// GetTenantExport: Get a tenant export. One of the tenant's exports: whether it is ready, its
+// parts, rows and bytes, and rows by table. An unknown or deleted one answers 404
+// export_not_found.
+func (c *Client) GetTenantExport(ctx context.Context, in GetTenantExportInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_tenant_export", in.values())
+}
+
+// DeleteTenantExportInput holds the arguments of [Client.DeleteTenantExport].
+type DeleteTenantExportInput struct {
+	ExportID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteTenantExportInput) values() map[string]any {
+	values := map[string]any{}
+	values["export_id"] = in.ExportID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteTenantExport: Delete a tenant export. Delete one of the tenant's exports at once, with
+// every part, rather than waiting for it to expire. deleted is false when there was none.
+func (c *Client) DeleteTenantExport(ctx context.Context, in DeleteTenantExportInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_tenant_export", in.values())
+}
+
+// GetTenantExportPartInput holds the arguments of [Client.GetTenantExportPart].
+type GetTenantExportPartInput struct {
+	ExportID string
+
+	Part string
+}
+
+func (in GetTenantExportPartInput) values() map[string]any {
+	values := map[string]any{}
+	values["export_id"] = in.ExportID
+	values["part"] = in.Part
+	return values
+}
+
+// GetTenantExportPart: Read a part of a tenant export. One part of a ready export, 1 to its
+// parts: one table's rows, each an object as Slotlock keeps it (without the tenant). Write each
+// part's rows as JSON lines to its table's file to keep the export as NDJSON. 409
+// export_not_ready before it is ready; 404 export_not_found or export_part_not_found.
+func (c *Client) GetTenantExportPart(ctx context.Context, in GetTenantExportPartInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_tenant_export_part", in.values())
 }
 
 // ListApprovalPoliciesInput holds the arguments of [Client.ListApprovalPolicies].

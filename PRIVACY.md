@@ -56,6 +56,7 @@ protection officer.
 | Webhooks: each endpoint's address, its signing secret, the change types it receives, and its delivery state and last error | You | While your account exists, or until you delete the endpoint |
 | Activity history: each change to your resources, holds, bookings, events, coverage and waitlist, with ids, times, references, which key or GitHub user made it and through which interface. It never holds titles, descriptions or attendees | The service | 30 days on the Free plan, 90 days on Developer and 400 days on Team. The server cannot change or delete an entry: entries go only when that time has passed, when you erase a person from them (their references are then replaced), or when your account is erased |
 | A record of each event write, so a retried request returns the first result | The service | 30 days |
+| Exports of your account that you ask for: a copy of everything in it at one moment, each table's rows without secrets | You, through the API | 24 hours after it is ready (or after you asked, if it never is), then deleted; at once when you delete it or your account is erased |
 | The references of cancelled bookings, so a delayed retry never books one again; an agent's cancelled events | The service | Booking references until your account is erased; an agent's cancelled events 30 days after cancellation |
 | Records of finished sign-ins, signed-out sessions and sent dashboard forms, as digests | The service | Until they expire, within 12 hours, and are then deleted as new ones are written |
 | Your dashboard session, in a cookie | The service | 12 hours |
@@ -102,7 +103,7 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 
 | Purpose | Data | Lawful basis (UK GDPR Article 6(1)) |
 | --- | --- | --- |
-| Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, contacts, busy time, payments for holds, reminder records, webhooks, history, write records, sessions, assistant settings | (b) contract: the Terms of Service |
+| Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, contacts, busy time, payments for holds, reminder records, webhooks, history, write records, exports, sessions, assistant settings | (b) contract: the Terms of Service |
 | Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
 | Team workspaces: showing members to each other, and inviting a person a member names | Login or verified email, memberships, invitations | (b) contract for members; (f) legitimate interests for an invitation: a member asked for it, it holds an address and a role only, and it is deleted 30 days after it ends |
 | Verified domains: proving a team holds its domain, and letting the people at it ask to join | Domain claims, verified addresses, requests to join | (b) contract for the team's members; (f) legitimate interests for a request: the person asked to join, it holds the address they chose to use, and it is deleted 30 days after it is decided |
@@ -167,12 +168,13 @@ is perfectly secure: [SECURITY.md](SECURITY.md) says how to report a vulnerabili
 You can ask us for a copy of your data, to correct it, to erase it, to restrict or object to how we
 use it, and to have it in a portable form. Much of it you can read, change, export and delete
 yourself through the API and the dashboard, and you can revoke keys yourself in the dashboard at any
-time.
+time. `POST /v1/tenant/exports` makes a copy of everything in your account, read at one moment, as
+JSON objects table by table, for you to download within 24 hours.
 
 To erase your account and everything in it, write to [privacy@pylota.io](mailto:privacy@pylota.io)
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
 that word as its name, which shows us the account is yours. We then erase every resource, booking,
-event, hold, payment record, waitlist entry, contact, busy period, webhook, history entry, assistant
+event, hold, payment record, waitlist entry, contact, busy period, webhook, export, history entry, assistant
 setting, plan, usage count and key in the account, in one step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
 lines until they age out as described above; and backups, until they are replaced within about five

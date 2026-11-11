@@ -73,6 +73,14 @@ versioning.
   in holds, bookings, cancelled bookings, events, approvals and the change history. Bookings stay
   as time taken; nothing goes on the feed; the audit log records `subject.erased` without the
   person.
+- **Exporting a whole tenant** (RFC 0004 D3). `POST /v1/tenant/exports` asks for a copy of
+  everything the tenant keeps, read through one cursor so at one moment; the server builds it after
+  answering into parts of one table's rows (new tables `tenant_exports` and `tenant_export_parts`),
+  read with `GET /v1/tenant/exports/{export_id}/parts/{part}` and kept 24 hours. Secrets stay out;
+  derived, internal and per-member tables are left out (`SLOTLOCK_TENANT_EXPORT_TABLES`,
+  `SLOTLOCK_TENANT_EXPORT_LEFT_OUT`). One at a time, five kept, 512 MB at most; maintenance deletes
+  expired exports and builds any left pending. `slotlock tenant export [--out <dir>]` reads the same
+  snapshot straight to NDJSON, storing nothing. Recorded in the audit log (`export.created`).
 - **The audit log over the API and the command line** (RFC 0004 D2): `GET /v1/audit` (on the Team
   plan where plans apply, as the dashboard's export) and `GET /v1/audit/verify`;
   `slotlock audit export` and `slotlock audit verify` (exit 1 when the chain breaks).

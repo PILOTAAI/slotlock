@@ -631,6 +631,11 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       expect(await dashboard.use('form', `form-${randomUUID()}`, Date.now() + HOUR, uid)).toBe(
         true,
       );
+      // A copy of it all, built (RFC 0004 D3).
+      const asked = await app.withTenant(tenantRef, (tenant) => tenant.createTenantExport({ tenantRef }));
+      expect(
+        (await app.withTenant(tenantRef, (tenant) => tenant.buildTenantExport({ tenantRef, exportId: asked.id })))?.status,
+      ).toBe('ready');
       return { key: key.key, resourceId };
     }
 

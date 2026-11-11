@@ -60,6 +60,10 @@ const READS = [
   // What the tenant keeps about one person, for an access request (RFC 0004 D3).
   'exportSubject',
   'tenantPlan',
+  'getTenantExport',
+  'listTenantExports',
+  'getTenantExportPart',
+  'streamTenantExport',
 ];
 const UPKEEP = [
   'dueHolidayCalendars',
@@ -98,6 +102,12 @@ const ADMINISTRATION = [
   'eraseTenant',
   // An erasure request is the person's right, and a suspended tenant's duty all the same.
   'eraseSubject',
+  // A copy of its data is the tenant's right whether or not it is suspended (RFC 0004 D3).
+  'createTenantExport',
+  'buildTenantExport',
+  'failTenantExport',
+  'deleteTenantExport',
+  'pruneTenantExports',
 ];
 
 /**

@@ -130,7 +130,12 @@ import type {
   SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
 } from './types.js';
-import { SLOTLOCK_SUBJECT_TABLES, type SlotlockSubjectTable } from './types.js';
+import {
+  SLOTLOCK_SUBJECT_TABLES,
+  SLOTLOCK_TENANT_EXPORT_TABLES,
+  type SlotlockSubjectTable,
+  type SlotlockTenantExportTable,
+} from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 import { applicableHours, exceptionQueryDays } from './hours.js';
 import { zonedDateTimeToUtc } from './timezone.js';
@@ -1321,6 +1326,116 @@ function sandboxTestOnlyError(): Error & { code: 'sandbox_test_only' } {
     new Error('Slotlock does this only in a test environment (a tenant ending ~test)'),
     { code: 'sandbox_test_only' as const },
   );
+}
+
+/** Columns an export leaves out of a table it holds: secrets, and leases only a server reads. */
+const TENANT_EXPORT_LEFT_OUT_COLUMNS: Partial<Record<SlotlockTenantExportTable, readonly string[]>> = {
+  webhook_endpoints: ['secret', 'lease_token', 'lease_until'],
+  assistant_settings: ['sealed_key'],
+};
+
+/**
+ * Every table an export holds, as one statement (so one snapshot): each row as its table's name
+ * and a JSON line, without the tenant. `$1` is the tenant. A hold keeps no tenant of its own: its
+ * resource's is its. API keys come from slotlock.list_api_keys, which holds no digest.
+ */
+const TENANT_EXPORT_SQL = SLOTLOCK_TENANT_EXPORT_TABLES.map((table) => {
+  if (table === 'api_keys') {
+    return `SELECT 'api_keys'::text AS table_name, (pg_catalog.to_jsonb(kept) - 'key_tenant_ref')::text AS line
+  FROM slotlock.list_api_keys($1) kept`;
+  }
+  const dropped = ['tenant_ref', ...(TENANT_EXPORT_LEFT_OUT_COLUMNS[table] ?? [])].map((column) => ` - '${column}'`).join('');
+  const where =
+    table === 'reservations'
+      ? `kept.tenant_ref = $1 OR (kept.tenant_ref IS NULL AND kept.resource_id IN (
+           SELECT owned.id FROM slotlock.resources owned WHERE owned.tenant_ref = $1))`
+      : 'kept.tenant_ref = $1';
+  return `SELECT '${table}'::text AS table_name, (pg_catalog.to_jsonb(kept)${dropped})::text AS line
+  FROM slotlock.${table} kept WHERE ${where}`;
+}).join('\nUNION ALL\n');
+
+/**
+ * Read everything the tenant keeps through one cursor (one snapshot), handing each part (one
+ * table's rows, up to SLOTLOCK_TENANT_EXPORT_PART_ROWS or about a megabyte) to `onPart`.
+ */
+async function readTenantExport(
+  tx: TransactionSql,
+  tenantRef: string,
+  onPart: (part: { table: SlotlockTenantExportTable; lines: string[]; bytes: number }) => Promise<void>,
+): Promise<{ rows: number; bytes: number; tables: Record<string, number> }> {
+  const totals = { rows: 0, bytes: 0, tables: {} as Record<string, number> };
+  let current: { table: SlotlockTenantExportTable; lines: string[]; bytes: number } | null = null;
+  const flush = async () => {
+    if (current && current.lines.length > 0) await onPart(current);
+    current = null;
+  };
+  await tx.unsafe(`DECLARE slotlock_tenant_export NO SCROLL CURSOR FOR\n${TENANT_EXPORT_SQL}`, [tenantRef]);
+  for (;;) {
+    const rows = await tx.unsafe<{ table_name: SlotlockTenantExportTable; line: string }[]>(
+      'FETCH 1000 FROM slotlock_tenant_export',
+    );
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      const open = current as { table: SlotlockTenantExportTable; lines: string[]; bytes: number } | null;
+      if (
+        open &&
+        (open.table !== row.table_name ||
+          open.lines.length >= SLOTLOCK_TENANT_EXPORT_PART_ROWS ||
+          open.bytes >= TENANT_EXPORT_PART_BYTES)
+      ) {
+        await flush();
+      }
+      current ??= { table: row.table_name, lines: [], bytes: 0 };
+      const bytes = Buffer.byteLength(row.line) + 1;
+      current.lines.push(row.line);
+      current.bytes += bytes;
+      totals.rows += 1;
+      totals.bytes += bytes;
+      totals.tables[row.table_name] = (totals.tables[row.table_name] ?? 0) + 1;
+    }
+  }
+  await flush();
+  await tx.unsafe('CLOSE slotlock_tenant_export');
+  return totals;
+}
+
+interface TenantExportRow {
+  id: string;
+  status: SlotlockTenantExport['status'];
+  requested_by: string | null;
+  created_at: Date;
+  finished_at: Date | null;
+  expires_at: Date;
+  parts: number;
+  row_count: string;
+  bytes: string;
+  tables: Record<string, number>;
+  error: string | null;
+}
+
+function toTenantExport(row: TenantExportRow): SlotlockTenantExport {
+  return {
+    id: row.id,
+    status: row.status,
+    requestedBy: row.requested_by,
+    createdAt: row.created_at,
+    finishedAt: row.finished_at,
+    expiresAt: row.expires_at,
+    parts: row.parts,
+    rows: Number(row.row_count),
+    bytes: Number(row.bytes),
+    tables: row.tables,
+    error: row.error,
+  };
+}
+
+function tenantExportRefusal(code: 'export_in_progress' | 'export_limit_reached' | 'export_too_large'): Error & { code: string } {
+  const message = {
+    export_in_progress: 'Slotlock builds one export of a tenant at a time: wait for the one asked for',
+    export_limit_reached: `Slotlock keeps at most ${SLOTLOCK_MAX_TENANT_EXPORTS} exports of a tenant: delete one first`,
+    export_too_large: `Slotlock exports at most ${SLOTLOCK_TENANT_EXPORT_MAX_BYTES / 1024 / 1024} MB through the API: its operator runs slotlock tenant export`,
+  }[code];
+  return Object.assign(new Error(message), { code });
 }
 
 /** A subject request's email: one address, compared without case. */
@@ -3614,6 +3729,41 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * Counts, by table, the rows deleted or changed.
    */
   eraseSubject(params: { tenantRef: string; subject: SlotlockSubject }): Promise<SlotlockSubjectErasure>;
+  /**
+   * Ask for a copy of everything the tenant keeps (RFC 0004 D3): a pending export, which
+   * buildTenantExport builds. Refused while another is pending (`export_in_progress`) or when the
+   * tenant keeps SLOTLOCK_MAX_TENANT_EXPORTS already (`export_limit_reached`).
+   */
+  createTenantExport(params: { tenantRef: string; requestedBy?: string }): Promise<SlotlockTenantExport>;
+  /**
+   * Build a pending export: every table of SLOTLOCK_TENANT_EXPORT_TABLES read through one cursor,
+   * so in one snapshot, into parts of one table's rows. Null when it is not pending, or another is
+   * building it. Throws `export_too_large` past SLOTLOCK_TENANT_EXPORT_MAX_BYTES, writing nothing.
+   */
+  buildTenantExport(params: { tenantRef: string; exportId: string }): Promise<SlotlockTenantExport | null>;
+  /** Mark a pending export failed, with why (`export_too_large`, `export_failed`). */
+  failTenantExport(params: { tenantRef: string; exportId: string; error: string }): Promise<void>;
+  /** One of the tenant's exports, or null. */
+  getTenantExport(params: { tenantRef: string; exportId: string }): Promise<SlotlockTenantExport | null>;
+  /** The tenant's exports, newest first. */
+  listTenantExports(params: { tenantRef: string }): Promise<SlotlockTenantExport[]>;
+  /** One part (1 to its `parts`) of a ready export. */
+  getTenantExportPart(params: { tenantRef: string; exportId: string; part: number }): Promise<SlotlockTenantExportPartResult>;
+  /** Delete one of the tenant's exports at once. False when there was none. */
+  deleteTenantExport(params: { tenantRef: string; exportId: string }): Promise<boolean>;
+  /**
+   * Delete the tenant's exports past their time; and name those left pending for more than two
+   * minutes (their server stopped before building them), for maintenance to build.
+   */
+  pruneTenantExports(params: { tenantRef: string }): Promise<{ deleted: number; pending: string[] }>;
+  /**
+   * Read everything the tenant keeps, as an export holds it, in one snapshot, without storing it
+   * (`slotlock tenant export`): each part (one table's rows) to `onPart` as it is read.
+   */
+  streamTenantExport(params: {
+    tenantRef: string;
+    onPart: (part: { table: SlotlockTenantExportTable; lines: string[] }) => Promise<void>;
+  }): Promise<{ rows: number; bytes: number; tables: Record<string, number> }>;
   /** One of the tenant's live holds, or null (none, expired, confirmed, or another tenant's). */
   getHold(params: { tenantRef: string; holdId: string }): Promise<SlotlockHold | null>;
   /**
@@ -4332,6 +4482,39 @@ export interface SlotlockSubjectErasure {
   erased: Record<SlotlockSubjectTable, number>;
 }
 
+/** Hours a tenant export is kept once ready, or since it was asked for if it never is. */
+export const SLOTLOCK_TENANT_EXPORT_HOURS = 24;
+/** The most a tenant export holds: past it, the export fails (`export_too_large`). */
+export const SLOTLOCK_TENANT_EXPORT_MAX_BYTES = 512 * 1024 * 1024;
+/** The most exports a tenant keeps at once. */
+export const SLOTLOCK_MAX_TENANT_EXPORTS = 5;
+/** A part of an export: one table's rows, at most this many, or about this many bytes. */
+export const SLOTLOCK_TENANT_EXPORT_PART_ROWS = 5_000;
+const TENANT_EXPORT_PART_BYTES = 1024 * 1024;
+
+/** A copy of everything the tenant keeps (createTenantExport), as built or being built. */
+export interface SlotlockTenantExport {
+  id: string;
+  /** `pending` until it is built, then `ready`, or `failed` (`error` says why). */
+  status: 'pending' | 'ready' | 'failed';
+  requestedBy: string | null;
+  createdAt: Date;
+  finishedAt: Date | null;
+  /** When maintenance deletes it. */
+  expiresAt: Date;
+  parts: number;
+  rows: number;
+  bytes: number;
+  /** Rows by table (SLOTLOCK_TENANT_EXPORT_TABLES), for the tables with any. */
+  tables: Record<string, number>;
+  error: string | null;
+}
+
+/** One part of an export: one table's rows, each a JSON object as kept (NDJSON lines). */
+export type SlotlockTenantExportPartResult =
+  | { ok: true; table: SlotlockTenantExportTable; lines: string[] }
+  | { ok: false; code: 'export_not_found' | 'export_not_ready' | 'export_part_not_found' };
+
 /** An audit event as the log keeps it. */
 export interface SlotlockAuditEvent extends SlotlockAuditEventInput {
   id: string;
@@ -4951,6 +5134,28 @@ function lockTimeoutError(cause: unknown): Error & { code: 'lock_timeout' } {
     new Error('Slotlock tenant transaction waited too long for a lock: retry later', { cause }),
     { code: 'lock_timeout' as const },
   );
+}
+
+/**
+ * Build a pending tenant export (RFC 0004 D3) in its own tenant transaction, and mark it failed if
+ * that fails (`export_too_large`, else `export_failed`). Null when it was not pending, or another
+ * server is building it. Never throws: a server builds it after answering, and maintenance builds
+ * one left pending.
+ */
+export async function buildSlotlockTenantExport(
+  store: SlotlockStore,
+  tenantRef: string,
+  exportId: string,
+): Promise<SlotlockTenantExport | null> {
+  try {
+    return await store.withTenant(tenantRef, (tenant) => tenant.buildTenantExport({ tenantRef, exportId }));
+  } catch (error) {
+    const reason = (error as { code?: unknown } | null)?.code === 'export_too_large' ? 'export_too_large' : 'export_failed';
+    await store
+      .withTenant(tenantRef, (tenant) => tenant.failTenantExport({ tenantRef, exportId, error: reason }))
+      .catch(() => undefined);
+    return null;
+  }
 }
 
 export function createSlotlockStore(sql: StoreSql, options: SlotlockStoreOptions = {}): SlotlockStore {
@@ -7309,6 +7514,136 @@ function buildSlotlockStore(
         }
         return { erased };
       }, 'read committed');
+    },
+
+    async createTenantExport(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      const tenantRef = params.tenantRef;
+      return inTransaction(sql, async (tx) => {
+        await lockExternalIdentity(tx, tenantRef, 'tenant-export');
+        const [kept] = await tx<{ pending: number; kept: number }[]>`
+          SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*)::int AS kept
+            FROM slotlock.tenant_exports
+           WHERE tenant_ref = ${tenantRef} AND expires_at > statement_timestamp()`;
+        if ((kept?.pending ?? 0) > 0) throw tenantExportRefusal('export_in_progress');
+        if ((kept?.kept ?? 0) >= SLOTLOCK_MAX_TENANT_EXPORTS) throw tenantExportRefusal('export_limit_reached');
+        const requestedBy = params.requestedBy === undefined ? null : cutBytes(params.requestedBy, 200) ?? null;
+        const [row] = await tx<TenantExportRow[]>`
+          INSERT INTO slotlock.tenant_exports (tenant_ref, requested_by, expires_at)
+          VALUES (${tenantRef}, ${requestedBy},
+                  statement_timestamp() + make_interval(hours => ${SLOTLOCK_TENANT_EXPORT_HOURS}))
+          RETURNING *, row_count::text AS row_count, bytes::text AS bytes`;
+        if (!row) throw new Error('slotlock: tenant export insert returned no row');
+        return toTenantExport(row);
+      }, 'read committed');
+    },
+
+    async buildTenantExport(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.exportId)) return null;
+      const tenantRef = params.tenantRef;
+      const exportId = params.exportId;
+      return inTransaction(sql, async (tx) => {
+        // Held to the end: another server building it skips it rather than waiting.
+        const [claimed] = await tx<{ id: string }[]>`
+          SELECT id FROM slotlock.tenant_exports
+           WHERE id = ${exportId} AND tenant_ref = ${tenantRef} AND status = 'pending'
+           FOR UPDATE SKIP LOCKED`;
+        if (!claimed) return null;
+        let part = 0;
+        let written = 0;
+        const totals = await readTenantExport(tx, tenantRef, async (read) => {
+          // Refused as soon as it is too large, so nothing past the limit is read or kept.
+          written += read.bytes;
+          if (written > SLOTLOCK_TENANT_EXPORT_MAX_BYTES) throw tenantExportRefusal('export_too_large');
+          part += 1;
+          await tx`
+            INSERT INTO slotlock.tenant_export_parts (export_id, tenant_ref, part, table_name, row_count, content)
+            VALUES (${exportId}, ${tenantRef}, ${part}, ${read.table}, ${read.lines.length}, ${read.lines.join('\n')})`;
+        });
+        const [row] = await tx<TenantExportRow[]>`
+          UPDATE slotlock.tenant_exports
+             SET status = 'ready', finished_at = statement_timestamp(),
+                 expires_at = statement_timestamp() + make_interval(hours => ${SLOTLOCK_TENANT_EXPORT_HOURS}),
+                 parts = ${part}, row_count = ${totals.rows}, bytes = ${totals.bytes},
+                 tables = ${tx.json(totals.tables as never)}
+           WHERE id = ${exportId} AND tenant_ref = ${tenantRef}
+          RETURNING *, row_count::text AS row_count, bytes::text AS bytes`;
+        return row ? toTenantExport(row) : null;
+      }, 'read committed');
+    },
+
+    async failTenantExport(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.exportId)) return;
+      await sql`
+        UPDATE slotlock.tenant_exports
+           SET status = 'failed', finished_at = statement_timestamp(), error = ${cutBytes(params.error, 200) ?? 'export_failed'}
+         WHERE id = ${params.exportId} AND tenant_ref = ${params.tenantRef} AND status = 'pending'`;
+    },
+
+    async getTenantExport(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.exportId)) return null;
+      const [row] = await sql<TenantExportRow[]>`
+        SELECT *, row_count::text AS row_count, bytes::text AS bytes FROM slotlock.tenant_exports
+         WHERE id = ${params.exportId} AND tenant_ref = ${params.tenantRef}`;
+      return row ? toTenantExport(row) : null;
+    },
+
+    async listTenantExports(params) {
+      if (!isValidIdentity(params.tenantRef)) return [];
+      const rows = await sql<TenantExportRow[]>`
+        SELECT *, row_count::text AS row_count, bytes::text AS bytes FROM slotlock.tenant_exports
+         WHERE tenant_ref = ${params.tenantRef}
+         ORDER BY created_at DESC, id DESC`;
+      return rows.map(toTenantExport);
+    },
+
+    async getTenantExportPart(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.exportId)) {
+        return { ok: false, code: 'export_not_found' };
+      }
+      const [found] = await sql<{ status: SlotlockTenantExport['status']; table_name: SlotlockTenantExportTable | null; content: string | null }[]>`
+        SELECT made.status, part.table_name, part.content
+          FROM slotlock.tenant_exports made
+          LEFT JOIN slotlock.tenant_export_parts part
+                 ON part.export_id = made.id AND part.tenant_ref = made.tenant_ref AND part.part = ${params.part}
+         WHERE made.id = ${params.exportId} AND made.tenant_ref = ${params.tenantRef}`;
+      if (!found) return { ok: false, code: 'export_not_found' };
+      if (found.status !== 'ready') return { ok: false, code: 'export_not_ready' };
+      if (found.table_name === null || found.content === null) return { ok: false, code: 'export_part_not_found' };
+      return { ok: true, table: found.table_name, lines: found.content.split('\n') };
+    },
+
+    async deleteTenantExport(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidResourceId(params.exportId)) return false;
+      const deleted = await sql`
+        DELETE FROM slotlock.tenant_exports WHERE id = ${params.exportId} AND tenant_ref = ${params.tenantRef}
+        RETURNING 1`;
+      return deleted.length > 0;
+    },
+
+    async pruneTenantExports(params) {
+      if (!isValidIdentity(params.tenantRef)) return { deleted: 0, pending: [] };
+      const deleted = await sql`
+        DELETE FROM slotlock.tenant_exports
+         WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()
+        RETURNING 1`;
+      const pending = await sql<{ id: string }[]>`
+        SELECT id FROM slotlock.tenant_exports
+         WHERE tenant_ref = ${params.tenantRef} AND status = 'pending'
+           AND created_at < statement_timestamp() - interval '2 minutes'
+         ORDER BY created_at`;
+      return { deleted: deleted.length, pending: pending.map((row) => row.id) };
+    },
+
+    async streamTenantExport(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant reference must be 1-500 UTF-8 bytes');
+      }
+      return inTransaction(sql, (tx) =>
+        readTenantExport(tx, params.tenantRef, ({ table, lines }) => params.onPart({ table, lines })),
+      'read committed');
     },
 
     async markHoldPaid(params) {

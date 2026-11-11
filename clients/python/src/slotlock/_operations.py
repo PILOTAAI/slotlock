@@ -722,6 +722,41 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_list_tenant_exports": Operation(
+        "slotlock_list_tenant_exports",
+        "GET",
+        "/v1/tenant/exports",
+        (),
+        (),
+    ),
+    "slotlock_create_tenant_export": Operation(
+        "slotlock_create_tenant_export",
+        "POST",
+        "/v1/tenant/exports",
+        (),
+        (),
+    ),
+    "slotlock_get_tenant_export": Operation(
+        "slotlock_get_tenant_export",
+        "GET",
+        "/v1/tenant/exports/{export_id}",
+        ("export_id",),
+        (),
+    ),
+    "slotlock_delete_tenant_export": Operation(
+        "slotlock_delete_tenant_export",
+        "DELETE",
+        "/v1/tenant/exports/{export_id}",
+        ("export_id",),
+        ("dry_run",),
+    ),
+    "slotlock_get_tenant_export_part": Operation(
+        "slotlock_get_tenant_export_part",
+        "GET",
+        "/v1/tenant/exports/{export_id}/parts/{part}",
+        ("export_id", "part"),
+        (),
+    ),
     "slotlock_list_approval_policies": Operation(
         "slotlock_list_approval_policies",
         "GET",
@@ -3660,6 +3695,79 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_erase_subject", values)
+
+    def list_tenant_exports(self) -> dict[str, Any]:
+        """List tenant exports.
+
+        The tenant's exports, newest first, until each is deleted: pending, ready (with how many
+        parts and rows) or failed.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_tenant_exports", values)
+
+    def create_tenant_export(self) -> dict[str, Any]:
+        """Export the tenant.
+
+        Ask for a copy of everything the tenant keeps, to download: every table's rows as kept,
+        read at one moment (resources, locations, resource_groups, resource_group_members,
+        pool_settings, booking_rule_defaults, availability_defaults, availability_exceptions,
+        holiday_calendars, reservations, reservation_tombstones, reservation_conflict_archive,
+        hold_payments, calendar_events, calendar_event_attendees, calendar_event_reminders,
+        calendar_event_exceptions, calendar_event_tombstones, calendar_coverage, source_busy,
+        waitlist_entries, approval_policies, approvals, contacts, webhook_endpoints,
+        assistant_settings, api_keys, outbox, audit_events). Secrets stay out: webhooks' signing
+        secrets, the assistant's provider key and API keys' digests. 11 tables are left out as
+        derived, internal or one member's own (each member's conversations with the assistant). It
+        answers pending at once and is built in the background: slotlock_get_tenant_export says
+        when it is ready, then read its parts with slotlock_get_tenant_export_part. Kept 24 hours
+        once ready, then deleted. One is built at a time (409 export_in_progress) and five are
+        kept (409 export_limit_reached); one past 512 MB fails (error export_too_large) and its
+        operator runs slotlock tenant export. Recorded in the audit log (export.created).
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_create_tenant_export", values)
+
+    def get_tenant_export(self, export_id: str) -> dict[str, Any]:
+        """Get a tenant export.
+
+        One of the tenant's exports: whether it is ready, its parts, rows and bytes, and rows by
+        table. An unknown or deleted one answers 404 export_not_found.
+        """
+        values: dict[str, Any] = {"export_id": export_id}
+        return self.call("slotlock_get_tenant_export", values)
+
+    def delete_tenant_export(
+        self,
+        export_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Delete a tenant export.
+
+        Delete one of the tenant's exports at once, with every part, rather than waiting for it to
+        expire. deleted is false when there was none.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"export_id": export_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_tenant_export", values)
+
+    def get_tenant_export_part(self, export_id: str, part: str) -> dict[str, Any]:
+        """Read a part of a tenant export.
+
+        One part of a ready export, 1 to its parts: one table's rows, each an object as Slotlock
+        keeps it (without the tenant). Write each part's rows as JSON lines to its table's file to
+        keep the export as NDJSON. 409 export_not_ready before it is ready; 404 export_not_found
+        or export_part_not_found.
+        """
+        values: dict[str, Any] = {"export_id": export_id, "part": part}
+        return self.call("slotlock_get_tenant_export_part", values)
 
     def list_approval_policies(self) -> dict[str, Any]:
         """List approval policies.
