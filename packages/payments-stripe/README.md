@@ -54,6 +54,28 @@ account: point that account's webhook endpoint at it for `payment_intent.succeed
 The Stripe-Signature check needs a `v1` HMAC-SHA256 over `<t>.<payload>` within five minutes.
 Requests pin Stripe API version `2026-04-22.dahlia`, as Slotlock's billing does.
 
+## Testing it end to end
+
+`src/payments.stripe-e2e.test.ts` runs the adapter against Stripe's test mode and a real Slotlock (in
+process, on PostgreSQL). It makes real PaymentIntents with Stripe's test cards and reads back Stripe's
+own `payment_intent.succeeded` events and the refunds it made. It covers six cases:
+
+- A paid hold confirms, from the return page and from the webhook.
+- Paying less, in another currency, after the hold expired, or a second time is refused and refunded
+  once.
+- A declined card, one that waits for authentication, or an uncaptured payment marks nothing; a
+  partial capture below the hold's price is refused.
+- A payment naming another tenant's hold changes nothing there and is not refunded.
+
+```bash
+STRIPE_TEST_SECRET_KEY=sk_test_... DATABASE_URL=postgres://... npx vitest run packages/payments-stripe/src/payments.stripe-e2e.test.ts
+```
+
+It runs only with a test-mode key: a live key is refused, and the account must answer
+`livemode: false`. It moves no money. Without `STRIPE_TEST_SECRET_KEY` it is skipped, as it is in
+CI. Behind an HTTPS proxy, add `NODE_USE_ENV_PROXY=1`. Stripe cannot reach a test machine, so the
+test signs Stripe's events itself.
+
 ## Status
 
 T2: an independent security review is needed before Cloud runs it.
