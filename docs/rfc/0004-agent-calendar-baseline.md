@@ -521,10 +521,15 @@ provider comes back as coverage and is reported as a conflict, never applied sil
 
 ### P4: platform (alongside)
 
-**D1. Roles for people (T2).** Status: built by the Teams work, but for limiting a person to
-locations or groups. Six roles (Owner, Admin, Developer, Member, Viewer, Billing) read from the
-database on every request, invitations by email, and sign-in with GitHub or Google. A person's
-role reaches the whole workspace.
+**D1. Roles for people (T2).** Status: built. Six roles (Owner, Admin, Developer, Member, Viewer,
+Billing) read from the database on every request, invitations by email, and sign-in with GitHub or
+Google, by the Teams work. A member but an Owner may be limited to locations or groups
+(`workspace_memberships.resource_scope`, set by `slotlock.set_member_scope` by an unlimited Owner
+or Admin): each dashboard request then runs the store with that resource scope, so G6's
+`resource_scope_v1` policies hold every read and write to those resources, approvals are shown and
+decided only when every resource they ask for is in it, and the person keeps only reading, the
+desk and an assistant limited alike. Their keys, which reached the whole workspace, are revoked
+unless kept.
 - Roles `owner`, `admin`, `member` and `viewer` within a tenant, from GitHub or by invitation
   (for Google accounts).
 - Only `owner` and `admin` make `admin` keys, webhooks and policy changes.

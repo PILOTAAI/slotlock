@@ -647,6 +647,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -810,6 +829,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -6989,6 +7027,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -7152,6 +7209,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -7695,6 +7771,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -7858,6 +7953,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -9461,6 +9575,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -9624,6 +9757,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -10187,6 +10339,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -10350,6 +10521,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -11051,6 +11241,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -11214,6 +11423,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -11852,6 +12080,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -12015,6 +12262,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -12486,6 +12752,25 @@
                               "currency"
                             ],
                             "additionalProperties": false
+                          },
+                          "hold_price": {
+                            "type": "object",
+                            "properties": {
+                              "amount_minor": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000000000000
+                              },
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              }
+                            },
+                            "required": [
+                              "amount_minor",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
@@ -12750,6 +13035,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -12913,6 +13217,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -13489,6 +13812,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -13652,6 +13994,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -14229,6 +14590,25 @@
                                     "currency"
                                   ],
                                   "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "additionalProperties": false
@@ -14392,6 +14772,25 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 525600
+                                    }
+                                  },
+                                  "required": [
+                                    "amount_minor",
+                                    "currency"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "hold_price": {
+                                  "type": "object",
+                                  "properties": {
+                                    "amount_minor": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 1000000000000
+                                    },
+                                    "currency": {
+                                      "type": "string",
+                                      "pattern": "^[A-Z]{3}$"
                                     }
                                   },
                                   "required": [
@@ -15045,6 +15444,25 @@
                                 "currency"
                               ],
                               "additionalProperties": false
+                            },
+                            "hold_price": {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "additionalProperties": false
@@ -15211,6 +15629,25 @@
                                     "type": "integer",
                                     "minimum": 0,
                                     "maximum": 525600
+                                  }
+                                },
+                                "required": [
+                                  "amount_minor",
+                                  "currency"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "hold_price": {
+                                "type": "object",
+                                "properties": {
+                                  "amount_minor": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1000000000000
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "pattern": "^[A-Z]{3}$"
                                   }
                                 },
                                 "required": [
@@ -15431,6 +15868,25 @@
                               "currency"
                             ],
                             "additionalProperties": false
+                          },
+                          "hold_price": {
+                            "type": "object",
+                            "properties": {
+                              "amount_minor": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000000000000
+                              },
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              }
+                            },
+                            "required": [
+                              "amount_minor",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
@@ -15610,6 +16066,25 @@
                                   "type": "integer",
                                   "minimum": 0,
                                   "maximum": 525600
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "hold_price": {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
                                 }
                               },
                               "required": [
@@ -15836,6 +16311,25 @@
                               "currency"
                             ],
                             "additionalProperties": false
+                          },
+                          "hold_price": {
+                            "type": "object",
+                            "properties": {
+                              "amount_minor": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000000000000
+                              },
+                              "currency": {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              }
+                            },
+                            "required": [
+                              "amount_minor",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
@@ -16030,6 +16524,25 @@
                                   "type": "integer",
                                   "minimum": 0,
                                   "maximum": 525600
+                                }
+                              },
+                              "required": [
+                                "amount_minor",
+                                "currency"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "hold_price": {
+                              "type": "object",
+                              "properties": {
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 1000000000000
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "pattern": "^[A-Z]{3}$"
                                 }
                               },
                               "required": [

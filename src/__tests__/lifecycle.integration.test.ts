@@ -259,4 +259,57 @@ describe.skipIf(!url)('the booking lifecycle (real Postgres)', () => {
     });
     expect(await agent('slotlock_update_event', { ...later2, title: 'Renamed', idempotency_key: 'u4' })).toMatchObject({ ok: true });
   });
+
+  it('keeps a booking moved inside its cancel cutoff as late as it was, so moving never avoids the fee', async () => {
+    const van = await resource('van-anchor');
+    // Moves allowed until an hour before; cancelling free only until a day before.
+    expect(
+      (
+        await call('PUT', `/v1/resources/${van}/booking-rules`, {
+          rules: {
+            cancel_cutoff_minutes: 1_440,
+            reschedule_cutoff_minutes: 60,
+            cancellation_fee: { amount_minor: 4_000, currency: 'EUR', within_minutes: 1_440 },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    // Two hours away, moved a month on, then cancelled: still the late cancellation it was.
+    const soon = Date.now() + 2 * HOUR;
+    const later = soon + 30 * 24 * HOUR;
+    expect(await reserve(van, 'bk-escape', soon, soon + HOUR)).toMatchObject({ ok: true });
+    expect(await reserve(van, 'bk-escape', later, later + HOUR, 2)).toMatchObject({ ok: true });
+    expect(await call('DELETE', '/v1/reservations/bk-escape?revision=3')).toMatchObject({
+      status: 409,
+      body: { error: { code: 'booking_rule_cancel_cutoff' } },
+    });
+    const forced = await call('DELETE', `/v1/reservations/bk-escape?revision=3&override_reason=${encodeURIComponent('Agreed')}`);
+    expect(forced.body).toMatchObject({ cancelled: true, cancellation_fee: { amount_minor: 4_000, currency: 'EUR' } });
+    // One moved while still free to cancel stays free to cancel.
+    const early = Date.now() + 3 * 24 * HOUR;
+    expect(await reserve(van, 'bk-early', early, early + HOUR)).toMatchObject({ ok: true });
+    expect(await reserve(van, 'bk-early', later + 2 * HOUR, later + 3 * HOUR, 2)).toMatchObject({ ok: true });
+    expect(await call('DELETE', '/v1/reservations/bk-early?revision=3')).toMatchObject({
+      status: 200,
+      body: { cancelled: true, cancellation_fee: null },
+    });
+
+    // An agent's event moved inside the cutoff stays late too.
+    const at = (ms: number) => new Date(ms - (ms % MINUTE)).toISOString();
+    const made = await agent('slotlock_create_event', {
+      resource_id: van, starts_at: at(soon + 2 * HOUR), ends_at: at(soon + 3 * HOUR), timezone: 'UTC', idempotency_key: 'anchor-e1',
+    });
+    expect(made.ok).toBe(true);
+    const eventId = (made.data?.event as { id: string }).id;
+    const moved = await agent('slotlock_update_event', {
+      event_id: eventId, expected_revision: 1, starts_at: at(later + 5 * HOUR), ends_at: at(later + 6 * HOUR), timezone: 'UTC', idempotency_key: 'anchor-e2',
+    });
+    expect(moved).toMatchObject({ ok: true });
+    expect(await agent('slotlock_delete_event', { event_id: eventId, expected_revision: 2, idempotency_key: 'anchor-e3' })).toMatchObject({
+      ok: false,
+      code: 'booking_rule_cancel_cutoff',
+    });
+    const [kept] = await sql<{ cutoff_anchor: Date | null }[]>`SELECT cutoff_anchor FROM slotlock.calendar_events WHERE resource_id = ${van}`;
+    expect(kept?.cutoff_anchor?.toISOString()).toBe(at(soon + 2 * HOUR));
+  });
 });

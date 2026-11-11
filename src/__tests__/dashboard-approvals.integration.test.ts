@@ -13,6 +13,7 @@ import {
   createSlotlockDashboardState,
 } from '../dashboard.js';
 import { createSlotlockStore } from '../store.js';
+import { runSlotlockDashboardRequest, setSlotlockDashboardRequestScope } from '../dashboard-scope.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const ORIGIN = 'https://slotlock.example.com';
@@ -153,6 +154,76 @@ describe.skipIf(!url)('dashboard approvals (real Postgres)', () => {
     const again = await post('/dashboard/approvals/decide', { id: first.details?.approval_id as string, decision: 'grant' }, session);
     expect(again.status).toBe(409);
     expect(await again.text()).toContain('That approval was already decided.');
+  });
+
+  it("keeps a limited member's request to their resources and the approvals that ask only for them (RFC 0004 D1)", async () => {
+    const store = createSlotlockStore(application);
+    const agentBackend = createSlotlockStoreAgentBackend(store, {
+      availabilityRules: async () => [
+        { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU', startMinutes: 0, durationMinutes: 24 * 60 },
+      ],
+    });
+    const resources = createSlotlockDashboardResources(store, { agentBackend });
+    expect(resources.keepsToScope).toBe(true);
+    const scopedRef = `${tenantRef}-scoped`;
+    try {
+      const [north, south] = await store.withTenant(scopedRef, async (tenant) => {
+        await tenant.putLocation({ tenantRef: scopedRef, ref: 'north', name: 'North' });
+        await tenant.putLocation({ tenantRef: scopedRef, ref: 'south', name: 'South' });
+        await tenant.putApprovalPolicy({ tenantRef: scopedRef, ref: 'all', name: 'All', outcome: 'require_approval' });
+        return [
+          await tenant.createResource({ tenantRef: scopedRef, externalRef: 'van-north', timezone: 'UTC', location: 'north' }),
+          await tenant.createResource({ tenantRef: scopedRef, externalRef: 'van-south', timezone: 'UTC', location: 'south' }),
+        ];
+      });
+      const base = Date.UTC(new Date().getUTCFullYear() + 1, 3, 4);
+      const ask = (resourceId: string, key: string) =>
+        invokeSlotlockAgentOperation({
+          operation: 'slotlock_create_event',
+          input: {
+            resource_id: resourceId,
+            starts_at: new Date(base + 9 * HOUR).toISOString(),
+            ends_at: new Date(base + 10 * HOUR).toISOString(),
+            timezone: 'UTC',
+            idempotency_key: key,
+          },
+          request: new Request(ORIGIN),
+          options: {
+            backend: agentBackend,
+            authenticate: async () => ({ subject: 'courier-agent', tenantRef: scopedRef, scopes: ['read', 'write'] }),
+            authorize: async () => true,
+          },
+        }) as Promise<{ ok: false; code: string; details?: Record<string, string> }>;
+      const northAsk = await ask((north as { id: string }).id, 'scoped-north');
+      const southAsk = await ask((south as { id: string }).id, 'scoped-south');
+      expect([northAsk.code, southAsk.code]).toEqual(['approval_pending', 'approval_pending']);
+      const approvals = resources.approvals as NonNullable<typeof resources.approvals>;
+
+      // Unlimited: both resources and both approvals.
+      await runSlotlockDashboardRequest(async () => {
+        expect((await resources.list(scopedRef)).map((resource) => resource.externalRef).sort()).toEqual(['van-north', 'van-south']);
+        expect(await approvals.list(scopedRef, 10)).toHaveLength(2);
+      });
+      // Limited to North: its resource, its approval; the South one is not found to decide.
+      await runSlotlockDashboardRequest(async () => {
+        setSlotlockDashboardRequestScope({ locations: ['north'], groups: [] });
+        expect((await resources.list(scopedRef)).map((resource) => resource.externalRef)).toEqual(['van-north']);
+        expect((await approvals.list(scopedRef, 10)).map((approval) => approval.id)).toEqual([northAsk.details?.approval_id]);
+        expect(await approvals.decide(scopedRef, southAsk.details?.approval_id as string, 'decline', 'github:1')).toEqual({
+          ok: false,
+          code: 'approval_not_found',
+        });
+        expect(await approvals.decide(scopedRef, northAsk.details?.approval_id as string, 'decline', 'github:1', 'No')).toEqual({ ok: true });
+      });
+      // A request after it is limited by nothing it did not set.
+      await runSlotlockDashboardRequest(async () => {
+        expect(await resources.list(scopedRef)).toHaveLength(2);
+      });
+      const southLeft = await store.withTenant(scopedRef, (tenant) => tenant.getApproval({ tenantRef: scopedRef, id: southAsk.details?.approval_id as string }));
+      expect(southLeft?.status).toBe('pending');
+    } finally {
+      await admin`SELECT * FROM slotlock.erase_tenant(${scopedRef}::text)`;
+    }
   });
 
   it('loads a sample into Test, moves its waiting forward and empties it, and never in Live (RFC 0004 A6)', async () => {

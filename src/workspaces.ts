@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import type { SlotlockSql } from './store.js';
 import { type SlotlockWorkspaceDomains, createSlotlockWorkspaceDomains } from './workspace-domains.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
+import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
 
 /** A person as the dashboard knows them: `github:<id>` or `google:<subject>`, never an email. */
 const PERSON = /^(github:[1-9]\d{0,19}|google:[A-Za-z0-9._-]{1,255})$/;
@@ -38,6 +39,11 @@ export interface SlotlockDashboardWorkspaces {
   signedIn(person: string, githubOrganizations?: readonly SlotlockGitHubMembership[]): Promise<number>;
   /** The person's role in a tenant (its test environment is its live tenant's) and their epoch. */
   standing(tenantRef: string, person: string): Promise<SlotlockWorkspaceStanding>;
+  /**
+   * The locations and groups the person is limited to in the tenant (RFC 0004 D1), or null for all
+   * of it. An Owner is never limited.
+   */
+  scope?(tenantRef: string, person: string): Promise<SlotlockResourceScope | null>;
   /** End every session of the person: a new epoch is drawn, and those sealed under the old are refused. */
   signOutEverywhere(person: string): Promise<number>;
   /** Team workspaces, their members and invitations: only with the database (createSlotlockDashboardWorkspaces). */
@@ -132,7 +138,9 @@ export type SlotlockTeamRefusal =
   | 'last_owner'
   | 'confirm'
   | 'subscription_live'
-  | 'domain_restricted';
+  | 'domain_restricted'
+  /** An Owner reaches the whole workspace: never limited. */
+  | 'owner';
 
 /**
  * Team workspaces through their SECURITY DEFINER functions: each checks the actor's role and
@@ -180,6 +188,14 @@ export interface SlotlockWorkspaceTeams {
     memberCap: number | null,
   ): Promise<SlotlockTeamRefusal | null>;
   changeRole(tenantRef: string, actor: string, person: string, role: SlotlockWorkspaceRole): Promise<SlotlockTeamRefusal | null>;
+  /**
+   * Limit a member to locations and groups, or give them the whole workspace again (null): by an
+   * Owner or Admin not limited themselves, of a member not an Owner (`owner`) whose role they may
+   * grant.
+   */
+  setScope(tenantRef: string, actor: string, person: string, scope: SlotlockResourceScope | null): Promise<SlotlockTeamRefusal | null>;
+  /** Each member limited to part of the workspace, by person, with what they are limited to. */
+  scopes(tenantRef: string): Promise<ReadonlyMap<string, SlotlockResourceScope>>;
   /** Remove a member; the actor removing themselves leaves. */
   remove(tenantRef: string, actor: string, person: string): Promise<SlotlockTeamRefusal | null>;
   /** Pending invitations meant for the person (their GitHub account, or an email they hold verified). */
@@ -226,6 +242,12 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
       const [row] = await sql<{ epoch: number }[]>`
         SELECT slotlock.dashboard_sign_in(${person}::text, ${listed}::text) AS epoch`;
       return Number(row?.epoch ?? 0);
+    },
+    async scope(tenantRef, person) {
+      if (!PERSON.test(person)) return null;
+      const [row] = await sql<{ scope: unknown }[]>`
+        SELECT slotlock.member_scope(${tenantRef}::text, ${person}::text) AS scope`;
+      return scopeOf(row?.scope);
     },
     async standing(tenantRef, person) {
       if (!PERSON.test(person)) return { role: null, sessionEpoch: null };
@@ -292,6 +314,17 @@ function createSessions(sql: SlotlockSql): SlotlockDashboardSessions {
 
 const TEAM = /^team:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * A member's scope as kept, or null for none. One that is not a scope never reads as none: that
+ * would give the whole workspace to someone limited, so it is refused (the database's check keeps
+ * such a value out).
+ */
+function scopeOf(value: unknown): SlotlockResourceScope | null {
+  if (value === null || value === undefined) return null;
+  if (!isSlotlockResourceScope(value)) throw new Error('Slotlock read a member scope that is not one');
+  return value;
+}
+
 const refusalOf = (value: string | null | undefined): SlotlockTeamRefusal | null =>
   value === null || value === undefined ? null : (value as SlotlockTeamRefusal);
 const roleOf = (value: string): SlotlockWorkspaceRole => {
@@ -419,6 +452,20 @@ function createTeams(sql: SlotlockSql): SlotlockWorkspaceTeams {
         SELECT slotlock.change_member_role(${tenantRef}::text, ${actor}::text, ${person}::text, ${role}::text) AS refusal`;
       return refusalOf(row?.refusal);
     },
+    async scopes(tenantRef) {
+      if (!TEAM.test(tenantRef.replace(/~test$/, ''))) return new Map();
+      const rows = await sql<{ person_ref: string; resource_scope: unknown }[]>`
+        SELECT person_ref, resource_scope FROM slotlock.member_scopes(${tenantRef}::text)`;
+      return new Map(rows.map((row) => [row.person_ref, scopeOf(row.resource_scope) as SlotlockResourceScope] as const));
+    },
+    async setScope(tenantRef, actor, person, scope) {
+      if (scope !== null && !isSlotlockResourceScope(scope)) refuse('a scope names locations or groups');
+      const kept = scope === null ? null : { locations: [...scope.locations], groups: [...scope.groups] };
+      const [row] = await sql<{ refusal: string | null }[]>`
+        SELECT slotlock.set_member_scope(${tenantRef}::text, ${actor}::text, ${person}::text,
+          ${kept === null ? null : sql.json(kept as never)}::jsonb) AS refusal`;
+      return refusalOf(row?.refusal);
+    },
     async remove(tenantRef, actor, person) {
       const [row] = await sql<{ refusal: string | null }[]>`
         SELECT slotlock.remove_member(${tenantRef}::text, ${actor}::text, ${person}::text) AS refusal`;
@@ -504,9 +551,11 @@ export function createSlotlockWorkspaceCheck(
 export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWorkspaces & {
   setRole(tenantRef: string, person: string, role: SlotlockWorkspaceRole, source?: 'github_org' | 'invitation' | 'created'): void;
   remove(tenantRef: string, person: string): void;
+  /** Limit a member to locations and groups, or (null) give them all of the workspace again. */
+  limit(tenantRef: string, person: string, scope: SlotlockResourceScope | null): void;
 } {
   const live = (tenantRef: string) => tenantRef.replace(/~test$/, '');
-  const memberships = new Map<string, { role: SlotlockWorkspaceRole; source: string; active: boolean }>();
+  const memberships = new Map<string, { role: SlotlockWorkspaceRole; source: string; active: boolean; scope?: SlotlockResourceScope }>();
   const epochs = new Map<string, number>();
   /** A new epoch, never the one it replaces. */
   const draw = (old?: number) => {
@@ -538,6 +587,10 @@ export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWork
       if (!epochs.has(person)) epochs.set(person, draw());
       return epochs.get(person) as number;
     },
+    async scope(tenantRef, person) {
+      const found = memberships.get(key(tenantRef, person));
+      return found?.active && found.role !== 'owner' ? (found.scope ?? null) : null;
+    },
     async standing(tenantRef, person) {
       const sessionEpoch = epochs.get(person) ?? null;
       if (live(tenantRef) === person) return { role: 'owner', sessionEpoch };
@@ -551,6 +604,12 @@ export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWork
     },
     setRole(tenantRef, person, role, source = 'created') {
       memberships.set(key(tenantRef, person), { role, source, active: true });
+    },
+    limit(tenantRef, person, scope) {
+      const found = memberships.get(key(tenantRef, person));
+      if (!found) throw new Error('Slotlock limits only a member');
+      if (scope === null) delete found.scope;
+      else found.scope = { locations: [...scope.locations], groups: [...scope.groups] };
     },
     remove(tenantRef, person) {
       // A removal made in Slotlock is Slotlock's: signing in again never undoes it.

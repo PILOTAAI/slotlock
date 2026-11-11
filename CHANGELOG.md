@@ -73,6 +73,23 @@ versioning.
   in holds, bookings, cancelled bookings, events, approvals and the change history. Bookings stay
   as time taken; nothing goes on the feed; the audit log records `subject.erased` without the
   person.
+- **Privacy in the dashboard** (Settings, Privacy; Owners and Admins, with a sign-in in the last 15
+  minutes: the new capability `privacy.manage`). Export the workspace and download it as JSON
+  lines; find one person by email, holder, contact or booking reference, see how many rows of each
+  table name them, download them as JSON, or erase them once confirmed. Every form posts, so the
+  person is never in an address; the audit log records `export.created`, `export.downloaded`,
+  `subject.exported` and `subject.erased` without them.
+- **People limited to locations or groups** (RFC 0004 D1). On a team's Members page an Owner, or an
+  Admin not limited themselves, limits anyone but an Owner to up to 20 locations and 20 groups
+  (new column `workspace_memberships.resource_scope`; definers `slotlock.member_scope`,
+  `slotlock.member_scopes` and `slotlock.set_member_scope`). From their next request every
+  transaction the dashboard runs for them carries that resource scope (`dashboard-scope.ts`), so
+  RFC 0003 G6's policies keep it to those resources; Approvals shows and decides only what asks
+  for theirs alone, and their assistant is limited the same way. They keep only reading, the desk
+  and the assistant (`SLOTLOCK_SCOPED_CAPABILITIES`, `SLOTLOCK_SCOPED_DASHBOARD_PAGES`,
+  `SLOTLOCK_SCOPED_DASHBOARD_POSTS`); the keys they created are revoked unless kept. Audited as
+  `member.scope_changed`. Custom resource adapters declare `keepsToScope`; without it a limited
+  person reaches only their own account. Rerun `slotlock migrate` and the role grants.
 - **Exporting a whole tenant** (RFC 0004 D3). `POST /v1/tenant/exports` asks for a copy of
   everything the tenant keeps, read through one cursor so at one moment; the server builds it after
   answering into parts of one table's rows (new tables `tenant_exports` and `tenant_export_parts`),
@@ -129,6 +146,24 @@ versioning.
   before this release have none, so everyone signs in once more after it.
 
 ### Security
+
+The four questions the review left open, now closed:
+
+- **Moving a booking no longer avoids a late cancellation.** Where the reschedule cutoff was
+  shorter than the cancel cutoff, a booking could be moved far ahead and then cancelled free. A
+  booking or event moved when cancelling it would already be late now keeps the start it had
+  (`cutoff_anchor`), and a later cancellation is judged, and its fee recorded, from it.
+- **An agent no longer sets its own hold price.** The new booking rule `holdPrice` (`hold_price`)
+  is the tenant's price: an agent's hold of the resource waits for it whatever the agent asks, a
+  `payment` it names that is not the price is refused (`payment_price_mismatch`), and an agent
+  books the resource only from a paid hold. Without a price, an agent names none.
+- **A key's caps count its pending approvals.** The time an agent's approvals hold while a person
+  decides counts against its key's `max_holds` and `max_held_hours`, so asking for approval never
+  holds more than the agent could hold itself (`hold_limit_reached`, `held_time_limit_reached`).
+- **ISK and UGX in `@slotlock/payments-stripe`.** Stripe counts them in hundredths ISO 4217 has
+  not, so 1 krona paid read as 100 against a hold's price. The adapter converts
+  (`isoMinorUnits`), refuses an amount that is not whole, and `stripeAmount` gives the
+  PaymentIntent's.
 
 From a review of RFC 0004's T2 changes, in five areas, each finding reproduced against a real
 database first. This was not a human review, so it does not count as the independent review

@@ -7,8 +7,12 @@ import {
   SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
   SLOTLOCK_FRESH_CAPABILITIES,
   SLOTLOCK_ROLE_CAPABILITIES,
+  SLOTLOCK_SCOPED_CAPABILITIES,
+  SLOTLOCK_SCOPED_DASHBOARD_PAGES,
+  SLOTLOCK_SCOPED_DASHBOARD_POSTS,
   SLOTLOCK_WORKSPACE_CAPABILITIES,
   SLOTLOCK_WORKSPACE_ROLES,
+  slotlockMemberCan,
   slotlockRoleCan,
   slotlockRoleKeyScopes,
   slotlockRoleMayGrant,
@@ -58,12 +62,40 @@ describe('workspace roles', () => {
     }
   });
 
-  it('asks a fresh sign-in for credentials that reach everything, money, the workspace itself and its identity', () => {
+  it('asks a fresh sign-in for credentials that reach everything, money, the workspace itself, its data whole or a person, and its identity', () => {
     expect([...SLOTLOCK_FRESH_CAPABILITIES].sort()).toEqual(
-      ['assistant.settings', 'billing.manage', 'identity.manage', 'keys.full', 'webhooks.manage', 'workspace.own'].sort(),
+      ['assistant.settings', 'billing.manage', 'identity.manage', 'keys.full', 'privacy.manage', 'webhooks.manage', 'workspace.own'].sort(),
     );
     // A team's domains, and who joins through them, are its Owners' alone.
     expect(SLOTLOCK_WORKSPACE_ROLES.filter((role) => slotlockRoleCan(role, 'identity.manage'))).toEqual(['owner']);
+  });
+
+  it('keeps a member limited to locations and groups to their desk and their own account (RFC 0004 D1)', () => {
+    expect([...SLOTLOCK_SCOPED_CAPABILITIES].sort()).toEqual(['account.use', 'assistant.chat', 'operations.run', 'workspace.read']);
+    // Never more than the role gives, and never what reaches the whole workspace.
+    expect(slotlockMemberCan('viewer', true, 'operations.run')).toBe(false);
+    expect(slotlockMemberCan('admin', true, 'operations.run')).toBe(true);
+    for (const capability of ['keys.manage_own', 'keys.full', 'webhooks.manage', 'members.manage', 'resources.manage', 'audit.read', 'privacy.manage', 'usage.read', 'contacts.forget'] as const) {
+      expect(slotlockMemberCan('admin', true, capability), capability).toBe(false);
+      expect(slotlockMemberCan('admin', false, capability), capability).toBe(slotlockRoleCan('admin', capability));
+    }
+    // Every page and form it reaches is one the dashboard has, needing a capability it keeps.
+    for (const page of SLOTLOCK_SCOPED_DASHBOARD_PAGES) {
+      const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[page];
+      expect(capability, page).toBeDefined();
+      expect(SLOTLOCK_SCOPED_CAPABILITIES.has(capability as never), page).toBe(true);
+    }
+    for (const route of SLOTLOCK_SCOPED_DASHBOARD_POSTS) {
+      const capability = SLOTLOCK_DASHBOARD_POST_CAPABILITIES[route];
+      expect(capability, route).toBeDefined();
+      expect(SLOTLOCK_SCOPED_CAPABILITIES.has(capability as never), route).toBe(true);
+    }
+    for (const page of ['/keys', '/webhooks', '/contacts', '/hours', '/closures', '/locations', '/plan', '/settings/audit', '/settings/privacy', '/settings/endpoints']) {
+      expect(SLOTLOCK_SCOPED_DASHBOARD_PAGES.has(page), page).toBe(false);
+    }
+    for (const route of ['/hours', '/closures', '/closures/import', '/members/scope', '/keys', '/sandbox/reset']) {
+      expect(SLOTLOCK_SCOPED_DASHBOARD_POSTS.has(route), route).toBe(false);
+    }
   });
 
   it('names the same roles as the database allows', () => {
