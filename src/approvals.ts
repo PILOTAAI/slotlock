@@ -38,6 +38,8 @@ export interface PutApprovalPolicyParams {
   outcome: SlotlockApprovalPolicy['outcome'];
   approvalTtlMinutes?: number;
   leadMinutes?: number;
+  /** It also holds the tenant's own bookings through the application API (default false). */
+  includeApplication?: boolean;
 }
 
 interface PolicyRow {
@@ -48,12 +50,13 @@ interface PolicyRow {
   outcome: 'require_approval' | 'refuse';
   approval_ttl_minutes: number;
   lead_minutes: number;
+  include_application: boolean;
   created_at: Date;
   updated_at: Date;
 }
 
 const POLICY_COLUMNS =
-  'ref, name, applies_to, conditions, outcome, approval_ttl_minutes, lead_minutes, created_at, updated_at';
+  'ref, name, applies_to, conditions, outcome, approval_ttl_minutes, lead_minutes, include_application, created_at, updated_at';
 
 function toPolicy(row: PolicyRow): SlotlockApprovalPolicy {
   const applies = row.applies_to as { resource_ids?: string[]; pools?: string[]; locations?: string[]; groups?: string[] };
@@ -75,6 +78,7 @@ function toPolicy(row: PolicyRow): SlotlockApprovalPolicy {
     outcome: row.outcome,
     approvalTtlMinutes: row.approval_ttl_minutes,
     leadMinutes: row.lead_minutes,
+    includeApplication: row.include_application === true,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -138,7 +142,10 @@ function storedPolicy(params: PutApprovalPolicyParams) {
     ...(given.outsideHours !== undefined ? { outside_hours: given.outsideHours } : {}),
     ...(given.kinds !== undefined ? { kinds: [...new Set(given.kinds)].sort() } : {}),
   };
-  return { name, appliesTo, conditions, ttl, lead };
+  if (params.includeApplication !== undefined && typeof params.includeApplication !== 'boolean') {
+    throw new SlotlockApprovalPolicyError('include_application must be true or false');
+  }
+  return { name, appliesTo, conditions, ttl, lead, includeApplication: params.includeApplication === true };
 }
 
 /** Create or replace a policy by its reference. Throws `invalid_approval_policy`; at most 50. */
@@ -146,17 +153,20 @@ export async function putApprovalPolicy(sql: StoreSql, params: PutApprovalPolicy
   const stored = storedPolicy(params);
   const [row] = await sql<PolicyRow[]>`
     INSERT INTO slotlock.approval_policies (
-      tenant_ref, ref, name, applies_to, conditions, outcome, approval_ttl_minutes, lead_minutes
+      tenant_ref, ref, name, applies_to, conditions, outcome, approval_ttl_minutes, lead_minutes,
+      include_application
     )
     SELECT ${params.tenantRef}, ${params.ref}, ${stored.name}, ${sql.json(stored.appliesTo)},
-           ${sql.json(stored.conditions)}, ${params.outcome}, ${stored.ttl}, ${stored.lead}
+           ${sql.json(stored.conditions)}, ${params.outcome}, ${stored.ttl}, ${stored.lead},
+           ${stored.includeApplication}
      WHERE EXISTS (SELECT 1 FROM slotlock.approval_policies WHERE tenant_ref = ${params.tenantRef} AND ref = ${params.ref})
         OR (SELECT count(*) FROM slotlock.approval_policies WHERE tenant_ref = ${params.tenantRef})
            < ${SLOTLOCK_MAX_APPROVAL_POLICIES}
     ON CONFLICT (tenant_ref, ref) DO UPDATE
       SET name = EXCLUDED.name, applies_to = EXCLUDED.applies_to, conditions = EXCLUDED.conditions,
           outcome = EXCLUDED.outcome, approval_ttl_minutes = EXCLUDED.approval_ttl_minutes,
-          lead_minutes = EXCLUDED.lead_minutes, updated_at = statement_timestamp()
+          lead_minutes = EXCLUDED.lead_minutes, include_application = EXCLUDED.include_application,
+          updated_at = statement_timestamp()
     RETURNING ${sql.unsafe(POLICY_COLUMNS)}`;
   return row ? toPolicy(row) : null;
 }

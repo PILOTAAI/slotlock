@@ -99,6 +99,11 @@ export interface SlotlockApprovalPolicy {
   /** How long a person has to decide, before the booking's start less `leadMinutes`. */
   approvalTtlMinutes: number;
   leadMinutes: number;
+  /**
+   * It also holds the tenant's own bookings through the application API (bundles and pool
+   * bookings); without it, it holds only agents' (RFC 0004 B7).
+   */
+  includeApplication: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

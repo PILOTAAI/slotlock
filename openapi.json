@@ -22743,7 +22743,7 @@
       "post": {
         "operationId": "slotlock_tenant_book_together",
         "summary": "Book resources together, as the tenant",
-        "description": "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an event the key owns, held to the resources' booking rules. If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
+        "description": "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it), held to the resources' booking rules; approval policies hold it only when they include the application (include_application). If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
         "tags": [
           "Application"
         ],
@@ -23169,7 +23169,7 @@
       "post": {
         "operationId": "slotlock_tenant_book_pool",
         "summary": "Book any member of a pool, as the tenant",
-        "description": "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member. 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
+        "description": "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member, and is the tenant's, not the key's; approval policies hold it only when they include the application (include_application). 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
         "tags": [
           "Application"
         ],
@@ -25449,6 +25449,9 @@
                             "minimum": 0,
                             "maximum": 43200
                           },
+                          "include_application": {
+                            "type": "boolean"
+                          },
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
@@ -25466,6 +25469,7 @@
                           "outcome",
                           "approval_ttl_minutes",
                           "lead_minutes",
+                          "include_application",
                           "created_at",
                           "updated_at"
                         ],
@@ -25506,7 +25510,7 @@
       "put": {
         "operationId": "slotlock_put_approval_policy",
         "summary": "Create or replace an approval policy",
-        "description": "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.",
+        "description": "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. The tenant's own bookings through this API (slotlock_tenant_book_together, slotlock_tenant_book_pool) are held only by policies with include_application true, and are the tenant's again when granted. At most 50 policies: one more is 409 approval_policy_limit_reached.",
         "tags": [
           "Application"
         ],
@@ -25605,6 +25609,9 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 43200
+                  },
+                  "include_application": {
+                    "type": "boolean"
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -25734,6 +25741,9 @@
                           "minimum": 0,
                           "maximum": 43200
                         },
+                        "include_application": {
+                          "type": "boolean"
+                        },
                         "created_at": {
                           "type": "string",
                           "format": "date-time"
@@ -25751,6 +25761,7 @@
                         "outcome",
                         "approval_ttl_minutes",
                         "lead_minutes",
+                        "include_application",
                         "created_at",
                         "updated_at"
                       ],

@@ -61,6 +61,7 @@ import {
   type SlotlockStore,
   type SlotlockTenantStore,
   type SlotlockWaitlistEntry,
+  SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
   calendarEventRollingHorizon,
 } from './store.js';
 import type {
@@ -186,6 +187,12 @@ const WRITE = { isolation: 'read committed' } as const;
  */
 const APPROVAL_GRANT = Symbol('slotlock.approvalGrant');
 const OCCUPANCY_PROBE = Symbol('slotlock.occupancyProbe');
+/**
+ * A booking the tenant's own systems make through the application API (RFC 0004 B7), not an
+ * agent's: its events are the tenant's (owner `internal`), outside any key's quota and kept when the
+ * key is revoked, and only approval policies that include the application hold it.
+ */
+const TENANT_ACTOR = Symbol('slotlock.tenantActor');
 
 /** The approval a granted write runs for: its holds give way, and it is marked, in the write's transaction. */
 interface ApprovalGrant {
@@ -211,6 +218,18 @@ interface TenantCallContext {
   [APPROVAL_GRANT]?: ApprovalGrant;
   /** Read what a dry run's write would occupy, in its transaction, before it is undone. */
   [OCCUPANCY_PROBE]?: (tenantStore: SlotlockTenantStore) => Promise<void>;
+  /** Made for the tenant's own systems, not an agent; internal, never from a request. */
+  [TENANT_ACTOR]?: true;
+}
+
+/** Whether the call books for the tenant's own systems (TENANT_ACTOR), not an agent. */
+function forTenant(context: SlotlockAgentInvocationContext): boolean {
+  return (context as unknown as TenantCallContext)[TENANT_ACTOR] === true;
+}
+
+/** The tenant's own identity for a retry key: per tenant, so any of its keys replays it. */
+function tenantDigest(context: SlotlockAgentInvocationContext, idempotencyKey: string): string {
+  return createHash('sha256').update(`${context.principal.tenantRef}\0tenant\0${idempotencyKey}`).digest('hex');
 }
 
 /** Thrown out of a dry run's transaction, with its answer, so the transaction rolls back. */
@@ -430,12 +449,14 @@ function uuidFromDigest(value: string): string {
 }
 
 function agentOwnerRef(context: SlotlockAgentInvocationContext): string {
+  if (forTenant(context)) return SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
   return `agent:${createHash('sha256')
     .update(`${context.principal.tenantRef}\0${context.principal.subject}`)
     .digest('hex')}`;
 }
 
 function agentExternalRef(context: SlotlockAgentInvocationContext, idempotencyKey: string): string {
+  if (forTenant(context)) return `tenant:${tenantDigest(context, idempotencyKey)}`;
   // Already a stable client-visible identity; keep it unchanged.
   return `agent:${agentPrincipalDigest(context, idempotencyKey)}`;
 }
@@ -444,6 +465,7 @@ function agentCommandIdempotencyKey(
   context: SlotlockAgentInvocationContext,
   idempotencyKey: string,
 ): string {
+  if (forTenant(context)) return `tenant-command:${tenantDigest(context, idempotencyKey)}`;
   // The principal stays in the digest so this remains safe with older tenant-only stores; hashing
   // keeps the subject and raw retry key out of durable rows.
   return `agent-command:${agentPrincipalDigest(context, idempotencyKey)}`;
@@ -1918,6 +1940,7 @@ function approvalPolicyOutput(policy: SlotlockApprovalPolicy) {
     outcome: policy.outcome,
     approval_ttl_minutes: policy.approvalTtlMinutes,
     lead_minutes: policy.leadMinutes,
+    include_application: policy.includeApplication,
     created_at: policy.createdAt.toISOString(),
     updated_at: policy.updatedAt.toISOString(),
   };
@@ -2045,6 +2068,8 @@ function keyApprovalPolicy(): SlotlockApprovalPolicy {
     outcome: 'require_approval',
     approvalTtlMinutes: SLOTLOCK_DEFAULT_APPROVAL_MINUTES,
     leadMinutes: 0,
+    // The key's own approval holds whatever it books, for the tenant too.
+    includeApplication: true,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   };
@@ -2219,6 +2244,8 @@ function withApprovalPolicies(
     // What the ask alone decides; hours wait for the resource the write takes.
     const policies = (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: asked.resourceIds })).filter(
       (policy) =>
+        // The tenant's own bookings are held only by policies that include the application.
+        (!forTenant(context) || policy.includeApplication === true) &&
         (policy.conditions.kinds === undefined || policy.conditions.kinds.includes(asked.kind)) &&
         (policy.conditions.longerThanMinutes === undefined || minutes > policy.conditions.longerThanMinutes),
     );
@@ -2345,6 +2372,8 @@ function withApprovalPolicies(
               : {}),
             ...(context.origin !== undefined ? { origin: context.origin } : {}),
             ...(ask.pool !== undefined ? { pool: ask.pool } : {}),
+            // Granted, it is made as the tenant's again, never as the key's agent.
+            ...(forTenant(context) ? { for: 'tenant' } : {}),
           },
           requesterRef: principal.subject,
           requestKey,
@@ -2410,6 +2439,7 @@ export async function runSlotlockApprovalGrant(
     key_id?: unknown;
     resource_scope?: { locations?: unknown; groups?: unknown };
     pool?: unknown;
+    for?: unknown;
   };
   if (typeof requester.subject !== 'string') throw new SlotlockAgentOperationError('store_inconsistent', 503);
   const scope = requester.resource_scope;
@@ -2432,6 +2462,7 @@ export async function runSlotlockApprovalGrant(
       decidedBy: grant.decidedBy,
       ...(typeof requester.pool === 'string' ? { pool: requester.pool } : {}),
     },
+    ...(requester.for === 'tenant' ? { [TENANT_ACTOR]: true } : {}),
   } as SlotlockAgentInvocationContext;
   const method =
     approval.operation === 'slotlock_book_together'
@@ -3685,9 +3716,10 @@ export function createSlotlockStoreApplicationBackend(
 
     async tenantBookTogether(context, input) {
       if (!options.agentBackend?.bookTogether) throw new SlotlockAgentOperationError('bundles_unavailable', 409);
-      // As the key itself, through the agents' bundle: one transaction, the booking rules applied.
+      // Through the agents' bundle (one transaction, the booking rules applied), as the tenant's:
+      // owned by the tenant, not the key, and held only by policies that include the application.
       return options.agentBackend.bookTogether(
-        { ...context, operation: 'slotlock_book_together' } as unknown as SlotlockAgentInvocationContext,
+        { ...context, operation: 'slotlock_book_together', [TENANT_ACTOR]: true } as unknown as SlotlockAgentInvocationContext,
         input,
       );
     },
@@ -3695,7 +3727,7 @@ export function createSlotlockStoreApplicationBackend(
     async tenantBookPool(context, input) {
       if (!options.agentBackend?.bookPool) throw new SlotlockAgentOperationError('pools_unavailable', 409);
       return options.agentBackend.bookPool(
-        { ...context, operation: 'slotlock_book_pool' } as unknown as SlotlockAgentInvocationContext,
+        { ...context, operation: 'slotlock_book_pool', [TENANT_ACTOR]: true } as unknown as SlotlockAgentInvocationContext,
         input,
       );
     },
@@ -4195,6 +4227,7 @@ export function createSlotlockStoreApplicationBackend(
             ...(input.conditions !== undefined ? { conditions: approvalConditions(input.conditions) } : {}),
             ...(input.approval_ttl_minutes !== undefined ? { approvalTtlMinutes: input.approval_ttl_minutes as number } : {}),
             ...(input.lead_minutes !== undefined ? { leadMinutes: input.lead_minutes as number } : {}),
+            ...(input.include_application !== undefined ? { includeApplication: input.include_application as boolean } : {}),
           });
         } catch (error) {
           if (error instanceof SlotlockApprovalPolicyError) {

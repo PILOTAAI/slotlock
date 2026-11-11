@@ -4968,6 +4968,9 @@ CREATE TABLE IF NOT EXISTS slotlock.approval_policies (
     AND lead_minutes BETWEEN 0 AND 43200
   )
 );
+-- A policy holds agents' bookings, and the tenant's own through the application API (bundles and
+-- pool bookings) only when it includes them (RFC 0004 B7).
+ALTER TABLE slotlock.approval_policies ADD COLUMN IF NOT EXISTS include_application boolean NOT NULL DEFAULT false;
 
 -- A write waiting for a person: its time held by holds whose holder is the approval (never the
 -- agent, so it cannot release them and they do not count against its caps), and the request to run

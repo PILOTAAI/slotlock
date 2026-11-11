@@ -353,6 +353,65 @@ describe.skipIf(!url)('approval policies (real Postgres)', () => {
     await call('admin', 'DELETE', '/v1/approval-policies/slow');
   });
 
+  it("books the tenant's own bundles and pool bookings as the tenant's, held only by policies that include the application", async () => {
+    const car = await resource();
+    const driver = await resource();
+    const vans = [await resource('tenant-vans'), await resource('tenant-vans')];
+    const owners = async (ids: string[]) =>
+      (
+        await sql<{ owner_ref: string }[]>`
+          SELECT DISTINCT owner_ref FROM slotlock.calendar_events WHERE tenant_ref = ${tenantRef} AND resource_id = ANY(${ids}::uuid[])`
+      ).map((row) => row.owner_ref);
+    const bundle = (key: string, hour: number) =>
+      call('admin', 'POST', '/v1/tenant/bundles', {
+        resource_ids: [car, driver],
+        starts_at: at(hour),
+        ends_at: at(hour + 1),
+        timezone: 'UTC',
+        idempotency_key: key,
+      });
+    // A policy over these resources holds an agent's bundle, but not the tenant's own.
+    const agentsOnly = await policy('staff-free', { applies_to: { resource_ids: [car, driver, ...vans] } });
+    expect(agentsOnly.body.policy).toMatchObject({ include_application: false });
+    expect((await call('agent', 'POST', '/v1/bundles', {
+      resource_ids: [car, driver],
+      starts_at: at(14),
+      ends_at: at(15),
+      timezone: 'UTC',
+      idempotency_key: `ab-${randomUUID()}`,
+    })).body).toMatchObject({ code: 'approval_pending', policy_ref: 'staff-free' });
+    const own = await bundle(`tb-${randomUUID()}`, 9);
+    expect(own.status).toBe(200);
+    const pooled = await call('admin', 'POST', '/v1/tenant/pool-bookings', {
+      pool: 'tenant-vans',
+      starts_at: at(9),
+      ends_at: at(10),
+      timezone: 'UTC',
+      idempotency_key: `tp-${randomUUID()}`,
+    });
+    expect(pooled.status).toBe(200);
+    // The tenant's, not the key's: no agent's quota counts them, and revoking the key leaves them.
+    expect(await owners([car, driver, ...vans])).toEqual(['internal']);
+
+    // A policy that includes the application holds the tenant's bundle for a person, and the grant
+    // books it as the tenant's again.
+    const including = await policy('staff-free', { applies_to: { resource_ids: [car, driver] }, include_application: true });
+    expect(including.body.policy).toMatchObject({ policy_ref: 'staff-free', include_application: true });
+    const key = `tb-${randomUUID()}`;
+    const asked = await bundle(key, 11);
+    expect(asked.body).toMatchObject({ code: 'approval_pending', policy_ref: 'staff-free' });
+    const approvalId = asked.body.approval_id as string;
+    expect(await held(approvalId)).toBe(2);
+    expect((await bundle(key, 11)).body).toMatchObject({ code: 'approval_pending', approval_id: approvalId });
+    const granted = await decide(approvalId, 'grant');
+    expect((granted.body.booking as { events: unknown[] }).events).toHaveLength(2);
+    expect(await owners([car, driver])).toEqual(['internal']);
+    // The retry answers what the grant booked.
+    const retried = await bundle(key, 11);
+    expect(retried).toMatchObject({ status: 200, body: { replayed: true } });
+    await call('admin', 'DELETE', '/v1/approval-policies/staff-free');
+  });
+
   it('refuses a series under a policy, which cannot hold every occurrence', async () => {
     const van = await resource();
     await policy('series-gate', { applies_to: { resource_ids: [van] } });

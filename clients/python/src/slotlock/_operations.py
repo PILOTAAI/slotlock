@@ -3197,10 +3197,12 @@ class Operations(Transport):
         """Book resources together, as the tenant.
 
         Book the same time on 2-20 resources at once, all or none, as agents'
-        slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an
-        event the key owns, held to the resources' booking rules. If any is taken, nothing is
-        booked and the refusal names that resource_id. A retry with the same idempotency_key
-        answers the same events. 409 bundles_unavailable where the server books no bundles.
+        slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the
+        tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it),
+        held to the resources' booking rules; approval policies hold it only when they include the
+        application (include_application). If any is taken, nothing is booked and the refusal
+        names that resource_id. A retry with the same idempotency_key answers the same events. 409
+        bundles_unavailable where the server books no bundles.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
@@ -3238,9 +3240,10 @@ class Operations(Transport):
         """Book any member of a pool, as the tenant.
 
         Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
-        the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member.
-        409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key
-        answers the member it booked.
+        the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member,
+        and is the tenant's, not the key's; approval policies hold it only when they include the
+        application (include_application). 409 pool_full when none is free; 404 pool_not_found. A
+        retry with the same idempotency_key answers the member it booked.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
@@ -3463,6 +3466,7 @@ class Operations(Transport):
         conditions: dict[str, Any] | None = None,
         approval_ttl_minutes: int | None = None,
         lead_minutes: int | None = None,
+        include_application: bool | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create or replace an approval policy.
@@ -3478,7 +3482,10 @@ class Operations(Transport):
         person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
         ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
         of the two. Where several apply, refuse wins, then the one that must be decided soonest.
-        At most 50 policies: one more is 409 approval_policy_limit_reached.
+        The tenant's own bookings through this API (slotlock_tenant_book_together,
+        slotlock_tenant_book_pool) are held only by policies with include_application true, and
+        are the tenant's again when granted. At most 50 policies: one more is 409
+        approval_policy_limit_reached.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -3495,6 +3502,8 @@ class Operations(Transport):
             values["approval_ttl_minutes"] = approval_ttl_minutes
         if lead_minutes is not None:
             values["lead_minutes"] = lead_minutes
+        if include_application is not None:
+            values["include_application"] = include_application
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_approval_policy", values)

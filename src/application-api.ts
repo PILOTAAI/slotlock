@@ -551,6 +551,7 @@ const APPROVAL_POLICY = z
     outcome: z.enum(['require_approval', 'refuse']),
     approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
     lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
+    include_application: z.boolean(),
     created_at: DATE_TIME,
     updated_at: DATE_TIME,
   })
@@ -2070,7 +2071,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_tenant_book_together',
       title: 'Book resources together, as the tenant',
       description:
-        "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an event the key owns, held to the resources' booking rules. If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
+        "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it), held to the resources' booking rules; approval policies hold it only when they include the application (include_application). If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
       method: 'POST',
       path: '/v1/tenant/bundles',
       input: z
@@ -2098,7 +2099,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_tenant_book_pool',
       title: 'Book any member of a pool, as the tenant',
       description:
-        "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member. 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
+        "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member, and is the tenant's, not the key's; approval policies hold it only when they include the application (include_application). 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
       method: 'POST',
       path: '/v1/tenant/pool-bookings',
       input: z
@@ -2337,7 +2338,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_put_approval_policy',
       title: 'Create or replace an approval policy',
       description:
-        "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.",
+        "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. The tenant's own bookings through this API (slotlock_tenant_book_together, slotlock_tenant_book_pool) are held only by policies with include_application true, and are the tenant's again when granted. At most 50 policies: one more is 409 approval_policy_limit_reached.",
       method: 'PUT',
       path: '/v1/approval-policies/{policy_ref}',
       input: z
@@ -2349,6 +2350,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           outcome: z.enum(['require_approval', 'refuse']),
           approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
           lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
+          include_application: z.boolean().optional(),
         })
         .strict(),
       output: z.object({ policy: APPROVAL_POLICY }).strict(),

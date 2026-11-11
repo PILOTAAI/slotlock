@@ -3238,10 +3238,12 @@ public sealed partial class SlotlockClient
     /// <summary>Book resources together, as the tenant.</summary>
     /// <remarks>
     /// Book the same time on 2-20 resources at once, all or none, as agents'
-    /// slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is an
-    /// event the key owns, held to the resources' booking rules. If any is taken, nothing is
-    /// booked and the refusal names that resource_id. A retry with the same idempotency_key
-    /// answers the same events. 409 bundles_unavailable where the server books no bundles.
+    /// slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the
+    /// tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it),
+    /// held to the resources' booking rules; approval policies hold it only when they include the
+    /// application (include_application). If any is taken, nothing is booked and the refusal
+    /// names that resource_id. A retry with the same idempotency_key answers the same events. 409
+    /// bundles_unavailable where the server books no bundles.
     /// </remarks>
     /// <param name="resourceIds">resource_ids</param>
     /// <param name="startsAt">starts_at</param>
@@ -3282,9 +3284,10 @@ public sealed partial class SlotlockClient
     /// <summary>Book any member of a pool, as the tenant.</summary>
     /// <remarks>
     /// Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
-    /// the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member.
-    /// 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key
-    /// answers the member it booked.
+    /// the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member,
+    /// and is the tenant's, not the key's; approval policies hold it only when they include the
+    /// application (include_application). 409 pool_full when none is free; 404 pool_not_found. A
+    /// retry with the same idempotency_key answers the member it booked.
     /// </remarks>
     /// <param name="pool">pool</param>
     /// <param name="startsAt">starts_at</param>
@@ -3583,7 +3586,10 @@ public sealed partial class SlotlockClient
     /// person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
     /// ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
     /// of the two. Where several apply, refuse wins, then the one that must be decided soonest.
-    /// At most 50 policies: one more is 409 approval_policy_limit_reached.
+    /// The tenant's own bookings through this API (slotlock_tenant_book_together,
+    /// slotlock_tenant_book_pool) are held only by policies with include_application true, and
+    /// are the tenant's again when granted. At most 50 policies: one more is 409
+    /// approval_policy_limit_reached.
     /// </remarks>
     /// <param name="policyRef">policy_ref</param>
     /// <param name="name">name</param>
@@ -3592,6 +3598,7 @@ public sealed partial class SlotlockClient
     /// <param name="conditions">conditions</param>
     /// <param name="approvalTtlMinutes">approval_ttl_minutes</param>
     /// <param name="leadMinutes">lead_minutes</param>
+    /// <param name="includeApplication">include_application</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -3607,6 +3614,7 @@ public sealed partial class SlotlockClient
         Optional<JsonObject> conditions = default,
         Optional<long> approvalTtlMinutes = default,
         Optional<long> leadMinutes = default,
+        Optional<bool> includeApplication = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -3618,6 +3626,7 @@ public sealed partial class SlotlockClient
         if (conditions.HasValue) values["conditions"] = Json.ToNode(conditions.Value);
         if (approvalTtlMinutes.HasValue) values["approval_ttl_minutes"] = Json.ToNode(approvalTtlMinutes.Value);
         if (leadMinutes.HasValue) values["lead_minutes"] = Json.ToNode(leadMinutes.Value);
+        if (includeApplication.HasValue) values["include_application"] = Json.ToNode(includeApplication.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_put_approval_policy", values, cancellationToken);
     }

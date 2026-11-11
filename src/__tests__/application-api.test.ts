@@ -395,6 +395,7 @@ const APPROVAL_POLICY = {
   outcome: 'require_approval',
   approval_ttl_minutes: 240,
   lead_minutes: 60,
+  include_application: false,
   created_at: '2026-11-01T09:00:00.000Z',
   updated_at: '2026-11-01T09:00:00.000Z',
 };

@@ -106,7 +106,11 @@ versioning.
   expire together. `slotlock_book_together` takes its `hold_group_id` and books the set from those
   holds in one transaction. The application API gains `slotlock_tenant_book_together`
   (`POST /v1/tenant/bundles`) and `slotlock_tenant_book_pool` (`POST /v1/tenant/pool-bookings`), the
-  agents' bundle and pool bookings for the tenant's own systems.
+  agents' bundle and pool bookings for the tenant's own systems. Their events are the tenant's
+  (owner `internal`), not the key's: no agent's event quota counts them, and revoking the key
+  leaves them. Approval policies hold them only when they say `include_application: true` (new,
+  false by default), and a grant books them as the tenant's again; a key that `requires_approval`
+  still waits for a person whatever it books.
 - Waitlists that match (RFC 0004 B6): an entry may wait for any slot of a length within its
   window (`duration_minutes`, `durationMs`), on a resource or a pool, and is offered the earliest
   free one. Offers end `accepted`, `declined` (new `slotlock_decline_waitlist_offer`,

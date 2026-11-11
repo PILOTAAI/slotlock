@@ -3420,10 +3420,11 @@ func (in TenantBookTogetherInput) values() map[string]any {
 
 // TenantBookTogether: Book resources together, as the tenant. Book the same time on 2-20
 // resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own
-// systems (RFC 0004 B7): each is an event the key owns, held to the resources' booking rules. If
-// any is taken, nothing is booked and the refusal names that resource_id. A retry with the same
-// idempotency_key answers the same events. 409 bundles_unavailable where the server books no
-// bundles.
+// systems (RFC 0004 B7): each is the tenant's event, not the key's (no key's quota counts it, and
+// revoking the key leaves it), held to the resources' booking rules; approval policies hold it
+// only when they include the application (include_application). If any is taken, nothing is
+// booked and the refusal names that resource_id. A retry with the same idempotency_key answers
+// the same events. 409 bundles_unavailable where the server books no bundles.
 func (c *Client) TenantBookTogether(ctx context.Context, in TenantBookTogetherInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_tenant_book_together", in.values())
 }
@@ -3469,8 +3470,10 @@ func (in TenantBookPoolInput) values() map[string]any {
 
 // TenantBookPool: Book any member of a pool, as the tenant. Book any one free member of a pool
 // for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7),
-// in the pool's order: the event names the member. 409 pool_full when none is free; 404
-// pool_not_found. A retry with the same idempotency_key answers the member it booked.
+// in the pool's order: the event names the member, and is the tenant's, not the key's; approval
+// policies hold it only when they include the application (include_application). 409 pool_full
+// when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member
+// it booked.
 func (c *Client) TenantBookPool(ctx context.Context, in TenantBookPoolInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_tenant_book_pool", in.values())
 }
@@ -3763,6 +3766,8 @@ type PutApprovalPolicyInput struct {
 
 	LeadMinutes *int64
 
+	IncludeApplication *bool
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -3787,6 +3792,9 @@ func (in PutApprovalPolicyInput) values() map[string]any {
 	if in.LeadMinutes != nil {
 		values["lead_minutes"] = *in.LeadMinutes
 	}
+	if in.IncludeApplication != nil {
+		values["include_application"] = *in.IncludeApplication
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -3804,7 +3812,10 @@ func (in PutApprovalPolicyInput) values() map[string]any {
 // approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most
 // 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the
 // wait is the earlier of the two. Where several apply, refuse wins, then the one that must be
-// decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.
+// decided soonest. The tenant's own bookings through this API (slotlock_tenant_book_together,
+// slotlock_tenant_book_pool) are held only by policies with include_application true, and are the
+// tenant's again when granted. At most 50 policies: one more is 409
+// approval_policy_limit_reached.
 func (c *Client) PutApprovalPolicy(ctx context.Context, in PutApprovalPolicyInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_put_approval_policy", in.values())
 }
