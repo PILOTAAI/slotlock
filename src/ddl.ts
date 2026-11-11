@@ -4651,9 +4651,11 @@ BEGIN
     RAISE EXCEPTION 'Slotlock prunes 1 to 10000 changes at a time, keeping 1 to 3650 days'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
-  -- Only the tenant the caller acts in, where row security names one: the function runs as the
-  -- schema's owner, which row security may not bind.
-  IF EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts)
+  -- A role that cannot delete changes itself (the serving role) acts only for the tenant it
+  -- acts in, where row security names one: the function runs as the schema's owner, which row
+  -- security may not bind. The owner, or a library on its connection, needs no tenant context.
+  IF NOT pg_catalog.has_table_privilege(session_user, 'slotlock.outbox', 'DELETE')
+     AND EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts)
      AND NOT EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts contract
                       WHERE current_setting(contract.tenant_context_setting, true) = requested_tenant) THEN
     RAISE EXCEPTION 'Slotlock prunes the history of only the tenant the caller acts in'
@@ -4718,9 +4720,11 @@ BEGIN
     RAISE EXCEPTION 'Slotlock erases a holder, a contact or a reference from the history, and names it erased-<32 hex>'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
-  -- Only the tenant the caller acts in, where row security names one: the function runs as the
-  -- schema's owner, which row security may not bind.
-  IF EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts)
+  -- A role that cannot update changes itself (the serving role) acts only for the tenant it
+  -- acts in, where row security names one: the function runs as the schema's owner, which row
+  -- security may not bind. The owner, or a library on its connection, needs no tenant context.
+  IF NOT pg_catalog.has_table_privilege(session_user, 'slotlock.outbox', 'UPDATE')
+     AND EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts)
      AND NOT EXISTS (SELECT 1 FROM slotlock.rls_policy_contracts contract
                       WHERE current_setting(contract.tenant_context_setting, true) = requested_tenant) THEN
     RAISE EXCEPTION 'Slotlock erases from the history of only the tenant the caller acts in'

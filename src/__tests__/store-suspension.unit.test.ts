@@ -57,6 +57,9 @@ const READS = [
   'listAssistantChats',
   'listAuditEvents',
   'getAssistantChat',
+  // What the tenant keeps about one person, for an access request (RFC 0004 D3).
+  'exportSubject',
+  'tenantPlan',
 ];
 const UPKEEP = [
   'dueHolidayCalendars',
@@ -93,6 +96,8 @@ const ADMINISTRATION = [
   'suspendTenant',
   'unsuspendTenant',
   'eraseTenant',
+  // An erasure request is the person's right, and a suspended tenant's duty all the same.
+  'eraseSubject',
 ];
 
 /**
