@@ -163,6 +163,8 @@ export type SlotlockTeamRefusal =
   | 'not_allowed'
   | 'already_member'
   | 'invitation_limit'
+  /** The address was sent SLOTLOCK_INVITATIONS_PER_ADDRESS invitations in the last day. */
+  | 'recipient_limit'
   | 'member_cap'
   | 'revoked'
   | 'accepted'

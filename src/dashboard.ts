@@ -116,7 +116,7 @@ import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js'
 import { createSlotlockRateLimiter } from './rate-limit.js';
 import { createSlotlockGuardedFetch } from './webhooks.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { SLOTLOCK_ASSISTANT_CHAT_ID, SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
+import { SLOTLOCK_ASSISTANT_CHAT_ID, SLOTLOCK_DASHBOARD_FORM_LIMIT, SLOTLOCK_INVITATIONS_PER_ADDRESS } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
@@ -540,6 +540,10 @@ const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text
   invitation_limit: {
     status: 429,
     text: `This team sent ${String(INVITATION_DAILY_LIMIT)} invitations in the last day. Try again tomorrow.`,
+  },
+  recipient_limit: {
+    status: 429,
+    text: `That address was sent ${String(SLOTLOCK_INVITATIONS_PER_ADDRESS)} invitations in the last day. Try again tomorrow.`,
   },
   member_cap: {
     status: 403,
@@ -8261,7 +8265,9 @@ ${
       });
       return true;
     } catch (error) {
-      report(`Invitation email failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      // The sender's own message names the provider and its status, never the address.
+      const known = error instanceof Error && error.name === 'SlotlockInvitationEmailError';
+      report(`Invitation email failed: ${known ? error.message : error instanceof Error ? error.name : 'unknown error'}`);
       return false;
     }
   }

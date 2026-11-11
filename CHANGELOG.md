@@ -58,9 +58,12 @@ notes first.
   - verified domains, with team workspaces (`SLOTLOCK_VERIFIED_DOMAINS=on`; the server's maintenance
     checks each domain daily, so set it on the server too);
   - single sign-on through each team's provider, with verified domains (`SLOTLOCK_TEAM_SSO=on` and
-    `SLOTLOCK_SSO_SECRET`, the same on the server and the Worker);
+    `SLOTLOCK_SSO_SECRET`, on whichever serves the dashboard: a server that does not never reads
+    them);
   - SCIM provisioning from each team's provider, with verified domains (`SLOTLOCK_TEAM_SCIM=on`, on
-    whichever serves the dashboard: its `/scim/v2` is where providers call).
+    whichever serves the dashboard: its `/scim/v2` is where providers call). On Workers, add the
+    `SLOTLOCK_SCIM_RATE_LIMIT` rate limiting binding, which counts providers' calls apart from each
+    client's dashboard budget; without it they share that budget, and the Worker logs a warning.
 
 ### Added
 
@@ -119,7 +122,10 @@ notes first.
 - **Invitations by email**: `SLOTLOCK_INVITATION_EMAIL` (`resend` or `postmark`), with
   `SLOTLOCK_INVITATION_EMAIL_KEY` and `SLOTLOCK_INVITATION_EMAIL_FROM`
   (`createSlotlockInvitationEmailSender`). Each person is held to 50 invitations a day across their
-  teams, as each team is.
+  teams, as each team is; sending one again counts as a send. One address is sent at most 5 a day
+  from every team together (`recipient_limit`), so open sign-up cannot fill an inbox. Requests to
+  the provider carry a User-Agent (Resend refuses one without), and a refusal is logged with the
+  provider's status (`SlotlockInvitationEmailError`), never the address.
 - **Requests about one person** (RFC 0004 D3). `POST /v1/subjects/export` (`exportSubject`,
   `slotlock subject export`) lists what the tenant keeps about one person, found by exactly one of
   `email`, `holder`, `contact` or `reference`: the rows that name them, by table
@@ -235,7 +241,9 @@ notes first.
   domain or through the team's single sign-on. Deactivation ends that membership at the next
   request and, as the Owner chose when turning SCIM on, revokes the person's keys; reactivation
   needs a new sign-in. Groups give roles (`slotlock-role-<role>`, or as an Owner maps them; never
-  Owner), and the directory never changes an Owner. The dashboard's `scim` option;
+  Owner), and the directory never changes an Owner. On Workers, the `SLOTLOCK_SCIM_RATE_LIMIT`
+  binding counts providers' calls per address apart from the dashboard's per-client budget: a
+  provider calls from addresses its other customers share. The dashboard's `scim` option;
   `workspaces.scim`.
   An Owner may also hold invitations to the team's verified domains. New capability
   `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,

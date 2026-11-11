@@ -23,9 +23,10 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
   const role = `slotlock_tm_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const password = randomBytes(24).toString('hex');
   const base = 600_000_000 + Math.floor(Math.random() * 90_000_000);
-  const people = Array.from({ length: 12 }, (_, index) => `github:${base + index}`);
-  const [ada, bea, cy, dee, eli, fay, gus, hal, ivy, jo, kim, lou] = people as [
+  const people = Array.from({ length: 15 }, (_, index) => `github:${base + index}`);
+  const [ada, bea, cy, dee, eli, fay, gus, hal, ivy, jo, kim, lou, max, ned, ola] = people as [
     string, string, string, string, string, string, string, string, string, string, string, string,
+    string, string, string,
   ];
   const googler = `google:t${randomUUID().replaceAll('-', '')}`;
   const created: string[] = [];
@@ -292,9 +293,48 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     const fresh = token();
     expect(await teams.resend(tenantRef, lou, id, fresh.digest, 7, 2, null)).toBe('invitation_limit');
     expect(await teams.resend(tenantRef, lou, id, fresh.digest, 7, null, null)).toBeNull();
-    expect(await teams.preview(first.digest)).toBeNull();
-    expect(await teams.accept({ tokenSha256: first.digest, person: bea, emails: ['a@example.com'], memberCap: null })).toEqual({ refusal: 'not_found' });
+    // The old link is withdrawn, as when the same address is invited again.
+    expect((await teams.preview(first.digest))?.state).toBe('revoked');
+    expect(await teams.accept({ tokenSha256: first.digest, person: bea, emails: ['a@example.com'], memberCap: null })).toEqual({ refusal: 'revoked' });
     expect(await teams.accept({ tokenSha256: fresh.digest, person: bea, emails: ['a@example.com'], memberCap: null })).toEqual({ tenantRef });
+  });
+
+  it('counts each re-send as a send, so re-sending one invitation cannot pass the daily limit', async () => {
+    // Re-sending made a new link, and so a new email, on the same row: the limit, which counts the
+    // day's sends, never saw it, and anyone could send one address an email a request.
+    const tenantRef = await team(max);
+    const limit = { dailyLimit: 3 };
+    const first = await invite(tenantRef, max, { email: `loop-${base}@example.com` }, 'member', limit);
+    const id = (first.result as { id: string }).id;
+    const resent: Array<string | null> = [];
+    let current = id;
+    for (let index = 0; index < 3; index += 1) {
+      resent.push(await teams.resend(tenantRef, max, current, token().digest, 7, 3, null));
+      current = (await teams.invitations(tenantRef))[0]?.id ?? '';
+    }
+    expect(resent).toEqual([null, null, 'invitation_limit']);
+    // One invitation is open, whatever was re-sent.
+    expect((await teams.invitations(tenantRef)).map((open) => open.email)).toEqual([`loop-${base}@example.com`]);
+    expect((await invite(tenantRef, max, { email: `other-${base}@example.com` }, 'member', limit)).result).toEqual({ refusal: 'invitation_limit' });
+  });
+
+  it('sends one address at most five invitations a day, from every team together', async () => {
+    // Open sign-up: many accounts, each within its own limits, could otherwise flood one inbox.
+    const target = `inbox-${base}@example.com`;
+    const limit = { dailyLimit: 50 };
+    const ours = await team(ned);
+    const theirs = await team(ola);
+    const sent: unknown[] = [];
+    for (const [tenantRef, inviter] of [[ours, ned], [theirs, ola], [ours, ned], [theirs, ola], [ours, ned]] as const) {
+      sent.push((await invite(tenantRef, inviter, { email: target }, 'member', limit)).result);
+    }
+    expect(sent.every((result) => typeof (result as { id?: string }).id === 'string')).toBe(true);
+    expect((await invite(theirs, ola, { email: target }, 'member', limit)).result).toEqual({ refusal: 'recipient_limit' });
+    const open = (await teams.invitations(ours))[0]?.id ?? '';
+    expect(await teams.resend(ours, ned, open, token().digest, 7, 50, null)).toBe('recipient_limit');
+    // Another address is not held to it, and a deployment without limits is not either.
+    expect((await invite(theirs, ola, { email: `someone-${base}@example.com` }, 'member', limit)).result).toHaveProperty('id');
+    expect((await invite(theirs, ola, { email: target }, 'member', { dailyLimit: null })).result).toHaveProperty('id');
   });
 
   it("refuses an expired invitation, and prunes finished ones a month on", async () => {
@@ -359,9 +399,9 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     // One person across two teams: the daily limit is theirs as well as each team's.
     const other = await team(gus);
     const limit = { dailyLimit: 6 };
-    for (const n of [1, 2, 3]) expect((await invite(other, gus, { email: `o${n}@example.com` }, 'member', limit)).result).toHaveProperty('id');
-    // gus has sent 6 today, 3 here and 3 in the first team.
-    expect((await invite(other, gus, { email: 'o4@example.com' }, 'member', limit)).result).toEqual({ refusal: 'invitation_limit' });
+    for (const n of [1, 2]) expect((await invite(other, gus, { email: `o${n}@example.com` }, 'member', limit)).result).toHaveProperty('id');
+    // gus has sent 6 today: 2 here, and 4 in the first team, where sending y again counted.
+    expect((await invite(other, gus, { email: 'o3@example.com' }, 'member', limit)).result).toEqual({ refusal: 'invitation_limit' });
   });
 
   it('keeps an Owner when an Owner is erased while another leaves', async () => {
