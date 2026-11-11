@@ -58,9 +58,12 @@ notes first.
   - verified domains, with team workspaces (`SLOTLOCK_VERIFIED_DOMAINS=on`; the server's maintenance
     checks each domain daily, so set it on the server too);
   - single sign-on through each team's provider, with verified domains (`SLOTLOCK_TEAM_SSO=on` and
-    `SLOTLOCK_SSO_SECRET`, the same on the server and the Worker);
+    `SLOTLOCK_SSO_SECRET`, on whichever serves the dashboard: a server that does not never reads
+    them);
   - SCIM provisioning from each team's provider, with verified domains (`SLOTLOCK_TEAM_SCIM=on`, on
-    whichever serves the dashboard: its `/scim/v2` is where providers call).
+    whichever serves the dashboard: its `/scim/v2` is where providers call). On Workers, add the
+    `SLOTLOCK_SCIM_RATE_LIMIT` rate limiting binding, which counts providers' calls apart from each
+    client's dashboard budget; without it they share that budget, and the Worker logs a warning.
 
 ### Added
 
@@ -199,7 +202,9 @@ notes first.
   domain or through the team's single sign-on. Deactivation ends that membership at the next
   request and, as the Owner chose when turning SCIM on, revokes the person's keys; reactivation
   needs a new sign-in. Groups give roles (`slotlock-role-<role>`, or as an Owner maps them; never
-  Owner), and the directory never changes an Owner. The dashboard's `scim` option;
+  Owner), and the directory never changes an Owner. On Workers, the `SLOTLOCK_SCIM_RATE_LIMIT`
+  binding counts providers' calls per address apart from the dashboard's per-client budget: a
+  provider calls from addresses its other customers share. The dashboard's `scim` option;
   `workspaces.scim`.
   An Owner may also hold invitations to the team's verified domains. New capability
   `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,

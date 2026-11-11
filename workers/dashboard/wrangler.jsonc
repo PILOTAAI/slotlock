@@ -41,7 +41,8 @@
     }
   ],
   // The Worker answers 503 without the first two, and without the ceiling counts sign-ins from every
-  // client in SLOTLOCK_SIGN_IN_RATE_LIMIT, as before the ceiling existed. A sign-in writes to the
+  // client in SLOTLOCK_SIGN_IN_RATE_LIMIT, as before the ceiling existed. Without the SCIM binding,
+  // with SCIM on, it counts teams' SCIM calls in SLOTLOCK_CLIENT_RATE_LIMIT. A sign-in writes to the
   // database and asks GitHub with the app's client secret, and the limit on sign-ins in flight is per
   // isolate, so these bound the requests of every isolate. Counts are per Cloudflare location.
   // namespace_id must be unique in the account (two bindings with the same one share their counts);
@@ -65,6 +66,13 @@
       // client's limit, so a few clients cannot use it up for everyone.
       "name": "SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT",
       "namespace_id": "41003",
+      "simple": { "limit": 600, "period": 60 }
+    },
+    {
+      // SCIM calls from teams' identity providers (SLOTLOCK_TEAM_SCIM), per client address, apart
+      // from the dashboard's: a provider calls from addresses its other customers share.
+      "name": "SLOTLOCK_SCIM_RATE_LIMIT",
+      "namespace_id": "41004",
       "simple": { "limit": 600, "period": 60 }
     }
   ],

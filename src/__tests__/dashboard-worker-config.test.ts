@@ -42,6 +42,7 @@ describe('the dashboard Worker example configuration', () => {
     const names = config.ratelimits.map(({ name }) => name).sort();
     expect(names).toEqual([
       'SLOTLOCK_CLIENT_RATE_LIMIT',
+      'SLOTLOCK_SCIM_RATE_LIMIT',
       'SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT',
       'SLOTLOCK_SIGN_IN_RATE_LIMIT',
     ]);
@@ -60,6 +61,17 @@ describe('the dashboard Worker example configuration', () => {
     };
     expect(perMinute('SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT')).toBeGreaterThanOrEqual(
       20 * perMinute('SLOTLOCK_SIGN_IN_RATE_LIMIT'),
+    );
+  });
+
+  it("gives providers' SCIM calls far more than one person's dashboard budget", () => {
+    // Okta's and Entra's provisioning services call from addresses their customers share.
+    const perMinute = (name: string) => {
+      const found = config.ratelimits.find((binding) => binding.name === name);
+      return ((found?.simple.limit ?? 0) * 60) / (found?.simple.period ?? 60);
+    };
+    expect(perMinute('SLOTLOCK_SCIM_RATE_LIMIT')).toBeGreaterThanOrEqual(
+      10 * perMinute('SLOTLOCK_CLIENT_RATE_LIMIT'),
     );
   });
 
