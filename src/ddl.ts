@@ -3151,7 +3151,9 @@ CREATE INDEX IF NOT EXISTS slotlock_assistant_chats_expiry_idx
 
 -- The one conversation a member had before chats were kept (0.8 and earlier) becomes their first
 -- chat, titled by its first message, and leaves the old table: a later migration does not bring
--- back a chat the member deleted. A server of 0.8 still running meanwhile keeps using the old table.
+-- back a chat the member deleted. A server of 0.8 still running meanwhile keeps using the old table;
+-- what it writes there is moved by the next migration as a chat of its own (its id is the
+-- conversation's, with when it was last written), never into one already moved.
 WITH moved AS (
   DELETE FROM slotlock.assistant_conversations old
    WHERE old.expires_at > statement_timestamp()
@@ -3161,7 +3163,8 @@ INSERT INTO slotlock.assistant_chats AS chat
   (tenant_ref, member_ref, chat_id, title, messages, actions, created_at, updated_at, expires_at)
 SELECT moved.tenant_ref, moved.member_ref,
        pg_catalog.translate(pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-         moved.tenant_ref || pg_catalog.chr(10) || moved.member_ref, 'UTF8')), 'base64'), 16), '+/', '-_'),
+         moved.tenant_ref || pg_catalog.chr(10) || moved.member_ref || pg_catalog.chr(10)
+           || (extract(epoch FROM moved.updated_at) * 1000000)::bigint::text, 'UTF8')), 'base64'), 16), '+/', '-_'),
        coalesce(nullif(pg_catalog.left(pg_catalog.regexp_replace(pg_catalog.btrim(first_user.text), '\\s+', ' ', 'g'), 80), ''),
                 'Conversation'),
        moved.messages, moved.actions, moved.updated_at, moved.updated_at, NULL

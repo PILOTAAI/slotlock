@@ -6,11 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
 import { SLOTLOCK_MAX_WEBHOOK_ENDPOINTS } from '../event-feed.js';
-import {
-  SLOTLOCK_API_KEY_ACTIVE_LIMIT,
-  SLOTLOCK_API_KEY_RETAINED_LIMIT,
-  SLOTLOCK_ASSISTANT_MAX_CHATS,
-} from '../ddl.js';
+import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
 import { SLOTLOCK_PLAN_LIMITS } from '../plans.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from '../rules.js';
@@ -64,18 +60,13 @@ describe('the published policies', () => {
     expect(privacy).toContain(`\`${cookie('SIGN_IN_COOKIE')}\` for the ten minutes a sign-in takes`);
     expect(declared('src/dashboard.ts', /const SIGN_IN_TTL_MS = ([0-9_ *]+);/) / 60_000).toBe(10);
     expect(privacy).toContain('| The sign-in in progress, in a cookie | The service | 10 minutes |');
-    // Assistant conversations: no lifetime unless a deployment sets one, and neither serve nor the
-    // hosted Worker does; a member keeps at most SLOTLOCK_ASSISTANT_MAX_CHATS, the least recent going.
-    expect(read('src/dashboard.ts'), 'canary: no conversation lifetime by default').toMatch(
-      /conversationTtlMs \?\? null;/,
-    );
-    for (const file of ['src/self-host.ts', 'workers/dashboard/worker.ts']) {
-      expect(read(file), file).not.toContain('conversationTtlMs');
-    }
+    // Assistant chats are kept until deleted (no lifetime unless a deployment sets one), at most
+    // so many a person; and the hourly maintenance that deletes what retention ends.
+    expect(read('src/dashboard.ts')).toContain('conversationTtlMs ?? null;');
+    const maxChats = declared('src/ddl.ts', /const SLOTLOCK_ASSISTANT_MAX_CHATS = ([0-9_]+);/);
     expect(privacy).toContain(
-      `each conversation until you delete it or your account is erased, at most ${String(SLOTLOCK_ASSISTANT_MAX_CHATS)} per person (past that, the least recently used is deleted)`,
+      `each conversation until the person who had it deletes it or the account is erased, at most ${String(maxChats)} per person`,
     );
-    // The hourly maintenance that deletes what retention ends.
     const maintenanceMinutes =
       declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
     expect(maintenanceMinutes).toBe(60);
@@ -248,16 +239,14 @@ describe('the hosted service page', () => {
     const dashboard = read('src/dashboard.ts');
     const steps = /SLOTLOCK_ASSISTANT_MAX_STEPS = (\d+);/.exec(source)?.[1];
     const perMinute = /rate \?\? \{ perSecond: (\d+) \/ 60,/.exec(dashboard)?.[1];
-    expect([steps, perMinute]).toEqual(['8', '10']);
-    expect(dashboard, 'canary: no conversation lifetime by default').toMatch(/conversationTtlMs \?\? null;/);
+    const maxChats = /const SLOTLOCK_ASSISTANT_MAX_CHATS = (\d+);/.exec(read('src/ddl.ts'))?.[1];
+    expect([steps, perMinute, maxChats]).toEqual(['8', '10', '100']);
+    expect(dashboard).toContain('conversationTtlMs ?? null;');
     expect(assistant).toContain('in Settings, Assistant');
     expect(assistant).toContain('the Anthropic Messages API, or any OpenAI-compatible API');
     expect(assistant).toContain(`up to ${String(steps)} model calls a message`);
     expect(assistant).toContain(`${String(perMinute)} messages a minute per person`);
-    expect(assistant).toContain('titled by its first message, until you delete it (or your account is erased)');
-    expect(assistant).toContain(
-      `up to ${String(SLOTLOCK_ASSISTANT_MAX_CHATS)} per person; past that, the least recently used goes`,
-    );
+    expect(assistant).toContain(`until you delete it (or the account is erased), up to ${String(maxChats)} per person`);
     expect(assistant).toContain('**Approve** or **Dismiss**');
     expect(assistant).toContain('needs a public HTTPS address, or a hosted provider');
     // Its privacy notice row is the one for a dashboard that offers the assistant.

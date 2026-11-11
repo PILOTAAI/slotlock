@@ -163,7 +163,8 @@ export interface SlotlockAssistantStore {
   /**
    * Create one of a member's conversations (titled `title`), or replace its messages; keep the
    * stored actions `keep` names, as they stand, and add the `added` ones not stored already
-   * (store.ts putAssistantChat). Kept until deleted, or for `ttlMs` when given.
+   * (store.ts putAssistantChat). Kept until deleted, or for `ttlMs` when given. With `create`
+   * false, only one still there is changed (false when it was deleted meanwhile).
    */
   putChat(
     tenantRef: string,
@@ -174,9 +175,10 @@ export interface SlotlockAssistantStore {
       messages: unknown[];
       added: Record<string, Record<string, unknown>>;
       keep: readonly string[];
+      create?: boolean;
     },
     ttlMs: number | null,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Give a conversation a new title (1-120 characters). False when there is none. */
   renameChat(tenantRef: string, memberRef: string, chatId: string, title: string): Promise<boolean>;
   settleAction(
@@ -315,6 +317,7 @@ export function createSlotlockMemoryAssistantStore(
     },
     async putChat(tenantRef, memberRef, chatId, chat, ttlMs) {
       const stored = live(tenantRef, memberRef, chatId);
+      if (!stored && chat.create === false) return false;
       // As the store does: stored ones kept as they stand, then new ones not stored already.
       const actions: Record<string, Record<string, unknown>> = {};
       for (const id of chat.keep) {
@@ -340,6 +343,7 @@ export function createSlotlockMemoryAssistantStore(
       for (const old of mine(tenantRef, memberRef).slice(SLOTLOCK_ASSISTANT_MAX_CHATS)) {
         chats.delete(keyOf(tenantRef, memberRef, old.id));
       }
+      return true;
     },
     async renameChat(tenantRef, memberRef, chatId, title) {
       const stored = live(tenantRef, memberRef, chatId);

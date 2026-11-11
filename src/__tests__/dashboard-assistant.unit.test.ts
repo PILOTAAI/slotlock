@@ -1685,4 +1685,23 @@ describe('re-review fixes', () => {
     await chat(target, bob, 'And now?');
     expect((await latestChat('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
   });
+
+  it('keeps a chat deleted while its turn ran deleted, and says so where it was', async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script({ text: 'Hello.' });
+    await chat(target, bob, 'Hi');
+    const id = (await assistantStore.listChats('github-org:91', 'github:12'))[0]?.id as string;
+    model.script(async () => {
+      // While this turn runs, the member deletes the chat it continues.
+      expect((await post(target, '/dashboard/assistant/delete', { chat: id }, bob)).status).toBe(303);
+      return { text: 'Too late.' };
+    });
+    const sent = await post(target, '/dashboard/assistant', { message: 'And now?', chat: id }, bob);
+    expect(sent.headers.get('location')).toBe(`/dashboard/assistant?c=${id}#latest`);
+    expect(await assistantStore.getChat('github-org:91', 'github:12', id)).toBeNull();
+    expect(await assistantStore.listChats('github-org:91', 'github:12')).toEqual([]);
+    expect(await (await get(target, `/dashboard/assistant?c=${id}`, bob)).text()).toContain('That chat is not here: it was deleted.');
+  });
 });

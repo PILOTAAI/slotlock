@@ -31,8 +31,10 @@ const wordsOf = (text: string) => fold(text).split(/[^\p{L}\p{N}]+/u).filter((wo
 export function slotlockResourceSearchWords(query: string): string[] {
   const trimmed = typeof query === 'string' ? query.trim() : '';
   if (trimmed === '' || [...trimmed].length > SLOTLOCK_RESOURCE_SEARCH_MAX) throw invalidQuery();
-  const words = [...new Set(wordsOf(trimmed))];
-  if (words.length > MAX_WORDS) throw invalidQuery();
+  // Counted as written: repeating a word does not make room for more.
+  const written = wordsOf(trimmed);
+  if (written.length > MAX_WORDS) throw invalidQuery();
+  const words = [...new Set(written)];
   const meaningful = words.filter((word) => !FILLER.has(word));
   // Only symbols ("%", "#"): looked for as written.
   if (words.length === 0) return [fold(trimmed)];
@@ -74,8 +76,25 @@ function distance(a: string, b: string, most: number): number {
 
 const DIGITS = /^\p{N}+$/u;
 
-/** How well one word of a search names a field (0 to 1), given the field's words and those run together. */
-function wordScore(word: string, field: { words: readonly string[]; joined: string }): number {
+/**
+ * The most edit distances one search computes: past it, matching is exact, by prefix and by words
+ * run together only. A tenant's resources (up to 5,000, each with a long description) cannot make
+ * one search cost seconds.
+ */
+const FUZZY_BUDGET = 20_000;
+/** A description is looked through by its first words only. */
+const DESCRIPTION_WORDS = 60;
+
+/**
+ * How well one word of a search names a field (0 to 1), given the field's words and those run
+ * together. Typos are forgiven only where `fuzzy`, and only while `budget` lasts.
+ */
+function wordScore(
+  word: string,
+  field: { words: readonly string[]; joined: string },
+  fuzzy: boolean,
+  budget: { left: number },
+): number {
   let best = 0;
   for (const candidate of field.words) {
     if (candidate === word) return 1;
@@ -83,10 +102,12 @@ function wordScore(word: string, field: { words: readonly string[]; joined: stri
   }
   // "mercedesbenz" for "Mercedes-Benz", "car17" for "car-17".
   if (word.length >= 3 && field.joined.includes(word)) best = Math.max(best, 0.75);
-  if (best < 0.7 && !DIGITS.test(word) && word.length >= 4) {
+  if (fuzzy && best < 0.7 && !DIGITS.test(word) && word.length >= 4 && word.length <= 24) {
     const most = word.length >= 8 ? 2 : 1;
     for (const candidate of field.words) {
-      if (DIGITS.test(candidate)) continue;
+      if (DIGITS.test(candidate) || candidate.length > 32) continue;
+      if (budget.left <= 0) break;
+      budget.left -= 2;
       const edits = distance(word, candidate, most);
       if (edits <= most) best = Math.max(best, edits === 1 ? 0.7 : 0.6);
       // A typo in a word cut short: "merced" for "mercedes" is a prefix; "mercad" is one edit off one.
@@ -98,20 +119,20 @@ function wordScore(word: string, field: { words: readonly string[]; joined: stri
   return best;
 }
 
-/** How much a match in each field counts: a name most, a description least. */
-const FIELDS: readonly [keyof Searchable, number][] = [
-  ['name', 1],
-  ['ref', 0.95],
-  ['labels', 0.7],
-  ['kind', 0.6],
-  ['location', 0.6],
-  ['description', 0.4],
+/** How much a match in each field counts (a name most, a description least), and whether typos are forgiven there. */
+const FIELDS: readonly [keyof Searchable, number, boolean][] = [
+  ['name', 1, true],
+  ['ref', 0.95, true],
+  ['labels', 0.7, true],
+  ['kind', 0.6, true],
+  ['location', 0.6, true],
+  ['description', 0.4, false],
 ];
 
 type Searchable = Record<'name' | 'ref' | 'labels' | 'kind' | 'location' | 'description', { words: string[]; joined: string }>;
 
-const indexed = (text: string | undefined | null) => {
-  const words = text ? wordsOf(text) : [];
+const indexed = (text: string | undefined | null, most = Number.POSITIVE_INFINITY) => {
+  const words = text ? wordsOf(text).slice(0, most) : [];
   return { words, joined: words.join('') };
 };
 
@@ -125,6 +146,7 @@ export function slotlockSearchResources<T extends SlotlockSearchableResource>(
   words: readonly string[],
 ): { resource: T; score: number }[] {
   if (words.length === 0) return [];
+  const budget = { left: FUZZY_BUDGET };
   const scored: { resource: T; score: number; at: number }[] = [];
   resources.forEach((resource, at) => {
     const fields: Searchable = {
@@ -133,13 +155,13 @@ export function slotlockSearchResources<T extends SlotlockSearchableResource>(
       labels: indexed(resource.labels?.join(' ')),
       kind: indexed(resource.kind),
       location: indexed(resource.locationName ?? resource.location),
-      description: indexed(resource.description),
+      description: indexed(resource.description, DESCRIPTION_WORDS),
     };
     let total = 0;
     let found = 0;
     for (const word of words) {
       let best = 0;
-      for (const [field, weight] of FIELDS) best = Math.max(best, weight * wordScore(word, fields[field]));
+      for (const [field, weight, fuzzy] of FIELDS) best = Math.max(best, weight * wordScore(word, fields[field], fuzzy, budget));
       // A search of symbols only ("%"): looked for as written in the name and reference.
       if (best === 0 && !/[\p{L}\p{N}]/u.test(word)) {
         if (fold(`${resource.name ?? ''} ${resource.externalRef ?? ''}`).includes(word)) best = 1;

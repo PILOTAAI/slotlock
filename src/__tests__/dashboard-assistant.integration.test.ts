@@ -89,6 +89,40 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     ).rejects.toMatchObject({ code: 'invalid_identity' });
   });
 
+  it('keeps at most 100 chats when many are started at once', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const id = (n: number) => `racing-${String(n).padStart(9, '0')}`;
+    for (let n = 0; n < 95; n += 1) {
+      await adapter.putChat(tenant, 'github:72', id(n), { title: 'Old', messages: [], added: {}, keep: [] }, null);
+    }
+    // Each new chat inserts, then trims: without one member's writes in turn, each trim misses the
+    // others' inserts and more than 100 stay.
+    await Promise.all(
+      Array.from({ length: 24 }, (_, k) =>
+        adapter.putChat(tenant, 'github:72', id(1_000 + k), { title: 'New', messages: [], added: {}, keep: [] }, null),
+      ),
+    );
+    const [stored] = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.assistant_chats
+       WHERE tenant_ref = ${tenant} AND member_ref = 'github:72'`;
+    expect(stored?.count).toBe(100);
+  });
+
+  it('keeps a chat deleted while its turn ran deleted, and continues one still there', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const chat = 'deleted-0000000a';
+    const turn = { title: 'Van', messages: [{ role: 'user', text: 'Is the van free?' }], added: {}, keep: [] };
+    expect(await adapter.putChat(tenant, 'github:73', chat, turn, null)).toBe(true);
+    // The turn ends with an update of the chat it began in.
+    expect(await adapter.putChat(tenant, 'github:73', chat, { ...turn, create: false }, null)).toBe(true);
+    expect(await adapter.deleteChat(tenant, 'github:73', chat)).toBe(true);
+    expect(await adapter.putChat(tenant, 'github:73', chat, { ...turn, create: false }, null)).toBe(false);
+    expect(await adapter.getChat(tenant, 'github:73', chat)).toBeNull();
+    expect(await adapter.listChats(tenant, 'github:73')).toEqual([]);
+  });
+
   it('moves the one conversation a member had before chats into their first chat, once', async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
@@ -116,7 +150,18 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
       SELECT count(*)::int AS count FROM slotlock.assistant_conversations
        WHERE tenant_ref = ${tenant} AND member_ref = 'github:80'`;
     expect(left?.count).toBe(0);
-    await adapter.deleteChat(tenant, 'github:80', moved?.id as string);
+    // A 0.8 server still running writes the old table again: the next migration moves that as a
+    // chat of its own, and leaves the one moved before as it was.
+    await admin`
+      INSERT INTO slotlock.assistant_conversations (tenant_ref, member_ref, messages, actions, expires_at, updated_at)
+      VALUES (${tenant}, 'github:80', ${admin.json([{ role: 'user', text: 'And on Friday?' }] as never)},
+              '{}'::jsonb, now() + interval '1 hour', now() + interval '1 second')`;
+    await admin`UPDATE slotlock.schema_version SET ddl_sha256 = NULL WHERE singleton`;
+    await owner.applySchema();
+    const both = await adapter.listChats(tenant, 'github:80');
+    expect(both.map((one) => one.title).sort()).toEqual(['And on Friday?', 'When is the Mercedes free tomorrow morning, and the van?']);
+    expect((await adapter.getChat(tenant, 'github:80', moved?.id as string))?.messages).toHaveLength(2);
+    for (const one of both) await adapter.deleteChat(tenant, 'github:80', one.id);
     await admin`UPDATE slotlock.schema_version SET ddl_sha256 = NULL WHERE singleton`;
     await owner.applySchema();
     expect(await adapter.listChats(tenant, 'github:80')).toEqual([]);
