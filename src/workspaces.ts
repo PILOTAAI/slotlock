@@ -126,7 +126,9 @@ export type SlotlockTeamRefusal =
   | 'accepted'
   | 'expired'
   | 'not_for_you'
-  | 'last_owner';
+  | 'last_owner'
+  | 'confirm'
+  | 'subscription_live';
 
 /**
  * Team workspaces through their SECURITY DEFINER functions: each checks the actor's role and
@@ -184,6 +186,12 @@ export interface SlotlockWorkspaceTeams {
   isActive(tenantRef: string): Promise<boolean>;
   /** Delete invitations finished more than 30 days ago; how many went. */
   prune(): Promise<number>;
+  /** Delete the team in seven days, by an Owner who typed its handle; its keys stop at once. */
+  scheduleDeletion(tenantRef: string, actor: string, handle: string): Promise<SlotlockTeamRefusal | null>;
+  /** Keep a team being deleted, by any of its Owners. */
+  cancelDeletion(tenantRef: string, actor: string): Promise<SlotlockTeamRefusal | null>;
+  /** When a team being deleted goes, or null. */
+  deleteAfter(tenantRef: string): Promise<Date | null>;
 }
 
 function refuse(message: string): never {
@@ -433,6 +441,21 @@ function createTeams(sql: SlotlockSql): SlotlockWorkspaceTeams {
     async prune() {
       const [row] = await sql<{ pruned: number }[]>`SELECT slotlock.prune_workspace_invitations() AS pruned`;
       return Number(row?.pruned ?? 0);
+    },
+    async scheduleDeletion(tenantRef, actor, handle) {
+      const [row] = await sql<{ refusal: string | null }[]>`
+        SELECT slotlock.schedule_team_deletion(${tenantRef}::text, ${actor}::text, ${handle}::text) AS refusal`;
+      return refusalOf(row?.refusal);
+    },
+    async cancelDeletion(tenantRef, actor) {
+      const [row] = await sql<{ refusal: string | null }[]>`
+        SELECT slotlock.cancel_team_deletion(${tenantRef}::text, ${actor}::text) AS refusal`;
+      return refusalOf(row?.refusal);
+    },
+    async deleteAfter(tenantRef) {
+      if (!TEAM.test(tenantRef.replace(/~test$/, ''))) return null;
+      const [row] = await sql<{ after: Date | null }[]>`SELECT slotlock.workspace_delete_after(${tenantRef}::text) AS after`;
+      return row?.after ?? null;
     },
   };
 }

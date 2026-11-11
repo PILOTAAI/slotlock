@@ -4013,7 +4013,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   /**
    * Delete team workspace invitations finished (accepted, revoked or expired) more than 30 days ago,
    * with the addresses they were sent to (slotlock.prune_workspace_invitations), and dashboard
-   * sessions ended or expired a day ago (slotlock.prune_dashboard_sessions): how many.
+   * sessions ended or expired a day ago (slotlock.prune_dashboard_sessions), and erase the team
+   * workspaces whose deletion came due (slotlock.erase_deleted_teams): how many.
    */
   sweepDashboardRecords(): Promise<number>;
   /**
@@ -10013,7 +10014,8 @@ function buildSlotlockStore(
 
     async sweepDashboardRecords() {
       const [row] = await sql<{ deleted: string | number }[]>`
-        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions() AS deleted`;
+        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions()
+               + slotlock.erase_deleted_teams() AS deleted`;
       return Number(row?.deleted ?? 0);
     },
 

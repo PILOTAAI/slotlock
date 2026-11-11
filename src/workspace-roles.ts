@@ -142,6 +142,9 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/teams/disable': 'account.use',
   // Anyone signed in may create a team workspace, join one they were invited to, or leave one.
   '/teams/create': 'account.use',
+  // Deleting a team, or keeping one being deleted: its Owners only.
+  '/teams/delete': 'workspace.own',
+  '/teams/restore': 'workspace.own',
   '/invite/accept': 'account.use',
   '/members/leave': 'account.use',
   // Inviting or changing someone also needs the power the role given carries (dashboard.ts
@@ -219,4 +222,5 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/members': 'workspace.read',
   '/settings/audit': 'audit.read',
   '/settings/audit/export': 'audit.read',
+  '/settings/team': 'workspace.own',
 });

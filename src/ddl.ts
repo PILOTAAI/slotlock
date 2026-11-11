@@ -293,6 +293,10 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.dashboard_sessions_of(text)',
   'slotlock.dashboard_session_end(text, bytea)',
   'slotlock.prune_dashboard_sessions()',
+  'slotlock.schedule_team_deletion(text, text, text)',
+  'slotlock.cancel_team_deletion(text, text)',
+  'slotlock.erase_deleted_teams()',
+  'slotlock.workspace_delete_after(text)',
 ] as const);
 
 /**
@@ -1557,7 +1561,7 @@ AS $slotlock_person_workspaces$
 BEGIN
   RETURN QUERY SELECT ws.tenant_ref, ws.handle, ws.name, member.role
     FROM slotlock.workspace_memberships member
-    JOIN slotlock.workspaces ws ON ws.tenant_ref = member.tenant_ref AND ws.status = 'active'
+    JOIN slotlock.workspaces ws ON ws.tenant_ref = member.tenant_ref AND ws.status IN ('active', 'deleting')
    WHERE member.person_ref = requested_person AND member.status = 'active'
    ORDER BY lower(ws.name), ws.handle
    LIMIT 100;
@@ -2209,6 +2213,137 @@ BEGIN
 END
 $slotlock_prune_dashboard_sessions$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[29]} FROM PUBLIC;
+
+-- A team workspace being deleted: its keys stop at once, its people stay until it goes seven days
+-- later, and any Owner can cancel meanwhile. Its status and when it goes, held together.
+ALTER TABLE slotlock.workspaces ADD COLUMN IF NOT EXISTS delete_after timestamptz;
+DO $slotlock_workspaces_deleting$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_workspaces_status_valid' AND conrelid = 'slotlock.workspaces'::regclass
+  ) THEN
+    ALTER TABLE slotlock.workspaces DROP CONSTRAINT IF EXISTS slotlock_workspaces_valid;
+    ALTER TABLE slotlock.workspaces ADD CONSTRAINT slotlock_workspaces_valid CHECK (
+      tenant_ref ~ '^team:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND handle ~ '^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$'
+      AND char_length(name) BETWEEN 1 AND 80
+      AND name !~ '[[:cntrl:]]'
+      AND (created_by IS NULL OR created_by ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$')
+    );
+    ALTER TABLE slotlock.workspaces ADD CONSTRAINT slotlock_workspaces_status_valid CHECK (
+      status IN ('active', 'deleting') AND (status = 'deleting') = (delete_after IS NOT NULL)
+    );
+  END IF;
+END
+$slotlock_workspaces_deleting$;
+
+-- Schedule a team's deletion, by an Owner who types its handle: refused while it has a subscription
+-- (cancelled first, as erase_tenant demands, so nobody is charged for a team that is gone).
+CREATE OR REPLACE FUNCTION slotlock.schedule_team_deletion(requested_tenant text, requested_actor text, requested_handle text)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_schedule_team_deletion$
+DECLARE
+  team_handle text;
+BEGIN
+  SELECT ws.handle INTO team_handle FROM slotlock.workspaces ws
+   WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF team_handle IS NULL THEN
+    RETURN 'not_found';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
+                  WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor
+                    AND member.status = 'active' AND member.role = 'owner') THEN
+    RETURN 'not_allowed';
+  END IF;
+  IF requested_handle IS DISTINCT FROM team_handle THEN
+    RETURN 'confirm';
+  END IF;
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_plans paid
+              WHERE paid.tenant_ref = requested_tenant AND paid.stripe_subscription IS NOT NULL) THEN
+    RETURN 'subscription_live';
+  END IF;
+  UPDATE slotlock.workspaces ws SET status = 'deleting', delete_after = statement_timestamp() + interval '7 days'
+   WHERE ws.tenant_ref = requested_tenant;
+  RETURN NULL;
+END
+$slotlock_schedule_team_deletion$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[30]} FROM PUBLIC;
+
+-- Cancel a team's deletion, by any of its Owners, before it goes.
+CREATE OR REPLACE FUNCTION slotlock.cancel_team_deletion(requested_tenant text, requested_actor text)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_cancel_team_deletion$
+BEGIN
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'deleting' FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN 'not_found';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
+                  WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor
+                    AND member.status = 'active' AND member.role = 'owner') THEN
+    RETURN 'not_allowed';
+  END IF;
+  UPDATE slotlock.workspaces ws SET status = 'active', delete_after = NULL WHERE ws.tenant_ref = requested_tenant;
+  RETURN NULL;
+END
+$slotlock_cancel_team_deletion$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[31]} FROM PUBLIC;
+
+-- Erase the teams whose seven days have passed, live and test, each on its own: one that cannot be
+-- erased yet (a plan still paid) is left for the next pass. How many went.
+CREATE OR REPLACE FUNCTION slotlock.erase_deleted_teams()
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_erase_deleted_teams$
+DECLARE
+  due text;
+  erased integer := 0;
+BEGIN
+  FOR due IN
+    SELECT ws.tenant_ref FROM slotlock.workspaces ws
+     WHERE ws.status = 'deleting' AND ws.delete_after <= statement_timestamp()
+     ORDER BY ws.delete_after
+     LIMIT 20
+  LOOP
+    BEGIN
+      PERFORM * FROM slotlock.erase_tenant(due || '~test');
+      PERFORM * FROM slotlock.erase_tenant(due);
+      erased := erased + 1;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'Slotlock could not erase deleted team %: %', due, SQLERRM;
+    END;
+  END LOOP;
+  RETURN erased;
+END
+$slotlock_erase_deleted_teams$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[32]} FROM PUBLIC;
+
+-- When a team being deleted goes, or null.
+CREATE OR REPLACE FUNCTION slotlock.workspace_delete_after(requested_tenant text)
+RETURNS timestamptz
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_delete_after$
+BEGIN
+  RETURN (SELECT ws.delete_after FROM slotlock.workspaces ws
+           WHERE ws.tenant_ref = pg_catalog.regexp_replace(requested_tenant, '~test$', ''));
+END
+$slotlock_workspace_delete_after$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[33]} FROM PUBLIC;
 `;
 
 // The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly

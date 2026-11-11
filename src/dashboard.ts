@@ -227,6 +227,8 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/teams/enable',
   '/teams/disable',
   '/teams/create',
+  '/teams/delete',
+  '/teams/restore',
   '/invite/accept',
   '/members/invite',
   '/members/resend',
@@ -295,6 +297,7 @@ const STEP_UP_PAGES: ReadonlySet<string> = new Set([
   '/plan',
   '/settings',
   '/settings/members',
+  '/settings/team',
   '/teams',
   '/contacts',
   '/invite',
@@ -365,6 +368,8 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'session.ended': 'signed a device out',
   'audit.exported': 'exported the audit log',
   'workspace.created': 'created the team',
+  'workspace.deletion_scheduled': 'asked for the team to be deleted',
+  'workspace.deletion_cancelled': 'kept the team',
   'member.invited': 'invited someone',
   'invitation.resent': 'sent an invitation again',
   'invitation.revoked': 'revoked an invitation',
@@ -377,7 +382,7 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
   ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
-  ['People', ['workspace.created', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
+  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
   ['Other', ['contact.forgotten', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
@@ -409,6 +414,8 @@ const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text
   expired: { status: 409, text: 'This invitation expired. Ask for a new one.' },
   not_for_you: { status: 403, text: 'This invitation is for another account.' },
   last_owner: { status: 409, text: 'A team keeps at least one owner. Make someone else an owner first.' },
+  confirm: { status: 400, text: "Type the team's handle to confirm." },
+  subscription_live: { status: 409, text: 'Cancel its Team plan on Usage first.' },
 });
 
 /** A handle from a team's name: lower-case letters, digits and dashes; later attempts add a random end. */
@@ -2095,6 +2102,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const enabledOf = new WeakMap<Session, ReadonlySet<string>>();
   /** The team workspaces the session's person is a member of, read with their standing. */
   const teamListOf = new WeakMap<Session, readonly SlotlockTeamWorkspace[]>();
+  /** When the session's team, being deleted, goes. */
+  const deletingOf = new WeakMap<Session, Date>();
   const brandName = options.name ?? 'Slotlock';
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
@@ -2233,11 +2242,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const person = personOf(session);
-    const [standing, listed, alive] = await Promise.all([
+    const [standing, listed, alive, deleting] = await Promise.all([
       workspaces.standing(tenantOf(session), person),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
       workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
+      teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
     ]);
+    if (deleting) deletingOf.set(session, deleting);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
     // from before this store, or of a person erased since (no record, no epoch) never passes; nor
     // one the person signed out from another device.
@@ -2469,6 +2480,12 @@ ${skip}
 <main class="page" id="main">${
       session.env === 'test'
         ? html`<p class="test-banner">Test environment: its own resources, keys, webhooks and history, on your plan's limits and never billed. Its keys start <code>slk_test_</code>.</p>`
+        : html``
+    }${
+      deletingOf.has(session)
+        ? html`<p class="test-banner deleting-banner">This team is deleted on ${formatDate(deletingOf.get(session) as Date)}; its keys have stopped.${
+            can(session, 'workspace.own') ? html` <a href="${root}/settings/team">Keep it</a>` : html``
+          }</p>`
         : html``
     }${content}</main>
 </div>
@@ -3094,7 +3111,7 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
-  type SettingsSection = 'assistant' | 'members' | 'audit' | 'endpoints' | 'hours' | 'account';
+  type SettingsSection = 'assistant' | 'members' | 'team' | 'audit' | 'endpoints' | 'hours' | 'account';
   /** An invitation's link, shown once to the person who made it. */
   type InvitationShown = { link: string; to: string; expiresAt: Date };
 
@@ -3105,6 +3122,7 @@ ${
   const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string; path: string }[] = Object.freeze([
     { id: 'assistant', label: 'Assistant', path: '/settings' },
     { id: 'members', label: 'Members', path: '/settings/members' },
+    { id: 'team', label: 'Team', path: '/settings/team' },
     { id: 'audit', label: 'Audit log', path: '/settings/audit' },
     { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
     { id: 'hours', label: 'Hours', path: '/settings/hours' },
@@ -3126,12 +3144,13 @@ ${
       (entry) =>
         (entry.id !== 'assistant' || store) &&
         (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
+        (entry.id !== 'team' || (teamStore && session.team !== undefined && can(session, 'workspace.own'))) &&
         (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))),
     );
     const shown: SettingsSection =
       section === 'assistant' && !store
         ? 'endpoints'
-        : (section === 'members' || section === 'audit') && !sections.some((entry) => entry.id === section)
+        : (section === 'members' || section === 'audit' || section === 'team') && !sections.some((entry) => entry.id === section)
           ? 'account'
           : section;
     const connected = store ? Boolean(await store.getSettings(tenantOf(session))) : false;
@@ -3146,6 +3165,8 @@ ${
       body = await assistantSettingsSection(session, status, notice, draft);
     } else if (shown === 'members') {
       body = await membersSection(session, status, notice, invitation);
+    } else if (shown === 'team') {
+      body = await teamSection(session, status, notice);
     } else if (shown === 'audit') {
       body = await auditSection(session, status, notice, query ?? new URLSearchParams());
     } else if (shown === 'endpoints') {
@@ -5664,6 +5685,7 @@ ${
   /** The page a form's route belongs to, to go back to. */
   const backOf = (route: string) => {
     if (route.startsWith('/members/')) return '/settings/members';
+    if (route === '/teams/delete' || route === '/teams/restore') return '/settings/team';
     const first = `/${route.split('/')[1] ?? ''}`;
     return first === '/' ? '' : first;
   };
@@ -5740,6 +5762,9 @@ ${
     if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
     if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
     if (route.startsWith('/assistant') && assistantStore()) return { path: '/assistant', page: assistantPage };
+    if ((route === '/teams/delete' || route === '/teams/restore') && teamStore) {
+      return { path: '/settings/team', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'team') };
+    }
     if (route.startsWith('/members/') && teamStore) {
       return { path: '/settings/members', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'members') };
     }
@@ -6633,6 +6658,50 @@ ${
         'Content-Security-Policy': "default-src 'none'",
       },
     });
+  }
+
+  /** A team's name and handle, and deleting it: what goes with it, the handle typed to confirm. */
+  async function teamSection(session: Session, status: number, notice: string | undefined): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return noticeOf(notice, status);
+    const [info, deleting, members, resources, keys, webhooks] = await Promise.all([
+      teamStore.info(tenantRef),
+      teamStore.deleteAfter(tenantRef),
+      teamStore.members(tenantRef),
+      options.resources.count ? options.resources.count(tenantRef) : options.resources.list(tenantRef).then((list) => list.length),
+      options.keys.list({ tenantRef }),
+      options.resources.webhooks ? options.resources.webhooks.list(tenantRef) : Promise.resolve([]),
+    ]);
+    if (!info) return noticeOf(notice, status);
+    const hidden = html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const live = keys.filter((key) => key.revokedAt === null && (key.expiresAt === null || key.expiresAt.getTime() > now())).length;
+    const card = html`<div class="set-card"><div class="row"><span class="row-label">Name</span><div class="row-value">${info.name}</div></div><div class="row"><span class="row-label">Handle</span><div class="row-value">@${info.handle}</div></div></div>`;
+    const danger = deleting
+      ? html`<h2>Being deleted</h2><p>${info.name} and everything in it go on ${formatDate(deleting)}.</p><form method="post" action="${root}/teams/restore">${hidden}<button class="primary" type="submit">Keep ${info.name}</button></form>`
+      : html`<h2>Delete team</h2><p>Its keys stop at once, and seven days later it goes with everything in it: ${String(members.length)} member${members.length === 1 ? '' : 's'}, ${String(resources)} resource${resources === 1 ? '' : 's'} with their bookings and history, ${String(live)} key${live === 1 ? '' : 's'} and ${String(webhooks.length)} webhook${webhooks.length === 1 ? '' : 's'}. Until then any owner can keep it.</p><form class="create-team" method="post" action="${root}/teams/delete">${hidden}<label for="confirm-handle">Type ${info.handle} to confirm</label><input id="confirm-handle" name="confirm" autocomplete="off" required><button class="danger" type="submit">Delete ${info.name}</button></form>`;
+    return html`${noticeOf(notice, status)}${card}${danger}`;
+  }
+
+  async function deleteTeam(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await teamStore.scheduleDeletion(tenantRef, personOf(session), (form.get('confirm') ?? '').trim());
+    if (refusal === 'confirm') return settingsPage(session, 400, "Type the team's handle to confirm.", undefined, 'team');
+    if (refusal === 'subscription_live') {
+      return settingsPage(session, 409, 'Cancel its Team plan on Usage first: deleting the team would not stop the payments.', undefined, 'team');
+    }
+    if (refusal) return settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'team');
+    await audit(session, { action: 'workspace.deletion_scheduled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/team`);
+  }
+
+  async function restoreTeam(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await teamStore.cancelDeletion(tenantRef, personOf(session));
+    if (refusal) return settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'team');
+    await audit(session, { action: 'workspace.deletion_cancelled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/team`);
   }
 
   /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
@@ -7826,6 +7895,10 @@ ${
         return changeTeam(session, form, false);
       case '/teams/create':
         return createTeam(session, form);
+      case '/teams/delete':
+        return deleteTeam(session, form);
+      case '/teams/restore':
+        return restoreTeam(session);
       case '/invite/accept':
         return acceptInvitation(session, form, request);
       case '/members/invite':
@@ -7880,6 +7953,7 @@ ${
             case '/settings/members':
             case '/settings/audit':
             case '/settings/audit/export':
+            case '/settings/team':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
@@ -7914,6 +7988,11 @@ ${
                   : nothingHere(session);
               }
               if (route === '/settings/audit/export') return await exportAudit(session, url.searchParams);
+              if (route === '/settings/team') {
+                return teamStore && session.team !== undefined
+                  ? await settingsPage(session, 200, undefined, undefined, 'team')
+                  : nothingHere(session);
+              }
               if (route === '/settings/audit') {
                 return options.resources.audit
                   ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
@@ -8316,6 +8395,8 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .fine + .table, .fine + .empty { margin-top: var(--space-4); }
 .pop label { margin-bottom: var(--space-3); }
 .pop textarea { width: 100%; }
+/* A team being deleted */
+.deleting-banner { background: var(--bad-soft, var(--surface-2)); }
 /* Sessions (Settings, Account) */
 h2.sessions-head { margin-top: var(--space-6); }
 /* Audit log */
