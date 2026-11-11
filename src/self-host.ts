@@ -2419,6 +2419,24 @@ async function runStaffCommand(
  * are the deployment role's alone, so they connect as SLOTLOCK_MIGRATE_DATABASE_URL when it is set;
  * the serving role reads a suspension and may erase.
  */
+/**
+ * A deployment-role command in the staff log (RFC 0006), by `cli:<user>`: suspensions, their end
+ * and erasure, and the default plan. Skipped on a schema from before the staff log, so the command
+ * still works against it.
+ */
+async function recordOperatorAction(
+  sql: postgres.Sql | postgres.TransactionSql,
+  happened: string,
+  account: string | null,
+  why: string | undefined,
+): Promise<boolean> {
+  const [found] = await sql<{ present: boolean }[]>`
+    SELECT to_regprocedure('slotlock.staff_operator_record(text, text, text, text)') IS NOT NULL AS present`;
+  if (!found?.present) return false;
+  await sql`SELECT slotlock.staff_operator_record(${cliActor()}, ${happened}, ${account}, ${why ?? null})`;
+  return true;
+}
+
 async function runTenantCommand(
   config: SlotlockDatabaseConfig,
   out: OutputStream,
@@ -2433,17 +2451,30 @@ async function runTenantCommand(
     let line: Record<string, unknown>;
     if (action === 'status') {
       line = { tenant: tenantRef, suspended: await store.isTenantSuspended({ tenantRef }) };
-    } else if (action === 'suspend') {
-      const { suspended } = await store.suspendTenant({
-        tenantRef,
-        ...(reason !== undefined ? { reason } : {}),
+    } else if (action === 'suspend' || action === 'unsuspend') {
+      // The change and its record in the staff log (RFC 0006) commit together.
+      const changed = await sql.begin(async (tx) => {
+        const inTransaction = createSlotlockStore(tx as unknown as postgres.Sql);
+        const done =
+          action === 'suspend'
+            ? (await inTransaction.suspendTenant({ tenantRef, ...(reason !== undefined ? { reason } : {}) })).suspended
+            : (await inTransaction.unsuspendTenant({ tenantRef })).unsuspended;
+        if (done) await recordOperatorAction(tx, `account.${action}ed`, tenantRef, reason);
+        return done;
       });
-      line = { tenant: tenantRef, suspended: true, changed: suspended };
-    } else if (action === 'unsuspend') {
-      const { unsuspended } = await store.unsuspendTenant({ tenantRef });
-      line = { tenant: tenantRef, suspended: false, changed: unsuspended };
+      line = { tenant: tenantRef, suspended: action === 'suspend', changed };
     } else {
       const erased = await store.eraseTenant({ tenantRef });
+      // Erasure runs as the serving role, which cannot write the staff log; with the deployment
+      // role's URL it is recorded after, on its own connection.
+      if (config.migrateDatabaseUrl) {
+        const owner = connect(config.migrateDatabaseUrl, 1);
+        try {
+          await recordOperatorAction(owner, 'account.erased', tenantRef, `${erased.total} rows`);
+        } finally {
+          await owner.end({ timeout: 5 });
+        }
+      }
       line = { tenant: tenantRef, total: erased.total, rows: erased.rows };
     }
     out.write(`${JSON.stringify(line)}\n`);
@@ -2466,6 +2497,12 @@ async function runPlanCommand(
     const owner = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
     try {
       await setSlotlockPlanDefault(owner, planDefault);
+      await recordOperatorAction(
+        owner,
+        planDefault ? 'plan.default_set' : 'plan.default_removed',
+        null,
+        planDefault ? `${planDefault.plan} from ${planDefault.appliesFrom.toISOString().slice(0, 10)}` : undefined,
+      );
     } finally {
       await owner.end({ timeout: 5 });
     }

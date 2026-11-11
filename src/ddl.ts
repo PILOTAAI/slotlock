@@ -382,6 +382,7 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.reset_test_tenant(text)',
   'slotlock.prune_changes(text, integer, integer)',
   'slotlock.erase_subject_changes(text, text, text, text)',
+  'slotlock.tenant_suspension_notice(text)',
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -2560,6 +2561,49 @@ AS $slotlock_tenant_suspended$
   ) OR slotlock.partner_tenant_blocked(requested_tenant_ref);
 $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
+
+-- Who suspended a tenant (a staff member, a deployment-role command, or nobody recorded), and what
+-- staff told it (RFC 0006): a message its dashboard shows on every page while the suspension lasts.
+ALTER TABLE slotlock.tenant_suspensions ADD COLUMN IF NOT EXISTS customer_message text;
+ALTER TABLE slotlock.tenant_suspensions ADD COLUMN IF NOT EXISTS suspended_by text;
+DO $slotlock_tenant_suspensions_message$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.tenant_suspensions'::regclass
+       AND conname = 'slotlock_tenant_suspensions_message_valid'
+  ) THEN
+    ALTER TABLE slotlock.tenant_suspensions ADD CONSTRAINT slotlock_tenant_suspensions_message_valid CHECK (
+      (customer_message IS NULL OR (char_length(customer_message) BETWEEN 1 AND 500
+                                    AND customer_message !~ '[[:cntrl:]]'))
+      AND (suspended_by IS NULL OR octet_length(suspended_by) BETWEEN 1 AND 100));
+  END IF;
+END
+$slotlock_tenant_suspensions_message$;
+
+-- A suspended tenant's notice for its dashboard: since when, and the message staff left (null for
+-- none). One row while it is suspended (its own suspension, its live tenant's, or its partner's),
+-- none otherwise. Never the internal reason.
+CREATE OR REPLACE FUNCTION slotlock.tenant_suspension_notice(requested_tenant_ref text)
+RETURNS TABLE (suspended_at timestamptz, message text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_suspension_notice$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  SELECT held.suspended_at, held.customer_message FROM slotlock.tenant_suspensions held
+   WHERE held.tenant_ref IN (requested_tenant_ref, regexp_replace(requested_tenant_ref, '~test$', ''))
+   ORDER BY held.tenant_ref = requested_tenant_ref DESC
+   LIMIT 1;
+  IF NOT FOUND AND slotlock.partner_tenant_blocked(requested_tenant_ref) THEN
+    RETURN QUERY SELECT NULL::timestamptz, NULL::text;
+  END IF;
+END
+$slotlock_tenant_suspension_notice$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[23]} FROM PUBLIC;
 
 -- A hosted tenant's plan (plans.ts): the limits it buys, set from its Stripe subscription. A tenant
 -- with no row is on the deployment's default plan (plan_defaults) once that applies, and otherwise

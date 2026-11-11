@@ -149,6 +149,10 @@ slotlock audit verify                     # check the audit log's hash chain
   connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role when it is set.
 - `erase` deletes everything the tenant has, its API keys included, at once and for good;
   `--confirm` must repeat the tenant. A suspension outlives it.
+- `suspend`, `unsuspend`, `erase` and `plan default` are recorded in the staff log by
+  `cli:<your user name>`. Erasure is recorded only when `SLOTLOCK_MIGRATE_DATABASE_URL` is set.
+  A suspension and its end also appear in the tenant's own audit log, as staff (operator), with
+  the reason.
 
 ## Upgrade
 

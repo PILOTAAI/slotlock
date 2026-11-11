@@ -339,18 +339,43 @@ body.plain{display:grid;place-items:center;min-height:100vh;padding:16px}
 .card input{padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--canvas);color:var(--ink);font:inherit}
 .card .btn{justify-content:center}
 .fine{font-size:12px;color:var(--ink-3)}
+.form{display:grid;gap:8px;max-width:560px}.form p{margin:0;color:var(--ink-2)}
+.form label{font-weight:500;font-size:13px}.hint{font-weight:400;color:var(--ink-3)}
+.form input,.form textarea,.form select{padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--canvas);color:var(--ink);font:inherit;width:100%}
+.form textarea{resize:vertical;min-height:64px}
+.form input:focus,.form textarea:focus,.form select:focus{outline:2px solid var(--accent);outline-offset:1px}
+.form .btn{justify-self:start}
+details.act{position:relative;display:inline-block}details.act.wide{display:block;margin:10px 0}
+details.act>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;padding:5px 10px;border-radius:8px;border:1px solid var(--line);font-size:13px;font-weight:500;background:var(--paper)}
+details.act>summary::-webkit-details-marker{display:none}
+details.act>summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+details.act[open]>summary{border-color:var(--ink-3)}
+.pop{margin-top:8px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);min-width:min(320px,80vw)}
+.rail .pop{min-width:0;padding:10px}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:var(--paper)}.btn.danger:hover{filter:brightness(1.08)}
+.danger-zone{margin-top:28px;padding:16px;border:1px solid var(--bad);border-radius:var(--radius);background:var(--bad-soft)}
+.danger-zone h2{margin-top:0;color:var(--bad)}
+.danger-zone .hint,.danger-zone p{color:var(--ink-2)}
+.notice p{margin:0 0 4px}.notice p:last-child{margin:0}
+.list{list-style:none;margin:0 0 10px;padding:0;display:grid;gap:8px}.list li{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.notes li{display:block;padding:8px 0;border-top:1px solid var(--line-2)}.notes li:first-child{border-top:0}
+.pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.rail h3{margin:18px 0 8px;font-size:13px;font-weight:600}
+.tabs{display:flex;gap:4px;margin:0 0 12px}.tab{padding:6px 12px;border-radius:8px;color:var(--ink-2);text-decoration:none;font-weight:500}
+.tab[aria-current]{background:var(--paper);color:var(--ink);border:1px solid var(--line)}
+.sub-inline{color:var(--ink-3);font-size:13px}
 @media (max-width:860px){.app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}.nav{display:flex;flex-wrap:wrap}.side-foot{margin:0;border:0;padding:0}.grid-2{grid-template-columns:1fr}.content{padding:18px 16px}.top{padding:10px 16px}
 thead{display:none}tr{display:block;border-top:1px solid var(--line-2)}td{display:flex;justify-content:space-between;gap:12px;border:0;padding:6px 14px}td::before{content:attr(data-label);color:var(--ink-3);font-size:12px}}
 `;
 
 /**
- * Progressive enhancement only: ⌘K or Ctrl+K (and /) focus the search; "g" then h, a, s or l goes
- * to Home, Accounts, Staff or the staff log; a button with data-copy copies its value.
+ * Progressive enhancement only: ⌘K or Ctrl+K (and /) focus the search; "g" then h, a, c, s or l
+ * goes to Home, Accounts, Cases, Staff or the staff log; a button with data-copy copies its value.
  */
 export const SLOTLOCK_ADMIN_JS = `(() => {
   const search = document.getElementById('q');
   let pending = false;
-  const go = { h: '/', a: '/accounts', s: '/staff', l: '/staff/log' };
+  const go = { h: '/', a: '/accounts', c: '/cases', s: '/staff', l: '/staff/log' };
   document.addEventListener('keydown', (event) => {
     const typing = event.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {

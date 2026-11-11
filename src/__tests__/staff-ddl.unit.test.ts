@@ -110,6 +110,30 @@ describe('the admin console schema', () => {
     expect(slotlockStaffMay('support', 'staff.read')).toBe(false);
     expect(slotlockStaffMay('editor', 'accounts.read')).toBe(false);
     expect(slotlockStaffMay('viewer', 'accounts.read')).toBe(false);
+    // Support actions (Phase 2): the Owner and Support, never Billing, an Editor or a Viewer.
+    for (const capability of ['accounts.act', 'safety.act'] as const) {
+      expect(slotlockStaffMay('owner', capability)).toBe(true);
+      expect(slotlockStaffMay('support', capability)).toBe(true);
+      expect(slotlockStaffMay('billing', capability)).toBe(false);
+      expect(slotlockStaffMay('editor', capability)).toBe(false);
+      expect(slotlockStaffMay('viewer', capability)).toBe(false);
+    }
+  });
+
+  it('gives every action on an account a reason, and records it in the account\'s own audit log too', () => {
+    for (const name of ['admin_suspend', 'admin_unsuspend', 'admin_revoke_key', 'admin_end_sessions']) {
+      const body = functions.find((f) => f.name === `slotlock.${name}`)?.body ?? '';
+      expect(body, name).toContain('PERFORM slotlock.staff_reason_valid(why);');
+      expect(body, name).toContain('PERFORM slotlock.staff_customer_audit(actor, account, ');
+      // The staff log first, then the customer's log, in the same transaction.
+      expect(body.indexOf('slotlock.staff_log('), name).toBeLessThan(body.indexOf('slotlock.staff_customer_audit('));
+    }
+    // A note's text never reaches a log.
+    const note = functions.find((f) => f.name === 'slotlock.admin_add_note')?.body ?? '';
+    expect(note).toMatch(/staff_log\(actor, 'account\.note_added', account, 'note:' \|\| added, NULL,/);
+    // The customer's log names staff by role, never by who they are.
+    const audit = functions.find((f) => f.name === 'slotlock.staff_customer_audit')?.body ?? '';
+    expect(audit).toContain("'system', 'slotlock-staff:' || coalesce(label, 'staff')");
   });
 
   it('grants the console role the admin functions and nothing else, and the serving role none of them', () => {

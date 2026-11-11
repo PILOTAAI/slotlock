@@ -207,6 +207,17 @@ Staff are added, have their role changed and are removed only with the deploymen
 credentials (`slotlock staff`), never from the console. The console shows account metadata: plan,
 usage, key prefixes and the audit log. It never shows booking titles, descriptions or attendees.
 
+Support staff can act on an account: suspend it or lift its suspension, revoke a key, end a
+person's dashboard sessions, add an internal note, and work an abuse case. Each action needs:
+
+- a role that allows it, checked again by the database;
+- the form's session token;
+- a passkey in the last 15 minutes;
+- a reason.
+
+The reason is written to the staff log and to the account's own audit log, as "Slotlock staff"
+and the role, in the same transaction. The customer always sees what staff did to their account.
+
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
 

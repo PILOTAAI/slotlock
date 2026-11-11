@@ -49,6 +49,17 @@ export interface SlotlockDashboardWorkspaces {
   teams?: SlotlockWorkspaceTeams;
   /** Each session a person signed in with, to list and sign out one by one: only with the database. */
   sessions?: SlotlockDashboardSessions;
+  /**
+   * The tenant's suspension, as its dashboard tells it (RFC 0006): since when, and the message
+   * staff left. Null while it is not suspended. Only with the database.
+   */
+  suspension?(tenantRef: string): Promise<SlotlockSuspensionNotice | null>;
+}
+
+/** A suspended workspace's notice: never the internal reason. */
+export interface SlotlockSuspensionNotice {
+  since: Date | null;
+  message: string | null;
 }
 
 /** A session a person signed in with, as their Account page lists it. */
@@ -264,6 +275,19 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
     },
     teams: createTeams(sql),
     sessions: createSessions(sql),
+    async suspension(tenantRef) {
+      try {
+        const [row] = await sql<{ suspended_at: Date | null; message: string | null }[]>`
+          SELECT suspended_at, message FROM slotlock.tenant_suspension_notice(${tenantRef}::text)`;
+        return row ? { since: row.suspended_at, message: row.message } : null;
+      } catch (error) {
+        // A schema or grants from before this release: no notice, as before; the store still
+        // refuses a suspended tenant's writes.
+        const code = (error as { code?: unknown } | null)?.code;
+        if (code === '42883' || code === '42501') return null;
+        throw error;
+      }
+    },
   };
 }
 

@@ -258,11 +258,12 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
   });
 
   /** Run `slotlock …` against this database, as the schema owner unless `serving`. */
-  async function cli(argv: string[], serving = false) {
+  async function cli(argv: string[], serving = false, extra: Record<string, string> = {}) {
     const chunks = { out: [] as string[], err: [] as string[] };
     const env = {
       DATABASE_URL: databaseUrls.serving,
       ...(serving ? {} : { SLOTLOCK_MIGRATE_DATABASE_URL: databaseUrls.superuser }),
+      ...extra,
     };
     const code = await runSlotlockCli(argv, {
       env,
@@ -319,5 +320,48 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
         expect.objectContaining({ staff_ref: VIEWER, status: 'removed' }),
       ]),
     );
+  });
+  it('records what deployment-role commands do to an account, by cli:<user>, for staff and the customer', async () => {
+    const onOther = { SLOTLOCK_TENANT: OTHER };
+    expect((await cli(['tenant', 'unsuspend'], false, onOther)).lines[0]).toMatchObject({ changed: true });
+    expect((await cli(['tenant', 'suspend', '--reason', 'Chargeback review'], false, onOther)).lines[0]).toMatchObject({ changed: true });
+    // Nothing changed, nothing recorded.
+    expect((await cli(['tenant', 'suspend'], false, onOther)).lines[0]).toMatchObject({ changed: false });
+    const staffLog = await superuser<{ staff_ref: string; action: string; reason: string | null }[]>`
+      SELECT staff_ref, action, reason FROM slotlock.staff_audit_events
+       WHERE account_ref = ${OTHER} AND staff_ref LIKE 'cli:%' ORDER BY chain_index`;
+    expect(staffLog.map((row) => [row.action, row.reason])).toEqual([
+      ['account.unsuspended', null],
+      ['account.suspended', 'Chargeback review'],
+    ]);
+    const [held] = await superuser<{ suspended_by: string }[]>`
+      SELECT suspended_by FROM slotlock.tenant_suspensions WHERE tenant_ref = ${OTHER}`;
+    expect(held?.suspended_by).toMatch(/^cli:/);
+    const customer = await superuser<{ action: string; actor_ref: string; reason: string | null }[]>`
+      SELECT action, actor_ref, reason FROM slotlock.audit_events WHERE tenant_ref = ${OTHER} ORDER BY chain_index`;
+    expect(customer.slice(-2)).toEqual([
+      { action: 'staff.account_unsuspended', actor_ref: 'slotlock-staff:operator', reason: null },
+      { action: 'staff.account_suspended', actor_ref: 'slotlock-staff:operator', reason: 'Chargeback review' },
+    ]);
+
+    // Erasure runs as the serving role; it is recorded with the deployment role's URL.
+    const gone = 'github:8080808';
+    await superuser`INSERT INTO slotlock.dashboard_people (person_ref) VALUES (${gone})`;
+    expect((await cli(['tenant', 'erase', '--confirm', gone], false, { SLOTLOCK_TENANT: gone })).code).toBe(0);
+    expect(await superuser`
+      SELECT 1 FROM slotlock.staff_audit_events WHERE account_ref = ${gone} AND action = 'account.erased'`).toHaveLength(1);
+
+    expect((await cli(['plan', 'default', 'free', '--from', '2000-01-01'], false, onOther)).code).toBe(0);
+    expect((await cli(['plan', 'default', 'none'], false, onOther)).code).toBe(0);
+    const plans = await superuser<{ action: string; reason: string | null }[]>`
+      SELECT action, reason FROM slotlock.staff_audit_events WHERE action LIKE 'plan.%' ORDER BY chain_index`;
+    expect(plans).toEqual([
+      { action: 'plan.default_set', reason: 'free from 2000-01-01' },
+      { action: 'plan.default_removed', reason: null },
+    ]);
+    // Only a deployment-role command may be recorded this way, and only these.
+    await expect(asOwner((tx) => tx`SELECT slotlock.staff_operator_record('github:1', 'account.suspended', ${OTHER}, NULL)`)).rejects.toMatchObject({ code: '22023' });
+    await expect(asOwner((tx) => tx`SELECT slotlock.staff_operator_record('cli:ops', 'staff.added', NULL, NULL)`)).rejects.toMatchObject({ code: '22023' });
+    await expect(adminSql`SELECT slotlock.staff_operator_record('cli:ops', 'account.erased', ${OTHER}, NULL)`).rejects.toMatchObject({ code: '42501' });
   });
 });

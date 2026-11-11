@@ -31,7 +31,12 @@ import {
   slotlockRoleCan,
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
-import type { SlotlockDashboardWorkspaces, SlotlockTeamRefusal, SlotlockTeamWorkspace } from './workspaces.js';
+import type {
+  SlotlockDashboardWorkspaces,
+  SlotlockSuspensionNotice,
+  SlotlockTeamRefusal,
+  SlotlockTeamWorkspace,
+} from './workspaces.js';
 import type { SlotlockAuditEvent, SlotlockAuditEventInput } from './store.js';
 import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
@@ -409,6 +414,10 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'member.removed': 'removed a member',
   'member.left': 'left',
   'authz.denied': 'was refused',
+  'staff.account_suspended': 'suspended the account',
+  'staff.account_unsuspended': "lifted the account's suspension",
+  'staff.key_revoked': 'revoked an API key',
+  'staff.sessions_ended': 'signed a person out',
 });
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
@@ -416,6 +425,7 @@ const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = O
   ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
+  ['Slotlock staff', ['staff.account_suspended', 'staff.account_unsuspended', 'staff.key_revoked', 'staff.sessions_ended']],
   ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
 ]);
 const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
@@ -2210,6 +2220,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const teamListOf = new WeakMap<Session, readonly SlotlockTeamWorkspace[]>();
   /** When the session's team, being deleted, goes. */
   const deletingOf = new WeakMap<Session, Date>();
+  /** The workspace's suspension notice, read with its standing: shown on every page while it lasts. */
+  const suspendedOf = new WeakMap<Session, SlotlockSuspensionNotice>();
   /** The locations and groups each session's member is limited to (RFC 0004 D1), read with their standing. */
   const scopes = new WeakMap<Session, SlotlockResourceScope>();
   const brandName = options.name ?? 'Slotlock';
@@ -2350,14 +2362,16 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const person = personOf(session);
-    const [standing, listed, alive, deleting, scope] = await Promise.all([
+    const [standing, listed, alive, deleting, scope, suspension] = await Promise.all([
       workspaces.standing(tenantOf(session), person),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
       workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
       teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
       workspaces.scope && sharedWorkspace(session) ? workspaces.scope(tenantOf(session), person) : Promise.resolve(null),
+      workspaces.suspension ? workspaces.suspension(tenantOf(session)) : Promise.resolve(null),
     ]);
     if (deleting) deletingOf.set(session, deleting);
+    if (suspension) suspendedOf.set(session, suspension);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
     // from before this store, or of a person erased since (no record, no epoch) never passes; nor
     // one the person signed out from another device.
@@ -2608,6 +2622,12 @@ ${skip}
 <main class="page" id="main">${
       session.env === 'test'
         ? html`<p class="test-banner">Test environment: its own resources, keys, webhooks and history, on your plan's limits and never billed. Its keys start <code>slk_test_</code>.</p>`
+        : html``
+    }${
+      suspendedOf.has(session)
+        ? html`<p class="test-banner suspended-banner" role="status"><strong>This account is suspended.</strong> Its data can be seen, not changed, and its API keys are refused.${
+            suspendedOf.get(session)?.message ? html` ${brandName} says: ${suspendedOf.get(session)?.message ?? ''}` : html``
+          }</p>`
         : html``
     }${
       deletingOf.has(session)
@@ -6707,6 +6727,11 @@ ${
   function actorName(event: SlotlockAuditEvent, session: Session, names: ReadonlyMap<string, string>): string {
     if (event.actorType === 'api_key') return `API key ${event.actorRef.replace(/^api_key:/, '').slice(0, 8)}`;
     if (event.actorType === 'assistant') return 'The assistant';
+    // What the people who run the service did (RFC 0006, E8): slotlock-staff:<role>.
+    const staff = /^slotlock-staff:(owner|support|billing|editor|viewer|operator)$/.exec(event.actorRef);
+    if (event.actorType === 'system' && staff) {
+      return `${brandName} staff (${staff[1] === 'operator' ? 'operator' : `${(staff[1] as string).slice(0, 1).toUpperCase()}${(staff[1] as string).slice(1)}`})`;
+    }
     if (event.actorType !== 'person') return 'Slotlock';
     if (event.actorRef === personOf(session)) return 'You';
     return (
@@ -8894,6 +8919,7 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .pop textarea { width: 100%; }
 /* A team being deleted */
 .deleting-banner { background: var(--bad-soft, var(--surface-2)); }
+.suspended-banner { background: var(--bad-soft, var(--surface-2)); }
 /* Sessions (Settings, Account) */
 h2.sessions-head { margin-top: var(--space-6); }
 /* Audit log */

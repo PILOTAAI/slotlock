@@ -76,6 +76,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ['fay', { id: base + 5, login: 'fay', emails: [] }],
     ['gus', { id: base + 6, login: 'gus', emails: [] }],
     ['hal', { id: base + 7, login: 'hal', emails: [] }],
+    ['ivy', { id: base + 8, login: 'ivy', emails: [] }],
   ]);
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -696,5 +697,31 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
   it("serves a team's keys only with team workspaces on", () => {
     expect(slotlockServeAllowsTenant({ allowedUsers: '*', teamWorkspaces: true }, `team:${randomUUID()}~test`)).toBe(true);
     expect(slotlockServeAllowsTenant({ allowedUsers: '*' }, `team:${randomUUID()}`)).toBe(false);
+  });
+  it('tells a suspended person why on every page, and shows what staff did in their audit log', async () => {
+    const ivy = new Browser(dashboard);
+    await signIn(ivy, 'ivy');
+    const person = `github:${String(github.get('ivy')?.id)}`;
+    tenants.push(person);
+    // As the admin console does it (RFC 0006): a suspension with a message, and the record in the
+    // person's own audit log, by a support member.
+    await admin`SELECT slotlock.staff_add('github:41', 'support', 'cli:test', NULL, NULL)`;
+    await admin`
+      INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason, customer_message, suspended_by)
+      VALUES (${person}, 'internal: matches abuse case 7', 'Write to abuse@pylota.io to discuss this.', 'github:41')`;
+    await admin`SELECT slotlock.staff_customer_audit('github:41', ${person}, 'staff.account_suspended', NULL, NULL, 'Card testing reported')`;
+
+    const page = await (await ivy.get('/dashboard')).text();
+    expect(page).toContain('This account is suspended.');
+    expect(page).toContain('Write to abuse@pylota.io to discuss this.');
+    // The internal reason is staff's, never the customer's page.
+    expect(page).not.toContain('abuse case 7');
+    const audit = await (await ivy.get('/dashboard/settings/audit')).text();
+    expect(audit).toContain('Slotlock staff (Support)');
+    expect(audit).toContain('suspended the account');
+    expect(audit).toContain('Card testing reported');
+
+    await admin`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = ${person}`;
+    expect(await (await ivy.get('/dashboard')).text()).not.toContain('This account is suspended.');
   });
 });

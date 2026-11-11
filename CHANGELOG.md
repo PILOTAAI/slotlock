@@ -106,6 +106,15 @@ versioning.
   functions and no table. `slotlock staff list|add|role|reset|remove`, run as the schema owner,
   manages who may use the console, and `add` and `reset` print a one-time code for the first
   passkey. The console itself is `workers/admin`; SECURITY.md describes it.
+- **Support actions in the admin console** (RFC 0006, Phase 2):
+  - Staff can suspend an account and lift the suspension, revoke a key, end a person's dashboard
+    sessions, keep internal notes, and work abuse cases.
+  - Each action needs a reason, which also goes into the account's own audit log as "Slotlock staff
+    (Support)".
+  - A suspension may carry a message, which the customer's dashboard shows on every page while the
+    suspension lasts (`slotlock.tenant_suspension_notice`; `SlotlockDashboardWorkspaces.suspension`).
+  - `slotlock tenant suspend`, `unsuspend` and `erase`, and `slotlock plan default`, are recorded in
+    the staff log by `cli:<user>`.
 
 ### Changed
 

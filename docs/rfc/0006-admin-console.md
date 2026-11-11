@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phase 1 is built (1a and 1b) and waits for its independent security review and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 and 2 are built and wait for their independent security review and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -535,6 +535,52 @@ What is left before the console goes live:
 - the independent security review, recorded on the pull request.
 
 SECURITY.md already describes the console.
+
+**Where Phase 2 stands.** Support actions are built and tested. Its done-when holds, end to end:
+a suspension made in the console shows in the customer's dashboard and audit log, and in the
+staff log.
+
+- **The roles.** Two capabilities: `accounts.act` (end sessions, revoke keys, notes) and
+  `safety.act` (suspend, lift a suspension, cases). The Owner and Support have both, as 4.3 says.
+  An action needs a passkey in the last 15 minutes. Past that, the console asks for the passkey
+  and sends the person back to the page.
+- **The functions.** Each action is an admin function:
+  - `admin_suspend` and `admin_unsuspend`;
+  - `admin_revoke_key`;
+  - `admin_account_sessions` and `admin_end_sessions`;
+  - `admin_account_notes` and `admin_add_note`;
+  - `admin_case_open`, `admin_case_update`, `admin_cases` and `admin_case`.
+- **The reason.** Each action takes one, of 1 to 200 bytes on one line. The function writes it to
+  the staff log and, as "Slotlock staff (<role>)", to the account's own audit log (E8), in the same
+  transaction. A suspension can also carry a message for the customer, which their dashboard
+  shows on every page while it lasts (`slotlock.tenant_suspension_notice`). The internal reason
+  is never shown there.
+- **What staff see of sessions.** They see when each session began and was last seen, never the
+  address or browser.
+- **What the log holds of notes.** The staff log records that a note was added, never its text.
+- **Cases (M6).** A case records:
+  - where it came from;
+  - the Acceptable Use Policy section;
+  - the evidence;
+  - what was done and the outcome.
+
+  Its history is the staff log's events about it. A suspension linked to a case records itself on
+  the case.
+- **The CLI.** `slotlock tenant suspend` and `unsuspend` write `cli:<user>` to the staff log in the
+  same transaction, and to the customer's audit log as "Slotlock staff (operator)". So do
+  `slotlock plan default` and, when `SLOTLOCK_MIGRATE_DATABASE_URL` is set, `slotlock tenant
+  erase`.
+- **Requests.** Every action is a form POST, with the Origin and session token checked. It
+  answers with a redirect to the page it came from, so a reload never sends it twice. Each
+  function is idempotent: a second suspension or revocation changes nothing and says so. No
+  separate single-use nonce is kept.
+
+Left for later phases:
+
+- suspending a partner with all its accounts (M6);
+- the members and invitations of a team on its page (M3);
+- what erasure does with an account's notes and cases, decided with the erasure checklist in
+  Phase 5. Until then both are kept, like the staff log.
 
 The database keeps no GitHub login or email for a person, only the numeric id, and that does not
 change. The console reads logins from GitHub's public profile API when it shows or searches an

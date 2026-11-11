@@ -335,6 +335,7 @@ export type {
   SlotlockWorkspaceTeams,
   SlotlockDashboardSession,
   SlotlockDashboardSessions,
+  SlotlockSuspensionNotice,
 } from './workspaces.js';
 export {
   SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,

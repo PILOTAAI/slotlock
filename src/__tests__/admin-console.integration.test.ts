@@ -445,6 +445,215 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(await log('github:1001')).toContain('staff.signed_out');
   });
 
+  // ---------- Phase 2: support actions ----------
+
+  /** The form token on a page the browser can open. */
+  const tokenOn = async (browser: Browser, path: string) =>
+    /name="csrf" value="([^"]+)"/.exec(await (await browser.request(path)).text())?.[1] ?? '';
+  const send = (browser: Browser, path: string, fields: Record<string, string>) =>
+    browser.request(path, { method: 'POST', body: new URLSearchParams(fields) });
+  const customerAudit = async (tenant: string) =>
+    superuser<{ action: string; actor_type: string; actor_ref: string; target_ref: string | null; reason: string | null }[]>`
+      SELECT action, actor_type, actor_ref, target_ref, reason FROM slotlock.audit_events
+       WHERE tenant_ref = ${tenant} ORDER BY chain_index`;
+  const accountPath = `/accounts/${encodeURIComponent(PERSON)}`;
+
+  it('lets support suspend an account, with a reason the customer sees and a message for their dashboard', async () => {
+    await asOwner((tx) => tx`SELECT slotlock.staff_reset('github:1002', 'cli:ops', ${sha('support-2')}, ${new Date(Date.now() + 86_400_000)})`);
+    const { browser: support } = await fullySignedIn('code-support', 'support-2');
+    const page = await (await support.request(accountPath)).text();
+    expect(page).toContain('Danger zone');
+    expect(page).toContain(`action="${accountPath}/suspend"`);
+    const csrf = (/name="csrf" value="([^"]+)"/.exec(page)?.[1]) ?? '';
+
+    // No reason: refused by the database, nothing changes.
+    const empty = await send(support, `${accountPath}/suspend`, { csrf, reason: '', message: '' });
+    expect(empty.headers.get('location')).toBe(`${accountPath}?error=invalid`);
+    // No form token: refused before anything runs.
+    expect((await send(support, `${accountPath}/suspend`, { reason: 'Card testing' })).status).toBe(403);
+
+    const done = await send(support, `${accountPath}/suspend`, {
+      csrf,
+      reason: 'Card testing reported to abuse@',
+      message: 'Write to abuse@pylota.io to discuss this.',
+    });
+    expect(done.status).toBe(303);
+    expect(done.headers.get('location')).toBe(`${accountPath}?done=suspended`);
+    const [held] = await superuser<{ reason: string; customer_message: string; suspended_by: string }[]>`
+      SELECT reason, customer_message, suspended_by FROM slotlock.tenant_suspensions WHERE tenant_ref = ${PERSON}`;
+    expect(held).toEqual({
+      reason: 'Card testing reported to abuse@',
+      customer_message: 'Write to abuse@pylota.io to discuss this.',
+      suspended_by: 'github:1002',
+    });
+    // In the staff log, and in the customer's own audit log as Slotlock staff (Support).
+    expect(await log('github:1002')).toContain('account.suspended');
+    expect((await customerAudit(PERSON)).at(-1)).toEqual({
+      action: 'staff.account_suspended',
+      actor_type: 'system',
+      actor_ref: 'slotlock-staff:support',
+      target_ref: null,
+      reason: 'Card testing reported to abuse@',
+    });
+    // The customer's dashboard reads the notice through the serving role's function.
+    const [notice] = await superuser<{ message: string }[]>`SELECT message FROM slotlock.tenant_suspension_notice(${PERSON})`;
+    expect(notice?.message).toBe('Write to abuse@pylota.io to discuss this.');
+
+    const after = await (await support.request(`${accountPath}?done=suspended`)).text();
+    expect(after).toContain('Suspended. From its next request it changes nothing');
+    expect(after).toContain('The customer sees: “Write to abuse@pylota.io to discuss this.”');
+    expect(after).toContain(`action="${accountPath}/unsuspend"`);
+    // Suspending again changes nothing.
+    expect((await send(support, `${accountPath}/suspend`, { csrf, reason: 'Again' })).headers.get('location')).toBe(
+      `${accountPath}?error=already_suspended`,
+    );
+
+    const lifted = await send(support, `${accountPath}/unsuspend`, { csrf, reason: 'Cleared after review' });
+    expect(lifted.headers.get('location')).toBe(`${accountPath}?done=unsuspended`);
+    expect(await superuser`SELECT 1 FROM slotlock.tenant_suspensions WHERE tenant_ref = ${PERSON}`).toHaveLength(0);
+    expect((await customerAudit(PERSON)).at(-1)).toMatchObject({ action: 'staff.account_unsuspended', reason: 'Cleared after review' });
+  });
+
+  it('asks for the passkey again before an action when the last one is over 15 minutes old', async () => {
+    const browser = browsers.owner();
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    const csrf = await tokenOn(browser, accountPath);
+    // Pages stay open (the idle limit is 30 minutes), but changing an account needs a fresh passkey.
+    clock += 10 * 60 * 1000;
+    expect((await browser.request(accountPath)).status).toBe(200);
+    clock += 6 * 60 * 1000;
+    const stale = await send(browser, `${accountPath}/notes`, { csrf, note: 'Called about the invoice.' });
+    expect(stale.status).toBe(303);
+    expect(stale.headers.get('location')).toBe(`/passkey?${new URLSearchParams({ next: accountPath, fresh: '1' }).toString()}`);
+    expect(await superuser`SELECT 1 FROM slotlock.account_notes WHERE account_ref = ${PERSON}`).toHaveLength(0);
+    expect(await (await browser.request(stale.headers.get('location') ?? '')).text()).toContain('Changing an account needs your passkey');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    const noted = await send(browser, `${accountPath}/notes`, { csrf, note: 'Called about the invoice.\nSee case 3.' });
+    expect(noted.headers.get('location')).toBe(`${accountPath}?done=note_added`);
+    const page = await (await browser.request(accountPath)).text();
+    expect(page).toContain('Called about the invoice.\nSee case 3.');
+    expect(page).toContain('octo-owner');
+    // The log records that a note was added, never what it says.
+    const [entry] = await superuser<{ target: string; metadata: unknown; reason: string | null }[]>`
+      SELECT target, metadata, reason FROM slotlock.staff_audit_events WHERE action = 'account.note_added'`;
+    expect(entry?.target).toMatch(/^note:\d+$/);
+    expect(JSON.stringify(entry)).not.toContain('invoice');
+  });
+
+  it('revokes a key and ends dashboard sessions, each recorded for staff and for the customer', async () => {
+    const browser = browsers.owner();
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    const csrf = await tokenOn(browser, accountPath);
+    const [key] = await superuser<{ id: string }[]>`SELECT id FROM slotlock.api_keys WHERE tenant_ref = ${PERSON}`;
+    const revoked = await send(browser, `${accountPath}/keys/revoke`, { csrf, key: key?.id ?? '', reason: 'Leaked in a public repository' });
+    expect(revoked.headers.get('location')).toBe(`${accountPath}?done=key_revoked`);
+    const [state] = await superuser<{ revoked_at: Date | null }[]>`SELECT revoked_at FROM slotlock.api_keys WHERE id = ${key?.id ?? ''}`;
+    expect(state?.revoked_at).toBeInstanceOf(Date);
+    expect((await customerAudit(PERSON)).at(-1)).toMatchObject({
+      action: 'staff.key_revoked', actor_ref: 'slotlock-staff:owner', target_ref: key?.id, reason: 'Leaked in a public repository',
+    });
+    expect((await send(browser, `${accountPath}/keys/revoke`, { csrf, key: key?.id ?? '', reason: 'Again' })).headers.get('location')).toBe(
+      `${accountPath}?error=key_unchanged`,
+    );
+
+    // Two dashboard sessions of the person: one ended, then all.
+    const sids = [randomBytes(32), randomBytes(32)];
+    for (const sid of sids) {
+      await superuser`SELECT slotlock.dashboard_session_started(${PERSON}, ${sid}, ${new Date(Date.now() + 3_600_000)}, 'Firefox', '192.0.2.1')`;
+    }
+    const page = await (await browser.request(accountPath)).text();
+    const handle = sids[0]?.subarray(0, 8).toString('hex') ?? '';
+    expect(page).toContain(`value="${handle}"`);
+    // Staff see when, never where from or which browser.
+    expect(page).not.toContain('192.0.2.1');
+    expect(page).not.toContain('Firefox');
+    const one = await send(browser, `${accountPath}/sessions/end`, { csrf, session: handle, reason: 'Asked to by the customer' });
+    expect(one.headers.get('location')).toBe(`${accountPath}?done=sessions_ended`);
+    const alive = async () =>
+      (await superuser<{ n: number }[]>`SELECT count(*)::int AS n FROM slotlock.dashboard_sessions WHERE person_ref = ${PERSON} AND ended_at IS NULL`)[0]?.n;
+    expect(await alive()).toBe(1);
+    expect((await send(browser, `${accountPath}/sessions/end`, { csrf, session: handle, reason: 'Again' })).headers.get('location')).toBe(
+      `${accountPath}?error=session_gone`,
+    );
+    const [before] = await superuser<{ epoch: number }[]>`SELECT session_epoch AS epoch FROM slotlock.dashboard_people WHERE person_ref = ${PERSON}`;
+    const all = await send(browser, `${accountPath}/sessions/end`, { csrf, session: 'all', reason: 'Account takeover suspected' });
+    expect(all.headers.get('location')).toBe(`${accountPath}?done=sessions_ended`);
+    expect(await alive()).toBe(0);
+    const [afterEpoch] = await superuser<{ epoch: number }[]>`SELECT session_epoch AS epoch FROM slotlock.dashboard_people WHERE person_ref = ${PERSON}`;
+    expect(afterEpoch?.epoch).not.toBe(before?.epoch);
+    expect((await customerAudit(PERSON)).at(-1)).toMatchObject({ action: 'staff.sessions_ended', target_ref: 'all' });
+    // A team or an organization has no sessions of its own: refused.
+    expect((await send(browser, '/accounts/team%3Anone/sessions/end', { csrf, session: 'all', reason: 'x' })).headers.get('location')).toBe(
+      '/accounts/team%3Anone?error=invalid',
+    );
+  });
+
+  it('opens, links, works and closes an abuse case, with its history from the staff log', async () => {
+    const browser = browsers.owner();
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    const csrf = await tokenOn(browser, '/cases');
+    const opened = await send(browser, '/cases', {
+      csrf, account: PERSON, source: 'report', summary: 'Card testing through the booking API', section: '2.3 Fraud',
+      evidence: 'Report from a card issuer.\nRequest ids: 1, 2, 3.',
+    });
+    expect(opened.status).toBe(303);
+    const location = opened.headers.get('location') ?? '';
+    expect(location).toMatch(/^\/cases\/\d+\?done=case_opened$/);
+    const id = /^\/cases\/(\d+)/.exec(location)?.[1] ?? '';
+
+    // Suspending from the account page, linked to the case, records it on the case.
+    const page = await (await browser.request(accountPath)).text();
+    expect(page).toContain(`<option value="${id}">#${id} Card testing through the booking API</option>`);
+    await send(browser, `${accountPath}/suspend`, { csrf, reason: 'Card testing', case: id });
+    const shown = await (await browser.request(`/cases/${id}`)).text();
+    expect(shown).toContain('Report from a card issuer.\nRequest ids: 1, 2, 3.');
+    expect(shown).toContain('account.suspended');
+    expect(shown).toContain('case.opened');
+    expect(shown).toMatch(/<dt>Done<\/dt><dd>Suspended<\/dd>/);
+
+    const closed = await send(browser, `/cases/${id}`, { csrf, status: 'closed', action: 'suspended', outcome: 'Suspended; the card issuer was told.' });
+    expect(closed.headers.get('location')).toBe(`/cases/${id}?done=case_updated`);
+    const [row] = await superuser<{ status: string; closed_by: string; outcome: string }[]>`
+      SELECT status, closed_by, outcome FROM slotlock.abuse_cases WHERE id = ${id}`;
+    expect(row).toEqual({ status: 'closed', closed_by: 'github:1001', outcome: 'Suspended; the card issuer was told.' });
+    expect(await (await browser.request('/cases')).text()).not.toContain(`/cases/${id}"`);
+    expect(await (await browser.request('/cases?status=closed')).text()).toContain(`/cases/${id}"`);
+    expect(await (await browser.request('/')).text()).not.toContain('open case');
+    // A made-up status is refused, and an unknown case is not found.
+    expect((await send(browser, `/cases/${id}`, { csrf, status: 'deleted', action: 'none' })).headers.get('location')).toBe(
+      `/cases/${id}?error=invalid`,
+    );
+    expect((await browser.request('/cases/999999')).status).toBe(404);
+    await asOwner((tx) => tx`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref = ${PERSON}`);
+  });
+
+  it('keeps actions to the roles that may take them, and the passkey step to this console', async () => {
+    await asOwner((tx) => tx`SELECT slotlock.staff_add('github:1004', 'billing', 'cli:ops', ${sha('billing-code')}, ${new Date(Date.now() + 86_400_000)})`);
+    PEOPLE['code-billing'] = { id: 1004, login: 'octo-billing' };
+    const { browser: billing } = await fullySignedIn('code-billing', 'billing-code');
+    const page = await (await billing.request(accountPath)).text();
+    expect(page).not.toContain('Danger zone');
+    expect(page).not.toContain('/notes"');
+    expect(page).not.toContain('/keys/revoke"');
+    expect((await billing.request('/cases')).status).toBe(403);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1] ?? '';
+    expect((await send(billing, `${accountPath}/suspend`, { csrf, reason: 'No' })).status).toBe(403);
+    expect((await send(billing, `${accountPath}/notes`, { csrf, note: 'No' })).status).toBe(403);
+    expect(await log('github:1004')).toContain('page.refused');
+    // The database holds the same line, whatever the console sends.
+    await expect(adminSql`SELECT slotlock.admin_suspend('github:1004', ${PERSON}, 'No', NULL, NULL)`).rejects.toMatchObject({ code: '42501' });
+    // A form body that is not a form is refused.
+    expect((await billing.request(`${accountPath}/notes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(400);
+    // After the passkey, the browser goes back to a page of this console, never another site.
+    for (const next of ['//evil.example/', '/\\evil.example', 'https://evil.example/']) {
+      const passkey = await (await billing.request(`/passkey?${new URLSearchParams({ next }).toString()}`)).text();
+      expect(passkey).toContain('data-next="/"');
+    }
+  });
+
   it('refuses a session cookie that was changed, that sat idle, or whose member was removed', async () => {
     const browser = browsers.owner();
     await browser.signIn('code-owner');

@@ -21,12 +21,13 @@ export const SLOTLOCK_STAFF_ROLES = Object.freeze(['owner', 'support', 'billing'
 export type SlotlockStaffRole = (typeof SLOTLOCK_STAFF_ROLES)[number];
 
 /**
- * What each role may do in Phase 1 (RFC 0006, 4.3). The database checks the same map
- * (slotlock.staff_require), so the console and the database cannot disagree.
+ * What each role may do (RFC 0006, 4.3). `accounts.act` ends sessions, revokes keys and writes
+ * notes; `safety.act` suspends, lifts suspensions and works abuse cases. The database checks the
+ * same map (slotlock.staff_require), so the console and the database cannot disagree.
  */
 export const SLOTLOCK_STAFF_CAPABILITIES = Object.freeze({
-  owner: ['home', 'accounts.read', 'staff.read', 'staff.log'],
-  support: ['home', 'accounts.read'],
+  owner: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'staff.read', 'staff.log'],
+  support: ['home', 'accounts.read', 'accounts.act', 'safety.act'],
   billing: ['home', 'accounts.read'],
   editor: ['home'],
   viewer: ['home'],
@@ -48,11 +49,19 @@ export const SLOTLOCK_STAFF_ENROLLMENT_DAYS = 2;
 export const SLOTLOCK_STAFF_MAX_PASSKEYS = 10;
 /** Rows one console call returns at most. */
 export const SLOTLOCK_ADMIN_PAGE_LIMIT = 100;
+/** Where an abuse case came from: a report (abuse@) or staff who saw something. */
+export const SLOTLOCK_CASE_SOURCES = Object.freeze(['report', 'staff'] as const);
+/** What was done about a case. */
+export const SLOTLOCK_CASE_ACTIONS = Object.freeze(['none', 'warned', 'keys_revoked', 'suspended', 'other'] as const);
+/** Longest internal note on an account, in characters. */
+export const SLOTLOCK_STAFF_NOTE_MAX = 2000;
 
 export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'staff_members',
   'staff_passkeys',
   'staff_audit_events',
+  'account_notes',
+  'abuse_cases',
 ] as const);
 
 /** The SECURITY DEFINER functions the console's role executes, and nothing else. */
@@ -70,6 +79,17 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_passkeys(text)',
   'slotlock.admin_passkey_enroll(text, bytea, bytea, bytea, integer, bigint, text)',
   'slotlock.admin_passkey_used(text, bytea, bigint)',
+  'slotlock.admin_suspend(text, text, text, text, bigint)',
+  'slotlock.admin_unsuspend(text, text, text)',
+  'slotlock.admin_revoke_key(text, text, uuid, text)',
+  'slotlock.admin_account_sessions(text, text)',
+  'slotlock.admin_end_sessions(text, text, text, text)',
+  'slotlock.admin_account_notes(text, text)',
+  'slotlock.admin_add_note(text, text, text)',
+  'slotlock.admin_case_open(text, text, text, text, text, text)',
+  'slotlock.admin_case_update(text, bigint, text, text, text)',
+  'slotlock.admin_cases(text, text, text, bigint, integer)',
+  'slotlock.admin_case(text, bigint)',
 ] as const);
 
 /** Functions only the deployment role runs (`slotlock staff …`): granted to no role. */
@@ -78,6 +98,7 @@ export const SLOTLOCK_STAFF_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.staff_set_role(text, text, text)',
   'slotlock.staff_reset(text, text, bytea, timestamptz)',
   'slotlock.staff_remove(text, text)',
+  'slotlock.staff_operator_record(text, text, text, text)',
 ] as const);
 
 /** Internal helpers the functions above call; executable by their owner only. */
@@ -85,6 +106,9 @@ const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_log(text, text, text, text, text, jsonb)',
   'slotlock.staff_require(text, text)',
   'slotlock.staff_directory()',
+  'slotlock.staff_account_known(text)',
+  'slotlock.staff_reason_valid(text)',
+  'slotlock.staff_customer_audit(text, text, text, text, text, text)',
 ] as const;
 
 const roleList = SLOTLOCK_STAFF_ROLES.map((role) => `'${role}'`).join(', ');
@@ -92,8 +116,472 @@ const capabilityCase = SLOTLOCK_STAFF_ROLES.map(
   (role) =>
     `      WHEN '${role}' THEN ARRAY[${SLOTLOCK_STAFF_CAPABILITIES[role].map((capability) => `'${capability}'`).join(', ')}]::text[]`,
 ).join('\n');
+const caseSources = SLOTLOCK_CASE_SOURCES.map((value) => `'${value}'`).join(', ');
+const caseActions = SLOTLOCK_CASE_ACTIONS.map((value) => `'${value}'`).join(', ');
+/** Text that may span lines: no control characters but newlines and tabs. */
+const multiline = (column: string) => `translate(${column}, E'\\n\\r\\t', '') !~ '[[:cntrl:]]'`;
 const monthStart = `date_trunc('month', statement_timestamp() AT TIME ZONE 'UTC')::date`;
 const today = `(statement_timestamp() AT TIME ZONE 'UTC')::date`;
+
+/**
+ * Phase 2 (RFC 0006): what support may do to an account. Every action is written twice, in the same
+ * transaction: in the staff log, and in the account's own audit log as "Slotlock staff (<role>)"
+ * with the reason, so the customer sees what staff did (E8).
+ */
+const STAFF_SUPPORT_DDL = `
+-- Internal notes on an account, by staff and for staff: never shown to the customer.
+CREATE TABLE IF NOT EXISTS slotlock.account_notes (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_ref text NOT NULL,
+  staff_ref text NOT NULL,
+  body text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_account_notes_valid CHECK (
+    octet_length(account_ref) BETWEEN 1 AND 500
+    AND staff_ref ~ '${STAFF_ACTOR_PATTERN}'
+    AND char_length(body) BETWEEN 1 AND ${SLOTLOCK_STAFF_NOTE_MAX}
+    AND ${multiline('body')}
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_account_notes_account_idx ON slotlock.account_notes (account_ref, id DESC);
+ALTER TABLE slotlock.account_notes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.account_notes FROM PUBLIC;
+
+-- Trust and safety cases (M6): a report or something staff saw, the Acceptable Use Policy section,
+-- the evidence, what was done and how it ended. An account may be named later.
+CREATE TABLE IF NOT EXISTS slotlock.abuse_cases (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_ref text,
+  source text NOT NULL,
+  summary text NOT NULL,
+  policy_section text,
+  evidence text,
+  action_taken text NOT NULL DEFAULT 'none',
+  outcome text,
+  status text NOT NULL DEFAULT 'open',
+  opened_by text NOT NULL,
+  opened_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  closed_by text,
+  closed_at timestamptz,
+  CONSTRAINT slotlock_abuse_cases_valid CHECK (
+    (account_ref IS NULL OR octet_length(account_ref) BETWEEN 1 AND 500)
+    AND source IN (${caseSources})
+    AND char_length(summary) BETWEEN 1 AND 200 AND summary !~ '[[:cntrl:]]'
+    AND (policy_section IS NULL OR (char_length(policy_section) BETWEEN 1 AND 100
+                                    AND policy_section !~ '[[:cntrl:]]'))
+    AND (evidence IS NULL OR (char_length(evidence) BETWEEN 1 AND 4000 AND ${multiline('evidence')}))
+    AND action_taken IN (${caseActions})
+    AND (outcome IS NULL OR (char_length(outcome) BETWEEN 1 AND 1000 AND ${multiline('outcome')}))
+    AND status IN ('open', 'closed')
+    AND opened_by ~ '${STAFF_ACTOR_PATTERN}'
+    AND (closed_by IS NULL OR closed_by ~ '${STAFF_ACTOR_PATTERN}')
+    AND (status = 'closed') = (closed_at IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_abuse_cases_status_idx ON slotlock.abuse_cases (status, id DESC);
+CREATE INDEX IF NOT EXISTS slotlock_abuse_cases_account_idx ON slotlock.abuse_cases (account_ref, id DESC);
+ALTER TABLE slotlock.abuse_cases ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.abuse_cases FROM PUBLIC;
+
+-- A case's history is the staff log's events about it (target case:<id>).
+CREATE INDEX IF NOT EXISTS slotlock_staff_audit_events_target_idx
+  ON slotlock.staff_audit_events (target, chain_index) WHERE target IS NOT NULL;
+
+-- An account staff act on must exist: an error (22023) for a reference no account has.
+CREATE OR REPLACE FUNCTION slotlock.staff_account_known(account text)
+RETURNS void
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_account_known$
+BEGIN
+  IF account IS NULL OR NOT EXISTS (SELECT 1 FROM slotlock.staff_directory() listed WHERE listed.account_ref = account) THEN
+    RAISE EXCEPTION 'admin_account_unknown' USING ERRCODE = '22023';
+  END IF;
+END
+$slotlock_staff_account_known$;
+
+-- Every staff action carries a reason the customer may read: 1-200 bytes, one line.
+CREATE OR REPLACE FUNCTION slotlock.staff_reason_valid(why text)
+RETURNS void
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_reason_valid$
+BEGIN
+  IF why IS NULL OR octet_length(why) NOT BETWEEN 1 AND 200 OR why ~ '[[:cntrl:]]' THEN
+    RAISE EXCEPTION 'admin_reason_invalid' USING ERRCODE = '22023';
+  END IF;
+END
+$slotlock_staff_reason_valid$;
+
+-- What staff did, in the account's own audit log (E8): by "Slotlock staff" and the role
+-- (slotlock-staff:<role>, or slotlock-staff:operator for a deployment-role command), with the
+-- reason (cut to fit the log's 200 bytes). Written under the account's row security, then the
+-- setting is put back.
+CREATE OR REPLACE FUNCTION slotlock.staff_customer_audit(actor text, account text, happened text, kind text, target text, why text)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_customer_audit$
+DECLARE
+  previous text := current_setting('slotlock.tenant_ref', true);
+  label text;
+BEGIN
+  IF actor LIKE 'cli:%' THEN
+    label := 'operator';
+  ELSE
+    SELECT member.role INTO label FROM slotlock.staff_members member WHERE member.staff_ref = actor;
+  END IF;
+  PERFORM set_config('slotlock.tenant_ref', account, true);
+  INSERT INTO slotlock.audit_events (tenant_ref, action, actor_type, actor_ref, target_type, target_ref, reason)
+  VALUES (account, happened, 'system', 'slotlock-staff:' || coalesce(label, 'staff'), kind, target,
+          CASE WHEN why IS NULL OR why = '' THEN NULL
+               WHEN octet_length(why) <= 200 THEN why
+               ELSE left(why, 49) || '…' END);
+  PERFORM set_config('slotlock.tenant_ref', coalesce(previous, ''), true);
+END
+$slotlock_staff_customer_audit$;
+
+-- Suspend an account (safety.act): from the next request it changes nothing, and its keys are
+-- refused, as slotlock tenant suspend does. The reason goes to the staff log and the account's audit
+-- log; the message, if any, is shown on every page of its dashboard. Linked to a case, the case
+-- records the suspension. False when it was suspended already.
+CREATE OR REPLACE FUNCTION slotlock.admin_suspend(actor text, account text, why text, message text, case_id bigint)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_suspend$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'safety.act');
+  PERFORM slotlock.staff_account_known(account);
+  PERFORM slotlock.staff_reason_valid(why);
+  IF message IS NOT NULL AND (char_length(message) NOT BETWEEN 1 AND 500 OR message ~ '[[:cntrl:]]') THEN
+    RAISE EXCEPTION 'admin_message_invalid' USING ERRCODE = '22023';
+  END IF;
+  IF case_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM slotlock.abuse_cases opened WHERE opened.id = case_id) THEN
+    RAISE EXCEPTION 'admin_case_unknown' USING ERRCODE = '22023';
+  END IF;
+  -- As suspend_tenant: the tenant's lock and its key lock, so writes in flight finish first.
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || account, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || account, 0));
+  INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason, customer_message, suspended_by)
+  VALUES (account, why, message, actor)
+  ON CONFLICT (tenant_ref) DO NOTHING;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'account.suspended', account,
+    CASE WHEN case_id IS NULL THEN NULL ELSE 'case:' || case_id END, why,
+    jsonb_build_object('message', message IS NOT NULL));
+  PERFORM slotlock.staff_customer_audit(actor, account, 'staff.account_suspended', NULL, NULL, why);
+  IF case_id IS NOT NULL THEN
+    UPDATE slotlock.abuse_cases opened
+       SET action_taken = 'suspended', account_ref = coalesce(opened.account_ref, account),
+           updated_at = statement_timestamp()
+     WHERE opened.id = case_id;
+  END IF;
+  RETURN true;
+END
+$slotlock_admin_suspend$;
+
+-- Lift an account's suspension, whoever made it (safety.act). False when it was not suspended.
+CREATE OR REPLACE FUNCTION slotlock.admin_unsuspend(actor text, account text, why text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_unsuspend$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'safety.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || account, 0));
+  DELETE FROM slotlock.tenant_suspensions held WHERE held.tenant_ref = account;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'account.unsuspended', account, NULL, why, '{}'::jsonb);
+  PERFORM slotlock.staff_customer_audit(actor, account, 'staff.account_unsuspended', NULL, NULL, why);
+  RETURN true;
+END
+$slotlock_admin_unsuspend$;
+
+-- Revoke one of an account's API keys (accounts.act): refused from its next request, as when its
+-- owner revokes it. False when the account has no such key, or it was revoked already.
+CREATE OR REPLACE FUNCTION slotlock.admin_revoke_key(actor text, account text, key_id uuid, why text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_revoke_key$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || account, 0));
+  UPDATE slotlock.api_keys minted SET revoked_at = now()
+   WHERE minted.tenant_ref = account AND minted.id = key_id AND minted.revoked_at IS NULL;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'account.key_revoked', account, 'api_key:' || key_id, why, '{}'::jsonb);
+  PERFORM slotlock.staff_customer_audit(actor, account, 'staff.key_revoked', 'api_key', key_id::text, why);
+  RETURN true;
+END
+$slotlock_admin_revoke_key$;
+
+-- A person's dashboard sessions still going, most recently seen first: each named by the first 8
+-- bytes of its digest, with when it began and was last seen. Not where from, nor which browser.
+CREATE OR REPLACE FUNCTION slotlock.admin_account_sessions(actor text, account text)
+RETURNS TABLE (handle text, started_at timestamptz, last_seen_at timestamptz, expires_at timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_account_sessions$
+#variable_conflict use_column
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  PERFORM slotlock.staff_log(actor, 'account.sessions_viewed', account, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT encode(substr(kept.sid_sha256, 1, 8), 'hex'), kept.started_at, kept.last_seen_at, kept.expires_at
+    FROM slotlock.dashboard_sessions kept
+   WHERE kept.person_ref = account AND kept.ended_at IS NULL AND kept.expires_at > statement_timestamp()
+   ORDER BY kept.last_seen_at DESC
+   LIMIT 50;
+END
+$slotlock_admin_account_sessions$;
+
+-- Sign a person out (accounts.act): one session by its handle, or every one with NULL, which also
+-- draws a new session epoch, as Sign out everywhere does. How many recorded sessions ended.
+CREATE OR REPLACE FUNCTION slotlock.admin_end_sessions(actor text, account text, handle text, why text)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_end_sessions$
+DECLARE
+  ended integer;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  IF account IS NULL OR account !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    RAISE EXCEPTION 'admin_not_a_person' USING ERRCODE = '22023';
+  END IF;
+  IF handle IS NOT NULL AND handle !~ '^[0-9a-f]{16}$' THEN
+    RAISE EXCEPTION 'admin_session_invalid' USING ERRCODE = '22023';
+  END IF;
+  PERFORM slotlock.staff_account_known(account);
+  UPDATE slotlock.dashboard_sessions ending SET ended_at = statement_timestamp()
+   WHERE ending.person_ref = account AND ending.ended_at IS NULL
+     AND (handle IS NULL OR encode(substr(ending.sid_sha256, 1, 8), 'hex') = handle);
+  GET DIAGNOSTICS ended = ROW_COUNT;
+  IF handle IS NULL THEN
+    PERFORM slotlock.dashboard_sign_out_everywhere(account);
+  ELSIF ended = 0 THEN
+    RETURN 0;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'account.sessions_ended', account, coalesce('session:' || handle, 'sessions:all'),
+    why, jsonb_build_object('ended', ended));
+  PERFORM slotlock.staff_customer_audit(actor, account, 'staff.sessions_ended', 'session', coalesce(handle, 'all'), why);
+  RETURN ended;
+END
+$slotlock_admin_end_sessions$;
+
+-- An account's internal notes, newest first.
+CREATE OR REPLACE FUNCTION slotlock.admin_account_notes(actor text, account text)
+RETURNS TABLE (id bigint, staff_ref text, body text, created_at timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_account_notes$
+#variable_conflict use_column
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  PERFORM slotlock.staff_log(actor, 'account.notes_viewed', account, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT kept.id, kept.staff_ref, kept.body, kept.created_at FROM slotlock.account_notes kept
+   WHERE kept.account_ref = account
+   ORDER BY kept.id DESC
+   LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT};
+END
+$slotlock_admin_account_notes$;
+
+-- Add an internal note to an account (accounts.act). The log records that a note was added, not
+-- what it says. The note's id.
+CREATE OR REPLACE FUNCTION slotlock.admin_add_note(actor text, account text, note_text text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_add_note$
+DECLARE
+  added bigint;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.act');
+  PERFORM slotlock.staff_account_known(account);
+  IF note_text IS NULL OR char_length(note_text) NOT BETWEEN 1 AND ${SLOTLOCK_STAFF_NOTE_MAX}
+     OR NOT (${multiline('note_text')}) THEN
+    RAISE EXCEPTION 'admin_note_invalid' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO slotlock.account_notes (account_ref, staff_ref, body) VALUES (account, actor, note_text)
+  RETURNING account_notes.id INTO added;
+  PERFORM slotlock.staff_log(actor, 'account.note_added', account, 'note:' || added, NULL, '{}'::jsonb);
+  RETURN added;
+END
+$slotlock_admin_add_note$;
+
+-- Open a case (safety.act), about an account or not yet. The case's id.
+CREATE OR REPLACE FUNCTION slotlock.admin_case_open(actor text, account text, case_source text, case_summary text,
+                                                    case_section text, case_evidence text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_case_open$
+DECLARE
+  opened bigint;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'safety.act');
+  IF account IS NOT NULL THEN
+    PERFORM slotlock.staff_account_known(account);
+  END IF;
+  BEGIN
+    INSERT INTO slotlock.abuse_cases (account_ref, source, summary, policy_section, evidence, opened_by)
+    VALUES (account, case_source, case_summary, nullif(case_section, ''), nullif(case_evidence, ''), actor)
+    RETURNING abuse_cases.id INTO opened;
+  EXCEPTION WHEN check_violation OR not_null_violation THEN
+    RAISE EXCEPTION 'admin_case_invalid' USING ERRCODE = '22023';
+  END;
+  PERFORM slotlock.staff_log(actor, 'case.opened', account, 'case:' || opened, NULL,
+    jsonb_build_object('source', case_source));
+  RETURN opened;
+END
+$slotlock_admin_case_open$;
+
+-- Change a case (safety.act): its status, what was done, how it ended; a NULL keeps what is there.
+-- Closing records who and when; reopening clears it. False for no such case.
+CREATE OR REPLACE FUNCTION slotlock.admin_case_update(actor text, case_id bigint, new_status text, new_action text,
+                                                      new_outcome text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_case_update$
+DECLARE
+  was text;
+  account text;
+  now_status text;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'safety.act');
+  SELECT opened.status, opened.account_ref INTO was, account FROM slotlock.abuse_cases opened
+   WHERE opened.id = case_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  now_status := coalesce(new_status, was);
+  BEGIN
+    UPDATE slotlock.abuse_cases opened
+       SET status = now_status,
+           action_taken = coalesce(new_action, opened.action_taken),
+           outcome = coalesce(nullif(new_outcome, ''), opened.outcome),
+           updated_at = statement_timestamp(),
+           closed_at = CASE WHEN now_status = 'closed' THEN coalesce(opened.closed_at, statement_timestamp()) END,
+           closed_by = CASE WHEN now_status = 'closed' THEN coalesce(opened.closed_by, actor) END
+     WHERE opened.id = case_id;
+  EXCEPTION WHEN check_violation THEN
+    RAISE EXCEPTION 'admin_case_invalid' USING ERRCODE = '22023';
+  END;
+  PERFORM slotlock.staff_log(actor,
+    CASE WHEN was = 'open' AND now_status = 'closed' THEN 'case.closed'
+         WHEN was = 'closed' AND now_status = 'open' THEN 'case.reopened'
+         ELSE 'case.updated' END,
+    account, 'case:' || case_id, NULL,
+    jsonb_strip_nulls(jsonb_build_object('status', now_status, 'action', new_action)));
+  RETURN true;
+END
+$slotlock_admin_case_update$;
+
+-- Cases, newest first, a page at a time (after: a case id): open, closed or all, for one account
+-- or every one.
+CREATE OR REPLACE FUNCTION slotlock.admin_cases(actor text, status_filter text, account text, after bigint, page_size integer)
+RETURNS TABLE (id bigint, account_ref text, source text, summary text, policy_section text, action_taken text,
+               status text, opened_by text, opened_at timestamptz, updated_at timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_cases$
+#variable_conflict use_column
+DECLARE
+  shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'safety.act');
+  PERFORM slotlock.staff_log(actor, 'cases.listed', account, NULL, NULL,
+    jsonb_strip_nulls(jsonb_build_object('status', status_filter)));
+  RETURN QUERY
+  SELECT opened.id, opened.account_ref, opened.source, opened.summary, opened.policy_section, opened.action_taken,
+         opened.status, opened.opened_by, opened.opened_at, opened.updated_at
+    FROM slotlock.abuse_cases opened
+   WHERE (status_filter IS NULL OR opened.status = status_filter)
+     AND (account IS NULL OR opened.account_ref = account)
+     AND (after IS NULL OR opened.id < after)
+   ORDER BY opened.id DESC
+   LIMIT shown;
+END
+$slotlock_admin_cases$;
+
+-- One case, with its evidence and outcome, and its history from the staff log. NULL for no such
+-- case.
+CREATE OR REPLACE FUNCTION slotlock.admin_case(actor text, case_id bigint)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_case$
+DECLARE
+  result jsonb;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'safety.act');
+  SELECT to_jsonb(opened) || jsonb_build_object('history', (
+           SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'occurred_at', event.occurred_at, 'staff_ref', event.staff_ref, 'action', event.action,
+                    'reason', event.reason) ORDER BY event.chain_index), '[]'::jsonb)
+             FROM slotlock.staff_audit_events event WHERE event.target = 'case:' || case_id))
+    INTO result
+    FROM slotlock.abuse_cases opened WHERE opened.id = case_id;
+  PERFORM slotlock.staff_log(actor, CASE WHEN result IS NULL THEN 'case.not_found' ELSE 'case.viewed' END,
+    result ->> 'account_ref', 'case:' || case_id, NULL, '{}'::jsonb);
+  RETURN result;
+END
+$slotlock_admin_case$;
+
+-- What a deployment-role command did (slotlock tenant suspend, unsuspend and erase, slotlock plan
+-- default), by cli:<user>: in the staff log, and for a suspension or its end in the account's own
+-- audit log too. Deployment role only; the CLI calls it in the command's transaction where it can.
+CREATE OR REPLACE FUNCTION slotlock.staff_operator_record(actor text, happened text, account text, why text)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_operator_record$
+BEGIN
+  IF actor IS NULL OR actor !~ '^cli:[a-z_][a-z0-9_.-]{0,63}$' THEN
+    RAISE EXCEPTION 'staff_operator_invalid' USING ERRCODE = '22023';
+  END IF;
+  IF happened NOT IN ('account.suspended', 'account.unsuspended', 'account.erased', 'plan.default_set',
+                      'plan.default_removed') THEN
+    RAISE EXCEPTION 'staff_operator_action' USING ERRCODE = '22023';
+  END IF;
+  PERFORM slotlock.staff_log(actor, happened, account, NULL, nullif(left(why, 500), ''), '{}'::jsonb);
+  IF happened = 'account.suspended' THEN
+    UPDATE slotlock.tenant_suspensions held SET suspended_by = coalesce(held.suspended_by, actor)
+     WHERE held.tenant_ref = account;
+    PERFORM slotlock.staff_customer_audit(actor, account, 'staff.account_suspended', NULL, NULL, why);
+  ELSIF happened = 'account.unsuspended' THEN
+    PERFORM slotlock.staff_customer_audit(actor, account, 'staff.account_unsuspended', NULL, NULL, why);
+  END IF;
+END
+$slotlock_staff_operator_record$;
+`;
 
 export const SLOTLOCK_STAFF_DDL = `
 -- Staff (RFC 0006): who may use the admin console, as which role. Added, changed and removed only
@@ -387,7 +875,8 @@ BEGIN
     'operations_last_month', (SELECT coalesce(sum(count), 0) FROM usage WHERE day < month_start AND metric = 'operations'),
     'bookings_last_month', (SELECT coalesce(sum(count), 0) FROM usage WHERE day < month_start AND metric = 'bookings'),
     'signups', (SELECT coalesce(jsonb_agg(jsonb_build_object('day', day, 'count', added) ORDER BY day), '[]'::jsonb) FROM signups),
-    'staff', (SELECT count(*) FROM slotlock.staff_members member WHERE member.status = 'active')
+    'staff', (SELECT count(*) FROM slotlock.staff_members member WHERE member.status = 'active'),
+    'cases_open', (SELECT count(*) FROM slotlock.abuse_cases opened WHERE opened.status = 'open')
   ) INTO result;
   PERFORM slotlock.staff_log(actor, 'home.viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN result;
@@ -495,7 +984,11 @@ BEGIN
       'webhook_endpoints', planned.max_webhook_endpoints) END,
     'partner', partner.partner_id,
     'suspended', held.tenant_ref IS NOT NULL, 'suspended_at', held.suspended_at,
-    'suspension_reason', held.reason,
+    'suspension_reason', held.reason, 'suspension_message', held.customer_message,
+    'suspended_by', held.suspended_by,
+    'cases_open', (SELECT count(*) FROM slotlock.abuse_cases opened
+                    WHERE opened.account_ref = listed.account_ref AND opened.status = 'open'),
+    'notes', (SELECT count(*) FROM slotlock.account_notes kept WHERE kept.account_ref = listed.account_ref),
     'team_status', team.status,
     'last_active', (SELECT max(used.day) FROM slotlock.usage_daily used WHERE used.tenant_ref = listed.account_ref),
     'members', (SELECT count(*) FROM slotlock.workspace_memberships member
@@ -830,6 +1323,7 @@ BEGIN
 END
 $slotlock_staff_remove$;
 
+${STAFF_SUPPORT_DDL}
 ${[...STAFF_HELPER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS]
   .map((signature) => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`)
   .join('\n')}

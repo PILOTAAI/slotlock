@@ -12,6 +12,8 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
 import {
+  SLOTLOCK_CASE_ACTIONS,
+  SLOTLOCK_STAFF_NOTE_MAX,
   SLOTLOCK_STAFF_ROLES,
   type SlotlockStaffCapability,
   type SlotlockStaffRole,
@@ -26,7 +28,7 @@ import {
   verifySlotlockPasskeyRegistration,
 } from './webauthn.js';
 import {
-  type Html,
+  Html,
   SLOTLOCK_ADMIN_CSS,
   SLOTLOCK_ADMIN_JS,
   SLOTLOCK_ADMIN_PASSKEY_JS,
@@ -78,6 +80,54 @@ const PAGE = 50;
 const GITHUB_CACHE_MS = 60 * 60 * 1000;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
+/** A person's account, whose dashboard sessions staff can see and end. */
+const PERSON_REF = /^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A page the passkey step may send the browser back to: this console's own path, never another site. */
+const LOCAL_PATH = /^\/(?![/\\])[^\s]*$/;
+
+interface Notice {
+  kind: 'done' | 'warn';
+  text: string;
+}
+
+/** What an action did, by the code it returns with (?done= or ?error=). */
+const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
+  suspended: { kind: 'done', text: 'Suspended. From its next request it changes nothing and its keys are refused.' },
+  already_suspended: { kind: 'warn', text: 'It was suspended already. Nothing changed.' },
+  unsuspended: { kind: 'done', text: 'Suspension lifted. It can write again, and its keys work.' },
+  not_suspended: { kind: 'warn', text: 'It was not suspended. Nothing changed.' },
+  key_revoked: { kind: 'done', text: 'Key revoked. Its next request is refused.' },
+  key_unchanged: { kind: 'warn', text: "That key was revoked already, or is not this account's." },
+  sessions_ended: { kind: 'done', text: 'Signed out.' },
+  session_gone: { kind: 'warn', text: 'That session had ended already.' },
+  note_added: { kind: 'done', text: 'Note added.' },
+  case_opened: { kind: 'done', text: 'Case opened.' },
+  case_updated: { kind: 'done', text: 'Case saved.' },
+  invalid: { kind: 'warn', text: 'Check the form: a reason is 1 to 200 characters on one line, and every required field is filled.' },
+});
+
+/** What was done about a case, in words. */
+const CASE_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  none: 'Nothing yet',
+  warned: 'Warned',
+  keys_revoked: 'Keys revoked',
+  suspended: 'Suspended',
+  other: 'Other',
+});
+
+interface CaseRow {
+  id: string;
+  account_ref: string | null;
+  source: string;
+  summary: string;
+  policy_section: string | null;
+  action_taken: string;
+  status: string;
+  opened_by: string;
+  opened_at: Date;
+  updated_at: Date;
+}
 
 interface Session {
   /** staff_ref: github:<id> */
@@ -222,19 +272,29 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const navFor = (session: Session) => [
     { href: '/', label: 'Home' },
     ...(slotlockStaffMay(session.r, 'accounts.read') ? [{ href: '/accounts', label: 'Accounts' }] : []),
+    ...(slotlockStaffMay(session.r, 'safety.act') ? [{ href: '/cases', label: 'Cases' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.read') ? [{ href: '/staff', label: 'Staff' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.log') ? [{ href: '/staff/log', label: 'Staff log' }] : []),
   ];
-  const shellOf = (session: Session, title: string, path: string, query?: string) => ({
+  const shellOf = (session: Session, title: string, path: string, query?: string, notice?: Notice) => ({
     title,
     path,
     nav: navFor(session),
     staff: { login: session.l, role: session.r },
     csrf: csrfOf(session),
     ...(query !== undefined ? { query } : {}),
+    ...(notice ? { notice } : {}),
   });
-  const page = (session: Session, title: string, path: string, body: Html, query?: string) =>
-    respond(layout(shellOf(session, title, path, query), body), 200, { 'Set-Cookie': sessionCookie(session) });
+  const page = (session: Session, title: string, path: string, body: Html, query?: string, notice?: Notice) =>
+    respond(layout(shellOf(session, title, path, query, notice), body), 200, { 'Set-Cookie': sessionCookie(session) });
+  /** What an action did, from the page it went back to: a fixed text per outcome, never the query's words. */
+  const noticeOf = (url: URL): Notice | undefined => {
+    const code = url.searchParams.get('done') ?? url.searchParams.get('error');
+    return code && Object.hasOwn(NOTICES, code) ? NOTICES[code] : undefined;
+  };
+  /** GitHub logins for staff references (github:<id>); a cli:<user> stays as it is. */
+  const staffNames = (refs: readonly string[]) =>
+    Promise.all(refs.map(async (ref) => (ref.startsWith('github:') ? ((await loginOf(ref)) ?? ref) : ref)));
 
   const kindPill = (kind: string) => pill(kind, kind === 'test' ? 'warn' : 'muted');
   const planPill = (plan: string | null) =>
@@ -254,6 +314,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const attention = [
       ...(n('suspended') > 0 ? [html`<li><a href="/accounts?status=suspended">${count(n('suspended'))} suspended ${n('suspended') === 1 ? 'account' : 'accounts'}</a> <span class="sub">Check each has a case and a reason.</span></li>`] : []),
       ...(n('past_due') > 0 ? [html`<li>${count(n('past_due'))} ${n('past_due') === 1 ? 'payment' : 'payments'} past due <span class="sub">Stripe retries; the plan ends if it fails.</span></li>`] : []),
+      ...(n('cases_open') > 0 && slotlockStaffMay(session.r, 'safety.act')
+        ? [html`<li><a href="/cases">${count(n('cases_open'))} open ${n('cases_open') === 1 ? 'case' : 'cases'}</a> <span class="sub">Each needs an action and an outcome.</span></li>`]
+        : []),
     ];
     const read = slotlockStaffMay(session.r, 'accounts.read');
     const body = html`
@@ -323,21 +386,33 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return page(session, 'Accounts', '/accounts', body, q);
   }
 
-  async function account(session: Session, ref: string): Promise<Response> {
+  async function account(session: Session, ref: string, url: URL): Promise<Response> {
     const sql = options.sql();
     const [row] = await sql<{ account: Record<string, unknown> | null }[]>`SELECT slotlock.admin_account(${session.s}, ${ref}) AS account`;
     const data = row?.account;
     if (!data) {
       return respond(layout(shellOf(session, 'Not found', '/accounts'), html`${pageHead('Accounts', 'No such account', html`No account has the reference <code>${ref}</code>.`)}`), 404, { 'Set-Cookie': sessionCookie(session) });
     }
-    const [keys, usage, audit, login] = await Promise.all([
-      sql<{ name: string; prefix: string; scopes: string[]; created_at: Date; expires_at: Date | null; last_used_at: Date | null; revoked_at: Date | null }[]>`
+    const person = PERSON_REF.test(ref);
+    const act = slotlockStaffMay(session.r, 'accounts.act');
+    const safety = slotlockStaffMay(session.r, 'safety.act');
+    const [keys, usage, audit, login, sessions, notes, cases] = await Promise.all([
+      sql<{ id: string; name: string; prefix: string; scopes: string[]; created_at: Date; expires_at: Date | null; last_used_at: Date | null; revoked_at: Date | null }[]>`
         SELECT * FROM slotlock.admin_account_keys(${session.s}, ${ref})`,
       sql<{ day: Date; metric: string; count: string }[]>`SELECT * FROM slotlock.admin_account_usage(${session.s}, ${ref}, 30)`,
       sql<{ occurred_at: Date; action: string; actor_type: string; actor_ref: string; target_type: string | null; target_ref: string | null; outcome: string; reason: string | null }[]>`
         SELECT * FROM slotlock.admin_account_audit(${session.s}, ${ref}, 50)`,
       loginOf(ref),
+      person
+        ? sql<{ handle: string; started_at: Date; last_seen_at: Date; expires_at: Date }[]>`
+            SELECT * FROM slotlock.admin_account_sessions(${session.s}, ${ref})`
+        : Promise.resolve([]),
+      sql<{ id: string; staff_ref: string; body: string; created_at: Date }[]>`SELECT * FROM slotlock.admin_account_notes(${session.s}, ${ref})`,
+      safety
+        ? sql<CaseRow[]>`SELECT * FROM slotlock.admin_cases(${session.s}, ${null}, ${ref}, ${null}, ${20})`
+        : Promise.resolve([] as CaseRow[]),
     ]);
+    const authors = await staffNames(notes.map((note) => note.staff_ref));
     const limits = (data.limits ?? null) as Record<string, number> | null;
     const monthUse = (data.usage_month ?? {}) as Record<string, number>;
     const meter = (label: string, value: number, max: number | undefined) =>
@@ -346,12 +421,25 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       usage.filter((point) => point.metric === metric).map((point) => ({ day: day(point.day), count: Number(point.count) }));
     const title = String(data.name ?? login ?? ref);
     const stripe = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
+    const base = accountHref(ref);
+    const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}">`;
+    const reasonField = (id: string, hint: string) =>
+      html`<label for="${id}">Reason <span class="hint">${hint}</span></label><input id="${id}" name="reason" required maxlength="200" autocomplete="off">`;
+    const suspended = Boolean(data.suspended);
+    const openCases = cases.filter((item) => item.status === 'open');
+    const now_ = now();
+    const activeKey = (key: { revoked_at: Date | null; expires_at: Date | null }) =>
+      !key.revoked_at && !(key.expires_at && new Date(key.expires_at).getTime() < now_);
     const body = html`
-      ${pageHead(`Account · ${String(data.kind)}`, title, html`<code>${ref}</code> <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan))} ${statusPill(Boolean(data.suspended), (data.plan_status as string | null) ?? null)}`,
-        stripe ? html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe</a>` : undefined)}
+      ${pageHead(`Account · ${String(data.kind)}`, title, html`<code>${ref}</code> <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan))} ${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
+        html`${stripe ? html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe</a>` : ''}${safety ? html`<a class="btn ${suspended ? '' : 'danger'}" href="#danger">${suspended ? 'Lift suspension' : 'Suspend'}</a>` : ''}`)}
       <div class="grid-2">
         <div>
-          ${data.suspended ? html`<p class="notice warn">Suspended ${when(data.suspended_at as string)}${data.suspension_reason ? html`: ${String(data.suspension_reason)}` : ''}. It can read, and writes nothing.</p>` : ''}
+          ${suspended
+            ? html`<div class="notice warn"><p><strong>Suspended ${when(data.suspended_at as string)}</strong>${data.suspended_by ? html` by <span class="mono">${String(data.suspended_by)}</span>` : ''}. It can read, writes nothing, and its keys are refused.</p>
+                ${data.suspension_reason ? html`<p>Reason: ${String(data.suspension_reason)}</p>` : ''}
+                ${data.suspension_message ? html`<p>The customer sees: “${String(data.suspension_message)}”</p>` : html`<p class="fine">No message for the customer.</p>`}</div>`
+            : ''}
           <h2>Use this month</h2>
           ${stats([
             { label: 'Operations', value: count(monthUse.operations ?? 0) },
@@ -361,21 +449,56 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           ])}
           <h2>Last 30 days</h2>
           ${bars('Operations', series('operations'))}
-          <h2>API keys</h2>
+          <h2 id="keys">API keys</h2>
           ${table('API keys', ['Name', 'Prefix', 'Access', 'Last used', 'State'], keys.map((key) => [
             html`${key.name}<span class="sub">Created ${day(key.created_at)}</span>`,
             html`<code>${key.prefix}</code>`,
             html`${key.scopes.join(', ')}`,
             html`${when(key.last_used_at)}`,
-            key.revoked_at ? pill('Revoked', 'muted') : key.expires_at && new Date(key.expires_at).getTime() < now() ? pill('Expired', 'muted') : pill('Active', 'good'),
+            key.revoked_at ? pill('Revoked', 'muted') : activeKey(key) ? pill('Active', 'good') : pill('Expired', 'muted'),
           ]), 'No API keys.')}
+          ${act && keys.some(activeKey)
+            ? html`<details class="act wide"><summary>Revoke a key</summary><form class="pop form" method="post" action="${base}/keys/revoke">${csrf}
+                <label for="revoke-key">Key</label><select id="revoke-key" name="key" required>${keys.filter(activeKey).map((key) => html`<option value="${key.id}">${key.prefix} · ${key.name}</option>`)}</select>
+                <p>Its next request is refused. The customer sees this in their audit log, with the reason.</p>
+                ${reasonField('revoke-reason', 'the customer sees it')}<button class="btn danger" type="submit">Revoke the key</button></form></details>`
+            : ''}
+          ${person
+            ? html`<h2 id="sessions">Dashboard sessions</h2>
+              ${table('Dashboard sessions', ['Session', 'Started', 'Last seen', 'Ends'], sessions.map((item) => [
+                html`<code>${item.handle.slice(0, 8)}</code>`,
+                html`${when(item.started_at)}`,
+                html`${when(item.last_seen_at)}`,
+                html`${when(item.expires_at)}`,
+              ]), 'No dashboard sessions going.')}
+              ${act
+                ? html`<details class="act wide"><summary>End sessions</summary><form class="pop form" method="post" action="${base}/sessions/end">${csrf}
+                    <label for="end-session">Which</label><select id="end-session" name="session">${sessions.map((item) => html`<option value="${item.handle}">${item.handle.slice(0, 8)} · last seen ${when(item.last_seen_at)}</option>`)}<option value="all">Every session, on every device</option></select>
+                    <p>Choosing every session also ends any this list misses, as Sign out everywhere does.</p>
+                    ${reasonField('end-reason', 'the customer sees it')}<button class="btn danger" type="submit">Sign out</button></form></details>`
+                : ''}`
+            : ''}
           <h2>Audit log</h2>
           ${table('Audit log', ['When', 'Action', 'By', 'Outcome'], audit.map((event) => [
             html`${when(event.occurred_at)}`,
-            html`<code>${event.action}</code>${event.target_ref ? html`<span class="sub mono">${event.target_type ?? ''} ${event.target_ref}</span>` : ''}`,
+            html`<code>${event.action}</code>${event.target_ref ? html`<span class="sub mono">${event.target_type ?? ''} ${event.target_ref}</span>` : ''}${event.reason ? html`<span class="sub">${event.reason}</span>` : ''}`,
             html`<span class="mono">${event.actor_type}</span><span class="sub mono">${event.actor_ref}</span>`,
             event.outcome === 'success' ? pill('Done', 'good') : pill(event.outcome, 'bad'),
           ]), 'Nothing in the audit log yet.')}
+          ${safety
+            ? html`<section id="danger" class="danger-zone" aria-labelledby="danger-title">
+                <h2 id="danger-title">Danger zone</h2>
+                ${suspended
+                  ? html`<form class="form" method="post" action="${base}/unsuspend">${csrf}<p>Lifting the suspension lets it write again and its keys work from the next request.</p>${reasonField('unsuspend-reason', 'the customer sees it in their audit log')}<button class="btn" type="submit">Lift the suspension</button></form>`
+                  : html`<form class="form" method="post" action="${base}/suspend">${csrf}<p>From the next request it changes nothing, and its keys are refused. It can still sign in and read.</p>
+                      ${reasonField('suspend-reason', 'the customer sees it in their audit log')}
+                      <label for="suspend-message">Message for the customer <span class="hint">optional; on every page of their dashboard</span></label><textarea id="suspend-message" name="message" rows="2" maxlength="500"></textarea>
+                      ${openCases.length
+                        ? html`<label for="suspend-case">Case</label><select id="suspend-case" name="case"><option value="">None</option>${openCases.map((item) => html`<option value="${item.id}">#${item.id} ${item.summary}</option>`)}</select>`
+                        : ''}
+                      <button class="btn danger" type="submit">Suspend this account</button></form>`}
+              </section>`
+            : ''}
         </div>
         <aside class="panel rail" aria-label="Details">
           ${meter('Resources', Number(data.resources ?? 0), limits?.resources)}
@@ -389,10 +512,108 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             ${data.current_period_end ? html`<div><dt>Paid until</dt><dd>${day(data.current_period_end as string)}</dd></div>` : ''}
             ${data.partner ? html`<div><dt>Partner</dt><dd><code>${String(data.partner)}</code></dd></div>` : ''}
           </dl>
+          ${safety
+            ? html`<h3>Cases</h3>
+              ${cases.length
+                ? html`<ul class="list">${cases.map((item) => html`<li><a href="/cases/${item.id}">#${item.id} ${item.summary}</a> ${item.status === 'open' ? pill('Open', 'warn') : pill('Closed', 'muted')}</li>`)}</ul>`
+                : html`<p class="fine">No cases.</p>`}
+              <details class="act"><summary>Open a case</summary>${caseForm(session, ref)}</details>`
+            : ''}
+          <h3>Notes</h3>
+          ${notes.length
+            ? html`<ul class="list notes">${notes.map((note, index) => html`<li><p class="pre">${note.body}</p><span class="sub">${authors[index] ?? note.staff_ref} · ${when(note.created_at)}</span></li>`)}</ul>`
+            : html`<p class="fine">No notes.</p>`}
+          ${act
+            ? html`<form class="form" method="post" action="${base}/notes">${csrf}<label for="note">Add a note <span class="hint">staff only; the customer never sees it</span></label><textarea id="note" name="note" rows="3" maxlength="${SLOTLOCK_STAFF_NOTE_MAX}" required></textarea><button class="btn" type="submit">Add note</button></form>`
+            : ''}
           <p class="fine">Booking titles, descriptions and attendees are never shown here (RFC 0006, E3).</p>
         </aside>
       </div>`;
-    return page(session, title, '/accounts', body);
+    return page(session, title, '/accounts', body, undefined, noticeOf(url));
+  }
+
+  /** The form that opens a case: about this account, or (with no account) one to name later. */
+  function caseForm(session: Session, ref: string | null): Html {
+    return html`<form class="pop form" method="post" action="/cases"><input type="hidden" name="csrf" value="${csrfOf(session)}">
+      ${ref ? html`<input type="hidden" name="account" value="${ref}">` : html`<label for="case-account">Account <span class="hint">optional</span></label><input id="case-account" name="account" maxlength="500" autocomplete="off" spellcheck="false">`}
+      <label for="case-summary">Summary</label><input id="case-summary" name="summary" required maxlength="200" autocomplete="off">
+      <label for="case-source">Came from</label><select id="case-source" name="source"><option value="report">A report (abuse@)</option><option value="staff">Something staff saw</option></select>
+      <label for="case-section">Acceptable Use Policy section <span class="hint">optional</span></label><input id="case-section" name="section" maxlength="100" autocomplete="off">
+      <label for="case-evidence">Evidence <span class="hint">optional; links, request ids, what was seen</span></label><textarea id="case-evidence" name="evidence" rows="4" maxlength="4000"></textarea>
+      <button class="btn" type="submit">Open the case</button></form>`;
+  }
+
+  async function casesPage(session: Session, url: URL): Promise<Response> {
+    const wanted = url.searchParams.get('status') ?? 'open';
+    const status = wanted === 'closed' || wanted === 'all' ? wanted : 'open';
+    const after = /^[1-9][0-9]{0,17}$/.test(url.searchParams.get('after') ?? '') ? (url.searchParams.get('after') as string) : null;
+    const rows = await options.sql()<CaseRow[]>`
+      SELECT * FROM slotlock.admin_cases(${session.s}, ${status === 'all' ? null : status}, ${null}, ${after}, ${PAGE})`;
+    const tab = (value: string, label: string) =>
+      html`<a class="tab" href="/cases?status=${value}" ${status === value ? new Html('aria-current="page"') : ''}>${label}</a>`;
+    const last = rows.at(-1)?.id;
+    const body = html`
+      ${pageHead('Trust and safety', 'Cases', 'Abuse reports and what staff saw: the policy section, the evidence, what was done and how it ended.')}
+      <nav class="tabs" aria-label="Cases">${tab('open', 'Open')}${tab('closed', 'Closed')}${tab('all', 'All')}</nav>
+      <details class="act wide"><summary>Open a case</summary>${caseForm(session, null)}</details>
+      ${table('Cases', ['Case', 'Account', 'Came from', 'Done', 'Status', 'Opened'], rows.map((item) => [
+        html`<a href="/cases/${item.id}">#${item.id} ${item.summary}</a>${item.policy_section ? html`<span class="sub">${item.policy_section}</span>` : ''}`,
+        item.account_ref ? html`<a class="mono" href="${accountHref(item.account_ref)}">${item.account_ref}</a>` : html`–`,
+        html`${item.source === 'report' ? 'A report' : 'Staff'}`,
+        html`${CASE_ACTION_WORDS[item.action_taken] ?? item.action_taken}`,
+        item.status === 'open' ? pill('Open', 'warn') : pill('Closed', 'muted'),
+        html`${day(item.opened_at)}`,
+      ]), status === 'open' ? 'No open cases.' : 'No cases.')}
+      ${rows.length === PAGE && last ? html`<p class="pager"><a class="btn" href="/cases?${new URLSearchParams({ status, after: last }).toString()}">Older</a></p>` : ''}`;
+    return page(session, 'Cases', '/cases', body, undefined, noticeOf(url));
+  }
+
+  async function casePage(session: Session, id: string, url: URL): Promise<Response> {
+    const [row] = await options.sql()<{ found: Record<string, unknown> | null }[]>`SELECT slotlock.admin_case(${session.s}, ${id}::bigint) AS found`;
+    const found = row?.found;
+    if (!found) {
+      return respond(layout(shellOf(session, 'Not found', '/cases'), pageHead('Cases', 'No such case', `There is no case #${id}.`)), 404, { 'Set-Cookie': sessionCookie(session) });
+    }
+    const history = (found.history ?? []) as { occurred_at: string; staff_ref: string; action: string; reason: string | null }[];
+    const names = await staffNames([String(found.opened_by), ...history.map((event) => event.staff_ref)]);
+    const open = found.status === 'open';
+    const account_ = typeof found.account_ref === 'string' ? found.account_ref : null;
+    const option = (value: string, label: string, current: unknown) =>
+      html`<option value="${value}" ${current === value ? html`selected` : ''}>${label}</option>`;
+    const body = html`
+      ${pageHead(`Case #${id}`, String(found.summary), html`${open ? pill('Open', 'warn') : pill('Closed', 'muted')} ${found.policy_section ? html`<span class="sub-inline">${String(found.policy_section)}</span>` : ''}`)}
+      <div class="grid-2">
+        <div>
+          <h2>Evidence</h2>
+          ${found.evidence ? html`<p class="pre panel">${String(found.evidence)}</p>` : html`<p class="empty">No evidence recorded.</p>`}
+          <h2>Outcome</h2>
+          ${found.outcome ? html`<p class="pre panel">${String(found.outcome)}</p>` : html`<p class="fine">Not decided yet.</p>`}
+          <h2>Update</h2>
+          <form class="form" method="post" action="/cases/${id}"><input type="hidden" name="csrf" value="${csrfOf(session)}">
+            <label for="case-status">Status</label><select id="case-status" name="status">${option('open', 'Open', found.status)}${option('closed', 'Closed', found.status)}</select>
+            <label for="case-action">What was done</label><select id="case-action" name="action">${SLOTLOCK_CASE_ACTIONS.map((value) => option(value, CASE_ACTION_WORDS[value] ?? value, found.action_taken))}</select>
+            <label for="case-outcome">Outcome <span class="hint">replaces the one above</span></label><textarea id="case-outcome" name="outcome" rows="3" maxlength="1000"></textarea>
+            <button class="btn" type="submit">Save</button>
+          </form>
+          <h2>History</h2>
+          ${table('History', ['When', 'Who', 'What'], history.map((event, index) => [
+            html`${when(event.occurred_at)}`,
+            html`${names[index + 1] ?? event.staff_ref}`,
+            html`<code>${event.action}</code>${event.reason ? html`<span class="sub">${event.reason}</span>` : ''}`,
+          ]), 'Nothing yet.')}
+        </div>
+        <aside class="panel rail" aria-label="Details">
+          <dl>
+            <div><dt>Account</dt><dd>${account_ ? html`<a class="mono" href="${accountHref(account_)}">${account_}</a>` : 'Not named'}</dd></div>
+            <div><dt>Came from</dt><dd>${found.source === 'report' ? 'A report' : 'Staff'}</dd></div>
+            <div><dt>Done</dt><dd>${CASE_ACTION_WORDS[String(found.action_taken)] ?? String(found.action_taken)}</dd></div>
+            <div><dt>Opened</dt><dd>${when(found.opened_at as string)}<span class="sub">${names[0] ?? String(found.opened_by)}</span></dd></div>
+            ${found.closed_at ? html`<div><dt>Closed</dt><dd>${when(found.closed_at as string)}</dd></div>` : ''}
+          </dl>
+          ${account_ ? html`<p><a class="btn" href="${accountHref(account_)}#danger">Suspend or lift on the account</a></p>` : ''}
+        </aside>
+      </div>`;
+    return page(session, `Case #${id}`, '/cases', body, undefined, noticeOf(url));
   }
 
   async function staff(session: Session): Promise<Response> {
@@ -514,7 +735,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
   async function passkeyPage(session: Session, url: URL): Promise<Response> {
     const keys = await options.sql()<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.s})`;
-    const next = (url.searchParams.get('next') ?? '/').startsWith('/') ? (url.searchParams.get('next') ?? '/') : '/';
+    const asked = url.searchParams.get('next') ?? '/';
+    const next = LOCAL_PATH.test(asked) ? asked : '/';
+    const fresh = url.searchParams.get('fresh') === '1';
     const adding = url.searchParams.get('add') === '1' && keys.length > 0;
     const enrolling = keys.length === 0 || adding;
     const body = enrolling
@@ -528,7 +751,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           <p id="passkey-unsupported" class="fine" hidden>This browser cannot use passkeys.</p>
         </form>`
       : html`<h1>Confirm it's you</h1>
-        <p>Signed in with GitHub as <strong>${session.l}</strong>. Use your passkey to open the console.</p>
+        <p>${fresh ? html`Changing an account needs your passkey in the last 15 minutes. Use it, then send the form again.` : html`Signed in with GitHub as <strong>${session.l}</strong>. Use your passkey to open the console.`}</p>
         <form id="passkey" data-purpose="get" data-next="${next}">
           <button class="btn primary" type="submit">Use passkey</button>
           <p id="passkey-status" class="fine" role="status"></p>
@@ -639,6 +862,162 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return json({ ok: true }, 200, [clear(PASSKEY_COOKIE), sessionCookie(upgraded)]);
   }
 
+  // ---------- Actions ----------
+  interface Action {
+    capability: SlotlockStaffCapability;
+    /** The page the browser goes back to, which shows what happened. */
+    back: string;
+    run(form: URLSearchParams): Promise<{ code: keyof typeof NOTICES; ok: boolean; to?: string }>;
+  }
+
+  const field = (form: URLSearchParams, name: string) => (form.get(name) ?? '').trim();
+  /** Text that may span lines, with Windows line ends made plain. */
+  const lines = (form: URLSearchParams, name: string) => field(form, name).replace(/\r\n?/g, '\n');
+  const optional = (value: string) => (value === '' ? null : value);
+
+  /** Each form's route: what it needs, where it goes back to, and the admin function it calls. */
+  function actionOf(path: string, session: Session): Action | null {
+    const sql = options.sql();
+    const onAccount = /^\/accounts\/([^/]+)\/(suspend|unsuspend|keys\/revoke|sessions\/end|notes)$/.exec(path);
+    if (onAccount) {
+      let ref: string;
+      try {
+        ref = decodeURIComponent(onAccount[1] ?? '');
+      } catch {
+        return null;
+      }
+      const back = accountHref(ref);
+      switch (onAccount[2]) {
+        case 'suspend':
+          return {
+            capability: 'safety.act',
+            back,
+            async run(form) {
+              const linked = /^[1-9][0-9]{0,17}$/.test(field(form, 'case')) ? field(form, 'case') : null;
+              const [row] = await sql<{ ok: boolean }[]>`
+                SELECT slotlock.admin_suspend(${session.s}, ${ref}, ${field(form, 'reason')}, ${optional(field(form, 'message'))}, ${linked}::bigint) AS ok`;
+              return row?.ok ? { code: 'suspended', ok: true } : { code: 'already_suspended', ok: false };
+            },
+          };
+        case 'unsuspend':
+          return {
+            capability: 'safety.act',
+            back,
+            async run(form) {
+              const [row] = await sql<{ ok: boolean }[]>`
+                SELECT slotlock.admin_unsuspend(${session.s}, ${ref}, ${field(form, 'reason')}) AS ok`;
+              return row?.ok ? { code: 'unsuspended', ok: true } : { code: 'not_suspended', ok: false };
+            },
+          };
+        case 'keys/revoke':
+          return {
+            capability: 'accounts.act',
+            back,
+            async run(form) {
+              const key = field(form, 'key');
+              if (!UUID.test(key)) return { code: 'invalid', ok: false };
+              const [row] = await sql<{ ok: boolean }[]>`
+                SELECT slotlock.admin_revoke_key(${session.s}, ${ref}, ${key}::uuid, ${field(form, 'reason')}) AS ok`;
+              return row?.ok ? { code: 'key_revoked', ok: true } : { code: 'key_unchanged', ok: false };
+            },
+          };
+        case 'sessions/end':
+          return {
+            capability: 'accounts.act',
+            back,
+            async run(form) {
+              const handle = field(form, 'session');
+              if (handle !== 'all' && !/^[0-9a-f]{16}$/.test(handle)) return { code: 'invalid', ok: false };
+              const [row] = await sql<{ ended: number }[]>`
+                SELECT slotlock.admin_end_sessions(${session.s}, ${ref}, ${handle === 'all' ? null : handle}, ${field(form, 'reason')}) AS ended`;
+              return handle !== 'all' && Number(row?.ended ?? 0) === 0
+                ? { code: 'session_gone', ok: false }
+                : { code: 'sessions_ended', ok: true };
+            },
+          };
+        default:
+          return {
+            capability: 'accounts.act',
+            back,
+            async run(form) {
+              await sql`SELECT slotlock.admin_add_note(${session.s}, ${ref}, ${lines(form, 'note')})`;
+              return { code: 'note_added', ok: true };
+            },
+          };
+      }
+    }
+    if (path === '/cases') {
+      return {
+        capability: 'safety.act',
+        back: '/cases',
+        async run(form) {
+          const [row] = await sql<{ id: string }[]>`
+            SELECT slotlock.admin_case_open(${session.s}, ${optional(field(form, 'account'))}, ${field(form, 'source')},
+              ${field(form, 'summary')}, ${optional(field(form, 'section'))}, ${optional(lines(form, 'evidence'))}) AS id`;
+          return { code: 'case_opened', ok: true, to: `/cases/${String(row?.id)}` };
+        },
+      };
+    }
+    const onCase = /^\/cases\/([1-9][0-9]{0,17})$/.exec(path);
+    if (onCase) {
+      const id = onCase[1] as string;
+      return {
+        capability: 'safety.act',
+        back: `/cases/${id}`,
+        async run(form) {
+          const status = field(form, 'status');
+          const done = field(form, 'action');
+          if (!['open', 'closed'].includes(status) || !(SLOTLOCK_CASE_ACTIONS as readonly string[]).includes(done)) {
+            return { code: 'invalid', ok: false };
+          }
+          const [row] = await sql<{ ok: boolean }[]>`
+            SELECT slotlock.admin_case_update(${session.s}, ${id}::bigint, ${status}, ${done}, ${optional(lines(form, 'outcome'))}) AS ok`;
+          return row?.ok ? { code: 'case_updated', ok: true } : { code: 'invalid', ok: false };
+        },
+      };
+    }
+    return null;
+  }
+
+  /**
+   * A form sent from a console page. The Origin was checked before this; here: a form body of a
+   * sane size, the session's token, the role, and a passkey in the last 15 minutes (RFC 0006, 4.2).
+   * Answered with a redirect to the page it came from, which says what happened (post, redirect,
+   * get), so a reload never sends it twice.
+   */
+  async function act(request: Request, session: Session, path: string): Promise<Response> {
+    const action = actionOf(path, session);
+    if (!action) return respond('Not found', 404, {}, 'text/plain; charset=utf-8');
+    if (!(request.headers.get('content-type') ?? '').startsWith('application/x-www-form-urlencoded')) {
+      return refused('Refused', 'That request was not one of this console’s forms.', 400);
+    }
+    const text = await request.text();
+    if (text.length > 16 * 1024) return refused('Too large', 'That form was too large.', 413);
+    const form = new URLSearchParams(text);
+    const token = Buffer.from(form.get('csrf') ?? '');
+    const expected = Buffer.from(csrfOf(session));
+    if (token.length !== expected.length || !timingSafeEqual(token, expected)) {
+      return refused('Refused', 'That form expired. Reload the page and send it again.');
+    }
+    if (!slotlockStaffMay(session.r, action.capability)) {
+      await record(session.s, 'page.refused', null, path.slice(0, 200));
+      return respond(layout(shellOf(session, 'Not allowed', path), pageHead('Slotlock admin', 'Not allowed', `Your role (${session.r}) does not do this.`)), 403, { 'Set-Cookie': sessionCookie(session) });
+    }
+    if (!session.pv || now() - session.pv > FRESH_MS) {
+      return redirect(`/passkey?${new URLSearchParams({ next: action.back, fresh: '1' }).toString()}`);
+    }
+    let outcome: { code: keyof typeof NOTICES; ok: boolean; to?: string };
+    try {
+      outcome = await action.run(form);
+    } catch (error) {
+      // A field the database refused (22023): say which kind of thing to fix, change nothing.
+      if ((error as { code?: unknown } | null)?.code !== '22023') throw error;
+      outcome = { code: 'invalid', ok: false };
+    }
+    const to = outcome.to ?? action.back;
+    return redirect(`${to}?${new URLSearchParams({ [outcome.ok ? 'done' : 'error']: outcome.code }).toString()}`, [sessionCookie(session)]);
+  }
+
   // ---------- Routing ----------
   const needs: Record<string, SlotlockStaffCapability> = {
     '/': 'home',
@@ -646,6 +1025,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     '/search': 'accounts.read',
     '/staff': 'staff.read',
     '/staff/log': 'staff.log',
+    '/cases': 'safety.act',
   };
 
   async function handle(request: Request): Promise<Response> {
@@ -713,10 +1093,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
     // Lock 3: a passkey, before any page with data.
     if (session.st !== 'full') return redirect(`/passkey?${new URLSearchParams({ next: path }).toString()}`);
-    if (request.method !== 'GET') return respond('Not found', 404, {}, 'text/plain; charset=utf-8');
+    if (request.method === 'POST') return act(request, session, path);
 
     const accountMatch = /^\/accounts\/([^/]+)$/.exec(path);
-    const capability = accountMatch ? 'accounts.read' : needs[path];
+    const caseMatch = /^\/cases\/([1-9][0-9]{0,17})$/.exec(path);
+    const capability = accountMatch ? 'accounts.read' : caseMatch ? 'safety.act' : needs[path];
     if (!capability) {
       return respond(layout(shellOf(session, 'Not found', path), pageHead('Slotlock admin', 'Not found', 'There is no page at this address.')), 404, { 'Set-Cookie': sessionCookie(session) });
     }
@@ -731,8 +1112,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       } catch {
         return refused('Not found', 'That account reference is not valid.', 404);
       }
-      return account(session, ref);
+      return account(session, ref, url);
     }
+    if (caseMatch) return casePage(session, caseMatch[1] as string, url);
+    if (path === '/cases') return casesPage(session, url);
     if (path === '/') return home(session);
     if (path === '/accounts') return accounts(session, url);
     if (path === '/search') return search(session, url);
