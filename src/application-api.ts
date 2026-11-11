@@ -27,7 +27,12 @@ import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_SOURCE_BUSY_MAX } from './rules.js';
-import { SLOTLOCK_SUBJECT_TABLES, type SlotlockSubjectTable } from './types.js';
+import {
+  SLOTLOCK_SUBJECT_TABLES,
+  SLOTLOCK_TENANT_EXPORT_LEFT_OUT,
+  SLOTLOCK_TENANT_EXPORT_TABLES,
+  type SlotlockSubjectTable,
+} from './types.js';
 import {
   SLOTLOCK_GROUPING_REF,
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
@@ -124,6 +129,11 @@ export type SlotlockApplicationOperation =
   | 'slotlock_verify_audit_log'
   | 'slotlock_export_subject'
   | 'slotlock_erase_subject'
+  | 'slotlock_create_tenant_export'
+  | 'slotlock_list_tenant_exports'
+  | 'slotlock_get_tenant_export'
+  | 'slotlock_get_tenant_export_part'
+  | 'slotlock_delete_tenant_export'
   | 'slotlock_list_approval_policies'
   | 'slotlock_put_approval_policy'
   | 'slotlock_delete_approval_policy'
@@ -173,6 +183,8 @@ export interface SlotlockApplicationInvocationContext {
  */
 const NOT_DRY_RUNNABLE: ReadonlySet<string> = new Set([
   'slotlock_erase_tenant',
+  // Built after the answer, outside the request's transaction.
+  'slotlock_create_tenant_export',
   'slotlock_run_maintenance',
   'slotlock_sandbox_seed',
   'slotlock_sandbox_reset',
@@ -287,6 +299,11 @@ export interface SlotlockApplicationBackend {
   verifyAuditLog: Handler;
   exportSubject: Handler;
   eraseSubject: Handler;
+  createTenantExport: Handler;
+  listTenantExports: Handler;
+  getTenantExport: Handler;
+  getTenantExportPart: Handler;
+  deleteTenantExport: Handler;
   listApprovalPolicies: Handler;
   putApprovalPolicy: Handler;
   deleteApprovalPolicy: Handler;
@@ -894,6 +911,28 @@ const SUBJECT = z
     (input) => Object.values(input).filter((value) => value !== undefined).length === 1,
     'Name the person by exactly one of email, holder, contact or reference',
   );
+
+/** A copy of everything the tenant keeps (RFC 0004 D3), as built or being built. */
+const TENANT_EXPORT = z
+  .object({
+    id: z.string().uuid(),
+    /** pending until it is built, then ready, or failed (error says why). */
+    status: z.enum(['pending', 'ready', 'failed']),
+    requested_by: z.string().min(1).max(200).nullable(),
+    created_at: DATE_TIME,
+    finished_at: DATE_TIME.nullable(),
+    /** When it is deleted. */
+    expires_at: DATE_TIME,
+    /** Parts to read, 1 to parts, with slotlock_get_tenant_export_part. */
+    parts: z.number().int().min(0),
+    rows: z.number().int().min(0),
+    bytes: z.number().int().min(0),
+    /** Rows by table, for the tables with any. */
+    tables: z.record(z.string(), z.number().int().min(0)),
+    error: z.string().min(1).max(200).nullable(),
+  })
+  .strict();
+const EXPORT_ID = z.string().uuid();
 
 /** A person a booking may name to be told about it (RFC 0004 P3), by the tenant's reference. */
 const CONTACT_REF = z
@@ -2516,6 +2555,73 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: true, idempotent: true },
       invoke: 'eraseSubject',
       example: { email: 'ada@example.com' },
+    },
+    {
+      name: 'slotlock_create_tenant_export',
+      title: 'Export the tenant',
+      description: `Ask for a copy of everything the tenant keeps, to download: every table's rows as kept, read at one moment (${SLOTLOCK_TENANT_EXPORT_TABLES.join(', ')}). Secrets stay out: webhooks' signing secrets, the assistant's provider key and API keys' digests. ${Object.keys(SLOTLOCK_TENANT_EXPORT_LEFT_OUT).length} tables are left out as derived, internal or one member's own (each member's conversations with the assistant). It answers pending at once and is built in the background: slotlock_get_tenant_export says when it is ready, then read its parts with slotlock_get_tenant_export_part. Kept 24 hours once ready, then deleted. One is built at a time (409 export_in_progress) and five are kept (409 export_limit_reached); one past 512 MB fails (error export_too_large) and its operator runs slotlock tenant export. Recorded in the audit log (export.created).`,
+      method: 'POST',
+      path: '/v1/tenant/exports',
+      input: z.object({}).strict(),
+      output: z.object({ export: TENANT_EXPORT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'createTenantExport',
+      example: {},
+    },
+    {
+      name: 'slotlock_list_tenant_exports',
+      title: 'List tenant exports',
+      description: "The tenant's exports, newest first, until each is deleted: pending, ready (with how many parts and rows) or failed.",
+      method: 'GET',
+      path: '/v1/tenant/exports',
+      input: z.object({}).strict(),
+      output: z.object({ exports: z.array(TENANT_EXPORT).max(100) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listTenantExports',
+      example: {},
+    },
+    {
+      name: 'slotlock_get_tenant_export',
+      title: 'Get a tenant export',
+      description: 'One of the tenant\'s exports: whether it is ready, its parts, rows and bytes, and rows by table. An unknown or deleted one answers 404 export_not_found.',
+      method: 'GET',
+      path: '/v1/tenant/exports/{export_id}',
+      input: z.object({ export_id: EXPORT_ID }).strict(),
+      output: z.object({ export: TENANT_EXPORT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getTenantExport',
+      example: { export_id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e' },
+    },
+    {
+      name: 'slotlock_get_tenant_export_part',
+      title: 'Read a part of a tenant export',
+      description: 'One part of a ready export, 1 to its parts: one table\'s rows, each an object as Slotlock keeps it (without the tenant). Write each part\'s rows as JSON lines to its table\'s file to keep the export as NDJSON. 409 export_not_ready before it is ready; 404 export_not_found or export_part_not_found.',
+      method: 'GET',
+      path: '/v1/tenant/exports/{export_id}/parts/{part}',
+      input: z.object({ export_id: EXPORT_ID, part: z.string().regex(/^[1-9][0-9]{0,6}$/, 'must be a part number, 1 or more') }).strict(),
+      output: z
+        .object({
+          export_id: EXPORT_ID,
+          part: z.number().int().min(1),
+          table: z.string().min(1).max(63),
+          rows: z.array(z.record(z.string(), z.unknown())).max(5_000),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getTenantExportPart',
+      example: { export_id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e', part: '1' },
+    },
+    {
+      name: 'slotlock_delete_tenant_export',
+      title: 'Delete a tenant export',
+      description: 'Delete one of the tenant\'s exports at once, with every part, rather than waiting for it to expire. deleted is false when there was none.',
+      method: 'DELETE',
+      path: '/v1/tenant/exports/{export_id}',
+      input: z.object({ export_id: EXPORT_ID }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteTenantExport',
+      example: { export_id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e' },
     },
     // Approval policies (RFC 0004 A4): writes a person approves before they are made.
     {

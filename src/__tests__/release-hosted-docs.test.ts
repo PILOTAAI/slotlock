@@ -16,6 +16,7 @@ import {
   SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA,
   SLOTLOCK_AGENT_OWNER_EVENT_QUOTA,
   SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS,
+  SLOTLOCK_TENANT_EXPORT_HOURS,
 } from '../store.js';
 
 const path = (file: string) => new URL(`../../${file}`, import.meta.url);
@@ -105,6 +106,8 @@ describe('the published policies', () => {
     expect(privacy).toContain(`${free} days on the Free plan, ${developer} days on Developer and ${team} days on Team`);
     expect(privacy).toContain(`${SLOTLOCK_AUDIT_RETENTION_DAYS} days (${team} days on the Team plan)`);
     expect(privacy).toContain('`POST /v1/subjects/erase` (or `slotlock subject erase`)');
+    expect(privacy).toContain(`${SLOTLOCK_TENANT_EXPORT_HOURS} hours after it is ready`);
+    expect(privacy).toContain(`for you to download within ${SLOTLOCK_TENANT_EXPORT_HOURS} hours`);
     // Outbox rows hold no event content, as the history row says.
     expect(read('src/ddl.ts')).toContain('never titles,\n// descriptions or attendees');
     expect(privacy).toContain('It never holds titles, descriptions or attendees');

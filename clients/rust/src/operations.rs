@@ -723,6 +723,41 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_list_tenant_exports",
+        method: "GET",
+        path: "/v1/tenant/exports",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_create_tenant_export",
+        method: "POST",
+        path: "/v1/tenant/exports",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_get_tenant_export",
+        method: "GET",
+        path: "/v1/tenant/exports/{export_id}",
+        path_params: &["export_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_tenant_export",
+        method: "DELETE",
+        path: "/v1/tenant/exports/{export_id}",
+        path_params: &["export_id"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_get_tenant_export_part",
+        method: "GET",
+        path: "/v1/tenant/exports/{export_id}/parts/{part}",
+        path_params: &["export_id", "part"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_approval_policies",
         method: "GET",
         path: "/v1/approval-policies",
@@ -2348,6 +2383,41 @@ pub struct EraseSubjectInput {
     pub dry_run: Option<bool>,
 }
 
+/// The arguments of [`Client::list_tenant_exports`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListTenantExportsInput {
+}
+
+/// The arguments of [`Client::create_tenant_export`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateTenantExportInput {
+}
+
+/// The arguments of [`Client::get_tenant_export`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetTenantExportInput {
+    pub export_id: String,
+}
+
+/// The arguments of [`Client::delete_tenant_export`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteTenantExportInput {
+    pub export_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::get_tenant_export_part`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetTenantExportPartInput {
+    pub export_id: String,
+    pub part: String,
+}
+
 /// The arguments of [`Client::list_approval_policies`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListApprovalPoliciesInput {
@@ -3667,6 +3737,61 @@ impl Client {
     /// identifier. 400 invalid_subject when no identifier, or more than one, is given.
     pub fn erase_subject(&self, input: &EraseSubjectInput) -> Result<Value, Error> {
         self.call("slotlock_erase_subject", serde_json::to_value(input)?)
+    }
+
+    /// List tenant exports.
+    ///
+    /// The tenant's exports, newest first, until each is deleted: pending, ready (with how many
+    /// parts and rows) or failed.
+    pub fn list_tenant_exports(&self, input: &ListTenantExportsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_tenant_exports", serde_json::to_value(input)?)
+    }
+
+    /// Export the tenant.
+    ///
+    /// Ask for a copy of everything the tenant keeps, to download: every table's rows as kept,
+    /// read at one moment (resources, locations, resource_groups, resource_group_members,
+    /// pool_settings, booking_rule_defaults, availability_defaults, availability_exceptions,
+    /// holiday_calendars, reservations, reservation_tombstones, reservation_conflict_archive,
+    /// hold_payments, calendar_events, calendar_event_attendees, calendar_event_reminders,
+    /// calendar_event_exceptions, calendar_event_tombstones, calendar_coverage, source_busy,
+    /// waitlist_entries, approval_policies, approvals, contacts, webhook_endpoints,
+    /// assistant_settings, api_keys, outbox, audit_events). Secrets stay out: webhooks' signing
+    /// secrets, the assistant's provider key and API keys' digests. 11 tables are left out as
+    /// derived, internal or one member's own (each member's conversations with the assistant). It
+    /// answers pending at once and is built in the background: slotlock_get_tenant_export says
+    /// when it is ready, then read its parts with slotlock_get_tenant_export_part. Kept 24 hours
+    /// once ready, then deleted. One is built at a time (409 export_in_progress) and five are
+    /// kept (409 export_limit_reached); one past 512 MB fails (error export_too_large) and its
+    /// operator runs slotlock tenant export. Recorded in the audit log (export.created).
+    pub fn create_tenant_export(&self, input: &CreateTenantExportInput) -> Result<Value, Error> {
+        self.call("slotlock_create_tenant_export", serde_json::to_value(input)?)
+    }
+
+    /// Get a tenant export.
+    ///
+    /// One of the tenant's exports: whether it is ready, its parts, rows and bytes, and rows by
+    /// table. An unknown or deleted one answers 404 export_not_found.
+    pub fn get_tenant_export(&self, input: &GetTenantExportInput) -> Result<Value, Error> {
+        self.call("slotlock_get_tenant_export", serde_json::to_value(input)?)
+    }
+
+    /// Delete a tenant export.
+    ///
+    /// Delete one of the tenant's exports at once, with every part, rather than waiting for it to
+    /// expire. deleted is false when there was none.
+    pub fn delete_tenant_export(&self, input: &DeleteTenantExportInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_tenant_export", serde_json::to_value(input)?)
+    }
+
+    /// Read a part of a tenant export.
+    ///
+    /// One part of a ready export, 1 to its parts: one table's rows, each an object as Slotlock
+    /// keeps it (without the tenant). Write each part's rows as JSON lines to its table's file to
+    /// keep the export as NDJSON. 409 export_not_ready before it is ready; 404 export_not_found
+    /// or export_part_not_found.
+    pub fn get_tenant_export_part(&self, input: &GetTenantExportPartInput) -> Result<Value, Error> {
+        self.call("slotlock_get_tenant_export_part", serde_json::to_value(input)?)
     }
 
     /// List approval policies.

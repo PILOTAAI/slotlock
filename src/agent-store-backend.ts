@@ -65,7 +65,9 @@ import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './inte
 import {
   type SlotlockStore,
   type SlotlockSubject,
+  type SlotlockTenantExport,
   type SlotlockTenantStore,
+  buildSlotlockTenantExport,
   slotlockAuditEventRecord,
   type SlotlockWaitlistEntry,
   SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
@@ -259,6 +261,23 @@ function actorOf(context: TenantCallContext): string | undefined {
 
 function assertActive(context: TenantCallContext): void {
   if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
+}
+
+/** A tenant export as the API gives it. */
+function tenantExportOutput(made: SlotlockTenantExport): Record<string, unknown> {
+  return {
+    id: made.id,
+    status: made.status,
+    requested_by: made.requestedBy,
+    created_at: made.createdAt.toISOString(),
+    finished_at: made.finishedAt?.toISOString() ?? null,
+    expires_at: made.expiresAt.toISOString(),
+    parts: made.parts,
+    rows: made.rows,
+    bytes: made.bytes,
+    tables: made.tables,
+    error: made.error,
+  };
 }
 
 /** The person an access or erasure request names (RFC 0004 D3), as the schema checked it. */
@@ -4439,6 +4458,68 @@ export function createSlotlockStoreApplicationBackend(
         tenant.verifyAuditChain({ tenantRef: tenantOf(context) }),
       );
       return { checked: verified.checked, broken_at: verified.brokenAt };
+    },
+
+    async createTenantExport(context) {
+      const tenantRef = tenantOf(context);
+      const keyId = context.principal.keyId;
+      const actor =
+        typeof keyId === 'string' && /^[0-9a-f-]{36}$/i.test(keyId)
+          ? { actorType: 'api_key' as const, actorRef: `api_key:${keyId}` }
+          : { actorType: 'system' as const, actorRef: 'application' };
+      const created = await withTenant(store, context, async (tenant) => {
+        const made = await tenant.createTenantExport({ tenantRef, requestedBy: actor.actorRef }).catch((error: unknown) => {
+          const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'export_in_progress' || code === 'export_limit_reached') {
+            throw new SlotlockAgentOperationError(code, 409);
+          }
+          throw error;
+        });
+        await tenant.recordAuditEvent({
+          tenantRef,
+          event: { action: 'export.created', ...actor, targetType: 'export', targetRef: made.id },
+        });
+        return made;
+      }, WRITE);
+      // Built after the answer; maintenance builds one a stopped server left pending.
+      void buildSlotlockTenantExport(store, tenantRef, created.id);
+      return { export: tenantExportOutput(created) };
+    },
+
+    async listTenantExports(context) {
+      const exports = await withTenant(store, context, (tenant) =>
+        tenant.listTenantExports({ tenantRef: tenantOf(context) }),
+      );
+      return { exports: exports.slice(0, 100).map(tenantExportOutput) };
+    },
+
+    async getTenantExport(context, input) {
+      const found = await withTenant(store, context, (tenant) =>
+        tenant.getTenantExport({ tenantRef: tenantOf(context), exportId: input.export_id as string }),
+      );
+      if (!found) throw new SlotlockAgentOperationError('export_not_found', 404);
+      return { export: tenantExportOutput(found) };
+    },
+
+    async getTenantExportPart(context, input) {
+      const part = Number(input.part);
+      const read = await withTenant(store, context, (tenant) =>
+        tenant.getTenantExportPart({ tenantRef: tenantOf(context), exportId: input.export_id as string, part }),
+      );
+      if (!read.ok) throw new SlotlockAgentOperationError(read.code, read.code === 'export_not_ready' ? 409 : 404);
+      return {
+        export_id: input.export_id as string,
+        part,
+        table: read.table,
+        rows: read.lines.map((line) => JSON.parse(line) as Record<string, unknown>),
+      };
+    },
+
+    async deleteTenantExport(context, input) {
+      const deleted = await withTenant(store, context, (tenant) =>
+        tenant.deleteTenantExport({ tenantRef: tenantOf(context), exportId: input.export_id as string }),
+      WRITE);
+      return { deleted };
     },
 
     async exportSubject(context, input) {
