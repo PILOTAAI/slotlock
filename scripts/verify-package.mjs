@@ -161,6 +161,8 @@ const expectedFiles = new Set([
   'workspaces.d.ts',
   'workspace-roles.js',
   'workspace-roles.d.ts',
+  'invitation-email.js',
+  'invitation-email.d.ts',
   'partner-billing.js',
   'partner-billing.d.ts',
   'partner-names.js',

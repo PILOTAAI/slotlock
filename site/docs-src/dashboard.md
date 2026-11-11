@@ -90,8 +90,16 @@ refused.
   changing anyone's keys and Full access, and so a recent sign-in.
 - An audit log (`slotlock.audit_events`, kept 180 days) records who created, rotated or revoked a
   key, changed a webhook, the plan, billing or the assistant's model, forgot a contact, signed in or
-  out everywhere, and every refusal, with the address and browser it came from. The serving role
-  can only add to it and read it.
+  out, changed a team's people, and every refusal, with the address and browser it came from. The
+  serving role can only add to it and read it. Owners and Admins read it on Settings, Audit log, 50
+  events a page, filtered by action, and export it as CSV or JSON (on the Team plan where plans
+  apply; up to 10,000 events, the filter kept). Each tenant's events are chained: each holds the
+  SHA-256 of the one before it with its own content, so an event changed or removed outside
+  Slotlock shows where (**Check the log**, `slotlock.verify_audit_chain`). Retention removes only the
+  start of the chain.
+- **Settings, Account** lists where the person is signed in (browser, address, when signed in and
+  last seen, to five minutes), and signs any other device out at its next request. Only a digest of
+  each session's id is kept (`slotlock.dashboard_sessions`), deleted a day after the session ends.
 
 ## Team workspaces
 
@@ -106,7 +114,10 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - **Invite by email**, with a role, on Members. An Owner gives any role; an Admin any up to Admin;
   nobody else invites. Making an Owner or a Billing manager also needs the inviter's own sign-in
   in the last 15 minutes.
-- **The link** is shown once to the person who invited, and sent by email where a sender is set.
+- **The link** is shown once to the person who invited, and sent by email where a sender is set:
+  `SLOTLOCK_INVITATION_EMAIL` (`resend` or `postmark`), `SLOTLOCK_INVITATION_EMAIL_KEY` (Resend's
+  API key or Postmark's server token) and `SLOTLOCK_INVITATION_EMAIL_FROM` (the sender the provider
+  verified). The email says who invited whom to what, until when, and nothing else.
   It works once, for seven days, and only for that address: a Google account with it verified, or
   a GitHub account that verifies it (the dashboard asks GitHub for the account's verified
   addresses, `user:email`, only then, and keeps only the invited one, in the session, until the
@@ -116,8 +127,9 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - **Change a role, remove someone, or leave** on Members. A team always keeps an Owner: the last
   one makes another Owner first, then may step down or leave. Removing someone revokes the keys
   they created, Live and Test, unless the form keeps them. Their next request is refused.
-- **Limits**: a team sends at most 50 invitations a day. Where plans apply, each person may create
-  one team on the Free plan, which has up to 3 people, open invitations included.
+- **Limits**: a team sends at most 50 invitations a day, and so does each person across their
+  teams. Where plans apply, each person may create one team on the Free plan, which has up to 3
+  people, open invitations included; a team's Owners and Billing managers buy Team for it on Usage.
 - The server takes a team's keys only with the setting on, and only while the team exists (checked
   in the database, kept 30 seconds).
 - Each person's GitHub login, or the email Google verified, is kept (`slotlock.dashboard_people`)

@@ -135,6 +135,7 @@ export function slotlockRoleKeyScopes(role: SlotlockWorkspaceRole | null | undef
 export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, SlotlockWorkspaceCapability>> = Object.freeze({
   '/sign-out': 'account.use',
   '/sign-out-everywhere': 'account.use',
+  '/sessions/end': 'account.use',
   '/organization': 'account.use',
   '/environment': 'account.use',
   '/teams/enable': 'account.use',
@@ -216,4 +217,6 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/hours': 'workspace.read',
   '/settings/account': 'account.use',
   '/settings/members': 'workspace.read',
+  '/settings/audit': 'audit.read',
+  '/settings/audit/export': 'audit.read',
 });

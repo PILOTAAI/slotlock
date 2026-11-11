@@ -3998,6 +3998,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<SlotlockAuditEvent[]>;
   /** Delete the tenant's audit events older than SLOTLOCK_AUDIT_RETENTION_DAYS; how many went. */
   pruneAuditEvents(params: { tenantRef: string }): Promise<number>;
+  /**
+   * Check the tenant's audit chain from its oldest event kept (slotlock.verify_audit_chain): how many
+   * events held, and the number of the first that does not (null when every one does).
+   */
+  verifyAuditChain(params: { tenantRef: string }): Promise<{ checked: number; brokenAt: number | null }>;
   /** Delete up to `limit` (default 1,000) of the tenant's expired assistant conversations: how many. */
   pruneAssistantConversations(params: { tenantRef: string; limit?: number }): Promise<number>;
   /**
@@ -4007,9 +4012,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
   sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
    * Delete team workspace invitations finished (accepted, revoked or expired) more than 30 days ago,
-   * with the addresses they were sent to (slotlock.prune_workspace_invitations): how many.
+   * with the addresses they were sent to (slotlock.prune_workspace_invitations), and dashboard
+   * sessions ended or expired a day ago (slotlock.prune_dashboard_sessions): how many.
    */
-  sweepWorkspaceInvitations(): Promise<number>;
+  sweepDashboardRecords(): Promise<number>;
   /**
    * Offer freed time to the waitlist in join order: each waiting entry whose window is free (on its
    * resource, or the first free pool member) gets a hold for its holder (`waitlist.offered`).
@@ -4173,6 +4179,9 @@ export interface SlotlockAuditEvent extends SlotlockAuditEventInput {
   occurredAt: Date;
   outcome: 'success' | 'denied';
   metadata: Record<string, unknown>;
+  /** Its place in the tenant's chain, and its SHA-256 (hex) over the one before and itself. */
+  chainIndex: number | null;
+  hash: string | null;
 }
 
 
@@ -9998,9 +10007,9 @@ function buildSlotlockStore(
       return Number(row?.deleted ?? 0);
     },
 
-    async sweepWorkspaceInvitations() {
+    async sweepDashboardRecords() {
       const [row] = await sql<{ deleted: string | number }[]>`
-        SELECT slotlock.prune_workspace_invitations() AS deleted`;
+        SELECT slotlock.prune_workspace_invitations() + slotlock.prune_dashboard_sessions() AS deleted`;
       return Number(row?.deleted ?? 0);
     },
 
@@ -10065,10 +10074,12 @@ function buildSlotlockStore(
           ip_address: string | null;
           user_agent: string | null;
           metadata: Record<string, unknown>;
+          chain_index: string | null;
+          hash: Buffer | null;
         }[]
       >`
         SELECT id, occurred_at, action, actor_type, actor_ref, actor_role, target_type, target_ref,
-               outcome, reason, ip_address, user_agent, metadata
+               outcome, reason, ip_address, user_agent, metadata, chain_index, hash
           FROM slotlock.audit_events
          WHERE tenant_ref = ${params.tenantRef}
            AND (${action}::text IS NULL OR action = ${action}::text)
@@ -10090,6 +10101,8 @@ function buildSlotlockStore(
         ...(row.reason !== null ? { reason: row.reason } : {}),
         ...(row.ip_address !== null ? { ipAddress: row.ip_address } : {}),
         ...(row.user_agent !== null ? { userAgent: row.user_agent } : {}),
+        chainIndex: row.chain_index === null ? null : Number(row.chain_index),
+        hash: row.hash === null ? null : row.hash.toString('hex'),
         metadata: row.metadata,
       }));
     },
@@ -10099,6 +10112,13 @@ function buildSlotlockStore(
       const [row] = await sql<{ pruned: number }[]>`
         SELECT slotlock.prune_audit_events(${params.tenantRef}::text) AS pruned`;
       return Number(row?.pruned ?? 0);
+    },
+
+    async verifyAuditChain(params) {
+      if (!isValidIdentity(params.tenantRef)) return { checked: 0, brokenAt: null };
+      const [row] = await sql<{ checked: string; broken_at: string | null }[]>`
+        SELECT checked, broken_at FROM slotlock.verify_audit_chain(${params.tenantRef}::text)`;
+      return { checked: Number(row?.checked ?? 0), brokenAt: row?.broken_at === null || row === undefined ? null : Number(row.broken_at) };
     },
 
     async offerWaitlist(params) {

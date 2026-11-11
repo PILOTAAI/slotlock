@@ -193,6 +193,7 @@ const FORM_NONCE = /^([A-Za-z0-9_-]{24})\.([A-Za-z0-9_-]{43})$/;
 const POST_ROUTES: ReadonlySet<string> = new Set([
   '/sign-out',
   '/sign-out-everywhere',
+  '/sessions/end',
   '/keys',
   '/keys/rotate',
   '/keys/revoke',
@@ -265,6 +266,7 @@ const AUDITED_ROUTES: Readonly<Record<string, string>> = Object.freeze({
   '/teams/disable': 'organization.disabled',
   '/sandbox/reset': 'sandbox.reset',
   '/sign-out-everywhere': 'session.signed_out_everywhere',
+  '/sessions/end': 'session.ended',
 });
 /** What each capability lets a person do, as a refusal says it. */
 const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = Object.freeze({
@@ -328,6 +330,60 @@ const FREE_TEAMS_PER_PERSON = 1;
 /** A team workspace's id, as its tenant names it (`team:<id>`). */
 const TEAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const EMAIL_ADDRESS = /^[^@\s<>"]{1,64}@[^@\s<>"]+\.[^@\s<>"]+$/;
+/** Audit events a page of the audit log shows, and an export holds at most. */
+const AUDIT_PAGE = 50;
+const AUDIT_EXPORT_MOST = 10_000;
+const AUDIT_EXPORT_EMPTY = Object.freeze({
+  occurred_at: '', action: '', outcome: '', actor_type: '', actor_ref: '', actor_role: '', target_type: '',
+  target_ref: '', reason: '', ip_address: '', user_agent: '', metadata: '', chain_index: '', hash: '',
+});
+
+/** A CSV cell, quoted; one a spreadsheet would read as a formula starts with an apostrophe. */
+function csvCell(value: string): string {
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+/** What each audited action did, as the audit log says it. */
+const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  'api_key.created': 'created an API key',
+  'api_key.rotated': 'rotated an API key',
+  'api_key.revoked': 'revoked an API key',
+  'api_key.limits_changed': "changed an API key's limits",
+  'webhook.created': 'added a webhook',
+  'webhook.deleted': 'removed a webhook',
+  'webhook.enabled': 'turned a webhook back on',
+  'contact.forgotten': 'forgot a contact',
+  'assistant.settings_saved': "changed the assistant's model",
+  'assistant.settings_removed': "removed the assistant's model",
+  'billing.checkout_started': 'started a checkout',
+  'billing.portal_opened': 'opened billing',
+  'organization.enabled': 'turned the organization on',
+  'organization.disabled': 'turned the organization off',
+  'sandbox.reset': 'reset the test environment',
+  'session.signed_in': 'signed in',
+  'session.signed_out_everywhere': 'signed out everywhere',
+  'session.ended': 'signed a device out',
+  'audit.exported': 'exported the audit log',
+  'workspace.created': 'created the team',
+  'member.invited': 'invited someone',
+  'invitation.resent': 'sent an invitation again',
+  'invitation.revoked': 'revoked an invitation',
+  'member.joined': 'joined',
+  'member.role_changed': "changed a member's role",
+  'member.removed': 'removed a member',
+  'member.left': 'left',
+  'authz.denied': 'was refused',
+});
+const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
+  ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
+  ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
+  ['People', ['workspace.created', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
+  ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
+  ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
+  ['Other', ['contact.forgotten', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
+]);
+const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
+
 /** What a team change refused says, and its status. */
 const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text: string }>> = Object.freeze({
   invalid_handle: { status: 400, text: 'That name gives no usable handle. Try another.' },
@@ -367,6 +423,34 @@ function teamHandleFrom(name: string, attempt: number): string {
       .slice(0, 30)
       .replace(/-+$/, '') || 'team';
   return attempt === 0 ? base : `${base}-${randomBytes(3).toString('hex')}`;
+}
+
+/** A browser as people name it, from its User-Agent: `Firefox on macOS`. */
+function deviceOf(agent: string | null): string {
+  if (!agent) return 'A browser';
+  const browser = /Edg\//.test(agent)
+    ? 'Edge'
+    : /OPR\//.test(agent)
+      ? 'Opera'
+      : /Firefox\//.test(agent)
+        ? 'Firefox'
+        : /Chrome\//.test(agent)
+          ? 'Chrome'
+          : /Safari\//.test(agent)
+            ? 'Safari'
+            : 'A browser';
+  const system = /iPhone|iPad/.test(agent)
+    ? 'iOS'
+    : /Android/.test(agent)
+      ? 'Android'
+      : /Mac OS X|Macintosh/.test(agent)
+        ? 'macOS'
+        : /Windows/.test(agent)
+          ? 'Windows'
+          : /Linux/.test(agent)
+            ? 'Linux'
+            : '';
+  return system ? `${browser} on ${system}` : browser;
 }
 
 /** An address as an invitation shows it before anyone signs in: its first letter and domain. */
@@ -597,6 +681,8 @@ export interface SlotlockDashboardResources {
    * settings, and every refusal. Append-only: record, and read newest first.
    */
   audit?: {
+    /** Whether the workspace's chain holds from its oldest event kept (store verifyAuditChain). */
+    verify?(tenantRef: string): Promise<{ checked: number; brokenAt: number | null }>;
     record(tenantRef: string, event: SlotlockAuditEventInput): Promise<void>;
     list(
       tenantRef: string,
@@ -1178,6 +1264,7 @@ export function createSlotlockDashboardResources(
     },
     assistant: createSlotlockAssistantStore(store),
     audit: {
+      verify: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.verifyAuditChain({ tenantRef })),
       record: (tenantRef, event) => store.withTenant(tenantRef, (tenant) => tenant.recordAuditEvent({ tenantRef, event })),
       list: (tenantRef, params = {}) =>
         store.withTenant(tenantRef, (tenant) => tenant.listAuditEvents({ tenantRef, ...params })),
@@ -2146,13 +2233,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const person = personOf(session);
-    const [standing, listed] = await Promise.all([
+    const [standing, listed, alive] = await Promise.all([
       workspaces.standing(tenantOf(session), person),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
+      workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
     ]);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
-    // from before this store, or of a person erased since (no record, no epoch) never passes.
-    if (session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
+    // from before this store, or of a person erased since (no record, no epoch) never passes; nor
+    // one the person signed out from another device.
+    if (!alive || session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
     if (standing.role !== null) {
       roles.set(session, standing.role);
       teamListOf.set(session, listed);
@@ -2183,6 +2272,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     );
   }
 
+  /** A workspace people share (an organization's or a team's), not a person's own. */
+  const sharedWorkspace = (session: Session) => session.org !== undefined || session.team !== undefined;
   /** The team workspace the session acts in (`team:<id>`, Live), or undefined. */
   const teamTenantOf = (session: Session) => (session.team !== undefined ? `team:${session.team}` : undefined);
   const currentTeam = (session: Session) =>
@@ -2442,7 +2533,7 @@ ${
       .filter(Boolean)
       .join(', ');
 
-  function keyRows(keys: SlotlockApiKey[], token: string, session: Session): Html[] {
+  function keyRows(keys: SlotlockApiKey[], token: string, session: Session, names: ReadonlyMap<string, string> = new Map()): Html[] {
     return keys.map((key) => {
       const expired = key.expiresAt !== null && key.expiresAt.getTime() <= now();
       const status = key.revokedAt ? 'Revoked' : expired ? 'Expired' : 'Active';
@@ -2456,7 +2547,7 @@ ${
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${session.org !== undefined ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : key.createdBy?.startsWith('google:') ? 'a Google user' : 'someone unknown'}</span>` : html``}</span></td>
+<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${sharedWorkspace(session) ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : (key.createdBy && names.get(key.createdBy)) ?? (key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : key.createdBy?.startsWith('google:') ? 'a Google user' : 'someone unknown')}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
 <td data-label="Access">${
         key.resourceScope || key.limits
@@ -2809,11 +2900,14 @@ ${
   async function keysPage(session: Session, status = 200, notice?: string | Html): Promise<Response> {
     const tenantRef = tenantOf(session);
     const grouping = options.resources.grouping;
-    const [keys, locations, groups] = await Promise.all([
+    const team = teamTenantOf(session);
+    const [keys, locations, groups, members] = await Promise.all([
       options.keys.list({ tenantRef }),
       grouping?.locations(tenantRef),
       grouping?.groups(tenantRef),
+      teamStore && team !== undefined ? teamStore.members(team) : Promise.resolve([]),
     ]);
+    const names = new Map(members.map((member) => [member.person, memberName(member)]));
     const token = csrfToken(session);
     const paths = locationPaths(locations ?? []);
     // A key limited to locations or groups (RFC 0003 G6), when the tenant has any to choose.
@@ -2850,8 +2944,8 @@ ${limitChoices}
 ${
   keys.length === 0
     ? emptyState(ICONS.keys, 'No keys yet. Give every agent its own, with the least access it needs.', { href: '#key-name', label: 'Create a key' })
-    : html`${session.org !== undefined ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-<tbody>${keyRows(keys, token, session)}</tbody></table></div>`
+    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+<tbody>${keyRows(keys, token, session, names)}</tbody></table></div>`
 }`;
     return respond(status, layout('API keys', content, session, 'keys'));
   }
@@ -3000,7 +3094,7 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
-  type SettingsSection = 'assistant' | 'members' | 'endpoints' | 'hours' | 'account';
+  type SettingsSection = 'assistant' | 'members' | 'audit' | 'endpoints' | 'hours' | 'account';
   /** An invitation's link, shown once to the person who made it. */
   type InvitationShown = { link: string; to: string; expiresAt: Date };
 
@@ -3011,6 +3105,7 @@ ${
   const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string; path: string }[] = Object.freeze([
     { id: 'assistant', label: 'Assistant', path: '/settings' },
     { id: 'members', label: 'Members', path: '/settings/members' },
+    { id: 'audit', label: 'Audit log', path: '/settings/audit' },
     { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
     { id: 'hours', label: 'Hours', path: '/settings/hours' },
     { id: 'account', label: 'Account', path: '/settings/account' },
@@ -3023,16 +3118,20 @@ ${
     draft?: AssistantDraft,
     section: SettingsSection = 'assistant',
     invitation?: InvitationShown,
+    query?: URLSearchParams,
   ): Promise<Response> {
     const store = assistantStore();
     // Members are a team workspace's: its people come from invitations, not from GitHub.
     const sections = SETTINGS_SECTIONS.filter(
-      (entry) => (entry.id !== 'assistant' || store) && (entry.id !== 'members' || (teamStore && session.team !== undefined)),
+      (entry) =>
+        (entry.id !== 'assistant' || store) &&
+        (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
+        (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))),
     );
     const shown: SettingsSection =
       section === 'assistant' && !store
         ? 'endpoints'
-        : section === 'members' && !sections.some((entry) => entry.id === 'members')
+        : (section === 'members' || section === 'audit') && !sections.some((entry) => entry.id === section)
           ? 'account'
           : section;
     const connected = store ? Boolean(await store.getSettings(tenantOf(session))) : false;
@@ -3047,6 +3146,8 @@ ${
       body = await assistantSettingsSection(session, status, notice, draft);
     } else if (shown === 'members') {
       body = await membersSection(session, status, notice, invitation);
+    } else if (shown === 'audit') {
+      body = await auditSection(session, status, notice, query ?? new URLSearchParams());
     } else if (shown === 'endpoints') {
       body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">MCP</span><div class="row-value">${copyField('mcp-url', mcpUrl)}</div></div><div class="row"><span class="row-label">A2A</span><div class="row-value">${copyField('a2a-url', a2aUrl)}</div></div></div>`;
     } else if (shown === 'hours') {
@@ -3071,10 +3172,42 @@ ${
         workspaces
           ? html`<div class="row"><span class="row-label">Sessions</span><div class="row-value"><form method="post" action="${root}/sign-out-everywhere"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Sign out everywhere</button></form></div></div>`
           : html``
-      }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}`;
+      }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}${await sessionsList(session)}`;
     }
     const content = html`${pageHead('Settings')}<div class="settings">${nav}<div class="settings-body">${body}</div></div>`;
     return respond(status, layout('Settings', content, session, 'settings'));
+  }
+
+  /** Where the person is signed in, each but this one with Sign out. */
+  async function sessionsList(session: Session): Promise<Html> {
+    const kept = workspaces?.sessions;
+    if (!kept) return html``;
+    const person = personOf(session);
+    const listed = await kept.list(person);
+    if (listed.length === 0) return html``;
+    const mine = kept.idOf(session.sid);
+    const rows = listed.map(
+      (entry) =>
+        html`<tr><td data-label="Device" class="strong">${deviceOf(entry.userAgent)}${entry.id === mine ? html` <span class="pill active">This device</span>` : html``}</td><td data-label="Address">${entry.ipAddress ?? '—'}</td><td data-label="Signed in">${formatDate(entry.startedAt)}</td><td data-label="Last seen">${formatDate(entry.lastSeenAt)}</td><td class="actions">${
+          entry.id === mine
+            ? html``
+            : html`<form class="inline" method="post" action="${root}/sessions/end"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button type="submit">Sign out<span class="visually-hidden"> ${deviceOf(entry.userAgent)}, signed in ${formatDate(entry.startedAt)}</span></button></form>`
+        }</td></tr>`,
+    );
+    return html`<h2 class="sessions-head">Signed in</h2><div class="table"><table><thead><tr><th>Device</th><th>Address</th><th>Signed in</th><th>Last seen</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  async function endSession(session: Session, form: URLSearchParams): Promise<Response> {
+    const kept = workspaces?.sessions;
+    if (!kept) return nothingHere(session);
+    const id = (form.get('id') ?? '').toLowerCase();
+    if (id === kept.idOf(session.sid)) {
+      return settingsPage(session, 400, 'To sign out of this device, use Sign out.', undefined, 'account');
+    }
+    if (!(await kept.end(personOf(session), id))) {
+      return settingsPage(session, 404, 'That session has ended already.', undefined, 'account');
+    }
+    return settingsPage(session, 200, 'Signed out of that device.', undefined, 'account');
   }
 
   /** A value to copy: monospace, cut with an ellipsis, with a Copy button (app.js). */
@@ -5309,7 +5442,7 @@ ${
     const keyName = new Map(keys.map((key) => [key.id, key.name]));
     // An organization is offered Team (where billing sells it, or by asking); a person, Developer.
     const offered: 'developer' | 'team' =
-      session.org !== undefined && (billing ? Boolean(billing.teamPrices) : true) ? 'team' : 'developer';
+      sharedWorkspace(session) && (billing ? Boolean(billing.teamPrices) : true) ? 'team' : 'developer';
     const contact = plans.contact ?? billing?.contact;
     const manage =
       billing && plan?.stripeCustomer && admin
@@ -5398,7 +5531,7 @@ ${
       url = await billing.checkout({
         tenantRef,
         interval,
-        ...(session.org !== undefined && billing.teamPrices ? { plan: 'team' as const } : {}),
+        ...(sharedWorkspace(session) && billing.teamPrices ? { plan: 'team' as const } : {}),
         customer: plan?.stripeCustomer ?? null,
         successUrl: `${publicRoot}/plan?checkout=done`,
         cancelUrl: `${publicRoot}/plan`,
@@ -6353,6 +6486,151 @@ ${
     }<div class="table"><table><thead><tr><th>Member</th><th>Role</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${memberRows}</tbody></table></div>`;
   }
 
+  /** Who did something, as the audit log names them: you, a member by their display, else their account. */
+  function actorName(event: SlotlockAuditEvent, session: Session, names: ReadonlyMap<string, string>): string {
+    if (event.actorType === 'api_key') return `API key ${event.actorRef.replace(/^api_key:/, '').slice(0, 8)}`;
+    if (event.actorType === 'assistant') return 'The assistant';
+    if (event.actorType !== 'person') return 'Slotlock';
+    if (event.actorRef === personOf(session)) return 'You';
+    return (
+      names.get(event.actorRef) ??
+      (event.actorRef.startsWith('github:') ? `GitHub user ${event.actorRef.slice(7)}` : event.actorRef.startsWith('google:') ? 'A Google account' : event.actorRef)
+    );
+  }
+
+  /** A workspace's audit log, newest first, 50 a page: who did what, refused or done, from where. */
+  async function auditSection(session: Session, status: number, notice: string | undefined, query: URLSearchParams): Promise<Html> {
+    const log = options.resources.audit;
+    if (!log) return noticeOf(notice, status);
+    const tenantRef = tenantOf(session);
+    const wanted = query.get('action') ?? '';
+    const action = AUDIT_ACTION_NAMES.has(wanted) ? wanted : undefined;
+    const cursor = /^(\d{1,15})\.([0-9a-f-]{36})$/.exec(query.get('before') ?? '');
+    const before =
+      cursor && UUID_PATTERN.test(cursor[2] as string)
+        ? { occurredAt: new Date(Number(cursor[1])), id: (cursor[2] as string).toLowerCase() }
+        : undefined;
+    const team = teamTenantOf(session);
+    const [events, members] = await Promise.all([
+      log.list(tenantRef, { limit: AUDIT_PAGE, ...(before ? { before } : {}), ...(action ? { action } : {}) }),
+      teamStore && team !== undefined ? teamStore.members(team) : Promise.resolve([]),
+    ]);
+    const names = new Map(members.map((member) => [member.person, memberName(member)]));
+    const options_ = AUDIT_ACTION_GROUPS.map(
+      ([group, actions]) =>
+        html`<optgroup label="${group}">${actions.map(
+          (name) => html`<option value="${name}"${name === action ? html` selected` : html``}>${AUDIT_ACTION_WORDS[name] ?? name}</option>`,
+        )}</optgroup>`,
+    );
+    const filter = html`<form class="audit-filter" method="get" action="${root}/settings/audit"><label for="audit-action">Action</label><select id="audit-action" name="action"><option value="">Everything</option>${options_}</select><button type="submit">Show</button></form>`;
+    const rows = events.map((event) => {
+      const details: [string, string][] = [
+        ...(event.targetRef ? [['Target', `${event.targetType ?? ''} ${event.targetRef}`.trim()] as [string, string]] : []),
+        ...(event.reason ? [['Reason', event.reason] as [string, string]] : []),
+        ...Object.entries(event.metadata).map(([key, value]) => [key, String(value)] as [string, string]),
+        ...(event.ipAddress ? [['Address', event.ipAddress] as [string, string]] : []),
+        ...(event.userAgent ? [['Browser', event.userAgent] as [string, string]] : []),
+      ];
+      return html`<tr><td data-label="When">${formatDate(event.occurredAt)}</td><td data-label="Who" class="strong">${actorName(event, session, names)}${
+        event.actorRole ? html` <span class="muted">(${SLOTLOCK_WORKSPACE_ROLE_NAMES[event.actorRole]})</span>` : html``
+      }</td><td data-label="What">${AUDIT_ACTION_WORDS[event.action] ?? event.action}${
+        event.outcome === 'denied' ? html` <span class="pill revoked">Refused</span>` : html``
+      }</td><td class="actions">${
+        details.length > 0
+          ? html`<details class="act"><summary>Details</summary><div class="pop"><dl class="audit-details">${details.map(
+              ([label, value]) => html`<dt>${label}</dt><dd>${value}</dd>`,
+            )}</dl></div></details>`
+          : html``
+      }</td></tr>`;
+    });
+    const last = events[events.length - 1];
+    const older =
+      last && events.length === AUDIT_PAGE
+        ? `${root}/settings/audit?${new URLSearchParams({ ...(action ? { action } : {}), before: `${String(last.occurredAt.getTime())}.${last.id}` }).toString()}`
+        : null;
+    // The chain, checked on asking: every event kept since the oldest still links to the one before.
+    const verified = query.get('verify') === '1' && log.verify ? await log.verify(tenantRef) : null;
+    const chain = verified
+      ? verified.brokenAt === null
+        ? html`<p class="notice done" role="status">The log is unbroken: ${String(verified.checked)} event${verified.checked === 1 ? '' : 's'} checked.</p>`
+        : html`<p class="notice" role="alert">The log was changed outside Slotlock at event ${String(verified.brokenAt)}, after ${String(verified.checked)} that check out.</p>`
+      : html``;
+    const exportQuery = action ? `&action=${action}` : '';
+    const tools = html`<p class="audit-tools">${
+      log.verify ? html`<a href="${root}/settings/audit?verify=1${exportQuery}">Check the log</a>` : html``
+    } <a href="${root}/settings/audit/export?format=csv${exportQuery}">Export CSV</a> <a href="${root}/settings/audit/export?format=json${exportQuery}">Export JSON</a></p>`;
+    return html`${noticeOf(notice, status)}${chain}${filter}${tools}${
+      rows.length === 0
+        ? html`<p class="empty">${before ? 'Nothing older.' : 'Nothing recorded yet.'}</p>`
+        : html`<div class="table"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th><span class="visually-hidden">Details</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+    }<p class="pager">${before ? html`<a href="${root}/settings/audit${action ? `?action=${action}` : ''}">Newest</a>` : html``}${
+      older ? html` <a href="${older}">Older</a>` : html``
+    }</p>`;
+  }
+
+  /**
+   * A workspace's audit log as a file, filtered as the page was: up to 10,000 events, newest first,
+   * with each event's place in the chain and its hash. On the Team plan where plans apply.
+   */
+  async function exportAudit(session: Session, query: URLSearchParams): Promise<Response> {
+    const log = options.resources.audit;
+    if (!log) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    if (plans) {
+      const plan = await plans.plan(tenantRef.replace(/~test$/, ''));
+      if (plan?.plan !== 'team' || plan.status === 'canceled') {
+        return settingsPage(session, 403, 'Exports come with the Team plan. Upgrade on Usage.', undefined, 'audit', undefined, query);
+      }
+    }
+    const format = query.get('format') === 'json' ? 'json' : 'csv';
+    const wanted = query.get('action') ?? '';
+    const action = AUDIT_ACTION_NAMES.has(wanted) ? wanted : undefined;
+    const events: SlotlockAuditEvent[] = [];
+    let before: { occurredAt: Date; id: string } | undefined;
+    while (events.length < AUDIT_EXPORT_MOST) {
+      const page = await log.list(tenantRef, { limit: 200, ...(before ? { before } : {}), ...(action ? { action } : {}) });
+      events.push(...page);
+      const last = page[page.length - 1];
+      if (!last || page.length < 200) break;
+      before = { occurredAt: last.occurredAt, id: last.id };
+    }
+    await audit(session, { action: 'audit.exported', metadata: { format, events: events.length, ...(action ? { filter: action } : {}) } });
+    const rows = events.slice(0, AUDIT_EXPORT_MOST).map((event) => ({
+      occurred_at: event.occurredAt.toISOString(),
+      action: event.action,
+      outcome: event.outcome,
+      actor_type: event.actorType,
+      actor_ref: event.actorRef,
+      actor_role: event.actorRole ?? '',
+      target_type: event.targetType ?? '',
+      target_ref: event.targetRef ?? '',
+      reason: event.reason ?? '',
+      ip_address: event.ipAddress ?? '',
+      user_agent: event.userAgent ?? '',
+      metadata: JSON.stringify(event.metadata),
+      chain_index: event.chainIndex === null ? '' : String(event.chainIndex),
+      hash: event.hash ?? '',
+    }));
+    const day = new Date(now()).toISOString().slice(0, 10);
+    const body =
+      format === 'json'
+        ? JSON.stringify(rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as unknown })), null, 2)
+        : [
+            Object.keys(rows[0] ?? AUDIT_EXPORT_EMPTY).join(','),
+            ...rows.map((row) => Object.values(row).map(csvCell).join(',')),
+          ].join('\r\n');
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': format === 'json' ? 'application/json; charset=utf-8' : 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="slotlock-audit-${day}.${format}"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'",
+      },
+    });
+  }
+
   /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
   async function deliverInvitation(session: Session, to: string, role: SlotlockWorkspaceRole, link: string, expiresAt: Date): Promise<boolean> {
     if (!options.invitations) return false;
@@ -7106,11 +7384,15 @@ ${
       if (invited && user.emails.includes(invited)) em = [invited];
     }
     const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
+    const sid = randomBytes(24).toString('base64url');
+    const expires = now() + SESSION_TTL_MS;
+    // Listed on the person's Account page, to sign out from another device.
+    await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
     const session = seal('slotlock-dashboard-session-v1', {
       uid: user.uid,
       login: user.login,
-      sid: randomBytes(24).toString('base64url'),
-      exp: now() + SESSION_TTL_MS,
+      sid,
+      exp: expires,
       ...(user.idp === 'google' ? { idp: 'google' } : {}),
       ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
       ...(epoch !== undefined ? { ep: epoch } : {}),
@@ -7439,11 +7721,15 @@ ${
         // the membership store, which holds the epoch every session carries.
         if (!workspaces) return notFound(session);
         await workspaces.signOutEverywhere(personOf(session));
+        await workspaces.sessions?.end(personOf(session), null);
         await options.state.endSession(session.sid, session.exp);
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
       case '/sign-out':
         await options.state.endSession(session.sid, session.exp);
+        await workspaces?.sessions?.end(personOf(session), workspaces.sessions.idOf(session.sid));
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
+      case '/sessions/end':
+        return endSession(session, form);
       case '/keys':
         return createKey(session, form);
       case '/keys/rotate':
@@ -7588,6 +7874,8 @@ ${
             case '/settings/hours':
             case '/settings/account':
             case '/settings/members':
+            case '/settings/audit':
+            case '/settings/audit/export':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
@@ -7619,6 +7907,12 @@ ${
               if (route === '/settings/members') {
                 return teamStore && session.team !== undefined
                   ? await settingsPage(session, 200, undefined, undefined, 'members')
+                  : nothingHere(session);
+              }
+              if (route === '/settings/audit/export') return await exportAudit(session, url.searchParams);
+              if (route === '/settings/audit') {
+                return options.resources.audit
+                  ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
                   : nothingHere(session);
               }
               // A provider preset fills the assistant's form; nothing is saved until Save.
@@ -8018,6 +8312,17 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .fine + .table, .fine + .empty { margin-top: var(--space-4); }
 .pop label { margin-bottom: var(--space-3); }
 .pop textarea { width: 100%; }
+/* Sessions (Settings, Account) */
+h2.sessions-head { margin-top: var(--space-6); }
+/* Audit log */
+form.audit-filter { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-3); margin: 0 0 var(--space-4); }
+form.audit-filter label { flex-basis: 100%; margin: 0; }
+form.audit-filter select { width: auto; }
+dl.audit-details { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); margin: 0; font-size: var(--text-sm); }
+dl.audit-details dt { color: var(--ink-2); }
+dl.audit-details dd { margin: 0; overflow-wrap: anywhere; }
+.pager, .audit-tools { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-4); }
+.audit-tools { margin: 0 0 var(--space-4); }
 /* Teams: one-line forms that create a team or invite to one */
 form.create-team, form.invite { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-3); margin: var(--space-5) 0; }
 form.create-team label, form.invite label { flex-basis: 100%; margin: 0; }

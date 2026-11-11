@@ -61,7 +61,9 @@ import {
 } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 import { createSlotlockDashboardTeams } from '../../src/teams.js';
+import { createSlotlockInvitationEmailSender } from '../../src/invitation-email.js';
 import {
+  type SlotlockDashboardSessions,
   type SlotlockDashboardWorkspaces,
   type SlotlockWorkspaceTeams,
   createSlotlockDashboardWorkspaces,
@@ -252,14 +254,16 @@ function perRequest<T extends object>(current: () => T): T {
 }
 
 /**
- * The membership store through the request's client, its team workspaces too: the dashboard reads
- * `teams` once, as it is built, outside any request.
+ * The membership store through the request's client, its team workspaces and sessions too: the
+ * dashboard reads `teams` and `sessions` once, as it is built, outside any request.
  */
 function perRequestWorkspaces(current: () => SlotlockDashboardWorkspaces): SlotlockDashboardWorkspaces {
   const teams = perRequest(() => current().teams as SlotlockWorkspaceTeams);
+  const sessions = perRequest(() => current().sessions as SlotlockDashboardSessions);
   return new Proxy({} as SlotlockDashboardWorkspaces, {
     get(_target, property) {
       if (property === 'teams') return teams;
+      if (property === 'sessions') return sessions;
       const target = current();
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -383,6 +387,14 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       ...(config.name ? { name: config.name } : {}),
       ...(config.termsUrl ? { termsUrl: config.termsUrl } : {}),
       ...(config.teamWorkspaces ? { teamWorkspaces: true } : {}),
+      ...(config.invitationEmail
+        ? {
+            invitations: createSlotlockInvitationEmailSender(config.invitationEmail, {
+              fetch: (input, init) => fetch(input, init),
+              ...(config.name ? { brandName: config.name } : {}),
+            }),
+          }
+        : {}),
       ...(config.privacyUrl ? { privacyUrl: config.privacyUrl } : {}),
       availability: readAvailability(vars),
       // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through

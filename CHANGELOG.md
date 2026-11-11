@@ -31,6 +31,20 @@ versioning.
   creates one team on Free, which holds up to 3 people. `SlotlockInvitationSender` sends the
   links by email where a deployment has one; otherwise the person inviting copies it.
 - Google's `email_verified` is accepted as the string `"true"` as well as `true`.
+- **The audit log in the dashboard** (Settings, Audit log): Owners and Admins read who did what,
+  refused or done, from where, 50 events a page, filtered by action, and export it as CSV or JSON on
+  the Team plan. Each tenant's events form a hash chain (`chain_index`, `prev_hash`, `hash`), so a
+  change made outside Slotlock shows where it was made (`slotlock.verify_audit_chain`,
+  `verifyAuditChain`); retention removes only the start of the chain.
+- **Where you're signed in** (Settings, Account): each session's browser, address, start and last
+  use, and signing another device out at its next request (`slotlock.dashboard_sessions`, a digest
+  of each session's id; `SlotlockDashboardSessions`).
+- **Team for team workspaces**: a team's Owners and Billing managers buy the Team plan on Usage, as
+  an organization's do.
+- **Invitations by email**: `SLOTLOCK_INVITATION_EMAIL` (`resend` or `postmark`), with
+  `SLOTLOCK_INVITATION_EMAIL_KEY` and `SLOTLOCK_INVITATION_EMAIL_FROM`
+  (`createSlotlockInvitationEmailSender`). Each person is held to 50 invitations a day across their
+  teams, as each team is.
 
 ### Changed
 
