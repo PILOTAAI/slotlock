@@ -1,6 +1,6 @@
 # Privacy notice for hosted Slotlock
 
-Last updated: 10 November 2026.
+Last updated: 11 November 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub account can
@@ -19,11 +19,13 @@ protection officer.
 
 - **Your account.** For the details of your account and how you use the service, we are the
   controller: we decide why and how they are processed.
-- **Your calendars.** What you and your agents store in Slotlock (resources, bookings, events and
-  the people named in them) is yours. For that content we are your processor: we process it only to
-  run the service for you, under the data processing terms in the [Terms of Service](TERMS.md#data-processing-terms).
-  If your events name other people, such as attendees' names and email addresses, you are their
-  controller and you tell them how their data is used.
+- **Your calendars.** What you, your agents and your integrations store in Slotlock (resources,
+  bookings, events, contacts, busy time from your other calendars, and the people named in them) is
+  yours. For that content we are your processor: we process it only to run the service for you,
+  under the data processing terms in the [Terms of Service](TERMS.md#data-processing-terms). If it
+  names other people, such as attendees' names and email addresses, or your customers' contact
+  details, you are their controller: you tell them how their data is used, and you record on which
+  channels they agreed to be told about their bookings.
 
 ## What we hold
 
@@ -44,6 +46,10 @@ protection officer.
 | The audit log of each workspace (each event chained to the one before by a SHA-256 hash, so changes show): who (an account id or a key id, never a name or an email) created, rotated or revoked a key, changed a webhook, the plan, billing or the assistant's model, forgot a contact, signed in or out everywhere, or was refused, when, and the internet address and browser it came from | The service, as it happens | 180 days, or until the workspace's account is erased |
 | Your API keys: name, scopes, expiry, the first characters and a SHA-256 digest of each key (never the key itself), who created it (a GitHub user id), and when it was created, last used and revoked | You, in the dashboard or the API | While your account exists; a revoked or expired key stays listed until your account is erased |
 | Calendar content: resources with their names, descriptions, labels, the attributes you give them, time zones, weekly hours, booking rules and pools, and the locations and groups you put them in, with their names; holds, bookings and waitlist entries with their times, references and the holder names your agents give; events with their titles, descriptions, locations, organisers, attendees' names and email addresses, reminders and recurrence; and the outside calendars you record coverage from, by the source name you give (which can be a calendar address) with the last error reported for it | You and your agents | While your account exists, or until you delete it. Holds end when they expire and are then deleted; finished waitlist entries are deleted 30 days after their window |
+| Contacts, if you keep them: each person's reference, name, email address, phone and WhatsApp numbers and language; whether they agreed to be told by email, SMS or WhatsApp, and when each agreement was given or withdrawn; and on each booking, the contact it is for, whether to tell them, and its reminders | You and your systems, through the API or the dashboard's Contacts page | Until you delete the contact, which also takes it off every booking, or your account is erased. Changes and webhooks name a contact only by its reference, never its details |
+| Busy time from your other calendars: when each busy period starts and ends, never its title, description or attendees, for the resources you link a calendar to, by the source you name | You or an integration you run (such as `@slotlock/sync`), through the API | 30 days after the period ends, then deleted; at once when you retire the source or your account is erased |
+| Payments for holds that wait for one: the amount the hold asks, the payment's reference at your payment provider (a Stripe PaymentIntent id, say), the amount received and when, and whether the hold was booked. Never card or bank details, nor who paid | You or an integration you run (such as `@slotlock/payments-stripe`), through the API | Until the resource is deleted or your account is erased |
+| A record of each reminder put on your change feed (its booking or event and when it was due), so it is said once | The service | Until the booking or event is deleted |
 | Webhooks: each endpoint's address, its signing secret, the change types it receives, and its delivery state and last error | You | While your account exists, or until you delete the endpoint |
 | Activity history: each change to your resources, holds, bookings, events, coverage and waitlist, with ids, times, references, which key or GitHub user made it and through which interface. It never holds titles, descriptions or attendees | The service | 30 days |
 | A record of each event write, so a retried request returns the first result | The service | 30 days |
@@ -68,9 +74,9 @@ held only in the running server's memory and replaced when it restarts. The serv
 copy of these logs of at most 100 MB, and sends them to a log store we run on the same server, which
 keeps them for 30 days and then deletes them.
 
-Expired holds, finished waitlist entries and the records kept for 30 days are deleted by a
-maintenance job that runs every hour for every account that has data, whether or not its keys are
-in use.
+Expired holds, finished waitlist entries, busy time that ended 30 days ago and the records kept for
+30 days are deleted by a maintenance job that runs every hour for every account that has data,
+whether or not its keys are in use.
 
 Sign-in asks GitHub for no permissions beyond your public profile; once teams are offered, it also
 asks to read which organizations you belong to (`read:org`), so you can work in the ones turned on.
@@ -88,7 +94,7 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 
 | Purpose | Data | Lawful basis (UK GDPR Article 6(1)) |
 | --- | --- | --- |
-| Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, webhooks, history, write records, sessions, assistant settings | (b) contract: the Terms of Service |
+| Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, contacts, busy time, payments for holds, reminder records, webhooks, history, write records, sessions, assistant settings | (b) contract: the Terms of Service |
 | Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
 | Team workspaces: showing members to each other, and inviting a person a member names | Login or verified email, memberships, invitations | (b) contract for members; (f) legitimate interests for an invitation: a member asked for it, it holds an address and a role only, and it is deleted 30 days after it ends |
 | Measuring use: counting what each account uses (operations, bookings, holds, webhook deliveries, assistant messages, resources), to show you your usage and to apply your plan's allowances | Account, usage counts | (b) contract: the Terms of Service |
@@ -118,6 +124,12 @@ served, and how much space the database and its disk use: no personal data.
 If you set up the dashboard assistant with your own provider key, your messages and the calendar
 data the assistant reads to answer them go to the provider you chose, under your own agreement with
 it. That provider is not our subprocessor.
+
+Hosted Slotlock sends no email, SMS or WhatsApp message to your contacts, holds no token for your
+Google or Microsoft calendars or your payment provider, and moves no money for your bookings. If you run integrations
+that do (such as `@slotlock/notify`, `@slotlock/sync` or `@slotlock/payments-stripe`), they read
+from and write to Slotlock through the API like any client, and what they send to those providers
+is under your own agreements with them. Those providers are not our subprocessors.
 
 We do not sell personal data or share it for advertising. We disclose it to anyone else only when
 the law requires us to.
@@ -150,8 +162,8 @@ time.
 To erase your account and everything in it, write to [privacy@pylota.io](mailto:privacy@pylota.io)
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
 that word as its name, which shows us the account is yours. We then erase every resource, booking,
-event, hold, waitlist entry, webhook, history entry, assistant setting, plan, usage count and key in the account, in one
-step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
+event, hold, payment record, waitlist entry, contact, busy period, webhook, history entry, assistant
+setting, plan, usage count and key in the account, in one step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
 lines until they age out as described above; and backups, until they are replaced within about five
 weeks. A Developer plan is cancelled before the account is erased; Stripe keeps its own records of the
@@ -159,8 +171,8 @@ purchase, as its privacy policy says.
 
 We answer every request within one month.
 
-If your data is in someone else's Slotlock account, for example as an event attendee, that account
-holder is your controller: ask them first. If you cannot reach them, write to us and we will pass
+If your data is in someone else's Slotlock account, for example as an event attendee or one of
+their contacts, that account holder is your controller: ask them first. If you cannot reach them, write to us and we will pass
 your request on.
 
 If you are unhappy with how we handle your data, tell us first at
