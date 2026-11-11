@@ -1,5 +1,6 @@
 ---
 title: API keys
+seoTitle: 'API keys for AI agents: scopes, expiry and revoking | Slotlock'
 description: Give each agent a key of its own, limited to what it needs and revocable without a restart.
 sidebar:
   label: API keys

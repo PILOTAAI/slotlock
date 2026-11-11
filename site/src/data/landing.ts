@@ -36,26 +36,33 @@ const knownIssues = facts.version.startsWith('0.2.');
 const clientList = `${facts.clients.slice(0, -1).join(', ')} and ${facts.clients.at(-1)}`;
 
 export interface Heading {
+  /** The section's topic in plain words, set small above the line: what a searcher types. */
+  topic?: string;
   soft: string;
   strong: string;
 }
 
+/** The search result: at most 60 characters of title and 155 of description (RFC 0005). */
 export const meta = {
-  title: 'Slotlock: let AI agents book vans, rooms and machines',
+  title: 'Slotlock: the booking API and calendar for AI agents',
   description:
-    'Slotlock lets AI agents book vehicles, rooms, machines and staff hours. Agents find a free time, hold it while a person picks, and book it over MCP, A2A or REST, and two agents can never book the same slot. Start free on Slotlock Cloud, or self-host the open-source server on your own PostgreSQL.',
+    'Give AI agents a calendar for every van, room and machine. Find, hold and book slots over MCP, A2A or REST, and PostgreSQL refuses double bookings.',
+  imageAlt: 'Slotlock: the booking API and calendar for AI agents. Two agents, one slot, one booking.',
 };
 
+/** The header of every page outside the docs: one page per thing people search for. */
 export const nav = [
-  { label: 'Product', href: '#product' },
-  { label: 'Developers', href: '#developers' },
-  { label: 'Security', href: '#security' },
-  { label: 'Pricing', href: '#pricing' },
+  { label: 'Use cases', href: '/use-cases/' },
+  { label: 'MCP server', href: '/mcp-server/' },
+  { label: 'API', href: '/booking-api/' },
+  { label: 'Pricing', href: '/pricing/' },
+  { label: 'Blog', href: '/blog/' },
   { label: 'Docs', href: '/docs/' },
 ];
 
 export const hero = {
   heading: {
+    topic: 'Booking API and calendar for AI agents',
     soft: 'Let AI agents book vans, rooms and machines.',
     strong: 'Two agents, one slot, one booking.',
   } satisfies Heading,
@@ -209,6 +216,7 @@ export function weekWindows() {
 export const story = {
   id: 'product',
   heading: {
+    topic: 'How it works',
     soft: 'Vans, rooms and clinics already run on calendars.',
     strong: 'Now your agents can book them.',
   } satisfies Heading,
@@ -256,6 +264,7 @@ export const story = {
 export const proof = {
   id: 'proof',
   heading: {
+    topic: 'Double-booking prevention',
     soft: 'Two agents ask for the same van.',
     strong: 'One gets it. The other gets the next free time.',
   } satisfies Heading,
@@ -284,7 +293,7 @@ export const proof = {
 /** The dashboard (src/dashboard.ts), drawn with the labels its Overview shows. */
 export const dashboard = {
   id: 'dashboard',
-  heading: { soft: 'See what every agent booked.', strong: 'Step in when it matters.' } satisfies Heading,
+  heading: { topic: 'Dashboard', soft: 'See what every agent booked.', strong: 'Step in when it matters.' } satisfies Heading,
   lede: 'Add resources, create keys, and see every change each key made.',
   view: {
     path: 'app.slotlock.pylota.io/dashboard',
@@ -320,7 +329,11 @@ export const dashboard = {
 /** Who books with Slotlock. Car rental first: Pylota checks every booking with it. */
 export const industries = {
   id: 'industries',
-  heading: { soft: 'Anything booked by the hour or the day.', strong: 'Built first for car rental.' } satisfies Heading,
+  heading: {
+    topic: 'Industries',
+    soft: 'Anything booked by the hour or the day.',
+    strong: 'Built first for car rental.',
+  } satisfies Heading,
   items: [
     { title: 'Car and van rental', body: 'Each vehicle is a calendar; a second booking is refused.', featured: true },
     { title: 'Equipment hire', body: 'Diggers to drills, with inspection time kept between hires.' },
@@ -331,7 +344,7 @@ export const industries = {
     { title: 'Rooms and desks', body: 'Rooms nobody checks in to go back on offer.' },
     { title: 'Field service', body: 'Technician and van, held while the customer chooses.' },
   ],
-  link: { label: 'Use cases', href: '/docs/use-cases/' },
+  link: { label: 'Use cases', href: '/use-cases/' },
 };
 
 export interface InstallTarget {
@@ -355,7 +368,7 @@ function cloudMcpAdd(): string {
 
 export const developers = {
   id: 'developers',
-  heading: { soft: 'However your agent is built,', strong: 'it can book.' } satisfies Heading,
+  heading: { topic: 'MCP, A2A and REST API', soft: 'However your agent is built,', strong: 'it can book.' } satisfies Heading,
   lede: `${facts.toolCount} tools with JSON Schemas, the same on every transport.`,
   /** The REST tab's example: pool availability, in the shape openapi.json gives it. */
   restPool: 'van-class',
@@ -370,9 +383,9 @@ export const developers = {
   },
   cloudMcpAdd: cloudMcpAdd(),
   rows: [
-    { label: 'MCP', body: `MCP ${facts.mcpModern} and ${facts.mcpLegacy}, with an MCP App.`, href: '/docs/connect/' },
+    { label: 'MCP', body: `MCP ${facts.mcpModern} and ${facts.mcpLegacy}, with an MCP App.`, href: '/mcp-server/' },
     { label: 'A2A', body: `A2A ${facts.a2a} skills and an agent card.`, href: '/docs/reference/#endpoints' },
-    { label: 'REST', body: '`/openapi.json`, with RFC 9457 refusals.', href: '/docs/api/' },
+    { label: 'REST', body: '`/openapi.json`, with RFC 9457 refusals.', href: '/booking-api/' },
     { label: 'Clients', body: `${clientList}.`, href: '/docs/clients/' },
     { label: 'TypeScript', body: 'The engine, on your own PostgreSQL.', href: '/docs/library/' },
   ],
@@ -451,7 +464,11 @@ export const developers = {
 
 export const security = {
   id: 'security',
-  heading: { soft: 'Agents reach only what their key allows.', strong: 'Tenants never see each other.' } satisfies Heading,
+  heading: {
+    topic: 'Security',
+    soft: 'Agents reach only what their key allows.',
+    strong: 'Tenants never see each other.',
+  } satisfies Heading,
   /** An API key as the dashboard's key list shows it. */
   key: {
     name: 'booking-agent',
@@ -519,6 +536,7 @@ export const pricing = {
   id: 'pricing',
   eyebrow: 'Slotlock Cloud',
   heading: {
+    topic: 'Pricing',
     soft: 'Start free on Slotlock Cloud.',
     strong: developerPlan ? 'Upgrade as you grow, or run it yourself.' : 'Or run it on your own PostgreSQL.',
   } satisfies Heading,
@@ -601,14 +619,16 @@ export const pricing = {
     label: `Write to ${SUPPORT_EMAIL}`,
     href: `mailto:${SUPPORT_EMAIL}`,
   },
-  link: freePlan
-    ? { label: 'Plans in detail', href: '/docs/hosted/#plans' }
-    : { label: 'Hosted Slotlock', href: '/docs/hosted/' },
+  link: { label: 'Plans in detail', href: '/pricing/' },
 };
 
 export const source = {
   id: 'source',
-  heading: { soft: 'Read how every booking is stored and checked.', strong: 'The source is on GitHub.' } satisfies Heading,
+  heading: {
+    topic: 'Open source',
+    soft: 'Read how every booking is stored and checked.',
+    strong: 'The source is on GitHub.',
+  } satisfies Heading,
   repo: {
     name: 'PILOTAAI/slotlock',
     caption: 'Repository on GitHub',
@@ -624,7 +644,7 @@ export const source = {
 
 export const faq = {
   id: 'faq',
-  heading: { soft: 'Questions', strong: 'we expect first.' } satisfies Heading,
+  heading: { topic: 'FAQ', soft: 'Questions', strong: 'we expect first.' } satisfies Heading,
   items: [
     {
       q: 'Does it sync with Google Calendar or Outlook?',
@@ -656,10 +676,12 @@ export const footer = {
     {
       title: 'Product',
       links: [
-        { label: 'Introduction', href: '/docs/' },
-        { label: 'Use cases', href: '/docs/use-cases/' },
-        { label: 'Dashboard', href: '/docs/dashboard/' },
-        { label: 'Changelog', href: '/docs/changelog/' },
+        { label: 'Booking MCP server', href: '/mcp-server/' },
+        { label: 'Booking API', href: '/booking-api/' },
+        { label: 'Use cases', href: '/use-cases/' },
+        { label: 'Compare', href: '/compare/' },
+        { label: 'Open source', href: '/open-source/' },
+        { label: 'Blog', href: '/blog/' },
       ],
     },
     {
@@ -667,14 +689,15 @@ export const footer = {
       links: [
         { label: 'Quickstart', href: '/docs/quickstart/' },
         { label: 'Tools reference', href: '/docs/tools/' },
-        { label: 'Specification', href: '/docs/specification/' },
+        { label: 'REST reference', href: '/docs/api/' },
         { label: 'Self-hosting', href: '/docs/self-host/' },
+        { label: 'Changelog', href: '/docs/changelog/' },
       ],
     },
     {
       title: 'Slotlock Cloud',
       links: [
-        { label: 'Pricing', href: '#pricing' },
+        { label: 'Pricing', href: '/pricing/' },
         { label: 'Hosted Slotlock', href: '/docs/hosted/' },
         { label: 'Status', href: '/docs/status/' },
         { label: 'Privacy notice', href: '/docs/privacy/' },
@@ -685,6 +708,7 @@ export const footer = {
     {
       title: 'Source',
       links: [
+        { label: 'About', href: '/about/' },
         { label: 'GitHub', href: REPO_URL },
         { label: 'Licence', href: `${REPO_URL}/blob/main/LICENSE` },
         { label: 'Security policy', href: `${REPO_URL}/blob/main/SECURITY.md` },

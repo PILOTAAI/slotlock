@@ -1,14 +1,11 @@
 ---
 // slotlock.pylota.io landing page. Copy lives in src/data/landing.ts (shared with /index.md); numbers
 // and names come from the repository through src/generated/facts.json.
-import '../styles/fonts.css';
-import '../generated/tokens.css';
-import '../styles/landing.css';
-import '../styles/lockup.css';
 import HeroScene from '../components/landing/HeroScene.astro';
 import Icon from '../components/landing/Icon.astro';
-import Lockup from '../components/Lockup.astro';
 import Rich from '../components/landing/Rich.astro';
+import Marketing from '../layouts/Marketing.astro';
+import { graph, ogImage, softwareApplication, softwareSourceCode, webPage, type Seo } from '../lib/seo';
 import {
   CLOUD_API_URL,
   closing,
@@ -16,11 +13,9 @@ import {
   developers,
   facts,
   faq,
-  footer,
   hero,
   industries,
   meta,
-  nav,
   pricing,
   proof,
   REPO_URL,
@@ -83,67 +78,28 @@ const restResponse = JSON.stringify(
   null,
   2,
 );
-const canonical = new URL('/', Astro.site).toString();
+const seo: Seo = {
+  title: meta.title,
+  description: meta.description,
+  path: '/',
+  image: ogImage('landing'),
+  imageAlt: meta.imageAlt,
+  markdown: '/index.md',
+  jsonLd: [
+    graph(
+      webPage({ title: meta.title, description: meta.description, path: '/' }),
+      softwareApplication(meta.description),
+      softwareSourceCode,
+    ),
+  ],
+};
 ---
 
-<!doctype html>
-<html lang="en-GB">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{meta.title}</title>
-    <meta name="description" content={meta.description} />
-    <link rel="canonical" href={canonical} />
-    <link rel="alternate" type="text/markdown" href="/index.md" title="Markdown" />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
-    <link
-      rel="preload"
-      href="/fonts/inter-tight.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin="anonymous"
-    />
-    <meta name="theme-color" content="#F6F4EE" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
-    <meta property="og:type" content="website" />
-    <meta property="og:url" content={canonical} />
-    <meta property="og:title" content={meta.title} />
-    <meta property="og:description" content={meta.description} />
-    <meta name="twitter:card" content="summary" />
-    <!-- Theme choice and the once-only hero motion, decided before first paint. -->
-    <script is:inline src="/js/head.js"></script>
-  </head>
-  <body>
-    <a class="skip" href="#main">Skip to content</a>
-
-    <header class="site-header">
-      <div class="wrap site-header__row">
-        <a class="brand lockup" href="/">
-          <Lockup />
-        </a>
-        <nav class="site-nav" aria-label="Main">
-          {nav.map((item) => <a href={item.href}>{item.label}</a>)}
-        </nav>
-        <a class="site-header__sign-in" href={signIn.href}>{signIn.label}</a>
-        <a class="btn btn--primary" href={signIn.href}>{signIn.start}</a>
-        <details class="menu">
-          <summary class="menu__button">
-            <Icon name="menu" />
-            <span class="sr-only">Menu</span>
-          </summary>
-          <nav class="menu__panel" aria-label="Menu">
-            {nav.map((item) => <a href={item.href}>{item.label}</a>)}
-            <a href={signIn.href}>{signIn.label}</a>
-          </nav>
-        </details>
-      </div>
-    </header>
-
-    <main id="main">
+<Marketing seo={seo}>
       <section class="hero" aria-labelledby="hero-title">
         <div class="wrap">
           <h1 class="h1" id="hero-title">
+            <span class="h2__topic">{hero.heading.topic}</span>
             <span class="soft">{hero.heading.soft}</span>
             <span class="strong">{hero.heading.strong}</span>
           </h1>
@@ -179,6 +135,7 @@ const canonical = new URL('/', Astro.site).toString();
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="story-title">
+              <span class="h2__topic">{story.heading.topic}</span>
               <span class="soft">{story.heading.soft}</span>
               <span class="strong">{story.heading.strong}</span>
             </h2>
@@ -283,6 +240,7 @@ const canonical = new URL('/', Astro.site).toString();
         <div class="wrap">
           <div class="head head--split">
             <h2 class="h2" id="proof-title">
+              <span class="h2__topic">{proof.heading.topic}</span>
               <span class="soft">{proof.heading.soft}</span>
               <span class="strong">{proof.heading.strong}</span>
             </h2>
@@ -331,6 +289,7 @@ const canonical = new URL('/', Astro.site).toString();
         <div class="wrap">
           <div class="head head--split">
             <h2 class="h2" id="dashboard-title">
+              <span class="h2__topic">{dashboard.heading.topic}</span>
               <span class="soft">{dashboard.heading.soft}</span>
               <span class="strong">{dashboard.heading.strong}</span>
             </h2>
@@ -414,6 +373,7 @@ const canonical = new URL('/', Astro.site).toString();
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="industries-title">
+              <span class="h2__topic">{industries.heading.topic}</span>
               <span class="soft">{industries.heading.soft}</span>
               <span class="strong">{industries.heading.strong}</span>
             </h2>
@@ -437,6 +397,7 @@ const canonical = new URL('/', Astro.site).toString();
         <div class="wrap">
           <div class="head head--split">
             <h2 class="h2" id="dev-title">
+              <span class="h2__topic">{developers.heading.topic}</span>
               <span class="soft">{developers.heading.soft}</span>
               <span class="strong">{developers.heading.strong}</span>
             </h2>
@@ -581,6 +542,7 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="security-title">
+              <span class="h2__topic">{security.heading.topic}</span>
               <span class="soft">{security.heading.soft}</span>
               <span class="strong">{security.heading.strong}</span>
             </h2>
@@ -614,8 +576,8 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
       <section class="band" id={pricing.id} aria-labelledby="pricing-title">
         <div class="wrap">
           <div class="head head--split">
-            <p class="eyebrow">{pricing.eyebrow}</p>
             <h2 class="h2" id="pricing-title">
+              <span class="h2__topic">{pricing.heading.topic} · {pricing.eyebrow}</span>
               <span class="soft">{pricing.heading.soft}</span>
               <span class="strong">{pricing.heading.strong}</span>
             </h2>
@@ -654,6 +616,7 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="source-title">
+              <span class="h2__topic">{source.heading.topic}</span>
               <span class="soft">{source.heading.soft}</span>
               <span class="strong">{source.heading.strong}</span>
             </h2>
@@ -684,6 +647,7 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
         <div class="wrap">
           <div class="head">
             <h2 class="h2" id="faq-title">
+              <span class="h2__topic">{faq.heading.topic}</span>
               <span class="soft">{faq.heading.soft}</span>
               <span class="strong">{faq.heading.strong}</span>
             </h2>
@@ -713,51 +677,4 @@ curl "{CLOUD_API_URL}/v1/pool-availability?pool={developers.restPool}&start={poo
           </div>
         </div>
       </section>
-    </main>
-
-    <footer class="site-footer">
-      <div class="wrap">
-        <div class="footer-grid">
-          <div>
-            <a class="brand lockup" href="/">
-              <Lockup />
-            </a>
-            <p>{footer.tagline}</p>
-          </div>
-          {
-            footer.columns.map((column) => (
-              <div class="footer-col">
-                <h2>{column.title}</h2>
-                <ul>
-                  {column.links.map((link) => (
-                    <li>
-                      <a href={link.href}>{link.label}</a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))
-          }
-        </div>
-        <div class="footer-base">
-          <span class="agents-links">
-            Markdown for agents:
-            <a href="/index.md">index.md</a>
-            <a href="/llms.txt">llms.txt</a>
-            <a href="/llms-full.txt">llms-full.txt</a>
-          </span>
-          <a class="footer-version" href={footer.version.href}>{footer.version.label}</a>
-          <button class="theme-toggle" type="button" data-theme-toggle hidden>
-            <Icon name="contrast" />
-            <span data-theme-label>Theme: system</span>
-          </button>
-          <span class="legal">{footer.legal}</span>
-        </div>
-      </div>
-    </footer>
-
-    <script>
-      import '../scripts/landing';
-    </script>
-  </body>
-</html>
+</Marketing>

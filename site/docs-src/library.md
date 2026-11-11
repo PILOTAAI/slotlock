@@ -1,5 +1,6 @@
 ---
 title: TypeScript library
+seoTitle: 'TypeScript availability and booking library | Slotlock'
 description: Call Slotlock's engine and PostgreSQL store from your own Node.js code, with no server in between.
 sidebar:
   label: TypeScript library

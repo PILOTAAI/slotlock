@@ -85,6 +85,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The whole history: each page's sitemap lastmod is its sources' last commit (the site's
+          # sync-content script reads it); a shallow clone would date every page alike.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22" # Astro 7.3.8 needs >= 22.12.0
@@ -96,13 +99,15 @@ jobs:
         env:
           # The benchmarks page reads the latest release's bench.json from the GitHub API.
           GITHUB_TOKEN: ${{ github.token }}
-      - name: Check contrast and copy
+      - name: Check contrast, copy and search metadata
         run: npm run check
       - name: Check the output
         run: |
           for f in index.html index.md 404.html llms.txt llms-full.txt _headers \
                    docs/index.html docs/quickstart/index.html docs/quickstart.md \
                    docs/reference/index.html docs/specification/index.html \
+                   pricing/index.html pricing.md mcp-server/index.html booking-api/index.html \
+                   blog/index.html blog/rss.xml sitemap-index.xml robots.txt og/landing.png \
                    schema/manifest.schema.json fonts/inter.woff2; do
             test -s "dist/$f" || { echo "missing dist/$f"; exit 1; }
           done
@@ -154,3 +159,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run deploy
+      # What a crawler meets on the live hosts (docs/rfc/0005-search.md, Part 4). The host settings it
+      # checks live in Cloudflare (Phase 0), so a failure names the setting to change, not the code.
+      - name: Check the live site for search engines
+        working-directory: .
+        run: bash scripts/check-live-seo.sh

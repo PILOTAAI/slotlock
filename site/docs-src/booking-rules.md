@@ -1,5 +1,6 @@
 ---
 title: Hours and booking rules
+seoTitle: 'Booking rules: notice, buffers, turnaround and hours'
 description: Set when each resource can be booked, and what a booking on it must satisfy, from notice and step to buffers, check-in and certainty.
 sidebar:
   label: Hours and booking rules

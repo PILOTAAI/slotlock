@@ -87,6 +87,11 @@ sign-in to work: `__Host-slotlock-oauth` for the ten minutes a sign-in takes, an
 `__Host-slotlock-session` for your session. Both are secure, HTTP-only and limited to the dashboard's
 own site. We use no analytics or advertising cookies, so there is nothing to consent to or turn off.
 
+The website at `https://slotlock.pylota.io` counts visits with Cloudflare Web Analytics. It sets no
+cookie and stores nothing in your browser; it records the page, the site that linked to it, the
+browser, the country and how long the page took to load, and we see only totals. We use the totals
+to learn which pages people read and how they find them.
+
 If you write to us at support@, abuse@ or privacy@pylota.io, we keep what you send and our reply in
 our mailboxes, hosted by Google Workspace, for two years and then delete them.
 
@@ -100,6 +105,7 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 | Measuring use: counting what each account uses (operations, bookings, holds, webhook deliveries, assistant messages, resources), to show you your usage and to apply your plan's allowances | Account, usage counts | (b) contract: the Terms of Service |
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
+| Learning which pages of the website people read, and how they find them | Page views on `slotlock.pylota.io`, counted without cookies (above) | (f) legitimate interests: improving the website, with no way to tell who you are |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
 
 You do not have to give us any of this, but without a GitHub sign-in we cannot create an account,
@@ -112,7 +118,7 @@ not use your data for marketing, and we do not use your calendar content to trai
 | Recipient | What for | Where |
 | --- | --- | --- |
 | OVHcloud | The server and database that hold all of the data above, and our log store | Its London (UK1) region, United Kingdom |
-| Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
+| Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it serves the website and counts its visits (Web Analytics); it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
 | GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock | United States |
 | Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
 | Once invitations are sent by email: the email provider we use for them, Resend or Postmark | Sends each team invitation: the invited address, the team's name, who invited and the link | The United States |

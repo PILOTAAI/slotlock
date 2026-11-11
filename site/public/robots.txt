@@ -1,3 +1,6 @@
+# slotlock.pylota.io: every page is open to search engines and to AI crawlers, training included.
+# The code and docs are Apache-2.0 on GitHub (docs/rfc/0005-search.md, D2). Cloudflare's managed
+# robots.txt is off for this host, so this file is the whole policy.
 User-agent: *
 Allow: /
 

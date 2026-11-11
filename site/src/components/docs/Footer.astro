@@ -4,6 +4,16 @@ import Default from '@astrojs/starlight/components/Footer.astro';
 import { markdownTwinPath } from '../../lib/markdown-twin';
 
 const twin = markdownTwinPath(Astro.locals.starlightRoute.id);
+/** The pages outside the docs, so every docs page links them (docs/rfc/0005-search.md). */
+const site = [
+  { href: '/', label: 'Home' },
+  { href: '/mcp-server/', label: 'MCP server' },
+  { href: '/booking-api/', label: 'Booking API' },
+  { href: '/use-cases/', label: 'Use cases' },
+  { href: '/pricing/', label: 'Pricing' },
+  { href: '/compare/', label: 'Compare' },
+  { href: '/blog/', label: 'Blog' },
+];
 const links = [
   ...(twin ? [{ href: twin, label: 'this page' }] : []),
   { href: '/llms.txt', label: 'llms.txt' },
@@ -15,6 +25,10 @@ const links = [
 <p class="agents">
   <span>Markdown for agents:</span>
   {links.map((link) => <a href={link.href}>{link.label}</a>)}
+</p>
+<p class="agents">
+  <span>Slotlock:</span>
+  {site.map((link) => <a href={link.href}>{link.label}</a>)}
 </p>
 <p class="licence">Apache-2.0 · A Pylota project · © 2026 TREFT LTD</p>
 

@@ -24,7 +24,8 @@ import {
 
 const SITE = 'https://slotlock.pylota.io';
 const abs = (href: string) => (href.startsWith('/') ? `${SITE}${href}` : href.startsWith('#') ? `${SITE}/${href}` : href);
-const heading = (h: { soft: string; strong: string }) => `## ${h.soft} ${h.strong}`;
+const heading = (h: { topic?: string; soft: string; strong: string }) =>
+  `## ${h.topic ? `${h.topic}: ` : ''}${h.soft} ${h.strong}`;
 const list = (items: string[]) => items.map((item) => `- ${item}`).join('\n');
 const link = (l: { label: string; href: string }) => `[${l.label}](${abs(l.href)})`;
 const siteLinks = (text: string) => text.replace(/\]\(\//g, `](${SITE}/`);

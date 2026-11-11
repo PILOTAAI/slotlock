@@ -20,6 +20,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://slotlock.pylota.io"
+Documentation = "https://slotlock.pylota.io/docs/clients/#python"
 Source = "https://github.com/PILOTAAI/slotlock/tree/main/clients/python"
 
 [tool.hatch.build.targets.wheel]
