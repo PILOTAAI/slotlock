@@ -669,6 +669,10 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         // A team's single sign-on: workspace-sso.integration covers its erasure, and a person's.
         'sso_connections',
         'sso_bypasses',
+        // A team's directory: scim-server.integration and workspace-scim cover its erasure.
+        'scim_tokens',
+        'scim_users',
+        'scim_groups',
       ]);
       const owned = tables.filter(
         (table) => table !== 'tenant_suspensions' && table !== 'partner_accounts' && !teamOnly.has(table),

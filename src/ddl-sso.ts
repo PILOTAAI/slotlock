@@ -189,10 +189,11 @@ ALTER TABLE slotlock.workspaces ADD COLUMN IF NOT EXISTS sso_max_age_hours integ
   CONSTRAINT slotlock_workspaces_sso_max_age_valid
   CHECK (sso_max_age_hours BETWEEN ${SLOTLOCK_SSO_MAX_AGE_HOURS.min} AND ${SLOTLOCK_SSO_MAX_AGE_HOURS.max});
 
--- Who decides a member's role: Slotlock (manual, the default; a role changed by hand stays so) or
--- the team's provider at each sign-in (sso: a member it provisioned).
+-- Who decides a member's role: Slotlock (manual, the default; a role changed by hand stays so), the
+-- team's provider at each sign-in (sso: a member it provisioned), or its directory's groups (scim).
+-- The role column is read by dashboard_standing below, and sessions_valid_after (ddl-scim.ts) too.
 ALTER TABLE slotlock.workspace_memberships ADD COLUMN IF NOT EXISTS role_managed_by text NOT NULL DEFAULT 'manual'
-  CONSTRAINT slotlock_workspace_memberships_managed_valid CHECK (role_managed_by IN ('manual', 'sso'));
+  CONSTRAINT slotlock_workspace_memberships_managed_valid CHECK (role_managed_by IN ('manual', 'sso', 'scim'));
 
 -- A person's standing in a workspace now, for this session: their role (Owner of their own; else an
 -- active membership's, or none) and their sessions' epoch. None, with why, when the session is scoped
@@ -214,6 +215,8 @@ DECLARE
   scoped uuid;
   scoped_tenant text;
   scoped_status text;
+  started timestamptz;
+  valid_after timestamptz;
   enforced boolean;
   max_age integer;
   connection uuid;
@@ -222,11 +225,11 @@ BEGIN
   IF live = requested_person AND requested_person ${NOT_SSO} THEN
     found_role := 'owner';
   ELSE
-    SELECT member.role INTO found_role FROM slotlock.workspace_memberships member
+    SELECT member.role, member.sessions_valid_after INTO found_role, valid_after FROM slotlock.workspace_memberships member
      WHERE member.tenant_ref = live AND member.person_ref = requested_person AND member.status = 'active';
   END IF;
   IF requested_sid IS NOT NULL THEN
-    SELECT kept.sso_connection_id INTO scoped FROM slotlock.dashboard_sessions kept
+    SELECT kept.sso_connection_id, kept.started_at INTO scoped, started FROM slotlock.dashboard_sessions kept
      WHERE kept.sid_sha256 = requested_sid AND kept.person_ref = requested_person;
     -- A person a team's provider made signs in only through it: a session of theirs it did not
     -- scope (its proof refused while it was turned off, say) is nobody's.
@@ -243,6 +246,11 @@ BEGIN
         RETURN;
       END IF;
     END IF;
+  END IF;
+  -- A membership the directory restored counts only for sessions begun after (ddl-scim.ts).
+  IF found_role IS NOT NULL AND valid_after IS NOT NULL AND (started IS NULL OR started < valid_after) THEN
+    RETURN QUERY SELECT NULL::text, epoch, NULL::text, false;
+    RETURN;
   END IF;
   IF found_role IS NOT NULL THEN
     SELECT ws.require_sso, ws.sso_max_age_hours INTO enforced, max_age FROM slotlock.workspaces ws WHERE ws.tenant_ref = live;
@@ -795,8 +803,9 @@ BEGIN
     RETURN QUERY SELECT newcomer, 'signed_in'::text, NULL::text, current_membership.role;
     RETURN;
   END IF;
-  IF current_membership.person_ref IS NOT NULL THEN
-    -- Removed from the team: the provider does not bring them back.
+  IF current_membership.person_ref IS NOT NULL AND current_membership.deactivated_by IS DISTINCT FROM 'scim' THEN
+    -- Removed from the team, or left it: the provider does not bring them back. One the team's
+    -- directory ended may return through the directory (below), or an invitation.
     RETURN QUERY SELECT CASE WHEN known.id IS NULL THEN NULL ELSE newcomer END, NULL::text, 'not_member'::text, NULL::text;
     RETURN;
   END IF;
@@ -824,6 +833,31 @@ BEGIN
         RETURN;
       END IF;
     END IF;
+  END IF;
+  -- The team's directory (SCIM, ddl-scim.ts) lists the address: it decides, whatever provisioning
+  -- says. Its active user there, not yet anyone's, is this person; deactivated, or another's, nobody.
+  IF trusted AND EXISTS (SELECT 1 FROM slotlock.scim_users directory
+                          JOIN slotlock.workspaces ws ON ws.tenant_ref = directory.tenant_ref AND ws.scim_enabled
+                         WHERE directory.tenant_ref = linked.tenant_ref AND directory.deleted_at IS NULL
+                           AND coalesce(directory.work_email, directory.user_name_key) = email_key) THEN
+    PERFORM 1 FROM slotlock.scim_bind(newcomer, ARRAY[email_key], requested_member_cap);
+    SELECT * INTO current_membership FROM slotlock.workspace_memberships member
+     WHERE member.tenant_ref = linked.tenant_ref AND member.person_ref = newcomer AND member.status = 'active';
+    IF current_membership.person_ref IS NULL THEN
+      RETURN QUERY SELECT CASE WHEN known.id IS NULL THEN NULL ELSE newcomer END, NULL::text, 'not_member'::text, NULL::text;
+      RETURN;
+    END IF;
+    IF known.id IS NULL THEN
+      INSERT INTO slotlock.sso_identities (connection_id, issuer, subject, entra_tid, entra_oid, person_ref, email_last)
+      VALUES (linked.id, requested_issuer, requested_subject, requested_tid, requested_oid, newcomer, email_key);
+    END IF;
+    RETURN QUERY SELECT newcomer, 'joined'::text, NULL::text, current_membership.role;
+    RETURN;
+  END IF;
+  IF current_membership.person_ref IS NOT NULL THEN
+    -- Ended by the directory, which lists them no more: not by provisioning either.
+    RETURN QUERY SELECT newcomer, NULL::text, 'not_member'::text, NULL::text;
+    RETURN;
   END IF;
   IF NOT linked.jit_enabled OR NOT trusted OR EXISTS (
     SELECT 1 FROM slotlock.workspace_join_blocks blocked

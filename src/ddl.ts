@@ -34,6 +34,7 @@ import {
   SLOTLOCK_INVITE_DOMAIN_REFUSED,
 } from './ddl-identity.js';
 import { SLOTLOCK_SSO_DDL, SLOTLOCK_SSO_FUNCTIONS, SLOTLOCK_SSO_TABLES } from './ddl-sso.js';
+import { SLOTLOCK_SCIM_DDL, SLOTLOCK_SCIM_FUNCTIONS, SLOTLOCK_SCIM_TABLES } from './ddl-scim.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -270,6 +271,8 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   ...SLOTLOCK_IDENTITY_TABLES,
   // Single sign-on (ddl-sso.ts).
   ...SLOTLOCK_SSO_TABLES,
+  // SCIM provisioning (ddl-scim.ts).
+  ...SLOTLOCK_SCIM_TABLES,
 ] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
@@ -313,6 +316,7 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.member_scopes(text)',
   ...SLOTLOCK_IDENTITY_FUNCTIONS,
   ...SLOTLOCK_SSO_FUNCTIONS,
+  ...SLOTLOCK_SCIM_FUNCTIONS,
 ] as const);
 
 /**
@@ -1283,7 +1287,7 @@ CREATE TABLE IF NOT EXISTS slotlock.workspace_memberships (
     AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
     AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
     AND status IN ('active', 'inactive')
-    AND source IN ('github_org', 'invitation', 'created', 'domain', 'sso')
+    AND source IN ('github_org', 'invitation', 'created', 'domain', 'sso', 'scim')
     AND (status = 'active') = (deactivated_at IS NULL)
   )
 );
@@ -1856,7 +1860,7 @@ BEGIN
   INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, source, joined_email)
   VALUES (invitation.tenant_ref, requested_person, invitation.role, 'invitation', invitation.email)
   ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
-    SET role = EXCLUDED.role, status = 'active', source = 'invitation', deactivated_at = NULL,
+    SET role = EXCLUDED.role, status = 'active', source = 'invitation', deactivated_at = NULL, deactivated_by = NULL,
         joined_email = coalesce(EXCLUDED.joined_email, member.joined_email), joined_via_domain = NULL,
         role_managed_by = 'manual', updated_at = statement_timestamp();
   UPDATE slotlock.workspace_invitations
@@ -2196,6 +2200,7 @@ BEGIN
   END IF;
   UPDATE slotlock.workspace_memberships member
      SET status = 'inactive', source = 'created', deactivated_at = statement_timestamp(),
+         deactivated_by = CASE WHEN requested_actor = requested_person THEN 'self' ELSE 'team' END,
          updated_at = statement_timestamp()
    WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person;
   -- Their pending invitations go with them: those they sent, and those sent to them (their account,
@@ -3660,6 +3665,29 @@ BEGIN
     ON CONFLICT DO NOTHING
   )
   SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  -- A team's directory goes with it; a person comes off the directory users bound to them.
+  erased_table := 'scim_users';
+  DELETE FROM slotlock.scim_users directory WHERE directory.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.scim_users directory SET person_ref = NULL WHERE directory.person_ref = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
+  erased_table := 'scim_groups';
+  DELETE FROM slotlock.scim_groups grouped WHERE grouped.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'scim_tokens';
+  DELETE FROM slotlock.scim_tokens token WHERE token.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+    UPDATE slotlock.scim_tokens token SET created_by = NULL WHERE token.created_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
   RETURN NEXT;
   -- A team's single sign-on goes with it (its identities, mappings, proofs and the sessions signed in
   -- through it alone with the connection); a person takes their identities, and their bypasses.
@@ -8240,7 +8268,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_IDENTITY_DDL}${SLOTLOCK_SSO_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_IDENTITY_DDL}${SLOTLOCK_SSO_DDL}${SLOTLOCK_SCIM_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id

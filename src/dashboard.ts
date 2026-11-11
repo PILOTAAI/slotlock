@@ -44,6 +44,8 @@ import {
   verifySlotlockIdToken,
 } from './oidc.js';
 import type { SlotlockSsoKind, SlotlockSsoRefusal } from './workspace-sso.js';
+import { handleSlotlockScimRequest } from './scim-server.js';
+import type { SlotlockScimRefusal } from './workspace-scim.js';
 import {
   type SlotlockDomainChangeRefusal,
   type SlotlockDomainCheckOutcome,
@@ -291,6 +293,11 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/identity/sso/provisioning',
   '/identity/sso/mapping',
   '/identity/sso/require',
+  '/identity/scim/enable',
+  '/identity/scim/disable',
+  '/identity/scim/token',
+  '/identity/scim/token/revoke',
+  '/identity/scim/group',
   '/sso/proof',
   '/sso/bypass',
   '/assistant',
@@ -1115,6 +1122,12 @@ export interface SlotlockDashboardOptions {
    * the URLs a team's Owner gives (on Node, one that refuses private addresses). Off unless set.
    */
   sso?: { secretBox: SlotlockSecretBox; fetch?: typeof fetch };
+  /**
+   * SCIM 2.0 provisioning (workspace-scim.ts, scim-server.ts): each team's identity provider adds,
+   * deactivates and groups its people at `<dashboard>/scim/v2/<team id>`, with a token an Owner
+   * makes on Settings, Identity. Needs verified domains. Off unless set.
+   */
+  scim?: boolean;
   /** Sends invitations by email; the person inviting is shown each link either way. */
   invitations?: SlotlockInvitationSender;
   keys: SlotlockApiKeyStore;
@@ -2298,6 +2311,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const domainResolvers = options.domains?.resolvers ?? [];
   /** Single sign-on: with verified domains and the database. */
   const ssoStore = domainStore && options.sso ? (workspaces?.sso ?? null) : null;
+  const scimStore = domainStore && options.scim ? (workspaces?.scim ?? null) : null;
   const ssoFetch: typeof fetch = (input, init) => (options.sso?.fetch ?? fetchImpl)(input, init);
   /** Teams' providers' keys, fetched as their Owners' URLs are: through ssoFetch. */
   const ssoJwks = createSlotlockJwksCache({ fetch: ssoFetch, now: () => now() });
@@ -7384,7 +7398,7 @@ ${
           }</button></form>`
         : html``
     }</div></div></div>`;
-    return html`${noticeOf(notice, status)}<h2>Domains</h2>${add}${cards}${invites}${await ssoSection(session, tenantRef)}`;
+    return html`${noticeOf(notice, status)}<h2>Domains</h2>${add}${cards}${invites}${await ssoSection(session, tenantRef)}${await scimSection(session, tenantRef)}`;
   }
 
   async function claimDomain(session: Session, form: URLSearchParams): Promise<Response> {
@@ -7805,6 +7819,121 @@ ${
     return startSsoSignIn({ ...connection, tenantRef: team }, 'proof', personOf(session));
   }
 
+  const SCIM_REFUSALS: Readonly<Record<SlotlockScimRefusal, { status: number; text: string }>> = Object.freeze({
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s provisioning.' },
+    not_enabled: { status: 409, text: 'Turn on SCIM first.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first: the directory adds people only there.' },
+    key_policy: { status: 400, text: 'Choose what happens to a deactivated member’s API keys.' },
+    token_limit: { status: 403, text: 'A team keeps two tokens. Revoke one first.' },
+    bad_token: { status: 401, text: 'That token is not this team’s.' },
+    wrong_workspace: { status: 401, text: 'That token is not this team’s.' },
+    domain_not_verified: { status: 400, text: 'The directory adds people at the verified domains only.' },
+    uniqueness: { status: 409, text: 'That name is taken.' },
+    owner_protected: { status: 409, text: 'The directory never changes an owner.' },
+    invalid_member: { status: 400, text: 'That member is not in the directory.' },
+    owner_not_mappable: { status: 400, text: 'No group makes an owner: owners are made in Slotlock.' },
+    role_not_allowed: { status: 400, text: 'Choose a role.' },
+  });
+  const scimRefused = (session: Session, refusal: SlotlockScimRefusal) =>
+    identityPage(session, SCIM_REFUSALS[refusal].status, SCIM_REFUSALS[refusal].text);
+  /** A token just made: shown on the page that answers, once. */
+  const scimTokenShown = new WeakMap<Session, string>();
+  const scimBaseUrl = (tenantRef: string) => `${publicRoot}/scim/v2/${tenantRef.slice('team:'.length)}`;
+
+  /** A team's SCIM provisioning on its Identity page: off with the Owner's choice of key policy, or its address, tokens and groups. */
+  async function scimSection(session: Session, tenantRef: string): Promise<Html> {
+    if (!scimStore) return html``;
+    const state = await scimStore.state(tenantRef);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    if (!state.enabled) {
+      return html`<h2>Provisioning</h2><form class="sso-form" method="post" action="${root}/identity/scim/enable">${hidden()}<fieldset><legend>When the directory deactivates someone, their API keys</legend><label><input type="radio" name="keys" value="revoke" required> Are revoked</label><label><input type="radio" name="keys" value="keep" required> Keep working</label></fieldset><button class="primary" type="submit">Turn on SCIM</button></form>`;
+    }
+    const shown = scimTokenShown.get(session);
+    const tokens = state.tokens.map(
+      (token) =>
+        html`<tr><td data-label="Token" class="strong"><code>${token.prefix}…</code></td><td data-label="Made">${formatDate(token.createdAt)}</td><td data-label="Last used">${token.lastUsedAt ? formatDate(token.lastUsedAt) : 'Never'}</td><td class="actions"><form class="inline" method="post" action="${root}/identity/scim/token/revoke">${hidden()}<input type="hidden" name="id" value="${token.id}"><button class="danger" type="submit">Revoke<span class="visually-hidden"> ${token.prefix}</span></button></form></td></tr>`,
+    );
+    const card = html`<div class="set-card"><div class="row"><span class="row-label">SCIM URL</span><div class="row-value">${copyField('scim-url', scimBaseUrl(tenantRef))}</div></div>${
+      shown ? html`<div class="row"><span class="row-label">New token</span><div class="row-value">${copyField('scim-token', shown)}</div></div>` : html``
+    }<div class="row"><span class="row-label">Deactivated members’ keys</span><div class="row-value">${state.keyPolicy === 'revoke' ? 'Revoked' : 'Keep working'}</div></div></div>`;
+    const tokenTable =
+      tokens.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Token</th><th>Made</th><th>Last used</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${tokens}</tbody></table></div>`
+        : html``;
+    const { groups } = await scimStore.groups(tenantRef, null, 1, 100);
+    const roleChoices: readonly SlotlockWorkspaceRole[] = ['admin', 'developer', 'member', 'viewer', 'billing'];
+    const reserved = (name: string) => /^slotlock-role-(admin|developer|member|viewer|billing)$/i.test(name);
+    const groupRows = groups.map(
+      (group) =>
+        html`<tr><td data-label="Group" class="strong">${group.displayName}</td><td data-label="People">${String(group.members.length)}</td><td data-label="Role">${
+          reserved(group.displayName)
+            ? SLOTLOCK_WORKSPACE_ROLE_NAMES[group.displayName.slice('slotlock-role-'.length).toLowerCase() as SlotlockWorkspaceRole]
+            : html`<form class="inline" method="post" action="${root}/identity/scim/group">${hidden()}<input type="hidden" name="id" value="${group.id}"><label class="visually-hidden" for="scim-group-${group.id}">Role for ${group.displayName}</label><select id="scim-group-${group.id}" name="role"><option value="">None</option>${roleChoices.map(
+                (role) => html`<option value="${role}"${group.role === role ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+              )}</select><button type="submit">Save</button></form>`
+        }</td></tr>`,
+    );
+    const groupTable =
+      groupRows.length > 0
+        ? html`<h3>Groups</h3><div class="table"><table><thead><tr><th>Group</th><th>People</th><th>Role</th></tr></thead><tbody>${groupRows}</tbody></table></div>`
+        : html``;
+    const off = html`<details class="act danger"><summary>Turn off SCIM</summary><div class="pop"><p>Its tokens stop working. Members it added stay.</p><form method="post" action="${root}/identity/scim/disable">${hidden()}<button class="danger" type="submit">Turn off SCIM</button></form></div></details>`;
+    return html`<h2>Provisioning</h2>${card}${tokenTable}<form class="inline" method="post" action="${root}/identity/scim/token">${hidden()}<button type="submit">New token</button></form>${groupTable}${off}`;
+  }
+
+  async function enableScim(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const keys = form.get('keys');
+    if (keys !== 'keep' && keys !== 'revoke') return scimRefused(session, 'key_policy');
+    const refusal = await scimStore.enable(tenantRef, personOf(session), keys);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.enabled', targetType: 'workspace', targetRef: tenantRef, metadata: { keys } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function disableScim(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await scimStore.disable(tenantRef, personOf(session));
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.disabled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function createScimToken(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const made = await scimStore.createToken(tenantRef, personOf(session));
+    if ('refusal' in made) return scimRefused(session, made.refusal);
+    await audit(session, { action: 'scim.token_created', targetType: 'scim_token', targetRef: made.prefix }, tenantRef);
+    scimTokenShown.set(session, made.token);
+    return identityPage(session, 201, 'Copy the token into your identity provider now: it is not shown again.');
+  }
+
+  async function revokeScimToken(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const refusal = await scimStore.revokeToken(tenantRef, personOf(session), id);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.token_revoked', targetType: 'scim_token', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function mapScimGroup(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const role = form.get('role') || null;
+    const refusal = await scimStore.mapGroup(tenantRef, personOf(session), id, role);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.group_mapped', targetType: 'scim_group', targetRef: id, metadata: { role } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
   async function useSsoBypass(session: Session, form: URLSearchParams): Promise<Response> {
     if (!ssoStore) return nothingHere(session);
     const team = form.get('team') ?? '';
@@ -7991,6 +8120,10 @@ ${
       if (!(await ssoStore.recordProof(session.sid, personOf(session), connection.id, false, connection.configVersion))) {
         return teamsPage(session, SSO_REFUSALS.connection_inactive.status, SSO_REFUSALS.connection_inactive.text);
       }
+      // The team's own provider vouched for the address: the directory's user there is this person.
+      if (scimStore && emailOk && email !== null && emailDomain !== null && verifiedDomains.includes(emailDomain)) {
+        await scimStore.bind(personOf(session), [email], plans ? FREE_TEAM_MEMBERS : null);
+      }
       if (result.outcome === 'linked') {
         await audit(session, { action: 'sso.linked', targetType: 'sso_connection', targetRef: connection.id }, connection.tenantRef);
       }
@@ -8026,6 +8159,7 @@ ${
     const epoch = workspaces ? await workspaces.signedIn(person) : undefined;
     // Named by the provider's email only where the team trusts it: at a domain it verified.
     const trusted = emailOk && emailDomain !== null && verifiedDomains.includes(emailDomain);
+    if (scimStore && trusted && email !== null) await scimStore.bind(person, [email], plans ? FREE_TEAM_MEMBERS : null);
     const login = trusted && email !== null ? email : 'SSO account';
     if (teamStore && idp === 'sso') await teamStore.setDisplay(person, login === 'SSO account' ? null : login);
     const sid = randomBytes(24).toString('base64url');
@@ -8872,6 +9006,12 @@ ${
         if (kept.length > 0) em = kept;
       }
     }
+    // A Google Workspace account of its own domain binds the directory's user at that address (SCIM):
+    // the domain vouches for it. An address GitHub or a consumer Google account verified once does not.
+    if (scimStore && user.idp === 'google' && user.hd !== undefined && user.login.includes('@')) {
+      const address = user.login.toLowerCase();
+      if (slotlockEmailDomain(address) === slotlockEmailDomain(`x@${user.hd}`)) await scimStore.bind(person, [address], plans ? FREE_TEAM_MEMBERS : null);
+    }
     const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
     const sid = randomBytes(24).toString('base64url');
     const expires = now() + SESSION_TTL_MS;
@@ -9380,6 +9520,16 @@ ${
         return startSsoProof(session, form);
       case '/sso/bypass':
         return useSsoBypass(session, form);
+      case '/identity/scim/enable':
+        return enableScim(session, form);
+      case '/identity/scim/disable':
+        return disableScim(session);
+      case '/identity/scim/token':
+        return createScimToken(session);
+      case '/identity/scim/token/revoke':
+        return revokeScimToken(session, form);
+      case '/identity/scim/group':
+        return mapScimGroup(session, form);
       default:
         return respond(
           404,
@@ -9402,6 +9552,18 @@ ${
     const url = new URL(request.url);
     const route = url.pathname.slice(root.length).replace(/\/$/, '') || '/';
     try {
+        // A team's SCIM endpoint: its identity provider's, by bearer token, never a session or a form.
+        if (scimStore && route.startsWith('/scim/v2/')) {
+          const log = options.resources.audit;
+          return await handleSlotlockScimRequest(request, route.slice('/scim/v2/'.length), {
+            scim: scimStore,
+            publicRoot,
+            documentationUri: 'https://slotlock.pylota.io/docs/dashboard/#scim',
+            ...(log ? { record: (tenantRef: string, event: SlotlockAuditEventInput) => log.record(tenantRef, event) } : {}),
+            // Their keys go as the team chose when it turned SCIM on.
+            deactivated: (tenantRef, person, keyPolicy) => (keyPolicy === 'revoke' ? revokeKeysOf(tenantRef, person, 'scim') : Promise.resolve(0)),
+          });
+        }
       if (request.method === 'GET') {
         switch (route) {
           case '/': {

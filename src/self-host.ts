@@ -210,6 +210,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_DNS_RESOLVER',
   'SLOTLOCK_TEAM_SSO',
   'SLOTLOCK_SSO_SECRET',
+  'SLOTLOCK_TEAM_SCIM',
   'HOST',
   'PORT',
 ] as const);
@@ -1348,6 +1349,7 @@ export async function startSlotlockServer(
             ...(config.dashboard.teamSso
               ? { sso: { secretBox: createSlotlockSecretBox(config.dashboard.teamSso.secret), fetch: createSlotlockGuardedFetch() } }
               : {}),
+            ...(config.dashboard.teamScim ? { scim: true } : {}),
             ...(config.dashboard.invitationEmail
               ? {
                   invitations: createSlotlockInvitationEmailSender(config.dashboard.invitationEmail, {
@@ -2884,6 +2886,8 @@ Environment:
   SLOTLOCK_TEAM_SSO              on or off (default): each team signs in through its own identity
                                  provider over OpenID Connect (with verified domains)
   SLOTLOCK_SSO_SECRET            32+ characters: seals each team's client secret (with team SSO)
+  SLOTLOCK_TEAM_SCIM             on or off (default): each team's identity provider provisions its
+                                 people over SCIM 2.0 at /dashboard/scim/v2 (with verified domains)
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 
