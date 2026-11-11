@@ -1,0 +1,106 @@
+# Stripe end to end: @slotlock/payments-stripe against Stripe's test mode and a real Slotlock on
+# PostgreSQL (packages/payments-stripe/src/payments.stripe-e2e.test.ts). Real PaymentIntents paid
+# with Stripe's test cards, Stripe's own events, and refunds read back from Stripe. It moves no
+# money: the test refuses a live key, and the account must answer livemode: false.
+#
+# It needs the STRIPE_TEST_SECRET_KEY repository secret: a test-mode secret key (sk_test_), or a
+# restricted test key (rk_test_) that writes PaymentIntents and Refunds and reads Events and
+# Balance. Without it (a fork's pull request, which never gets secrets, or before it is set) the
+# run says so and passes without testing.
+#
+# It is its own workflow, outside CI's required check, so Stripe's test mode being down never
+# blocks a merge; it runs on changes to the code payments go through, every day (Stripe may change
+# under the pinned API version), and when asked.
+name: Stripe end to end
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/stripe-e2e.yml
+      - packages/payments-stripe/**
+      - src/store.ts
+      - src/ddl.ts
+      - src/types.ts
+      - src/agent-store-backend.ts
+      - src/agent-server.ts
+      - src/application-api.ts
+      - src/rest-api.ts
+      - src/webhooks.ts
+      - src/event-feed.ts
+      - package.json
+      - package-lock.json
+  push:
+    branches: [main]
+    # The same paths as pull_request.
+    paths:
+      - .github/workflows/stripe-e2e.yml
+      - packages/payments-stripe/**
+      - src/store.ts
+      - src/ddl.ts
+      - src/types.ts
+      - src/agent-store-backend.ts
+      - src/agent-server.ts
+      - src/application-api.ts
+      - src/rest-api.ts
+      - src/webhooks.ts
+      - src/event-feed.ts
+      - package.json
+      - package-lock.json
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stripe-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  stripe:
+    name: Stripe test mode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: slotlock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
+      STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+    steps:
+      - name: Without the secret, say so
+        if: env.STRIPE_TEST_SECRET_KEY == ''
+        run: echo "::notice::STRIPE_TEST_SECRET_KEY is not set here (a fork's pull request never gets it), so Stripe's test mode was not tested."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.STRIPE_TEST_SECRET_KEY != ''
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: env.STRIPE_TEST_SECRET_KEY != ''
+        with:
+          node-version: '24'
+          cache: npm
+      - if: env.STRIPE_TEST_SECRET_KEY != ''
+        run: npm ci
+      - name: Run the end-to-end test, refusing a run that skipped it
+        if: env.STRIPE_TEST_SECRET_KEY != ''
+        run: |
+          npx vitest run packages/payments-stripe/src/payments.stripe-e2e.test.ts --reporter=default --reporter=json --outputFile.json=stripe-e2e.json
+          # With the key and the database set, every case must have run: none skipped, none missing.
+          jq -e '.numTotalTests >= 7 and .numPassedTests == .numTotalTests and .numPendingTests == 0' stripe-e2e.json
