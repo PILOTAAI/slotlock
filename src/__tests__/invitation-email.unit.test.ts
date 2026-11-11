@@ -3,7 +3,7 @@
 // 2026-11-11: resend.com/docs/api-reference/emails/send-email, postmarkapp.com/developer/api/email-api).
 import { describe, expect, it, vi } from 'vitest';
 import { readDashboardConfig } from '../config.js';
-import { createSlotlockInvitationEmailSender, slotlockInvitationEmail } from '../invitation-email.js';
+import { createSlotlockInvitationEmailSender, SlotlockInvitationEmailError, slotlockInvitationEmail } from '../invitation-email.js';
 
 const invitation = {
   to: 'desk@clinic.example',
@@ -40,6 +40,8 @@ describe('invitation email', () => {
     expect(headers.authorization).toBe('Bearer re_test_key_123');
     expect(headers['idempotency-key']).toMatch(/^[0-9a-f]{64}$/);
     expect(headers['idempotency-key']).not.toContain('desk');
+    // Resend refuses a request with no User-Agent (403), and a Worker's fetch adds none.
+    expect(headers['user-agent']).toMatch(/^Slotlock /);
     const body = JSON.parse(String(init.body));
     expect(body).toMatchObject({ from: 'Slotlock <team@slotlock.example>', to: ['desk@clinic.example'], subject: '@ada invited you to Acme <Rentals> on Slotlock' });
     expect(body.text).toContain(invitation.link);
@@ -53,10 +55,13 @@ describe('invitation email', () => {
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('https://api.postmarkapp.com/email');
     expect((init.headers as Record<string, string>)['x-postmark-server-token']).toBe('00000000-aaaa-bbbb-cccc-000000000000');
+    expect((init.headers as Record<string, string>)['user-agent']).toMatch(/^Slotlock /);
     expect(JSON.parse(String(init.body))).toMatchObject({ From: 'team@slotlock.example', To: 'desk@clinic.example', MessageStream: 'outbound' });
     fetch.mockResolvedValueOnce(Response.json({ ErrorCode: 406, Message: 'desk@clinic.example is inactive' }, { status: 422 }));
     const refused = await sender.send(invitation).catch((error: Error) => error);
-    expect(refused).toBeInstanceOf(Error);
+    // Its name tells the dashboard's log it may print the message: the status, never the address.
+    expect(refused).toBeInstanceOf(SlotlockInvitationEmailError);
+    expect((refused as Error).name).toBe('SlotlockInvitationEmailError');
     expect((refused as Error).message).toBe('Postmark answered HTTP 422');
   });
 

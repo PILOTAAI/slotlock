@@ -15,6 +15,14 @@ export interface SlotlockInvitationEmailConfig {
 
 type Invitation = Parameters<SlotlockInvitationSender['send']>[0];
 
+/** A provider's refusal: its name and HTTP status alone (its text can echo the address). */
+export class SlotlockInvitationEmailError extends Error {
+  override name = 'SlotlockInvitationEmailError';
+}
+
+/** Resend refuses a request without a User-Agent (403), and a Worker's fetch sends none. */
+const USER_AGENT = 'Slotlock (+https://slotlock.pylota.io)';
+
 const escape = (value: string) =>
   value.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
 
@@ -50,6 +58,7 @@ export function createSlotlockInvitationEmailSender(
               headers: {
                 authorization: `Bearer ${config.key}`,
                 'content-type': 'application/json',
+                'user-agent': USER_AGENT,
                 // One send per link, however often the person inviting submits: keyed by the link,
                 // as a digest, so the key names no address.
                 'idempotency-key': createHash('sha256').update(invitation.link, 'utf8').digest('hex'),
@@ -62,6 +71,7 @@ export function createSlotlockInvitationEmailSender(
                 'x-postmark-server-token': config.key,
                 'content-type': 'application/json',
                 accept: 'application/json',
+                'user-agent': USER_AGENT,
               },
               body: {
                 From: config.from,
@@ -81,7 +91,7 @@ export function createSlotlockInvitationEmailSender(
       });
       if (!response.ok) {
         // The status alone: a provider's error text can echo the address.
-        throw new Error(`${config.provider === 'resend' ? 'Resend' : 'Postmark'} answered HTTP ${response.status}`);
+        throw new SlotlockInvitationEmailError(`${config.provider === 'resend' ? 'Resend' : 'Postmark'} answered HTTP ${response.status}`);
       }
     },
   };

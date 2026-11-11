@@ -343,6 +343,12 @@ const planChangeRetentionDaysSql = (tenant: string) =>
       FROM slotlock.tenant_plan(${tenant}) given LIMIT 1)`;
 
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
+/**
+ * The invitations one address is sent in a day, from every team together, where invitations are
+ * limited (a deployment with plans): with sign-up open, many accounts each within their own daily
+ * limit could otherwise fill one inbox.
+ */
+export const SLOTLOCK_INVITATIONS_PER_ADDRESS = 5;
 export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
 
 /** The table that records which release migrated the schema (SLOTLOCK_SCHEMA_VERSION). */
@@ -1476,6 +1482,8 @@ CREATE INDEX IF NOT EXISTS slotlock_workspace_invitations_github_idx
   ON slotlock.workspace_invitations (github_ref) WHERE accepted_at IS NULL AND revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS slotlock_workspace_invitations_email_idx
   ON slotlock.workspace_invitations (email) WHERE accepted_at IS NULL AND revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_workspace_invitations_sent_email_idx
+  ON slotlock.workspace_invitations (email, sent_at) WHERE email IS NOT NULL;
 ALTER TABLE slotlock.workspace_invitations ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.workspace_invitations FROM PUBLIC;
 
@@ -1712,6 +1720,14 @@ BEGIN
     RETURN QUERY SELECT NULL::uuid, 'invitation_limit'::text;
     RETURN;
   END IF;
+  -- One address's invitations a day, from every team together (SLOTLOCK_INVITATIONS_PER_ADDRESS).
+  IF requested_daily_limit IS NOT NULL AND email_normalized IS NOT NULL AND
+     (SELECT count(*) FROM slotlock.workspace_invitations sent
+       WHERE sent.email = email_normalized AND sent.sent_at > statement_timestamp() - interval '1 day')
+     >= ${SLOTLOCK_INVITATIONS_PER_ADDRESS} THEN
+    RETURN QUERY SELECT NULL::uuid, 'recipient_limit'::text;
+    RETURN;
+  END IF;
   -- A pending invitation to the same address is replaced, so it is not counted against the cap.
   IF requested_member_cap IS NOT NULL THEN
     SELECT (SELECT count(*) FROM slotlock.workspace_memberships member
@@ -1900,7 +1916,9 @@ $slotlock_revoke_invitation$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[18]} FROM PUBLIC;
 
 -- Send an invitation again, with a new token and a new expiry: by someone who may give its role,
--- within the daily limit. The old token stops working.
+-- within the daily limit and the address's. As inviting the address again does, it withdraws the
+-- old invitation and adds a new one, so each re-send counts as a send: re-sending one row in place
+-- made a new link, and an email, the daily limit never saw.
 CREATE OR REPLACE FUNCTION slotlock.resend_invitation(
   requested_tenant text, requested_actor text, requested_id uuid, requested_token bytea,
   requested_days integer, requested_daily_limit integer, requested_member_cap integer)
@@ -1950,6 +1968,12 @@ BEGIN
   ) THEN
     RETURN 'invitation_limit';
   END IF;
+  IF requested_daily_limit IS NOT NULL AND invitation_email IS NOT NULL AND
+     (SELECT count(*) FROM slotlock.workspace_invitations sent
+       WHERE sent.email = invitation_email AND sent.sent_at > statement_timestamp() - interval '1 day')
+     >= ${SLOTLOCK_INVITATIONS_PER_ADDRESS} THEN
+    RETURN 'recipient_limit';
+  END IF;
   -- Sent again, it is open again: held to the cap with the members and the other open invitations.
   IF requested_member_cap IS NOT NULL AND
      (SELECT count(*) FROM slotlock.workspace_memberships member
@@ -1961,10 +1985,14 @@ BEGIN
      >= requested_member_cap THEN
     RETURN 'member_cap';
   END IF;
-  UPDATE slotlock.workspace_invitations invitation
-     SET token_sha256 = requested_token, sent_at = statement_timestamp(), inviter_ref = requested_actor,
-         expires_at = statement_timestamp() + make_interval(days => requested_days)
+  UPDATE slotlock.workspace_invitations invitation SET revoked_at = statement_timestamp()
    WHERE invitation.id = requested_id;
+  INSERT INTO slotlock.workspace_invitations
+    (tenant_ref, token_sha256, email, github_ref, github_login, role, inviter_ref, expires_at)
+  SELECT old.tenant_ref, requested_token, old.email, old.github_ref, old.github_login, old.role,
+         requested_actor, statement_timestamp() + make_interval(days => requested_days)
+    FROM slotlock.workspace_invitations old
+   WHERE old.id = requested_id;
   RETURN NULL;
 END
 $slotlock_resend_invitation$;

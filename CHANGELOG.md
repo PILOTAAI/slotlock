@@ -128,7 +128,10 @@ notes first.
 - **Invitations by email**: `SLOTLOCK_INVITATION_EMAIL` (`resend` or `postmark`), with
   `SLOTLOCK_INVITATION_EMAIL_KEY` and `SLOTLOCK_INVITATION_EMAIL_FROM`
   (`createSlotlockInvitationEmailSender`). Each person is held to 50 invitations a day across their
-  teams, as each team is.
+  teams, as each team is; sending one again counts as a send. One address is sent at most 5 a day
+  from every team together (`recipient_limit`), so open sign-up cannot fill an inbox. Requests to
+  the provider carry a User-Agent (Resend refuses one without), and a refusal is logged with the
+  provider's status (`SlotlockInvitationEmailError`), never the address.
 - **Requests about one person** (RFC 0004 D3). `POST /v1/subjects/export` (`exportSubject`,
   `slotlock subject export`) lists what the tenant keeps about one person, found by exactly one of
   `email`, `holder`, `contact` or `reference`: the rows that name them, by table
