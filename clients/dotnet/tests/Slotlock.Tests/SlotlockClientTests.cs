@@ -139,7 +139,7 @@ public sealed class SlotlockClientTests
             },
             busy);
 
-        Assert.True(JsonNode.DeepEquals(new JsonObject { ["cancelled"] = true, ["revision"] = 2 }, await c.CancelReservationAsync(reference, 2, cancellationToken: Ct)));
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["cancelled"] = true, ["revision"] = 2, ["cancellation_fee"] = null }, await c.CancelReservationAsync(reference, 2, cancellationToken: Ct)));
         Assert.True(JsonNode.DeepEquals(
             new JsonObject { ["revision"] = 1, ["replayed"] = false },
             await c.RecordCoverageAsync(id, "ics:https://calendar.example.com/fleet.ics", At(0), At(24), 1, cancellationToken: Ct)));

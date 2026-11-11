@@ -14,6 +14,13 @@ export const HOLD_METADATA_KEY = 'slotlock_hold_id';
 /** Refusals that prove a payment was not applied to its hold: only these are refunded. */
 const REFUNDABLE = new Set(['hold_expired', 'payment_conflict', 'payment_amount_mismatch']);
 
+/** A URL without its trailing slashes, in one pass from the end (a `/\/+$/` replace backtracks). */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 const HOLD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Why a Stripe webhook delivery was refused: not from Stripe, or not now. */
@@ -92,7 +99,7 @@ export function createStripePayments(options: StripePaymentsOptions) {
     received: { amount_minor: number; currency: string } | null,
   ): Promise<PaymentOutcome> {
     const response = await send(
-      `${options.slotlock.baseUrl.replace(/\/+$/, '')}/v1/holds/${encodeURIComponent(holdId)}/paid`,
+      `${withoutTrailingSlashes(options.slotlock.baseUrl)}/v1/holds/${encodeURIComponent(holdId)}/paid`,
       {
         method: 'POST',
         headers: { authorization: `Bearer ${options.slotlock.apiKey}`, 'content-type': 'application/json' },

@@ -71,10 +71,20 @@ export interface SlotlockNotifyApi {
   listEvents(resourceId: string, window: { start: Date; end: Date }): Promise<SlotlockEvent[]>;
 }
 
+/**
+ * A URL without its trailing slashes, in one pass from the end: a `/\/+$/` replace backtracks
+ * quadratically on a value with many slashes not at its end.
+ */
+export function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 /** Slotlock at `baseUrl` (its REST root, without /v1), as the key's tenant. */
 export function createSlotlockNotifyApi(options: { baseUrl: string; apiKey: string; fetch?: typeof fetch }): SlotlockNotifyApi {
   const send = options.fetch ?? fetch;
-  const base = options.baseUrl.replace(/\/+$/, '');
+  const base = withoutTrailingSlashes(options.baseUrl);
   const get = async (path: string): Promise<Record<string, unknown> | null> => {
     const response = await send(`${base}${path}`, {
       headers: { authorization: `Bearer ${options.apiKey}`, accept: 'application/json' },

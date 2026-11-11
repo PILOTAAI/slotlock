@@ -161,7 +161,10 @@ class SlotlockClientTest {
         List.of(List.of(Instant.parse(at(9)), Instant.parse(at(10))), List.of(Instant.parse(at(11)), Instant.parse(at(12.5)))),
         intervals);
 
-    assertEquals(Map.of("cancelled", true, "revision", 2L), client.cancelReservation(reference, 2));
+    // No cancellation fee applies, so it is answered as null (Map.of cannot hold one).
+    Map<String, Object> cancelled = new HashMap<>(Map.of("cancelled", true, "revision", 2L));
+    cancelled.put("cancellation_fee", null);
+    assertEquals(cancelled, client.cancelReservation(reference, 2));
     assertEquals(
         Map.of("revision", 1L, "replayed", false),
         client.recordCoverage(id, "ics:https://calendar.example.com/fleet.ics", at(0), at(24), 1));

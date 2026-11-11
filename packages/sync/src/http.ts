@@ -12,7 +12,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { OAuthProvider } from './oauth.js';
 import type { ProviderCalendar } from './providers.js';
-import type { SlotlockResourceSummary } from './slotlock-api.js';
+import { type SlotlockResourceSummary, withoutTrailingSlashes } from './slotlock-api.js';
 import type { SyncStore } from './store.js';
 import type { Syncer } from './syncer.js';
 
@@ -69,7 +69,7 @@ function sameSecret(given: string, expected: string): boolean {
 export function createSyncHttpHandler(options: SyncHttpOptions): (request: Request) => Promise<Response> {
   if (options.adminToken.length < 32) throw new TypeError('The sync admin token must be at least 32 characters');
   if (Buffer.byteLength(options.linkSecret) < 32) throw new TypeError('The sync link secret must be at least 32 bytes');
-  const publicUrl = options.publicUrl.replace(/\/+$/, '');
+  const publicUrl = withoutTrailingSlashes(options.publicUrl);
   if (!/^https:\/\//.test(publicUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(publicUrl)) {
     throw new TypeError('The sync public URL must be https (or http on localhost)');
   }

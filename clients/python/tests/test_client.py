@@ -287,7 +287,7 @@ class AgainstAServer(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(client.cancel_reservation(reference, revision=2), {"cancelled": True, "revision": 2})
+        self.assertEqual(client.cancel_reservation(reference, revision=2), {"cancelled": True, "revision": 2, "cancellation_fee": None})
         source = "ics:https://calendar.example.com/fleet.ics"
         coverage = client.record_coverage(resource_id, source, start=self.at(0), end=self.at(24), revision=1)
         self.assertEqual(coverage, {"revision": 1, "replayed": False})
@@ -357,7 +357,7 @@ class AgainstAServer(unittest.TestCase):
         self.assertEqual(client.get_reservation(hold["id"])["reservation"], confirmed)
         listed = client.list_reservations(resource_id, start=self.at(0), end=self.at(24))
         self.assertEqual(listed["reservations"], [confirmed])
-        self.assertEqual(client.cancel_reservation(hold["id"], revision=2), {"cancelled": True, "revision": 2})
+        self.assertEqual(client.cancel_reservation(hold["id"], revision=2), {"cancelled": True, "revision": 2, "cancellation_fee": None})
         self.refused(404, "reservation_not_found", lambda: client.get_reservation(hold["id"]))
 
         shared_id = client.create_resource(external_ref=f"python-events-{self.suffix}-t")["resource"]["id"]

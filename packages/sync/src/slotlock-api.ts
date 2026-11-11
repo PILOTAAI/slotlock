@@ -190,10 +190,20 @@ export function createSlotlockSyncApi(options: {
   };
 }
 
+/**
+ * A URL without its trailing slashes, in one pass from the end: a `/\/+$/` replace backtracks
+ * quadratically on a value with many slashes not at its end.
+ */
+export function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 /** One authenticated JSON request to Slotlock; a refusal throws SlotlockApiError. */
 export function slotlockRequester(options: { baseUrl: string; apiKey: string; fetch?: typeof fetch }) {
   const send = options.fetch ?? fetch;
-  const base = options.baseUrl.replace(/\/+$/, '');
+  const base = withoutTrailingSlashes(options.baseUrl);
   return async (method: string, path: string, body?: unknown): Promise<unknown> => {
     const response = await send(`${base}${path}`, {
       method,

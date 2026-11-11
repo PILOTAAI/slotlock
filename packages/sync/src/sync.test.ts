@@ -271,3 +271,17 @@ describe('the HTTP surface', () => {
     expect(forged.status).toBe(400);
   });
 });
+
+describe('withoutTrailingSlashes', () => {
+  it('drops every trailing slash and nothing else, in time linear in the value', async () => {
+    const { withoutTrailingSlashes } = await import('./slotlock-api.js');
+    expect(withoutTrailingSlashes('https://slotlock.example.com///')).toBe('https://slotlock.example.com');
+    expect(withoutTrailingSlashes('https://slotlock.example.com/api')).toBe('https://slotlock.example.com/api');
+    expect(withoutTrailingSlashes('///')).toBe('');
+    // Many slashes not at the end: what made /\/+$/ quadratic.
+    const crafted = `${'/'.repeat(200_000)}x`;
+    const started = performance.now();
+    expect(withoutTrailingSlashes(crafted)).toBe(crafted);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+});

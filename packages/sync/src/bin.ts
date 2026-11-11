@@ -16,6 +16,7 @@ import { every, serveFetchHandler, setting } from './node-http.js';
 import type { OAuthClient } from './oauth.js';
 import type { ICalendarFeedParser } from './providers.js';
 import { parseSealKeys } from './seal.js';
+import { withoutTrailingSlashes } from './slotlock-api.js';
 import { createPostgresSyncStore } from './store.js';
 import { createSyncer } from './syncer.js';
 
@@ -35,7 +36,7 @@ async function main(command: string): Promise<void> {
     console.error('usage: slotlock-sync migrate | serve');
     process.exit(2);
   }
-  const publicUrl = setting('SYNC_PUBLIC_URL').replace(/\/+$/, '');
+  const publicUrl = withoutTrailingSlashes(setting('SYNC_PUBLIC_URL'));
   const redirectUri = `${publicUrl}/oauth/callback`;
   const clients: { google?: OAuthClient; microsoft?: OAuthClient } = {};
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
