@@ -162,20 +162,24 @@ with a sign-in in the last 15 minutes.
 - **Keep the record.** Each day the server's maintenance looks it up again over DNS-over-HTTPS
   (Cloudflare's, cross-checked by Google's), or with its own resolver
   (`SLOTLOCK_DNS_RESOLVER=system`, for split-horizon DNS; a Worker always uses DNS-over-HTTPS).
-  Absent from both on two checks a day apart, the domain is lapsing and its token is replaced:
-  only the new record restores it, so whoever holds the domain next cannot revive it from DNS
-  history. Fourteen days later it has lapsed and another team may claim it. Resolver errors change
-  nothing. Every change is in the team's audit log.
+  Absent from both on two checks a day apart (or 14 days of nothing but resolver errors), the
+  domain is lapsing and its token is replaced: only the new record restores it, so whoever holds
+  the domain next cannot revive it from DNS history. Fourteen days later it has lapsed and another
+  team may claim it. A record reached through an alias (a CNAME) does not count. Every change is in
+  the team's audit log.
 - **Who may join through it**: anyone whose address at it is verified (by Google, or by GitHub
   when the person asks GitHub for their verified addresses on the Teams page) may ask to join, and
-  an Owner or Admin approves them, as Viewer, Member or Developer, on Members; or, where the Owner
-  chooses, joins at once as a Viewer (someone removed asks again); or nobody, for invitations
-  only. Only an exact domain matches (`sub.acme.com` is not `acme.com`), only while it is verified,
+  an Owner or Admin approves them, as Viewer, Member or Developer, on Members, which says how the
+  address was verified; or nobody, for invitations only. Where the Owner chooses, a Google
+  Workspace account of the domain joins at once as a Viewer: an address Google or GitHub verified
+  once (a former employee's personal account, say) only ever asks, and so does an address the team
+  removed or declined, under any account. Only an exact domain matches (`sub.acme.com` is not `acme.com`), only while it is verified,
   and members who joined through a domain that lapses stay, marked on Members.
 - **Invitations only to verified domains**, when an Owner turns it on: invitations to other
   addresses, and to GitHub accounts, are refused.
 - A claim names its domain and who added it; a request to join keeps the address it came by until
-  30 days after it is decided or expires. Claims that ended go three months later.
+  30 days after it is decided or expires. Claims that ended go three months later. An address the
+  team removed or declined is remembered by its SHA-256 for a year.
 
 ## Organizations
 

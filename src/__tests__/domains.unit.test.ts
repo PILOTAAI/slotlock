@@ -101,13 +101,34 @@ describe('TXT answers', () => {
         { name: 'target', type: 16, TTL: 60, data: '"a"' },
       ],
     };
-    expect(slotlockDohTxtAnswer(mixed)).toEqual({ status: 'ok', values: ['a'], ad: false, ttl: 60 });
+    // A name that is an alias holds no record of its own, whatever its target holds.
+    expect(slotlockDohTxtAnswer(mixed)).toEqual({ status: 'ok', values: [], ad: false, ttl: null });
+    const plain = { Status: 0, Answer: [{ name: 'x', type: 16, TTL: 60, data: '"a"' }, { name: 'x', type: 6, TTL: 60, data: 'soa' }] };
+    expect(slotlockDohTxtAnswer(plain)).toEqual({ status: 'ok', values: ['a'], ad: false, ttl: 60 });
     expect(slotlockDohTxtAnswer({ Status: 0, Authority: [{ type: 6 }] })).toEqual({ status: 'ok', values: [], ad: false, ttl: null });
     expect(slotlockDohTxtAnswer({ Status: 3, AD: true })).toEqual({ status: 'nxdomain', ad: true });
     expect(slotlockDohTxtAnswer({ Status: 2 })).toEqual({ status: 'error', reason: 'status 2' });
     expect(slotlockDohTxtAnswer(null)).toEqual({ status: 'error', reason: 'malformed' });
     expect(slotlockDohTxtAnswer({ Status: 0, Answer: 'x' })).toEqual({ status: 'error', reason: 'malformed' });
     expect(slotlockDohTxtAnswer({ Status: 0, Answer: [{ type: 16, data: 7 }] })).toEqual({ status: 'error', reason: 'malformed' });
+  });
+
+  it("counts only the name's own records: an alias (CNAME, DNAME) holds none, and another name's records are not its", () => {
+    const asked = '_slotlock-challenge.acme-rentals.com';
+    const aliased = {
+      Status: 0,
+      Answer: [
+        { name: asked, type: 5, TTL: 60, data: 'acme.some-saas.net.' },
+        { name: 'acme.some-saas.net.', type: 16, TTL: 60, data: '"slotlock-verification=tok"' },
+      ],
+    };
+    expect(slotlockDohTxtAnswer(aliased, asked)).toEqual({ status: 'ok', values: [], ad: false, ttl: null });
+    const dname = { Status: 0, Answer: [{ name: 'acme-rentals.com', type: 39, TTL: 60, data: 'evil.example.' }, { name: asked, type: 16, TTL: 60, data: '"x"' }] };
+    expect(slotlockDohTxtAnswer(dname, asked)).toEqual({ status: 'ok', values: [], ad: false, ttl: null });
+    const other = { Status: 0, Answer: [{ name: 'elsewhere.example.', type: 16, TTL: 60, data: '"slotlock-verification=tok"' }] };
+    expect(slotlockDohTxtAnswer(other, asked)).toEqual({ status: 'ok', values: [], ad: false, ttl: null });
+    const own = { Status: 0, Answer: [{ name: `${asked.toUpperCase()}.`, type: 16, TTL: 60, data: '"slotlock-verification=tok"' }] };
+    expect(slotlockDohTxtAnswer(own, asked)).toEqual({ status: 'ok', values: ['slotlock-verification=tok'], ad: false, ttl: 60 });
   });
 
   it('finds the record only by its exact value', () => {
@@ -124,7 +145,9 @@ describe('TXT answers', () => {
 
 describe('DNS-over-HTTPS resolvers', () => {
   it('asks the documented JSON endpoints for TXT, uncached, without following redirects', async () => {
-    const fetch = vi.fn(async () => Response.json({ Status: 0, Answer: [{ type: 16, TTL: 5, data: '"slotlock-verification=tok"' }] }));
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      Response.json({ Status: 0, Answer: [{ name: new URL(String(url)).searchParams.get('name'), type: 16, TTL: 5, data: '"slotlock-verification=tok"' }] }),
+    );
     const check = await checkSlotlockDomain(
       [createSlotlockDohResolver('cloudflare', { fetch }), createSlotlockDohResolver('google', { fetch })],
       'acme-rentals.com',

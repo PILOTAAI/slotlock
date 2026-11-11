@@ -34,6 +34,7 @@ import {
   type SlotlockDomainChangeRefusal,
   type SlotlockDomainCheckOutcome,
   type SlotlockDomainJoinPolicy,
+  type SlotlockJoinEvidence,
   SLOTLOCK_DOMAIN_AUDIT_ACTIONS,
   slotlockDomainCheckEvent,
   slotlockJoinRole,
@@ -1479,6 +1480,11 @@ interface Session {
   team?: string;
   /** Addresses GitHub verified, kept only for the invitation being opened: at most its own. */
   em?: string[];
+  /**
+   * With Google: the Google Workspace domain the account belongs to (the ID token's `hd`), so its
+   * address is one the company controls now, not one it verified once.
+   */
+  hd?: string;
 }
 
 interface Organization {
@@ -2320,6 +2326,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ) {
       return false;
     }
+    if (payload.hd !== undefined && (payload.idp !== 'google' || typeof payload.hd !== 'string' || payload.hd.length > 253)) return false;
     if (payload.em === undefined) return true;
     return (
       Array.isArray(payload.em) &&
@@ -2337,6 +2344,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   /** Addresses the person holds verified: their Google account's, or those GitHub confirmed for an invitation. */
   const verifiedEmails = (session: Session): string[] =>
     session.idp === 'google' ? (session.login.includes('@') ? [session.login.toLowerCase()] : []) : (session.em ?? []);
+  /**
+   * How those addresses were verified, for joining through a domain: by a Google Workspace account
+   * of the address's own domain (the company controls it now), or once, by Google or GitHub.
+   */
+  const joinEvidence = (session: Session): SlotlockJoinEvidence => {
+    if (session.idp !== 'google') return 'github';
+    const domain = slotlockEmailDomain(session.login);
+    return session.hd !== undefined && domain !== null && domain === slotlockEmailDomain(`x@${session.hd}`) ? 'google_workspace' : 'google';
+  };
 
   /**
    * Without a membership store: the Owner of one's own workspace; in an organization's, its GitHub
@@ -6578,7 +6594,7 @@ ${
     const joinRoles = (['viewer', 'member', 'developer'] as const).filter((role) => slotlockRoleMayGrant(mine, role));
     const requestRows = requests.map((request, index) => {
       const name = request.display ?? request.email;
-      return html`<tr><td data-label="Asked" class="strong">${name}${request.display ? html` <span class="muted">${request.email}</span>` : html``}</td><td data-label="Asked on">${formatDate(request.createdAt)}</td><td class="actions"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
+      return html`<tr><td data-label="Asked" class="strong">${name}${request.display ? html` <span class="muted">${request.email}</span>` : html``} <span class="muted">${JOIN_EVIDENCE_WORDS[request.evidence]}</span></td><td data-label="Asked on">${formatDate(request.createdAt)}</td><td class="actions"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
         (role) => html`<option value="${role}"${role === 'member' ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
       )}</select><button class="primary" type="submit" name="decision" value="approve">Approve<span class="visually-hidden"> ${name}</span></button><button type="submit" name="decision" value="decline">Decline<span class="visually-hidden"> ${name}</span></button></form></td></tr>`;
     });
@@ -6804,6 +6820,13 @@ ${
     domain_not_verified: { status: 409, text: 'That domain is no longer verified, so the request cannot be approved.' },
   });
 
+  /** How a request's address was verified, as the people deciding read it. */
+  const JOIN_EVIDENCE_WORDS: Readonly<Record<SlotlockJoinEvidence, string>> = Object.freeze({
+    google_workspace: 'verified by Google Workspace',
+    google: 'verified once by Google, not checked since',
+    github: 'verified once by GitHub, not checked since',
+  });
+
   /** What a domain lets the people whose verified address is at it do, as the Identity page offers it. */
   const JOIN_POLICY_WORDS: Readonly<Record<SlotlockDomainJoinPolicy, string>> = Object.freeze({
     request: 'Ask to join',
@@ -6960,7 +6983,9 @@ ${
           team.requested
             ? html`<span class="pill held">Asked</span>`
             : html`<form class="inline" method="post" action="${root}/join/request"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="team" value="${team.tenantRef}"><button class="primary" type="submit">${
-                team.joinPolicy === 'auto' ? html`Join ${team.name}` : html`Ask to join<span class="visually-hidden"> ${team.name}</span>`
+                team.joinPolicy === 'auto' && joinEvidence(session) === 'google_workspace'
+                  ? html`Join ${team.name}`
+                  : html`Ask to join<span class="visually-hidden"> ${team.name}</span>`
               }</button></form>`
         }</td></tr>`,
     );
@@ -6972,7 +6997,7 @@ ${
     const team = form.get('team') ?? '';
     const offered = (await domainStore.discoverable(personOf(session), verifiedEmails(session))).find((found) => found.tenantRef === team);
     if (!offered) return teamsPage(session, 404, DOMAIN_REFUSALS.not_found.text);
-    const asked = await domainStore.requestToJoin(team, personOf(session), verifiedEmails(session), await memberCapOf(team));
+    const asked = await domainStore.requestToJoin(team, personOf(session), verifiedEmails(session), joinEvidence(session), await memberCapOf(team));
     if ('refusal' in asked) return teamsPage(session, DOMAIN_REFUSALS[asked.refusal].status, DOMAIN_REFUSALS[asked.refusal].text);
     const person = personOf(session);
     if (asked.outcome === 'joined') {
@@ -6983,7 +7008,11 @@ ${
       );
       return moveTo(session, team.slice('team:'.length), '');
     }
-    await audit(session, { action: 'member.join_requested', actorRole: null, targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey } }, team);
+    await audit(
+      session,
+      { action: 'member.join_requested', actorRole: null, targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey, evidence: joinEvidence(session) } },
+      team,
+    );
     return teamsPage(session, 200, `Asked to join ${offered.name}. An owner or admin decides.`);
   }
 
@@ -7586,7 +7615,7 @@ ${
     code: string,
     verifier: string,
     nonce: string,
-  ): Promise<{ uid: string; login: string; idp: 'google' } | null> {
+  ): Promise<{ uid: string; login: string; idp: 'google'; hd?: string } | null> {
     try {
       const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -7639,7 +7668,9 @@ ${
         (claims.email_verified === true || claims.email_verified === 'true') && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
           ? claims.email
           : 'Google account';
-      return { uid: claims.sub, login: email, idp: 'google' };
+      // A Google Workspace account names its domain (hd); a consumer account names none.
+      const hd = typeof claims.hd === 'string' && /^[a-z0-9.-]{1,253}$/i.test(claims.hd) ? claims.hd.toLowerCase() : undefined;
+      return { uid: claims.sub, login: email, idp: 'google', ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
     } catch (error) {
       report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
       return null;
@@ -7701,7 +7732,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[] } | null;
+    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -7781,7 +7812,7 @@ ${
       login: user.login,
       sid,
       exp: expires,
-      ...(user.idp === 'google' ? { idp: 'google' } : {}),
+      ...(user.idp === 'google' ? { idp: 'google', ...(user.hd !== undefined ? { hd: user.hd } : {}) } : {}),
       ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
       ...(epoch !== undefined ? { ep: epoch } : {}),
       ...(em ? { em } : {}),

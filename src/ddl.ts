@@ -27,7 +27,12 @@ import {
   SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
   legacyCoverageSourceDigestSql,
 } from './event-feed.js';
-import { SLOTLOCK_IDENTITY_DDL, SLOTLOCK_IDENTITY_FUNCTIONS, SLOTLOCK_IDENTITY_TABLES } from './ddl-identity.js';
+import {
+  SLOTLOCK_IDENTITY_DDL,
+  SLOTLOCK_IDENTITY_FUNCTIONS,
+  SLOTLOCK_IDENTITY_TABLES,
+  SLOTLOCK_INVITE_DOMAIN_REFUSED,
+} from './ddl-identity.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -1679,12 +1684,7 @@ BEGIN
   END IF;
   -- Held to the team's verified domains (ddl-identity.ts): only addresses at one, and so no GitHub
   -- account, which carries none.
-  IF (SELECT ws.invites_domain_restricted FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant)
-     AND (email_normalized IS NULL OR NOT EXISTS (
-       SELECT 1 FROM slotlock.workspace_domains claim
-        WHERE claim.tenant_ref = requested_tenant AND claim.status IN ('verified', 'lapsing')
-          AND lower(substring(email_normalized FROM '@([^@]+)$')) IN (claim.domain_ascii, claim.domain_unicode)
-     )) THEN
+  IF ${SLOTLOCK_INVITE_DOMAIN_REFUSED('requested_tenant', 'email_normalized', 'requested_github')} THEN
     RETURN QUERY SELECT NULL::uuid, 'domain_restricted'::text;
     RETURN;
   END IF;
@@ -1847,10 +1847,11 @@ BEGIN
       RETURN;
     END IF;
   END IF;
-  INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, source)
-  VALUES (invitation.tenant_ref, requested_person, invitation.role, 'invitation')
+  INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, source, joined_email)
+  VALUES (invitation.tenant_ref, requested_person, invitation.role, 'invitation', invitation.email)
   ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
     SET role = EXCLUDED.role, status = 'active', source = 'invitation', deactivated_at = NULL,
+        joined_email = coalesce(EXCLUDED.joined_email, member.joined_email), joined_via_domain = NULL,
         updated_at = statement_timestamp();
   UPDATE slotlock.workspace_invitations
      SET accepted_at = statement_timestamp(), accepted_by = requested_person WHERE id = invitation.id;
@@ -1902,6 +1903,8 @@ AS $slotlock_resend_invitation$
 DECLARE
   actor_role text;
   invitation_role text;
+  invitation_email text;
+  invitation_github text;
 BEGIN
   IF requested_days IS NULL OR requested_days NOT BETWEEN 1 AND 30 THEN
     RAISE EXCEPTION 'Slotlock teams: invitations last 1-30 days' USING ERRCODE = '22023';
@@ -1912,7 +1915,8 @@ BEGIN
   END IF;
   SELECT member.role INTO actor_role FROM slotlock.workspace_memberships member
    WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
-  SELECT invitation.role INTO invitation_role FROM slotlock.workspace_invitations invitation
+  SELECT invitation.role, invitation.email, invitation.github_ref INTO invitation_role, invitation_email, invitation_github
+    FROM slotlock.workspace_invitations invitation
    WHERE invitation.id = requested_id AND invitation.tenant_ref = requested_tenant
      AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
    FOR UPDATE;
@@ -1921,6 +1925,10 @@ BEGIN
   END IF;
   IF actor_role IS NULL OR NOT slotlock.workspace_may_grant(actor_role, invitation_role) THEN
     RETURN 'not_allowed';
+  END IF;
+  -- Sent again only where it could be sent now (ddl-identity.ts).
+  IF ${SLOTLOCK_INVITE_DOMAIN_REFUSED('requested_tenant', 'invitation_email', 'invitation_github')} THEN
+    RETURN 'domain_restricted';
   END IF;
   IF requested_daily_limit IS NOT NULL AND (
     (SELECT count(*) FROM slotlock.workspace_invitations sent
@@ -2035,6 +2043,14 @@ BEGIN
        AND other.person_ref <> requested_person
   ) THEN
     RETURN 'last_owner';
+  END IF;
+  -- Removed by someone else, the address they came by joins at once no more (ddl-identity.ts).
+  IF requested_actor <> requested_person THEN
+    INSERT INTO slotlock.workspace_join_blocks (tenant_ref, email_sha256)
+    SELECT member.tenant_ref, sha256(convert_to(member.joined_email, 'UTF8'))
+      FROM slotlock.workspace_memberships member
+     WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person AND member.joined_email IS NOT NULL
+    ON CONFLICT ON CONSTRAINT slotlock_workspace_join_blocks_pkey DO NOTHING;
   END IF;
   UPDATE slotlock.workspace_memberships member
      SET status = 'inactive', source = 'created', deactivated_at = statement_timestamp(),
@@ -3486,6 +3502,10 @@ BEGIN
     GET DIAGNOSTICS cleared_rows = ROW_COUNT;
     erased_rows := erased_rows + cleared_rows;
   END IF;
+  RETURN NEXT;
+  erased_table := 'workspace_join_blocks';
+  DELETE FROM slotlock.workspace_join_blocks blocked WHERE blocked.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   erased_table := 'workspace_domains';
   DELETE FROM slotlock.workspace_domains claim WHERE claim.tenant_ref = requested_tenant_ref;

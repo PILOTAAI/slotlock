@@ -38,6 +38,13 @@ export type SlotlockDomainChangeRefusal =
   | 'role_not_allowed'
   | 'domain_not_verified';
 
+/**
+ * How the addresses a person brings were verified: by a Google Workspace account of their domain
+ * (Google's `hd` claim; the company controls it), or by a Google or GitHub account that verified the
+ * address once and never checks again. Only the first may join at once.
+ */
+export type SlotlockJoinEvidence = 'google_workspace' | 'google' | 'github';
+
 /** What a domain lets the people whose verified address is at it do. */
 export type SlotlockDomainJoinPolicy = 'off' | 'request' | 'auto';
 
@@ -82,6 +89,7 @@ export interface SlotlockJoinRequest {
   domain: string;
   createdAt: Date;
   expiresAt: Date;
+  evidence: SlotlockJoinEvidence;
 }
 
 /** What one claim's check did, for the audit log and the people told. */
@@ -125,6 +133,7 @@ export interface SlotlockWorkspaceDomains {
     tenantRef: string,
     person: string,
     emails: readonly string[],
+    evidence: SlotlockJoinEvidence,
     memberCap: number | null,
   ): Promise<{ outcome: 'joined' | 'requested' } | { refusal: SlotlockDomainChangeRefusal }>;
   requests(tenantRef: string): Promise<SlotlockJoinRequest[]>;
@@ -281,18 +290,27 @@ export function createSlotlockWorkspaceDomains(sql: SlotlockSql): SlotlockWorksp
         requested: row.requested,
       }));
     },
-    async requestToJoin(tenantRef, person, emails, memberCap) {
+    async requestToJoin(tenantRef, person, emails, evidence, memberCap) {
       const matchable = slotlockMatchableEmails(emails);
       if (!TEAM.test(tenantRef) || !PERSON.test(person) || matchable.length === 0) return { refusal: 'not_found' };
       const [row] = await sql<{ outcome: 'joined' | 'requested' | null; refusal: string | null }[]>`
         SELECT outcome, refusal FROM slotlock.request_to_join(
-          ${tenantRef}::text, ${person}::text, ${matchable}::text[], ${memberCap}::integer)`;
+          ${tenantRef}::text, ${person}::text, ${matchable}::text[], ${evidence}::text, ${memberCap}::integer)`;
       return row?.outcome ? { outcome: row.outcome } : { refusal: refusalOf(row?.refusal) ?? 'not_found' };
     },
     async requests(tenantRef) {
       if (!TEAM.test(tenantRef)) return [];
       const rows = await sql<
-        { request_id: string; person_ref: string; display: string | null; email: string; domain: string; created_at: Date; expires_at: Date }[]
+        {
+          request_id: string;
+          person_ref: string;
+          display: string | null;
+          email: string;
+          domain: string;
+          created_at: Date;
+          expires_at: Date;
+          evidence: SlotlockJoinEvidence;
+        }[]
       >`SELECT * FROM slotlock.workspace_join_requests_list(${tenantRef}::text)`;
       return rows.map((row) => ({
         id: row.request_id,
@@ -302,6 +320,7 @@ export function createSlotlockWorkspaceDomains(sql: SlotlockSql): SlotlockWorksp
         domain: row.domain,
         createdAt: row.created_at,
         expiresAt: row.expires_at,
+        evidence: row.evidence,
       }));
     },
     async decide({ tenantRef, actor, id, decision, role, memberCap }) {

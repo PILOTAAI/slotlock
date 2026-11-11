@@ -16,7 +16,7 @@ const PERSON = '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$';
 const DOMAIN = '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$';
 
 /** The tables of verified domains and requests to join: their owner's only. */
-export const SLOTLOCK_IDENTITY_TABLES = Object.freeze(['workspace_domains', 'workspace_join_requests'] as const);
+export const SLOTLOCK_IDENTITY_TABLES = Object.freeze(['workspace_domains', 'workspace_join_requests', 'workspace_join_blocks'] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches them. */
 export const SLOTLOCK_IDENTITY_FUNCTIONS = Object.freeze([
@@ -28,7 +28,7 @@ export const SLOTLOCK_IDENTITY_FUNCTIONS = Object.freeze([
   'slotlock.set_invite_domain_restriction(text, text, boolean)',
   'slotlock.set_domain_join_policy(text, text, uuid, text)',
   'slotlock.discoverable_workspaces(text, text[])',
-  'slotlock.request_to_join(text, text, text[], integer)',
+  'slotlock.request_to_join(text, text, text[], text, integer)',
   'slotlock.workspace_join_requests_list(text)',
   'slotlock.decide_join_request(text, text, uuid, text, text, integer)',
   'slotlock.workspace_domain_members(text)',
@@ -38,6 +38,24 @@ export const SLOTLOCK_IDENTITY_FUNCTIONS = Object.freeze([
 
 /** How many domains a team may claim or hold at once. */
 export const SLOTLOCK_WORKSPACE_DOMAIN_LIMIT = 20;
+/**
+ * How a person's address was verified, as a request to join records it: by a Google Workspace
+ * account of that domain (Google's `hd` claim), the only evidence that lets someone join at once;
+ * or by a Google or GitHub account that verified it once and never checks again, which only asks.
+ */
+export const SLOTLOCK_JOIN_EVIDENCE = Object.freeze(['google_workspace', 'google', 'github'] as const);
+
+/**
+ * SQL that is true when a team holds its invitations to its verified domains and the invitation
+ * (to `email`, or to the GitHub account `github`) is not to one of them.
+ */
+export const SLOTLOCK_INVITE_DOMAIN_REFUSED = (tenant: string, email: string, github: string) =>
+  `(coalesce((SELECT ws.invites_domain_restricted FROM slotlock.workspaces ws WHERE ws.tenant_ref = ${tenant}), false)
+     AND (${github} IS NOT NULL OR ${email} IS NULL OR NOT EXISTS (
+       SELECT 1 FROM slotlock.workspace_domains claim
+        WHERE claim.tenant_ref = ${tenant} AND claim.status IN ('verified', 'lapsing')
+          AND lower(substring(${email} FROM '@([^@]+)$')) IN (claim.domain_ascii, claim.domain_unicode))))`;
+
 /** Requests to join a person may make a day, across every team. */
 export const SLOTLOCK_JOIN_REQUEST_DAILY_LIMIT = 20;
 
@@ -94,9 +112,13 @@ REVOKE ALL ON slotlock.workspace_domains FROM PUBLIC;
 -- Invitations only to addresses at the team's verified domains, when its Owner says so.
 ALTER TABLE slotlock.workspaces ADD COLUMN IF NOT EXISTS invites_domain_restricted boolean NOT NULL DEFAULT false;
 
--- A membership a domain gave (asked for and approved, or joined at once), and through which domain.
+-- A membership a domain gave (asked for and approved, or joined at once), and through which domain;
+-- and the address a membership came by (a domain's, or an invitation's), to remember a removal by.
 ALTER TABLE slotlock.workspace_memberships ADD COLUMN IF NOT EXISTS joined_via_domain uuid
   REFERENCES slotlock.workspace_domains (id) ON DELETE SET NULL;
+ALTER TABLE slotlock.workspace_memberships ADD COLUMN IF NOT EXISTS joined_email text
+  CONSTRAINT slotlock_workspace_memberships_joined_email_valid
+  CHECK (joined_email IS NULL OR (char_length(joined_email) BETWEEN 3 AND 254 AND joined_email = lower(joined_email)));
 DO $slotlock_memberships_domain_source$
 BEGIN
   IF NOT EXISTS (
@@ -142,6 +164,8 @@ CREATE TABLE IF NOT EXISTS slotlock.workspace_join_requests (
     AND expires_at > created_at
   )
 );
+ALTER TABLE slotlock.workspace_join_requests ADD COLUMN IF NOT EXISTS evidence text NOT NULL DEFAULT 'github'
+  CONSTRAINT slotlock_workspace_join_requests_evidence_valid CHECK (evidence IN ('google_workspace', 'google', 'github'));
 CREATE UNIQUE INDEX IF NOT EXISTS slotlock_workspace_join_requests_pending_key
   ON slotlock.workspace_join_requests (tenant_ref, person_ref) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS slotlock_workspace_join_requests_person_idx
@@ -149,8 +173,21 @@ CREATE INDEX IF NOT EXISTS slotlock_workspace_join_requests_person_idx
 ALTER TABLE slotlock.workspace_join_requests ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.workspace_join_requests FROM PUBLIC;
 
+-- Addresses a team removed or declined, by their SHA-256 only: whoever holds one asks again rather
+-- than joining at once, under any account and after erasing the one they had. A team's record of its
+-- own decision: it goes with the team, or a year after it was made, or when a request is approved.
+CREATE TABLE IF NOT EXISTS slotlock.workspace_join_blocks (
+  tenant_ref text NOT NULL REFERENCES slotlock.workspaces (tenant_ref) ON DELETE CASCADE,
+  email_sha256 bytea NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_workspace_join_blocks_pkey PRIMARY KEY (tenant_ref, email_sha256),
+  CONSTRAINT slotlock_workspace_join_blocks_valid CHECK (octet_length(email_sha256) = 32)
+);
+ALTER TABLE slotlock.workspace_join_blocks ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.workspace_join_blocks FROM PUBLIC;
+
 -- Claim a domain for a team, by its Owner, with a new token. A claim already pending past its seven
--- days is claimed afresh (a new token); one the team holds, or another team holds, is refused.
+-- days is claimed afresh (a new token); one the team claimed or holds already is refused.
 -- The caller has normalised and checked the domain (public suffixes, consumer mail); the shape is
 -- checked again here.
 CREATE OR REPLACE FUNCTION slotlock.claim_domain(
@@ -183,12 +220,8 @@ BEGIN
     RETURN QUERY SELECT NULL::uuid, 'invalid_domain'::text;
     RETURN;
   END IF;
-  IF EXISTS (SELECT 1 FROM slotlock.workspace_domains held
-              WHERE held.domain_ascii = requested_ascii AND held.status IN ('verified', 'lapsing')
-                AND held.tenant_ref <> requested_tenant) THEN
-    RETURN QUERY SELECT NULL::uuid, 'domain_taken'::text;
-    RETURN;
-  END IF;
+  -- Whether another team holds it is not said here, where anyone with a team could ask of any
+  -- domain: only to a team that publishes its own record (record_domain_check's domain_taken).
   SELECT * INTO existing FROM slotlock.workspace_domains claim
    WHERE claim.tenant_ref = requested_tenant AND claim.domain_ascii = requested_ascii
      AND claim.status IN ('pending', 'verified', 'lapsing')
@@ -347,6 +380,19 @@ BEGIN
       RETURN;
     END IF;
     IF requested_primary = 'error' OR requested_secondary = 'error' THEN
+      -- Fourteen days of nothing but errors (a zone deleted, its delegation dangling): lapsing, with
+      -- a new token, as if the record had gone, so whoever takes the delegation over cannot revive it.
+      IF claim.error_since IS NOT NULL AND claim.error_since <= statement_timestamp() - interval '14 days'
+         AND requested_primary <> 'present' AND coalesce(requested_secondary, 'error') <> 'present' THEN
+        IF requested_next_token IS NULL OR requested_next_token !~ '^[a-z2-7]{26}$' OR requested_next_token = claim.token THEN
+          RAISE EXCEPTION 'Slotlock domains: a lapsing domain needs a new token' USING ERRCODE = '22023';
+        END IF;
+        UPDATE slotlock.workspace_domains found
+           SET status = 'lapsing', token = requested_next_token, lapse_after = statement_timestamp() + interval '14 days'
+         WHERE found.id = claim.id;
+        RETURN QUERY SELECT 'lapsing'::text, claim.tenant_ref, claim.domain_ascii;
+        RETURN;
+      END IF;
       UPDATE slotlock.workspace_domains found SET error_since = coalesce(found.error_since, statement_timestamp())
        WHERE found.id = claim.id;
       RETURN QUERY SELECT 'error'::text, claim.tenant_ref, claim.domain_ascii;
@@ -366,9 +412,20 @@ BEGIN
     RETURN QUERY SELECT 'restored'::text, claim.tenant_ref, claim.domain_ascii;
     RETURN;
   END IF;
-  IF claim.lapse_after <= statement_timestamp() THEN
+  -- Past its fourteen days it lapses only on what lapsed it: both resolvers without the record, or
+  -- fourteen days of nothing but errors. One resolver failing, or one still finding it, waits.
+  IF requested_primary = 'error' OR requested_secondary = 'error' THEN
+    UPDATE slotlock.workspace_domains found SET error_since = coalesce(found.error_since, statement_timestamp())
+     WHERE found.id = claim.id;
+  ELSE
+    UPDATE slotlock.workspace_domains found SET error_since = NULL WHERE found.id = claim.id;
+  END IF;
+  IF claim.lapse_after <= statement_timestamp()
+     AND (both_absent
+          OR (requested_primary <> 'present' AND coalesce(requested_secondary, 'error') <> 'present'
+              AND claim.error_since IS NOT NULL AND claim.error_since <= statement_timestamp() - interval '14 days')) THEN
     UPDATE slotlock.workspace_domains found
-       SET status = 'lapsed', lapse_after = NULL, ended_at = statement_timestamp()
+       SET status = 'lapsed', lapse_after = NULL, error_since = NULL, ended_at = statement_timestamp()
      WHERE found.id = claim.id;
     UPDATE slotlock.workspace_join_requests pending SET status = 'expired'
      WHERE pending.domain_id = claim.id AND pending.status = 'pending';
@@ -451,7 +508,7 @@ $slotlock_release_domain$;
 REVOKE ALL ON FUNCTION ${fn[4]} FROM PUBLIC;
 
 -- Hold invitations to addresses at the team's verified domains, or stop: by its Owner, and only
--- with a verified domain to hold them to.
+-- with a verified domain to hold them to. Turning it on withdraws the open invitations it refuses.
 CREATE OR REPLACE FUNCTION slotlock.set_invite_domain_restriction(requested_tenant text, requested_actor text, requested_on boolean)
 RETURNS text
 LANGUAGE plpgsql
@@ -479,6 +536,12 @@ BEGIN
   END IF;
   UPDATE slotlock.workspaces ws SET invites_domain_restricted = coalesce(requested_on, false)
    WHERE ws.tenant_ref = requested_tenant;
+  -- Held from now on, invitations already open to anyone else are withdrawn too.
+  IF requested_on THEN
+    UPDATE slotlock.workspace_invitations invitation SET revoked_at = statement_timestamp()
+     WHERE invitation.tenant_ref = requested_tenant AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
+       AND ${SLOTLOCK_INVITE_DOMAIN_REFUSED('requested_tenant', 'invitation.email', 'invitation.github_ref')};
+  END IF;
   RETURN NULL;
 END
 $slotlock_set_invite_domain_restriction$;
@@ -551,10 +614,13 @@ $slotlock_discoverable_workspaces$;
 REVOKE ALL ON FUNCTION ${fn[7]} FROM PUBLIC;
 
 -- Ask to join a team by a verified address at one of its domains: joined at once as a Viewer where
--- the domain says so (and the person was never a member: someone removed asks again), else a request
--- that waits seven days. Every case the person may not see answers not_found.
+-- the domain says so, the address was verified by an account of that domain (a Google Workspace
+-- account: evidence google_workspace), the person was never a member and the address was never
+-- removed or declined (someone removed asks again, under any account); else a request that waits
+-- seven days. Every case the person may not see answers not_found.
 CREATE OR REPLACE FUNCTION slotlock.request_to_join(
-  requested_tenant text, requested_person text, requested_emails text[], requested_member_cap integer)
+  requested_tenant text, requested_person text, requested_emails text[], requested_evidence text,
+  requested_member_cap integer)
 RETURNS TABLE (outcome text, refusal text)
 LANGUAGE plpgsql
 VOLATILE
@@ -569,6 +635,9 @@ BEGIN
   IF requested_person IS NULL OR requested_person !~ '${PERSON}' THEN
     RETURN QUERY SELECT NULL::text, 'not_found'::text;
     RETURN;
+  END IF;
+  IF requested_evidence IS NULL OR requested_evidence NOT IN ('google_workspace', 'google', 'github') THEN
+    RAISE EXCEPTION 'Slotlock teams: evidence is google_workspace, google or github' USING ERRCODE = '22023';
   END IF;
   PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
   IF NOT FOUND THEN
@@ -595,10 +664,13 @@ BEGIN
   UPDATE slotlock.workspace_join_requests stale SET status = 'expired'
    WHERE stale.tenant_ref = requested_tenant AND stale.person_ref = requested_person
      AND stale.status = 'pending' AND stale.expires_at <= statement_timestamp();
-  IF matched.join_policy = 'auto' AND NOT EXISTS (
-    SELECT 1 FROM slotlock.workspace_memberships member
-     WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_person
-  ) THEN
+  IF matched.join_policy = 'auto' AND requested_evidence = 'google_workspace'
+     AND NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
+                      WHERE member.tenant_ref = requested_tenant
+                        AND (member.person_ref = requested_person OR member.joined_email = matched_email))
+     AND NOT EXISTS (SELECT 1 FROM slotlock.workspace_join_blocks blocked
+                      WHERE blocked.tenant_ref = requested_tenant
+                        AND blocked.email_sha256 = sha256(convert_to(matched_email, 'UTF8'))) THEN
     IF requested_member_cap IS NOT NULL THEN
       SELECT (SELECT count(*) FROM slotlock.workspace_memberships member
                WHERE member.tenant_ref = requested_tenant AND member.status = 'active')
@@ -611,8 +683,8 @@ BEGIN
         RETURN;
       END IF;
     END IF;
-    INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source, joined_via_domain)
-    VALUES (requested_tenant, requested_person, 'viewer', 'domain', matched.id);
+    INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source, joined_via_domain, joined_email)
+    VALUES (requested_tenant, requested_person, 'viewer', 'domain', matched.id, matched_email);
     UPDATE slotlock.workspace_join_requests asked SET status = 'expired'
      WHERE asked.tenant_ref = requested_tenant AND asked.person_ref = requested_person AND asked.status = 'pending';
     RETURN QUERY SELECT 'joined'::text, NULL::text;
@@ -629,8 +701,9 @@ BEGIN
     RETURN QUERY SELECT NULL::text, 'request_limit'::text;
     RETURN;
   END IF;
-  INSERT INTO slotlock.workspace_join_requests (tenant_ref, domain_id, person_ref, email, expires_at)
-  VALUES (requested_tenant, matched.id, requested_person, matched_email, statement_timestamp() + interval '7 days');
+  INSERT INTO slotlock.workspace_join_requests (tenant_ref, domain_id, person_ref, email, evidence, expires_at)
+  VALUES (requested_tenant, matched.id, requested_person, matched_email, requested_evidence,
+          statement_timestamp() + interval '7 days');
   RETURN QUERY SELECT 'requested'::text, NULL::text;
 END
 $slotlock_request_to_join$;
@@ -639,13 +712,14 @@ REVOKE ALL ON FUNCTION ${fn[8]} FROM PUBLIC;
 -- The requests waiting on a team: who asked (as they are shown), by which address, through which domain.
 CREATE OR REPLACE FUNCTION slotlock.workspace_join_requests_list(requested_tenant text)
 RETURNS TABLE (request_id uuid, person_ref text, display text, email text, domain text,
-               created_at timestamptz, expires_at timestamptz)
+               created_at timestamptz, expires_at timestamptz, evidence text)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_workspace_join_requests_list$
-  SELECT asked.id, asked.person_ref, person.display, asked.email, claim.domain_unicode, asked.created_at, asked.expires_at
+  SELECT asked.id, asked.person_ref, person.display, asked.email, claim.domain_unicode, asked.created_at, asked.expires_at,
+         asked.evidence
     FROM slotlock.workspace_join_requests asked
     JOIN slotlock.workspace_domains claim ON claim.id = asked.domain_id
     LEFT JOIN slotlock.dashboard_people person ON person.person_ref = asked.person_ref
@@ -701,6 +775,9 @@ BEGIN
     UPDATE slotlock.workspace_join_requests found
        SET status = 'declined', decided_by = requested_actor, decided_at = statement_timestamp()
      WHERE found.id = asked.id;
+    INSERT INTO slotlock.workspace_join_blocks (tenant_ref, email_sha256)
+    VALUES (requested_tenant, sha256(convert_to(asked.email, 'UTF8')))
+    ON CONFLICT ON CONSTRAINT slotlock_workspace_join_blocks_pkey DO NOTHING;
     RETURN QUERY SELECT NULL::text, asked.person_ref;
     RETURN;
   END IF;
@@ -735,11 +812,14 @@ BEGIN
       RETURN;
     END IF;
   END IF;
-  INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source, joined_via_domain)
-  VALUES (requested_tenant, asked.person_ref, requested_role, 'domain', asked.domain_id)
+  INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source, joined_via_domain, joined_email)
+  VALUES (requested_tenant, asked.person_ref, requested_role, 'domain', asked.domain_id, asked.email)
   ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
      SET role = excluded.role, status = 'active', source = 'domain', joined_via_domain = excluded.joined_via_domain,
-         deactivated_at = NULL, updated_at = statement_timestamp();
+         joined_email = excluded.joined_email, deactivated_at = NULL, updated_at = statement_timestamp();
+  -- Let in by a person who decided: the address is no longer one the team turned away.
+  DELETE FROM slotlock.workspace_join_blocks blocked
+   WHERE blocked.tenant_ref = requested_tenant AND blocked.email_sha256 = sha256(convert_to(asked.email, 'UTF8'));
   UPDATE slotlock.workspace_join_requests found
      SET status = 'approved', role = requested_role, decided_by = requested_actor, decided_at = statement_timestamp()
    WHERE found.id = asked.id;
@@ -765,7 +845,8 @@ $slotlock_workspace_domain_members$;
 REVOKE ALL ON FUNCTION ${fn[11]} FROM PUBLIC;
 
 -- Requests decided or expired 30 days ago, with the address they came by, deleted; claims that ended
--- (lapsed, released, or pending past their seven days) 90 days ago deleted. How many went.
+-- (lapsed, released, or pending past their seven days) 90 days ago deleted; removals and refusals
+-- remembered a year. How many went.
 CREATE OR REPLACE FUNCTION slotlock.prune_workspace_domains()
 RETURNS integer
 LANGUAGE plpgsql
@@ -776,6 +857,7 @@ AS $slotlock_prune_workspace_domains$
 DECLARE
   requests integer;
   claims integer;
+  blocks integer;
 BEGIN
   DELETE FROM slotlock.workspace_join_requests asked
    WHERE (asked.status <> 'pending' AND coalesce(asked.decided_at, asked.expires_at) < statement_timestamp() - interval '30 days')
@@ -785,7 +867,9 @@ BEGIN
    WHERE (claim.status IN ('lapsed', 'released') AND claim.ended_at < statement_timestamp() - interval '90 days')
       OR (claim.status = 'pending' AND claim.created_at < statement_timestamp() - interval '97 days');
   GET DIAGNOSTICS claims = ROW_COUNT;
-  RETURN requests + claims;
+  DELETE FROM slotlock.workspace_join_blocks blocked WHERE blocked.created_at < statement_timestamp() - interval '365 days';
+  GET DIAGNOSTICS blocks = ROW_COUNT;
+  RETURN requests + claims + blocks;
 END
 $slotlock_prune_workspace_domains$;
 REVOKE ALL ON FUNCTION ${fn[12]} FROM PUBLIC;

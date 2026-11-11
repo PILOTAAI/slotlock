@@ -80,7 +80,7 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
   const googleSubject = `${base}888`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const JWKS = { keys: [{ ...signing.publicKey.export({ format: 'jwk' }), kid: 'domains-key', alg: 'RS256', use: 'sig' }] };
-  let googleClaims: { nonce: string; email: string; verified: unknown } = { nonce: '', email: '', verified: true };
+  let googleClaims: { nonce: string; email: string; verified: unknown; hd?: string } = { nonce: '', email: '', verified: true };
   const records = new Map<string, string[]>();
   const resolver = (name: string): SlotlockDnsResolver => ({
     name,
@@ -106,6 +106,7 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
         sub: googleSubject,
         email: googleClaims.email,
         email_verified: googleClaims.verified,
+        ...(googleClaims.hd ? { hd: googleClaims.hd } : {}),
         nonce: googleClaims.nonce,
         exp: Math.floor(clock / 1000) + 3600,
       })}`;
@@ -125,10 +126,10 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
     expect(callback.status).toBe(303);
     return { location, callback };
   }
-  async function signInWithGoogle(browser: Browser, email: string, verified: unknown) {
+  async function signInWithGoogle(browser: Browser, email: string, verified: unknown, hd?: string) {
     const start = await browser.get('/dashboard/sign-in?with=google');
     const location = new URL(start.headers.get('location') ?? '');
-    googleClaims = { nonce: location.searchParams.get('nonce') ?? '', email, verified };
+    googleClaims = { nonce: location.searchParams.get('nonce') ?? '', email, verified, ...(hd ? { hd } : {}) };
     return browser.get(`/dashboard/callback?code=g&state=${location.searchParams.get('state')}`);
   }
   const roleIn = async (tenantRef: string, person: string) =>
@@ -246,6 +247,7 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
     // A Member cannot decide; the Admin approves as Developer.
     const members = await (await ada.get('/dashboard/settings/members')).text();
     expect(members).toContain('Asking to join');
+    expect(members).toContain('verified once by GitHub, not checked since');
     const requestId = /name="id" value="([0-9a-f-]{36})"><label class="visually-hidden" for="join-role-0"/.exec(members)?.[1] as string;
     expect(requestId).toBeDefined();
     const approved = await bea.send(
@@ -262,12 +264,19 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
     expect(await roleIn(team, `github:${base + 2}`)).toBe('developer');
     expect(await (await ada.get('/dashboard/settings/members')).text()).toContain(`via ${domain}`);
 
-    // Join as Viewer: a Google person whose verified address is at the domain joins at once.
+    // Join as Viewer: only a Google Workspace account of the domain joins at once. A consumer Google
+    // account that verified the address once (an ex-employee's, say) may only ask.
     expect((await ada.post('/dashboard/settings/identity', '/identity/domains/policy', { policy: 'auto' })).status).toBe(200);
     const desk = new Browser(dashboard);
     await signInWithGoogle(desk, `desk@${domain}`, false);
     expect(await (await desk.get('/dashboard/teams')).text()).not.toContain('Acme Rentals');
     await signInWithGoogle(desk, `desk@${domain}`, true);
+    const consumer = await (await desk.get('/dashboard/teams')).text();
+    expect(consumer).toContain('Ask to join');
+    expect(consumer).not.toContain('Join Acme Rentals');
+    await signInWithGoogle(desk, `desk@${domain}`, true, 'elsewhere-domain.org');
+    expect(await (await desk.get('/dashboard/teams')).text()).not.toContain('Join Acme Rentals');
+    await signInWithGoogle(desk, `desk@${domain}`, true, domain);
     const offered = await (await desk.get('/dashboard/teams')).text();
     expect(offered).toContain('Join Acme Rentals');
     const joined = await desk.post('/dashboard/teams', '/join/request', { team });

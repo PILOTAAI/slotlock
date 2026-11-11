@@ -167,11 +167,16 @@ export function slotlockTxtText(data: string): string {
   return text;
 }
 
+/** A DNS name as answers spell it, compared: lowercase, without its trailing dot. */
+const dnsName = (value: unknown) => (typeof value === 'string' ? value.toLowerCase().replace(/\.$/, '') : null);
+
 /**
  * A DNS-over-HTTPS JSON answer (Cloudflare's application/dns-json, Google's /resolve) as an answer:
- * Status 0 with its type-16 records (none is NODATA), 3 as NXDOMAIN, anything else an error.
+ * Status 0 with the type-16 records of the name asked for (none is NODATA), 3 as NXDOMAIN, anything
+ * else an error. A name that is an alias (a CNAME or DNAME in the answer) holds no record of its
+ * own: a wildcard CNAME to a host someone else controls must not let them prove the domain.
  */
-export function slotlockDohTxtAnswer(body: unknown): SlotlockTxtAnswer {
+export function slotlockDohTxtAnswer(body: unknown, asked?: string): SlotlockTxtAnswer {
   if (typeof body !== 'object' || body === null) return { status: 'error', reason: 'malformed' };
   const answer = body as { Status?: unknown; AD?: unknown; Answer?: unknown };
   const ad = answer.AD === true;
@@ -180,10 +185,15 @@ export function slotlockDohTxtAnswer(body: unknown): SlotlockTxtAnswer {
   if (answer.Answer !== undefined && !Array.isArray(answer.Answer)) return { status: 'error', reason: 'malformed' };
   const values: string[] = [];
   let ttl: number | null = null;
-  for (const record of (answer.Answer ?? []) as unknown[]) {
-    if (typeof record !== 'object' || record === null) return { status: 'error', reason: 'malformed' };
-    const { type, data, TTL } = record as { type?: unknown; data?: unknown; TTL?: unknown };
+  const records = (answer.Answer ?? []) as unknown[];
+  if (records.some((record) => typeof record !== 'object' || record === null)) return { status: 'error', reason: 'malformed' };
+  if (records.some((record) => (record as { type?: unknown }).type === 5 || (record as { type?: unknown }).type === 39)) {
+    return { status: 'ok', values: [], ad, ttl: null };
+  }
+  for (const record of records) {
+    const { type, data, TTL, name } = record as { type?: unknown; data?: unknown; TTL?: unknown; name?: unknown };
     if (type !== 16) continue;
+    if (asked !== undefined && dnsName(name) !== dnsName(asked)) continue;
     if (typeof data !== 'string') return { status: 'error', reason: 'malformed' };
     values.push(slotlockTxtText(data));
     if (typeof TTL === 'number' && Number.isFinite(TTL)) ttl = ttl === null ? TTL : Math.min(ttl, TTL);
@@ -218,7 +228,7 @@ export function createSlotlockDohResolver(
         if (!response.ok) return { status: 'error', reason: `HTTP ${response.status}` };
         const text = await response.text();
         if (text.length > 65_536) return { status: 'error', reason: 'too large' };
-        return slotlockDohTxtAnswer(JSON.parse(text));
+        return slotlockDohTxtAnswer(JSON.parse(text), host);
       } catch (error) {
         return { status: 'error', reason: error instanceof Error ? error.name : 'failed' };
       }
@@ -235,6 +245,12 @@ export function createSlotlockSystemResolver(options: { timeoutMs?: number } = {
       try {
         const { Resolver } = await import('node:dns/promises');
         const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
+        // An alias holds no record of its own (see slotlockDohTxtAnswer).
+        const aliases = await resolver.resolveCname(host).catch((error: { code?: unknown }) => {
+          if (error.code === 'ENODATA' || error.code === 'ENOTFOUND') return [];
+          throw error;
+        });
+        if (aliases.length > 0) return { status: 'ok', values: [], ad: false, ttl: null };
         const records = await resolver.resolveTxt(host);
         // Each record arrives as its character-strings: joined, as DNS-over-HTTPS joins them.
         return { status: 'ok', values: records.map((chunks) => chunks.join('')), ad: false, ttl: null };

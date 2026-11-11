@@ -85,7 +85,10 @@ versioning.
   One team holds a domain at a time; public suffixes, special-use names and consumer mail domains
   are refused (the Public Suffix List through `tldts`, pinned). People whose verified address is at
   a team's domain find it on the Teams page and ask to join, approved by an Owner or Admin as
-  Viewer, Member or Developer; an Owner may let them join at once as a Viewer, or turn joining off.
+  Viewer, Member or Developer; an Owner may let Google Workspace accounts of the domain join at once
+  as a Viewer (an address verified once by Google or GitHub, or one the team removed or declined,
+  only asks), or turn joining off. A record behind a CNAME does not count, and 14 days of resolver
+  errors lapse a domain too.
   An Owner may also hold invitations to the team's verified domains. New capability
   `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,
   `runSlotlockDomainChecks`, `normalizeSlotlockDomain`, `createSlotlockDohResolver`.

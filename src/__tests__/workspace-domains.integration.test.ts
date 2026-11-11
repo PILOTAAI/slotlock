@@ -158,8 +158,11 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     publish(domain, claimB.token);
     await age(claimB.id, 'last_checked_at', '2 minutes');
     expect((await domains.verifyNow(b, cy, claimB.id, both)).outcome).toBe('domain_taken');
+    // A third team's claim says nothing of who holds it: only its own record, once published, does.
     const c = await team(dee);
-    expect(await domains.claim(c, dee, domain)).toEqual({ refusal: 'domain_taken' });
+    const claimC = await claimed(c, dee, domain);
+    publish(domain, claimC.token);
+    expect((await domains.verifyNow(c, dee, claimC.id, both)).outcome).toBe('domain_taken');
     // A record holding the token inside a longer value, or a suffix of it, is not the record.
     const near = fresh();
     const claimNear = await claimed(a, ada, near);
@@ -245,8 +248,8 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     expect(lapsing?.metadata).toMatchObject({ domain, resolvers: [{ resolver: 'primary', verdict: 'absent' }, { resolver: 'secondary', verdict: 'absent' }] });
   });
 
-  it('never lapses on resolver errors, however long they last', async () => {
-    const { domain, id } = await verifiedTeam(ada);
+  it('never lapses on resolver errors for a fortnight, and lapses after', async () => {
+    const { tenantRef, domain, id } = await verifiedTeam(ada);
     const name = slotlockDomainRecord(domain, 'x').name;
     primary.records.set(name, 'servfail');
     secondary.records.set(name, 'servfail');
@@ -258,6 +261,31 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     const [row] = await admin<{ status: string; error_since: Date | null }[]>`SELECT status, error_since FROM slotlock.workspace_domains WHERE id = ${id}`;
     expect(row?.status).toBe('verified');
     expect(row?.error_since).not.toBeNull();
+    // Fourteen days of nothing but errors (a deleted zone, a dangling delegation): lapsing, with a new token.
+    const before = (await domains.list(tenantRef)).find((claim) => claim.id === id)?.token;
+    await admin`UPDATE slotlock.workspace_domains SET last_checked_at = now() - interval '25 hours', error_since = now() - interval '15 days' WHERE id = ${id}`;
+    expect((await domains.checkDue(both, 500)).find((found) => found.domainId === id)?.outcome).toBe('lapsing');
+    expect((await domains.list(tenantRef)).find((claim) => claim.id === id)?.token).not.toBe(before);
+  });
+
+  it('lapses a lapsing domain only on what lapses it, never on one resolver failing', async () => {
+    const { tenantRef, domain, id } = await verifiedTeam(ada);
+    await admin`UPDATE slotlock.workspace_domains SET status = 'lapsing', lapse_after = now() - interval '1 minute', last_checked_at = now() - interval '25 hours' WHERE id = ${id}`;
+    const token = (await domains.list(tenantRef)).find((claim) => claim.id === id)?.token as string;
+    const name = slotlockDomainRecord(domain, 'x').name;
+    // The new record is published; the first resolver fails, the second finds it.
+    primary.records.set(name, 'servfail');
+    secondary.records.set(name, [slotlockDomainRecord(domain, token).value]);
+    expect((await domains.checkDue(both, 500)).find((found) => found.domainId === id)?.outcome).toBe('error');
+    expect((await domains.list(tenantRef)).find((claim) => claim.id === id)?.status).toBe('lapsing');
+    // One without it and one failing: still waits.
+    secondary.records.delete(name);
+    await age(id, 'last_checked_at', '1 day');
+    expect((await domains.checkDue(both, 500)).find((found) => found.domainId === id)?.outcome).toBe('error');
+    // Both without it: lapsed.
+    primary.records.delete(name);
+    await age(id, 'last_checked_at', '1 day');
+    expect((await domains.checkDue(both, 500)).find((found) => found.domainId === id)?.outcome).toBe('lapsed');
   });
 
   it('lets a claim verify for seven days only, then claims it afresh with a new token', async () => {
@@ -319,9 +347,9 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     expect(await domains.discoverable(dee, ['dee@gmail.com'])).toEqual([]);
     const [found] = await domains.discoverable(dee, at);
     expect(found).toMatchObject({ tenantRef, joinPolicy: 'request', requested: false, name: 'Acme rentals' });
-    expect(await domains.requestToJoin(tenantRef, dee, [`dee@sub.${domain}`], null)).toEqual({ refusal: 'not_found' });
-    expect(await domains.requestToJoin(tenantRef, dee, at, null)).toEqual({ outcome: 'requested' });
-    expect(await domains.requestToJoin(tenantRef, dee, at, null)).toEqual({ refusal: 'pending' });
+    expect(await domains.requestToJoin(tenantRef, dee, [`dee@sub.${domain}`], 'github', null)).toEqual({ refusal: 'not_found' });
+    expect(await domains.requestToJoin(tenantRef, dee, at, 'github', null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, dee, at, 'github', null)).toEqual({ refusal: 'pending' });
     expect((await domains.discoverable(dee, at))[0]?.requested).toBe(true);
     const [request] = await domains.requests(tenantRef);
     expect(request).toMatchObject({ person: dee, email: `dee@${domain}`, domain });
@@ -337,9 +365,9 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, dee)).role).toBe('developer');
     expect((await domains.domainMembers(tenantRef)).get(dee)).toEqual({ domain, status: 'verified' });
     expect(await domains.discoverable(dee, at)).toEqual([]);
-    expect(await domains.requestToJoin(tenantRef, dee, at, null)).toEqual({ refusal: 'already_member' });
+    expect(await domains.requestToJoin(tenantRef, dee, at, 'github', null)).toEqual({ refusal: 'already_member' });
     // Declined: no membership.
-    expect(await domains.requestToJoin(tenantRef, eli, [`eli@${domain}`], null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, eli, [`eli@${domain}`], 'github', null)).toEqual({ outcome: 'requested' });
     const eliRequest = (await domains.requests(tenantRef)).find((row) => row.person === eli)?.id as string;
     expect(await domains.decide({ tenantRef, actor: ada, id: eliRequest, decision: 'decline', role: null, memberCap: null })).toEqual({ person: eli, refusal: null });
     expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, eli)).role).toBeNull();
@@ -348,26 +376,81 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
   it('joins at once as a Viewer where the domain says so, once however many race, and asks again after a removal', async () => {
     const { tenantRef, domain, id } = await verifiedTeam(ada);
     expect(await domains.setJoinPolicy(tenantRef, ada, id, 'auto')).toBeNull();
-    const outcomes = await Promise.all(Array.from({ length: 6 }, () => domains.requestToJoin(tenantRef, fay, [`fay@${domain}`], null)));
+    const outcomes = await Promise.all(Array.from({ length: 6 }, () => domains.requestToJoin(tenantRef, fay, [`fay@${domain}`], 'google_workspace', null)));
     expect(outcomes.filter((result) => 'outcome' in result && result.outcome === 'joined')).toHaveLength(1);
     expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, fay)).role).toBe('viewer');
     // Removed by an Owner, the person cannot rejoin at once: they ask, and wait.
     expect(await teams.remove(tenantRef, ada, fay)).toBeNull();
-    expect(await domains.requestToJoin(tenantRef, fay, [`fay@${domain}`], null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, fay, [`fay@${domain}`], 'google_workspace', null)).toEqual({ outcome: 'requested' });
     expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, fay)).role).toBeNull();
     // At the member cap (here 2: Ada and one more), joining is refused.
-    expect(await domains.requestToJoin(tenantRef, gus, [`gus@${domain}`], 2)).toEqual({ outcome: 'joined' });
-    expect(await domains.requestToJoin(tenantRef, hal, [`hal@${domain}`], 2)).toEqual({ refusal: 'member_cap' });
+    expect(await domains.requestToJoin(tenantRef, gus, [`gus@${domain}`], 'google_workspace', 2)).toEqual({ outcome: 'joined' });
+    expect(await domains.requestToJoin(tenantRef, hal, [`hal@${domain}`], 'google_workspace', 2)).toEqual({ refusal: 'member_cap' });
     // Off: not discoverable, and the waiting requests are withdrawn.
     expect(await domains.setJoinPolicy(tenantRef, ada, id, 'off')).toBeNull();
     expect(await domains.discoverable(hal, [`hal@${domain}`])).toEqual([]);
     expect(await domains.requests(tenantRef)).toEqual([]);
   });
 
+  it('joins at once only on a Google Workspace account of the domain: an address verified once only asks', async () => {
+    const { tenantRef, domain, id } = await verifiedTeam(ada);
+    expect(await domains.setJoinPolicy(tenantRef, ada, id, 'auto')).toBeNull();
+    expect(await domains.requestToJoin(tenantRef, bea, [`bea@${domain}`], 'github', null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, cy, [`cy@${domain}`], 'google', null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, dee, [`dee@${domain}`], 'google_workspace', null)).toEqual({ outcome: 'joined' });
+    const evidence = (await domains.requests(tenantRef)).map((request) => [request.person, request.evidence]);
+    expect(evidence).toEqual(expect.arrayContaining([[bea, 'github'], [cy, 'google']]));
+  });
+
+  it('remembers an address the team removed or declined, under any account and after erasure', async () => {
+    const { tenantRef, domain, id } = await verifiedTeam(ada);
+    expect(await domains.setJoinPolicy(tenantRef, ada, id, 'auto')).toBeNull();
+    const address = `eve@${domain}`;
+    expect(await domains.requestToJoin(tenantRef, eli, [address], 'google_workspace', null)).toEqual({ outcome: 'joined' });
+    expect(await teams.remove(tenantRef, ada, eli)).toBeNull();
+    // The same address under another account asks; so does the same account once erased and back.
+    expect(await domains.requestToJoin(tenantRef, fay, [address], 'google_workspace', null)).toEqual({ outcome: 'requested' });
+    await admin`SELECT * FROM slotlock.erase_tenant(${eli}::text)`;
+    await createSlotlockDashboardWorkspaces(application).signedIn(eli, []);
+    expect(await domains.requestToJoin(tenantRef, eli, [address], 'google_workspace', null)).toEqual({ outcome: 'requested' });
+    // Declined, an address asks again too; approved, it is let in and no longer remembered.
+    const declined = `gus@${domain}`;
+    expect(await domains.requestToJoin(tenantRef, gus, [declined], 'github', null)).toEqual({ outcome: 'requested' });
+    const gusRequest = (await domains.requests(tenantRef)).find((request) => request.person === gus)?.id as string;
+    expect((await domains.decide({ tenantRef, actor: ada, id: gusRequest, decision: 'decline', role: null, memberCap: null })).refusal).toBeNull();
+    expect(await domains.requestToJoin(tenantRef, hal, [declined], 'google_workspace', null)).toEqual({ outcome: 'requested' });
+    const halRequest = (await domains.requests(tenantRef)).find((request) => request.person === hal)?.id as string;
+    expect((await domains.decide({ tenantRef, actor: ada, id: halRequest, decision: 'approve', role: 'viewer', memberCap: null })).refusal).toBeNull();
+    const [blocked] = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.workspace_join_blocks WHERE tenant_ref = ${tenantRef} AND email_sha256 = sha256(convert_to(${declined}, 'UTF8'))`;
+    expect(blocked?.count).toBe(0);
+  });
+
+  it('withdraws open invitations the restriction refuses, and never sends one again', async () => {
+    const { tenantRef, domain } = await verifiedTeam(ada);
+    await addMember(tenantRef, ada, bea, 'admin');
+    const sent = async (to: { email: string } | { github: string; login: string }) => {
+      const raw = randomBytes(32);
+      const digest = createHash('sha256').update(raw).digest();
+      const made = await teams.invite({ tenantRef, inviter: bea, to, role: 'admin', tokenSha256: digest, days: 7, dailyLimit: null, memberCap: null });
+      return { id: (made as { id: string }).id, digest };
+    };
+    const elsewhere = await sent({ email: 'x@elsewhere-example.org' });
+    const github = await sent({ github: cy, login: 'cy' });
+    const inside = await sent({ email: `desk@${domain}` });
+    expect(await domains.restrictInvites(tenantRef, ada, true)).toBeNull();
+    expect(await teams.accept({ tokenSha256: elsewhere.digest, person: dee, emails: ['x@elsewhere-example.org'], memberCap: null })).toEqual({ refusal: 'revoked' });
+    expect(await teams.accept({ tokenSha256: github.digest, person: cy, emails: [], memberCap: null })).toEqual({ refusal: 'revoked' });
+    expect((await teams.invitations(tenantRef)).map((invitation) => invitation.id)).toEqual([inside.id]);
+    // An invitation to another domain cannot be sent again either, by an Admin's "Send again".
+    await admin`UPDATE slotlock.workspace_invitations SET revoked_at = NULL WHERE id = ${elsewhere.id}`;
+    expect(await teams.resend(tenantRef, bea, elsewhere.id, randomBytes(32), 7, null, null)).toBe('domain_restricted');
+  });
+
   it('refuses approval once the domain lapses, and a request past its seven days', async () => {
     const { tenantRef, domain, id } = await verifiedTeam(ada);
-    expect(await domains.requestToJoin(tenantRef, bea, [`bea@${domain}`], null)).toEqual({ outcome: 'requested' });
-    expect(await domains.requestToJoin(tenantRef, cy, [`cy@${domain}`], null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, bea, [`bea@${domain}`], 'github', null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, cy, [`cy@${domain}`], 'github', null)).toEqual({ outcome: 'requested' });
     const [first, second] = await domains.requests(tenantRef);
     await admin`UPDATE slotlock.workspace_join_requests SET created_at = created_at - interval '8 days', expires_at = expires_at - interval '8 days' WHERE id = ${second?.id as string}`;
     expect((await domains.decide({ tenantRef, actor: ada, id: second?.id as string, decision: 'approve', role: 'viewer', memberCap: null })).refusal).toBe('expired');
@@ -375,13 +458,13 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     unpublish(domain);
     await admin`UPDATE slotlock.workspace_domains SET status = 'lapsing', lapse_after = now() + interval '14 days' WHERE id = ${id}`;
     expect(await domains.discoverable(dee, [`dee@${domain}`])).toEqual([]);
-    expect(await domains.requestToJoin(tenantRef, dee, [`dee@${domain}`], null)).toEqual({ refusal: 'not_found' });
+    expect(await domains.requestToJoin(tenantRef, dee, [`dee@${domain}`], 'github', null)).toEqual({ refusal: 'not_found' });
     expect((await domains.decide({ tenantRef, actor: ada, id: first?.id as string, decision: 'approve', role: 'viewer', memberCap: null })).refusal).toBe('domain_not_verified');
   });
 
   it('takes domains and requests with an erased team, and a person off them with an erased person', async () => {
     const { tenantRef, domain } = await verifiedTeam(ada);
-    expect(await domains.requestToJoin(tenantRef, eli, [`eli@${domain}`], null)).toEqual({ outcome: 'requested' });
+    expect(await domains.requestToJoin(tenantRef, eli, [`eli@${domain}`], 'github', null)).toEqual({ outcome: 'requested' });
     // Eli is erased: their request goes; Ada's claim stays the team's, without her name on it.
     await admin`SELECT * FROM slotlock.erase_tenant(${eli}::text)`;
     expect(await domains.requests(tenantRef)).toEqual([]);
