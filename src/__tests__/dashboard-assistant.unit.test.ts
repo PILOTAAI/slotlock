@@ -1,5 +1,6 @@
 // The dashboard assistant without a database: the model is a real HTTP server on loopback, GitHub a
 // fake `fetch`.
+import { createRequire } from 'node:module';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   SlotlockAgentCalendarBackend,
@@ -37,6 +38,7 @@ import {
 import {
   type FakeModel,
   type FakeModelFormat,
+  type FakeModelRequest,
   startFakeModel,
   toolResultsSent,
   toolsOffered,
@@ -566,6 +568,92 @@ describe.each(['anthropic', 'openai'] as const)('the chat over %s', (format) => 
     } finally {
       release();
     }
+  });
+
+  it('tells the model the workspace\u2019s resources, with the ids tools take, leaving out private ones', async () => {
+    const fleet = [
+      { id: '11111111-1111-4111-8111-111111111111', externalRef: 'car-17', name: 'Mercedes-Benz 2025', kind: 'vehicle', timezone: 'Europe/London' },
+      { id: '22222222-2222-4222-8222-222222222222', externalRef: 'phase-b-exit-20261108T142642Z-3444', timezone: 'UTC' },
+      { id: '33333333-3333-4333-8333-333333333333', externalRef: 'owner-only', name: 'Private car', timezone: 'UTC', visibility: 'private' },
+    ];
+    const target = dashboard({}, { list: async () => fleet as never });
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Van 1.' });
+    await chat(target, alice, 'When is the Mercedes free?');
+    const request = model.requests.at(-1) as FakeModelRequest;
+    const system = String(
+      format === 'anthropic' ? request.body.system : (request.body.messages as { content: string }[])[0]?.content,
+    );
+    expect(system).toContain('{"id":"11111111-1111-4111-8111-111111111111","name":"Mercedes-Benz 2025","ref":"car-17","kind":"vehicle","timezone":"Europe/London"}');
+    expect(system).toContain('"ref":"phase-b-exit-20261108T142642Z-3444"');
+    expect(system).not.toContain('owner-only');
+    expect(system).toContain('Tools name a resource by its id');
+    // Past fifty, the rest are found by search.
+    const many = Array.from({ length: 60 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      externalRef: `desk-${String(index)}`,
+      timezone: 'UTC',
+    }));
+    const big = dashboard({}, { list: async () => many as never });
+    const bob = await signIn(big, 'alice');
+    await connect(big, bob, model, format);
+    await chat(big, bob, 'Any desk free?');
+    const second = model.requests.at(-1) as FakeModelRequest;
+    const listed = String(format === 'anthropic' ? second.body.system : (second.body.messages as { content: string }[])[0]?.content);
+    expect(listed).toContain('(50 of 60; find the others with slotlock_list_resources and query)');
+    expect(listed).toContain('desk-49');
+    expect(listed).not.toContain('desk-50');
+  });
+
+  it('sends a chip that asks through the box, so its reply streams, and only fills the box for one that writes', async () => {
+    const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
+      JSDOM: new (
+        html: string,
+        options: { url: string; runScripts: 'outside-only'; pretendToBeVisual: boolean },
+      ) => {
+        window: {
+          eval(code: string): void;
+          close(): void;
+          document: {
+            querySelectorAll(selector: string): Iterable<ChipButton>;
+            querySelector(selector: string): { value: string } | null;
+          };
+        };
+      };
+    };
+    type ChipButton = { value: string; hasAttribute(name: string): boolean; getAttribute(name: string): string | null; click(): void };
+    const target = dashboard({}, { list: async () => [{ id: RESOURCE.id, externalRef: 'Van 1', timezone: 'Europe/London' }] as never });
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const html = await page(target, alice);
+    const script = /<script src="([^"]*app\.js[^"]*)"/.exec(html)?.[1] as string;
+    const js = await (await get(target, script, alice)).text();
+    const dom = new JSDOM(html, { url: `${ORIGIN}/dashboard/assistant`, runScripts: 'outside-only', pretendToBeVisual: true });
+    const sent: { url: string; body: string }[] = [];
+    Object.assign(dom.window, {
+      TextDecoder,
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      fetch: async (url: string, init: { body: unknown }) => {
+        sent.push({ url: String(url), body: String(init.body) });
+        return new Response('{"t":"done","html":"","once":"a.b"}\n', { headers: { 'content-type': 'application/x-ndjson' } });
+      },
+    });
+    dom.window.eval(js);
+    const chips = [...dom.window.document.querySelectorAll('.chips button.chip')];
+    const asks = chips.find((chip) => !chip.hasAttribute('data-fill')) as ChipButton;
+    asks.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe('/dashboard/assistant/stream');
+    expect(new URLSearchParams(sent[0]?.body).get('message')).toBe(asks.value);
+    // A chip that writes fills the box and waits for the member.
+    const writes = chips.find((chip) => chip.hasAttribute('data-fill')) as ChipButton;
+    writes.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sent).toHaveLength(1);
+    expect(dom.window.document.querySelector('textarea')?.value).toBe(writes.getAttribute('data-fill'));
+    dom.window.close();
   });
 
   it('answers a refused stream with one error line and a fresh form value', async () => {

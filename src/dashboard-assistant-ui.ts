@@ -272,14 +272,20 @@ export function slotlockAssistantScript(markdownSource: string): string {
     event.preventDefault();
     if (!busy && box.value.trim() !== '') form.requestSubmit();
   });
-  for (var chip of page.querySelectorAll('button[data-fill]')) {
+  // A chip that asks sends through the box, so its reply streams; one that writes only fills it.
+  for (var chip of page.querySelectorAll('.chips button.chip')) {
     chip.addEventListener('click', function (event) {
       event.preventDefault();
-      box.value = this.getAttribute('data-fill') || '';
+      var fill = this.getAttribute('data-fill');
+      box.value = fill !== null ? fill : (this.value || '');
       grow();
       update();
-      box.focus();
-      box.setSelectionRange(box.value.length, box.value.length);
+      if (fill !== null) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      } else if (!busy && box.value.trim() !== '') {
+        form.requestSubmit();
+      }
     });
   }
   for (var decide of document.querySelectorAll('.change-buttons form')) {

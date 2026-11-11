@@ -61,6 +61,7 @@ import {
   runSlotlockAssistantTurn,
   sealSlotlockAssistantKey,
   slotlockAssistantProviderMessage,
+  SLOTLOCK_ASSISTANT_DIRECTORY_SIZE,
   slotlockAssistantSystemPrompt,
   testSlotlockAssistantModel,
   listSlotlockAssistantModels,
@@ -4129,7 +4130,13 @@ ${
     } catch {
       // Metering never changes an answer.
     }
-    const stored = await store.getConversation(tenantRef, member);
+    // The member's conversation, and the resources agents may see, so a name is matched to its id
+    // without a lookup.
+    const [stored, listed] = await Promise.all([
+      store.getConversation(tenantRef, member),
+      options.resources.list(tenantRef).catch(() => [] as SlotlockResource[]),
+    ]);
+    const bookable = listed.filter((resource) => resource.visibility !== 'private' && resource.archivedAt === undefined);
     const entries = boundSlotlockAssistantEntries([
       ...readSlotlockAssistantEntries(stored?.messages),
       { role: 'user', text },
@@ -4146,6 +4153,17 @@ ${
         workspace: current?.login ?? session.login,
         login: session.login,
         now: new Date(now()),
+        resources: bookable.slice(0, SLOTLOCK_ASSISTANT_DIRECTORY_SIZE).map((resource) => ({
+          id: resource.id,
+          ...(resource.name !== undefined ? { name: resource.name } : {}),
+          ...(resource.externalRef ? { ref: resource.externalRef } : {}),
+          ...(resource.kind !== undefined ? { kind: resource.kind } : {}),
+          ...(resource.locationName !== undefined || resource.location !== undefined
+            ? { location: (resource.locationName ?? resource.location) as string }
+            : {}),
+          timezone: resource.timezone,
+        })),
+        resourceCount: bookable.length,
       }),
       entries,
       fetch: assistantFetch,
