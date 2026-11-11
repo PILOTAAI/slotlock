@@ -7604,19 +7604,30 @@ function buildSlotlockStore(
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
             }
-            // A one-off event moved in time or to another resource, past its reschedule cutoff
-            // (RFC 0004 B5), is refused to a writer held to the booking rules.
-            if (
-              found &&
-              params.enforceBookingRules === true &&
-              found.recurrence_rule === null &&
-              (found.starts_at.getTime() !== event.start.getTime() ||
+            // A one-off event changed past its cutoffs (RFC 0004 B5) is refused to a writer held to
+            // the booking rules: moved in time or to another resource, or made a series (whose
+            // cancellation no cutoff holds), past its reschedule cutoff; made transparent, letting its
+            // time go, past its cancel cutoff or once a cancellation fee is due, as a cancellation
+            // would be (cancelling records the fee).
+            if (found && params.enforceBookingRules === true && found.recurrence_rule === null) {
+              const moved =
+                found.starts_at.getTime() !== event.start.getTime() ||
                 found.ends_at.getTime() !== event.end.getTime() ||
-                found.resource_id !== params.resourceId)
-            ) {
-              const judged = await rulesNow(tx, found.resource_id);
-              if (cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
-                return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
+                found.resource_id !== params.resourceId ||
+                (event.recurrence?.rrule ?? null) !== null;
+              const letGo = found.transparency !== 'transparent' && (event.transparency ?? 'opaque') === 'transparent';
+              if (moved || letGo) {
+                const judged = await rulesNow(tx, found.resource_id);
+                if (moved && cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
+                  return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
+                }
+                if (
+                  letGo &&
+                  (cutoffRuleBroken(judged.rules, 'cancel', found.starts_at, judged.now) ||
+                    cancellationFeeDue(judged.rules, found.starts_at, judged.now) !== null)
+                ) {
+                  return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
+                }
               }
             }
             const series = expanded ?? resumeStoredSeries(event, materializationWindow, found);

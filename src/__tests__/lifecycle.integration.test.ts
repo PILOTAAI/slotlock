@@ -231,5 +231,32 @@ describe.skipIf(!url)('the booking lifecycle (real Postgres)', () => {
     expect(
       await agent('slotlock_delete_event', { event_id: created.id, expected_revision: created.revision, idempotency_key: 'd2' }),
     ).toMatchObject({ ok: true });
+    // Nor may it let the time go another way: made transparent (as a cancellation), or made a
+    // series, whose cancellation no cutoff holds (as a move).
+    const close2 = { event_id: closeEvent.id, expected_revision: closeEvent.revision };
+    expect(await agent('slotlock_update_event', { ...close2, transparency: 'transparent', idempotency_key: 'u1' })).toMatchObject({
+      ok: false,
+      code: 'booking_rule_cancel_cutoff',
+    });
+    expect(await agent('slotlock_update_event', { ...close2, recurrence_rule: 'FREQ=DAILY;COUNT=1', idempotency_key: 'u2' })).toMatchObject({
+      ok: false,
+      code: 'booking_rule_reschedule_cutoff',
+    });
+    // Outside the cutoff but inside the fee's day, made transparent is refused too: cancelling it
+    // records the fee. Its details change freely.
+    const later = await agent('slotlock_create_event', {
+      resource_id: van,
+      starts_at: new Date(soon + 5 * HOUR - (soon % MINUTE)).toISOString(),
+      ends_at: new Date(soon + 6 * HOUR - (soon % MINUTE)).toISOString(),
+      timezone: 'UTC',
+      idempotency_key: 'later',
+    });
+    const laterEvent = later.data?.event as { id: string; revision: number };
+    const later2 = { event_id: laterEvent.id, expected_revision: laterEvent.revision };
+    expect(await agent('slotlock_update_event', { ...later2, transparency: 'transparent', idempotency_key: 'u3' })).toMatchObject({
+      ok: false,
+      code: 'booking_rule_cancel_cutoff',
+    });
+    expect(await agent('slotlock_update_event', { ...later2, title: 'Renamed', idempotency_key: 'u4' })).toMatchObject({ ok: true });
   });
 });
