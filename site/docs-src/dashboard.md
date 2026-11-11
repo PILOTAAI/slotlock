@@ -74,7 +74,7 @@ refused.
 | Role | May |
 |---|---|
 | Owner | Everything: billing, and the workspace itself |
-| Admin | All but billing and the workspace itself: Full-access keys, webhooks, anyone's keys, contacts, the assistant's model |
+| Admin | All but billing and the workspace itself: Full-access keys, webhooks, anyone's keys, contacts, the assistant's model, Privacy |
 | Developer | Resources, booking rules, hours, the test environment, and read-only or read-write keys of their own |
 | Member | Bookings, approvals, the waitlist, hours and closures, and the assistant |
 | Viewer | Reads everything, changes nothing; their assistant only reads |
@@ -82,8 +82,17 @@ refused.
 
 - A person is the Owner of their own workspace. In an organization's, GitHub's owners are its
   Owners and its other members Developers, recorded at each sign-in.
-- Full-access keys, webhooks, billing and the assistant's model also need a sign-in in the last 15
+- Full-access keys, webhooks, billing, the assistant's model and Privacy also need a sign-in in the last 15
   minutes: past it, the dashboard asks the person to sign in again and comes back to the page.
+- **Privacy** (Settings, Owners and Admins, RFC 0004 D3): **Export the workspace** makes a copy of
+  everything it keeps, every table read at one moment, built in the background and kept a day;
+  **Download** gives it as one file of JSON lines (`{"table", "row"}`). **One person** finds someone
+  by email address, holder, contact or booking reference, shows how many rows of each table name
+  them, downloads them as JSON, and erases them once you tick that you understand: their contacts,
+  attendee and waitlist entries go, their references become a name that is no one's, and their
+  bookings stay as time taken. The person never goes in an address (every form posts), and the
+  audit log records each step (`export.created`, `export.downloaded`, `subject.exported`,
+  `subject.erased`) without them.
 - A Developer rotates or limits only keys they created, and never a Full-access one.
 - **Sign out everywhere** (Settings, Account) ends every session of the person on every device;
   erasing a person ends them too.

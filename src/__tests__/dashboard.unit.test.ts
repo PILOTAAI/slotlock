@@ -2678,6 +2678,101 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(404);
   });
 
+  it('exports the workspace, and finds, downloads and erases one person, on Privacy', async () => {
+    const ready = {
+      id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e',
+      status: 'ready' as const,
+      requestedBy: 'github:4242',
+      createdAt: new Date(),
+      finishedAt: new Date(),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      parts: 2,
+      rows: 3,
+      bytes: 120,
+      tables: { resources: 2, outbox: 1 },
+      error: null,
+    };
+    const records = {
+      contacts: [{ ref: 'cust-1', email: 'ada@example.com' }],
+      calendar_event_attendees: [],
+      calendar_events: [],
+      reservations: [{ external_ref: 'bk-1' }, { external_ref: 'bk-2' }],
+      reservation_tombstones: [],
+      reservation_conflict_archive: [],
+      calendar_event_tombstones: [],
+      calendar_event_commands: [],
+      waitlist_entries: [],
+      approvals: [],
+      outbox: [],
+    };
+    const privacy = {
+      createExport: vi.fn(async () => ({ ...ready, status: 'pending' as const })),
+      listExports: vi.fn(async () => [ready]),
+      exportPart: vi.fn(async (_tenant: string, _id: string, part: number) =>
+        part === 1
+          ? { ok: true as const, table: 'resources' as const, lines: ['{"external_ref":"van-1"}', '{"external_ref":"van-2"}'] }
+          : part === 2
+            ? { ok: true as const, table: 'outbox' as const, lines: ['{"type":"resource.created"}'] }
+            : { ok: false as const, code: 'export_part_not_found' as const },
+      ),
+      deleteExport: vi.fn(async () => true),
+      exportSubject: vi.fn(async () => ({ records, truncated: false })),
+      eraseSubject: vi.fn(async () => ({ erased: { ...Object.fromEntries(Object.keys(records).map((table) => [table, 0])), contacts: 1, reservations: 2 } as never })),
+    };
+    const audited: { action: string; metadata?: Record<string, unknown> }[] = [];
+    const target = dashboard({
+      resources: {
+        ...resources.store,
+        privacy,
+        audit: { record: async (_tenant: string, event: { action: string }) => void audited.push(event), list: async () => [] },
+      },
+    });
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/settings/privacy', session)).text();
+    expect(page).toContain('Export the workspace');
+    expect(page).toContain(`/base/dashboard/settings/privacy/download?id=${ready.id}`);
+    const token = await csrf(target, session);
+    // Asked for, built elsewhere.
+    expect(await (await post(target, '/base/dashboard/settings/privacy/export', { csrf: token }, session)).text()).toContain('Asked for.');
+    expect(privacy.createExport).toHaveBeenCalledWith('github:4242', 'github:4242');
+    // Downloaded as JSON lines, a part at a time.
+    const file = await get(target, `/base/dashboard/settings/privacy/download?id=${ready.id}`, session);
+    expect(file.headers.get('content-disposition')).toMatch(/^attachment; filename="slotlock-export-\d{4}-\d{2}-\d{2}\.ndjson"$/);
+    expect((await file.text()).trim().split('\n').map((line) => JSON.parse(line))).toEqual([
+      { table: 'resources', row: { external_ref: 'van-1' } },
+      { table: 'resources', row: { external_ref: 'van-2' } },
+      { table: 'outbox', row: { type: 'resource.created' } },
+    ]);
+    // One person: found, downloaded, and erased only once confirmed.
+    const found = await (await post(target, '/base/dashboard/settings/privacy/person', { csrf: token, kind: 'email', value: 'ada@example.com' }, session)).text();
+    expect(found).toContain('reservations');
+    expect(privacy.exportSubject).toHaveBeenCalledWith('github:4242', { email: 'ada@example.com' });
+    const json = await post(target, '/base/dashboard/settings/privacy/person/export', { csrf: token, kind: 'email', value: 'ada@example.com' }, session);
+    expect(json.headers.get('content-disposition')).toContain('slotlock-person-');
+    expect(JSON.parse(await json.text())).toMatchObject({ records: { contacts: [{ ref: 'cust-1' }] } });
+    const unconfirmed = await post(target, '/base/dashboard/settings/privacy/person/erase', { csrf: token, kind: 'email', value: 'ada@example.com' }, session);
+    expect(unconfirmed.status).toBe(400);
+    expect(privacy.eraseSubject).not.toHaveBeenCalled();
+    const erased = await post(target, '/base/dashboard/settings/privacy/person/erase', { csrf: token, kind: 'email', value: 'ada@example.com', confirm: 'yes' }, session);
+    expect(await erased.text()).toContain('Erased: 3 rows deleted or changed.');
+    expect(privacy.eraseSubject).toHaveBeenCalledWith('github:4242', { email: 'ada@example.com' }, 'github:4242');
+    // The audit log has each, never the person.
+    expect(audited.map((event) => event.action).filter((action) => action !== 'session.signed_in')).toEqual([
+      'export.created',
+      'export.downloaded',
+      'subject.exported',
+      'subject.erased',
+    ]);
+    expect(JSON.stringify(audited)).not.toContain('ada@example.com');
+    // A stale sign-in is asked to sign in again, for the download too.
+    now += 16 * 60_000;
+    expect(await (await get(target, `/base/dashboard/settings/privacy/download?id=${ready.id}`, session)).text()).toContain('Confirm it’s you');
+    expect((await post(target, '/base/dashboard/settings/privacy/person/erase', { csrf: token, kind: 'email', value: 'x@example.com', confirm: 'yes' }, session)).status).toBe(403);
+    // Without the adapter there is no section.
+    const plain = dashboard();
+    expect((await get(plain, '/base/dashboard/settings/privacy', (await signIn(plain)).session)).status).toBe(404);
+  });
+
   it('lists contacts with their consent, and forgets one', async () => {
     const people = [
       {

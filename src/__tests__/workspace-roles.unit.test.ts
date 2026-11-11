@@ -58,9 +58,9 @@ describe('workspace roles', () => {
     }
   });
 
-  it('asks a fresh sign-in for credentials that reach everything, money and the workspace itself', () => {
+  it('asks a fresh sign-in for credentials that reach everything, money, the workspace itself, and its data whole or a person', () => {
     expect([...SLOTLOCK_FRESH_CAPABILITIES].sort()).toEqual(
-      ['assistant.settings', 'billing.manage', 'keys.full', 'webhooks.manage', 'workspace.own'].sort(),
+      ['assistant.settings', 'billing.manage', 'keys.full', 'privacy.manage', 'webhooks.manage', 'workspace.own'].sort(),
     );
   });
 

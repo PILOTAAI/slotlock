@@ -117,11 +117,17 @@ import {
   type SlotlockChange,
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
-import type {
-  SlotlockAssistantChatSummary,
-  SlotlockSql,
-  SlotlockStore,
-  SlotlockWaitlistEntry,
+import {
+  type SlotlockAssistantChatSummary,
+  type SlotlockSql,
+  type SlotlockStore,
+  type SlotlockSubject,
+  type SlotlockSubjectErasure,
+  type SlotlockSubjectExport,
+  type SlotlockTenantExport,
+  type SlotlockTenantExportPartResult,
+  type SlotlockWaitlistEntry,
+  buildSlotlockTenantExport,
 } from './store.js';
 import type {
   SlotlockAvailabilityDefaults,
@@ -249,6 +255,11 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/settings/assistant/remove',
   '/plan/upgrade',
   '/plan/manage',
+  '/settings/privacy/export',
+  '/settings/privacy/export/delete',
+  '/settings/privacy/person',
+  '/settings/privacy/person/export',
+  '/settings/privacy/person/erase',
 ]);
 /** The forms whose success the audit log records, by the action it records. */
 const AUDITED_ROUTES: Readonly<Record<string, string>> = Object.freeze({
@@ -287,11 +298,13 @@ const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = 
   'assistant.settings': "change the assistant's model",
   'members.manage': 'manage members',
   'audit.read': 'read the audit log',
+  'privacy.manage': "export the workspace's data or erase a person",
   'billing.manage': 'change the plan or billing',
   'workspace.own': 'change who owns this workspace',
 });
 /** The pages a sign-in may come back to: one made to confirm it's you, or to open an invitation. */
 const STEP_UP_PAGES: ReadonlySet<string> = new Set([
+  '/settings/privacy',
   '/keys',
   '/webhooks',
   '/plan',
@@ -358,6 +371,8 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'contact.forgotten': 'forgot a contact',
   'subject.erased': 'erased a person',
   'export.created': 'exported the account',
+  'export.downloaded': 'downloaded an export of the account',
+  'subject.exported': "exported a person's data",
   'assistant.settings_saved': "changed the assistant's model",
   'assistant.settings_removed': "removed the assistant's model",
   'billing.checkout_started': 'started a checkout',
@@ -387,7 +402,7 @@ const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = O
   ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.removed', 'member.left', 'organization.enabled', 'organization.disabled']],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
-  ['Other', ['contact.forgotten', 'subject.erased', 'export.created', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
+  ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
 ]);
 const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
 
@@ -546,6 +561,19 @@ export interface SlotlockDashboardResources {
     actor?: string,
     override?: SlotlockOverrideResources,
   ): Promise<number>;
+  /**
+   * What the tenant keeps, exported whole, and what it keeps about one person, exported or erased
+   * (RFC 0004 D3): Settings, Privacy.
+   */
+  privacy?: {
+    /** Ask for an export, built in the background; refused while one is built, or with five kept. */
+    createExport(tenantRef: string, actor?: string): Promise<SlotlockTenantExport>;
+    listExports(tenantRef: string): Promise<SlotlockTenantExport[]>;
+    exportPart(tenantRef: string, exportId: string, part: number): Promise<SlotlockTenantExportPartResult>;
+    deleteExport(tenantRef: string, exportId: string): Promise<boolean>;
+    exportSubject(tenantRef: string, subject: SlotlockSubject): Promise<SlotlockSubjectExport>;
+    eraseSubject(tenantRef: string, subject: SlotlockSubject, actor?: string): Promise<SlotlockSubjectErasure>;
+  };
   /** The people the tenant keeps to tell about bookings (RFC 0004 P3), and forgetting one. */
   contacts?: {
     list(tenantRef: string, limit: number, after?: string): Promise<SlotlockContact[]>;
@@ -1117,6 +1145,30 @@ export function createSlotlockDashboardResources(
         },
         by(actor),
       ),
+    privacy: {
+      async createExport(tenantRef, actor) {
+        const made = await store.withTenant(
+          tenantRef,
+          (tenant) => tenant.createTenantExport({ tenantRef, ...(actor ? { requestedBy: actor } : {}) }),
+          { isolation: 'read committed', ...by(actor) },
+        );
+        // Built after the answer; maintenance builds one a stopped server left pending.
+        void buildSlotlockTenantExport(store, tenantRef, made.id);
+        return made;
+      },
+      listExports: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listTenantExports({ tenantRef })),
+      exportPart: (tenantRef, exportId, part) =>
+        store.withTenant(tenantRef, (tenant) => tenant.getTenantExportPart({ tenantRef, exportId, part })),
+      deleteExport: (tenantRef, exportId) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteTenantExport({ tenantRef, exportId })),
+      exportSubject: (tenantRef, subject) =>
+        store.withTenant(tenantRef, (tenant) => tenant.exportSubject({ tenantRef, subject, limit: 1_000 })),
+      eraseSubject: (tenantRef, subject, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.eraseSubject({ tenantRef, subject }), {
+          isolation: 'read committed',
+          ...by(actor),
+        }),
+    },
     contacts: {
       list: (tenantRef, limit, after) =>
         store.withTenant(tenantRef, (tenant) => tenant.listContacts({ tenantRef, limit, ...(after ? { after } : {}) })),
@@ -3114,7 +3166,7 @@ ${
     return respond(status, layout('Locations and groups', content, session, 'resources'));
   }
 
-  type SettingsSection = 'assistant' | 'members' | 'team' | 'audit' | 'endpoints' | 'hours' | 'account';
+  type SettingsSection = 'assistant' | 'members' | 'team' | 'audit' | 'privacy' | 'endpoints' | 'hours' | 'account';
   /** An invitation's link, shown once to the person who made it. */
   type InvitationShown = { link: string; to: string; expiresAt: Date };
 
@@ -3127,6 +3179,7 @@ ${
     { id: 'members', label: 'Members', path: '/settings/members' },
     { id: 'team', label: 'Team', path: '/settings/team' },
     { id: 'audit', label: 'Audit log', path: '/settings/audit' },
+    { id: 'privacy', label: 'Privacy', path: '/settings/privacy' },
     { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
     { id: 'hours', label: 'Hours', path: '/settings/hours' },
     { id: 'account', label: 'Account', path: '/settings/account' },
@@ -3140,6 +3193,7 @@ ${
     section: SettingsSection = 'assistant',
     invitation?: InvitationShown,
     query?: URLSearchParams,
+    found?: PersonFound,
   ): Promise<Response> {
     const store = assistantStore();
     // Members are a team workspace's: its people come from invitations, not from GitHub.
@@ -3148,12 +3202,14 @@ ${
         (entry.id !== 'assistant' || store) &&
         (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
         (entry.id !== 'team' || (teamStore && session.team !== undefined && can(session, 'workspace.own'))) &&
-        (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))),
+        (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))) &&
+        (entry.id !== 'privacy' || (options.resources.privacy && can(session, 'privacy.manage'))),
     );
     const shown: SettingsSection =
       section === 'assistant' && !store
         ? 'endpoints'
-        : (section === 'members' || section === 'audit' || section === 'team') && !sections.some((entry) => entry.id === section)
+        : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy') &&
+            !sections.some((entry) => entry.id === section)
           ? 'account'
           : section;
     const connected = store ? Boolean(await store.getSettings(tenantOf(session))) : false;
@@ -3172,6 +3228,8 @@ ${
       body = await teamSection(session, status, notice);
     } else if (shown === 'audit') {
       body = await auditSection(session, status, notice, query ?? new URLSearchParams());
+    } else if (shown === 'privacy') {
+      body = await privacySection(session, status, notice, found);
     } else if (shown === 'endpoints') {
       body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">MCP</span><div class="row-value">${copyField('mcp-url', mcpUrl)}</div></div><div class="row"><span class="row-label">A2A</span><div class="row-value">${copyField('a2a-url', a2aUrl)}</div></div></div>`;
     } else if (shown === 'hours') {
@@ -5692,6 +5750,7 @@ ${
   const backOf = (route: string) => {
     if (route.startsWith('/members/')) return '/settings/members';
     if (route === '/teams/delete' || route === '/teams/restore') return '/settings/team';
+    if (route.startsWith('/settings/privacy')) return '/settings/privacy';
     const first = `/${route.split('/')[1] ?? ''}`;
     return first === '/' ? '' : first;
   };
@@ -6530,6 +6589,215 @@ ${
     return (
       names.get(event.actorRef) ??
       (event.actorRef.startsWith('github:') ? `GitHub user ${event.actorRef.slice(7)}` : event.actorRef.startsWith('google:') ? 'A Google account' : event.actorRef)
+    );
+  }
+
+  /** A person looked up on Privacy: how they were named, and what the workspace keeps about them. */
+  interface PersonFound {
+    kind: keyof typeof PERSON_KINDS;
+    value: string;
+    records: SlotlockSubjectExport['records'];
+    truncated: boolean;
+  }
+
+  /** The ways Privacy finds a person, as the form names them. */
+  const PERSON_KINDS = Object.freeze({
+    email: 'Email address',
+    holder: 'Holder reference',
+    contact: 'Contact reference',
+    reference: 'Booking reference',
+  });
+
+  /** A person named on a Privacy form, checked: one kind and a value, or null. */
+  function personOf_(form: URLSearchParams): { kind: keyof typeof PERSON_KINDS; value: string; subject: SlotlockSubject } | null {
+    const kind = form.get('kind') ?? '';
+    const value = (form.get('value') ?? '').trim();
+    if (!Object.hasOwn(PERSON_KINDS, kind) || value.length === 0 || Buffer.byteLength(value) > 500) return null;
+    const named = kind as keyof typeof PERSON_KINDS;
+    return { kind: named, value, subject: { [named]: value } as SlotlockSubject };
+  }
+
+  /**
+   * Privacy (RFC 0004 D3): an export of everything the workspace keeps, to download for a day; and
+   * one person found by email, holder, contact or booking reference, what is kept about them
+   * downloaded, or them erased. Owners and Admins, signed in within 15 minutes.
+   */
+  async function privacySection(
+    session: Session,
+    status: number,
+    notice: string | undefined,
+    found: PersonFound | undefined,
+  ): Promise<Html> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return noticeOf(notice, status);
+    const exports = await privacy.listExports(tenantOf(session));
+    const hidden = html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const rows = exports.map(
+      (made) =>
+        html`<tr><td data-label="Asked for">${formatDate(made.createdAt)}</td><td data-label="State">${
+          made.status === 'ready'
+            ? html`<span class="pill active">Ready</span>`
+            : made.status === 'pending'
+              ? html`<span class="pill">Being made</span>`
+              : html`<span class="pill revoked">Failed</span>${made.error === 'export_too_large' ? html` <span class="muted">too large: ask the operator</span>` : html``}`
+        }</td><td data-label="Rows">${made.status === 'ready' ? String(made.rows) : '—'}</td><td data-label="Deleted">${formatDate(made.expiresAt)}</td><td class="actions">${
+          made.status === 'ready' ? html`<a class="button" href="${root}/settings/privacy/download?id=${made.id}">Download</a> ` : html``
+        }<form method="post" action="${root}/settings/privacy/export/delete">${hidden}<input type="hidden" name="id" value="${made.id}"><button type="submit">Delete</button></form></td></tr>`,
+    );
+    const exportCard = html`<h2>Everything</h2><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted.</p><form method="post" action="${root}/settings/privacy/export">${hidden}<button type="submit" class="primary">Export the workspace</button></form>${
+      rows.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Asked for</th><th>State</th><th>Rows</th><th>Deleted</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : html``
+    }`;
+    const kinds = Object.entries(PERSON_KINDS).map(
+      ([kind, label]) => html`<option value="${kind}"${found?.kind === kind ? html` selected` : html``}>${label}</option>`,
+    );
+    const finder = html`<h2>One person</h2><p>For a person who asks what you keep about them, or to be erased. Find them by one thing you know.</p><form class="person-find" method="post" action="${root}/settings/privacy/person">${hidden}<label for="person-kind">By</label><select id="person-kind" name="kind">${kinds}</select><label for="person-value" class="visually-hidden">Value</label><input id="person-value" name="value" maxlength="320" required value="${found?.value ?? ''}"><button type="submit">Find</button></form>`;
+    let person = html``;
+    if (found) {
+      const counted = Object.entries(found.records).filter(([, rows_]) => rows_.length > 0);
+      const keep = html`<input type="hidden" name="kind" value="${found.kind}"><input type="hidden" name="value" value="${found.value}">`;
+      person =
+        counted.length === 0
+          ? html`<p class="empty">Nothing kept names them.</p>`
+          : html`<div class="set-card">${counted.map(
+              ([table, rows_]) =>
+                html`<div class="row"><span class="row-label">${table.replaceAll('_', ' ')}</span><div class="row-value">${String(rows_.length)}${found.truncated && rows_.length >= 1_000 ? '+' : ''}</div></div>`,
+            )}</div><div class="actions"><form method="post" action="${root}/settings/privacy/person/export">${hidden}${keep}<button type="submit">Download what is kept</button></form></div><form method="post" action="${root}/settings/privacy/person/erase" class="danger-zone">${hidden}${keep}<p>Erasing deletes their contacts, attendee and waitlist entries, takes their email out of events and approvals, and replaces their references with a name that is no one's, everywhere, history included. Their bookings stay, as time taken. This cannot be undone.</p><label class="choice"><input type="checkbox" name="confirm" value="yes" required> I understand</label><button type="submit" class="danger">Erase this person</button></form>`;
+    }
+    return html`${noticeOf(notice, status)}${exportCard}${finder}${person}`;
+  }
+
+  async function askPrivacyExport(session: Session): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    try {
+      const made = await privacy.createExport(tenantRef, personOf(session));
+      await audit(session, { action: 'export.created', targetType: 'export', targetRef: made.id });
+      return settingsPage(session, 200, 'Asked for. It is made in a moment: reload this page to download it.', undefined, 'privacy');
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code === 'export_in_progress') {
+        return settingsPage(session, 409, 'One is being made already: wait for it.', undefined, 'privacy');
+      }
+      if (code === 'export_limit_reached') {
+        return settingsPage(session, 409, 'Five exports are kept already: delete one first.', undefined, 'privacy');
+      }
+      throw error;
+    }
+  }
+
+  async function deletePrivacyExport(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id) || !(await privacy.deleteExport(tenantOf(session), id))) {
+      return settingsPage(session, 404, 'That export is not here.', undefined, 'privacy');
+    }
+    return settingsPage(session, 200, 'Deleted.', undefined, 'privacy');
+  }
+
+  /**
+   * A ready export as one file of JSON lines, `{"table", "row"}` each, read a part at a time. Only
+   * with a sign-in in the last 15 minutes, as every Privacy action.
+   */
+  async function downloadPrivacyExport(session: Session, query: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    if (!freshlySignedIn(session)) return confirmPage(session, 'privacy.manage', '/settings/privacy');
+    const id = query.get('id') ?? '';
+    const tenantRef = tenantOf(session);
+    const first = UUID_PATTERN.test(id) ? await privacy.exportPart(tenantRef, id, 1) : null;
+    if (!first || (!first.ok && first.code !== 'export_part_not_found')) {
+      return settingsPage(session, first && !first.ok && first.code === 'export_not_ready' ? 409 : 404, 'That export is not ready, or not here.', undefined, 'privacy');
+    }
+    await audit(session, { action: 'export.downloaded', targetType: 'export', targetRef: id });
+    const encoder = new TextEncoder();
+    let next: SlotlockTenantExportPartResult | null = first;
+    let part = 1;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const read = next ?? (await privacy.exportPart(tenantRef, id, part));
+        next = null;
+        if (!read.ok) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(encoder.encode(read.lines.map((line) => `{"table":${JSON.stringify(read.table)},"row":${line}}\n`).join('')));
+        part += 1;
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Content-Disposition': `attachment; filename="slotlock-export-${new Date(now()).toISOString().slice(0, 10)}.ndjson"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'",
+      },
+    });
+  }
+
+  async function findPerson(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const named = personOf_(form);
+    if (!named) return settingsPage(session, 400, 'Choose how to find them, and what you know.', undefined, 'privacy');
+    try {
+      const exported = await privacy.exportSubject(tenantOf(session), named.subject);
+      return settingsPage(session, 200, undefined, undefined, 'privacy', undefined, undefined, {
+        kind: named.kind,
+        value: named.value,
+        records: exported.records,
+        truncated: exported.truncated,
+      });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'invalid_subject') {
+        return settingsPage(session, 400, 'That is not one: an email address, or a reference of up to 500 bytes.', undefined, 'privacy');
+      }
+      throw error;
+    }
+  }
+
+  /** What is kept about one person, as a JSON file: posted, so the person is never in an address. */
+  async function exportPerson(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const named = personOf_(form);
+    if (!named) return settingsPage(session, 400, 'Choose how to find them, and what you know.', undefined, 'privacy');
+    const exported = await privacy.exportSubject(tenantOf(session), named.subject);
+    await audit(session, { action: 'subject.exported', targetType: 'subject', metadata: { by: named.kind } });
+    return new Response(JSON.stringify(exported, null, 2), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': `attachment; filename="slotlock-person-${new Date(now()).toISOString().slice(0, 10)}.json"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'",
+      },
+    });
+  }
+
+  async function erasePerson(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const named = personOf_(form);
+    if (!named) return settingsPage(session, 400, 'Choose how to find them, and what you know.', undefined, 'privacy');
+    if (form.get('confirm') !== 'yes') return settingsPage(session, 400, 'Tick that you understand first.', undefined, 'privacy');
+    const { erased } = await privacy.eraseSubject(tenantOf(session), named.subject, personOf(session));
+    const changed = Object.entries(erased).filter(([, rows]) => rows > 0);
+    // Never the person: how they were named, and what went.
+    await audit(session, { action: 'subject.erased', targetType: 'subject', metadata: { by: named.kind, ...Object.fromEntries(changed) } });
+    const total = changed.reduce((sum, [, rows]) => sum + rows, 0);
+    return settingsPage(
+      session,
+      200,
+      total === 0 ? 'Nothing kept named them.' : `Erased: ${String(total)} row${total === 1 ? '' : 's'} deleted or changed. Their bookings stay, as time taken.`,
+      undefined,
+      'privacy',
     );
   }
 
@@ -7831,6 +8099,16 @@ ${
         return deleteHolidayCalendar(session, form);
       case '/contacts/forget':
         return forgetContact(session, form);
+      case '/settings/privacy/export':
+        return askPrivacyExport(session);
+      case '/settings/privacy/export/delete':
+        return deletePrivacyExport(session, form);
+      case '/settings/privacy/person':
+        return findPerson(session, form);
+      case '/settings/privacy/person/export':
+        return exportPerson(session, form);
+      case '/settings/privacy/person/erase':
+        return erasePerson(session, form);
       case '/organization':
         return switchOrganization(session, form);
       case '/environment':
@@ -7960,6 +8238,8 @@ ${
             case '/settings/audit':
             case '/settings/audit/export':
             case '/settings/team':
+            case '/settings/privacy':
+            case '/settings/privacy/download':
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
@@ -7994,6 +8274,12 @@ ${
                   : nothingHere(session);
               }
               if (route === '/settings/audit/export') return await exportAudit(session, url.searchParams);
+              if (route === '/settings/privacy') {
+                return options.resources.privacy
+                  ? await settingsPage(session, 200, undefined, undefined, 'privacy')
+                  : nothingHere(session);
+              }
+              if (route === '/settings/privacy/download') return await downloadPrivacyExport(session, url.searchParams);
               if (route === '/settings/team') {
                 return teamStore && session.team !== undefined
                   ? await settingsPage(session, 200, undefined, undefined, 'team')

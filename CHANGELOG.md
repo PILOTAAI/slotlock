@@ -73,6 +73,12 @@ versioning.
   in holds, bookings, cancelled bookings, events, approvals and the change history. Bookings stay
   as time taken; nothing goes on the feed; the audit log records `subject.erased` without the
   person.
+- **Privacy in the dashboard** (Settings, Privacy; Owners and Admins, with a sign-in in the last 15
+  minutes: the new capability `privacy.manage`). Export the workspace and download it as JSON
+  lines; find one person by email, holder, contact or booking reference, see how many rows of each
+  table name them, download them as JSON, or erase them once confirmed. Every form posts, so the
+  person is never in an address; the audit log records `export.created`, `export.downloaded`,
+  `subject.exported` and `subject.erased` without them.
 - **Exporting a whole tenant** (RFC 0004 D3). `POST /v1/tenant/exports` asks for a copy of
   everything the tenant keeps, read through one cursor so at one moment; the server builds it after
   answering into parts of one table's rows (new tables `tenant_exports` and `tenant_export_parts`),

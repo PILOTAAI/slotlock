@@ -59,6 +59,11 @@ export const SLOTLOCK_WORKSPACE_CAPABILITIES = Object.freeze([
   'members.manage',
   /** Read the audit log. */
   'audit.read',
+  /**
+   * Export the workspace's data, and find, export or erase what it keeps about one person (RFC 0004
+   * D3). Fresh.
+   */
+  'privacy.manage',
   /** Change the plan and open billing. Fresh. */
   'billing.manage',
   /** Grant Owner or Billing, transfer, delete the workspace, link a GitHub organization. Fresh. */
@@ -73,6 +78,7 @@ export const SLOTLOCK_FRESH_CAPABILITIES: ReadonlySet<SlotlockWorkspaceCapabilit
   'assistant.settings',
   'billing.manage',
   'workspace.own',
+  'privacy.manage',
 ]);
 
 const everyCapability = SLOTLOCK_WORKSPACE_CAPABILITIES;
@@ -196,6 +202,11 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/assistant/remove': 'assistant.settings',
   '/plan/upgrade': 'billing.manage',
   '/plan/manage': 'billing.manage',
+  '/settings/privacy/export': 'privacy.manage',
+  '/settings/privacy/export/delete': 'privacy.manage',
+  '/settings/privacy/person': 'privacy.manage',
+  '/settings/privacy/person/export': 'privacy.manage',
+  '/settings/privacy/person/erase': 'privacy.manage',
 });
 
 /** Each dashboard page (GET), by the capability it needs. A page not listed is refused. */
@@ -223,4 +234,6 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/audit': 'audit.read',
   '/settings/audit/export': 'audit.read',
   '/settings/team': 'workspace.own',
+  '/settings/privacy': 'privacy.manage',
+  '/settings/privacy/download': 'privacy.manage',
 });
