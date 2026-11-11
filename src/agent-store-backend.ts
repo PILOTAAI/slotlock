@@ -51,6 +51,7 @@ import {
   type SlotlockWaitlistEntry,
   calendarEventRollingHorizon,
 } from './store.js';
+import { slotlockResourceSearchWords, slotlockSearchResources } from './resource-search.js';
 import type {
   CalendarAttendee,
   CalendarEventContent,
@@ -624,12 +625,72 @@ async function requireResource(
 }
 
 /** The caller's shared resource with this id: what an agent may see and book. */
-function requireAgentResource(
+/** The most resources a search or a not-found's candidates look through: more than a tenant may have. */
+const MAX_SEARCHED_RESOURCES = 5_000;
+
+/** A tenant's resources agents may see, in pages, up to MAX_SEARCHED_RESOURCES. */
+async function sharedResources(
+  tenantStore: SlotlockTenantStore,
+  tenantRef: string,
+  filter: { kind?: NonNullable<SlotlockResource['kind']>; labels?: string[]; location?: string; group?: string } = {},
+): Promise<SlotlockResource[]> {
+  const all: SlotlockResource[] = [];
+  let after: string | undefined;
+  while (all.length < MAX_SEARCHED_RESOURCES) {
+    const page = await tenantStore.listResources({
+      tenantRef,
+      visibility: 'shared',
+      limit: 1_000,
+      ...(after !== undefined ? { after } : {}),
+      ...filter,
+    });
+    all.push(...page);
+    if (page.length < 1_000) break;
+    after = page.at(-1)?.id;
+  }
+  return all.slice(0, MAX_SEARCHED_RESOURCES);
+}
+
+/**
+ * The refusal for an id that names no resource the caller can see. When what was given is not an
+ * id at all (a name or a reference, as a model will pass), it names up to three resources that best
+ * match it, so the caller can try again with the right id.
+ */
+async function resourceNotFound(
+  tenantStore: SlotlockTenantStore,
+  tenantRef: string,
+  given: string,
+): Promise<SlotlockAgentOperationError> {
+  if (STORE_ID_PATTERN.test(given) || typeof given !== 'string' || given.trim() === '') {
+    return new SlotlockAgentOperationError('resource_not_found', 404);
+  }
+  let words: string[];
+  try {
+    words = slotlockResourceSearchWords(given);
+  } catch {
+    return new SlotlockAgentOperationError('resource_not_found', 404);
+  }
+  const best = slotlockSearchResources(await sharedResources(tenantStore, tenantRef), words).slice(0, 3);
+  const details = Object.fromEntries(
+    best.map((match, index) => [
+      `candidate_${String(index + 1)}`,
+      `${match.resource.id} ${match.resource.name ?? match.resource.externalRef ?? ''}`.trim().slice(0, 200),
+    ]),
+  );
+  return new SlotlockAgentOperationError('resource_not_found', 404, details);
+}
+
+async function requireAgentResource(
   tenantStore: SlotlockTenantStore,
   tenantRef: string,
   resourceId: string,
 ): Promise<SlotlockResource> {
-  return requireResource(tenantStore, tenantRef, resourceId, 'shared');
+  try {
+    return await requireResource(tenantStore, tenantRef, resourceId, 'shared');
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 'resource_not_found') throw error;
+    throw await resourceNotFound(tenantStore, tenantRef, resourceId);
+  }
 }
 
 /**
@@ -1068,6 +1129,12 @@ export function createSlotlockStoreAgentBackend(
       const labels = input.labels as string[] | undefined;
       const location = input.location as string | undefined;
       const group = input.group as string | undefined;
+      let words: string[] | undefined;
+      try {
+        words = typeof input.query === 'string' ? slotlockResourceSearchWords(input.query) : undefined;
+      } catch {
+        throw new SlotlockAgentOperationError('invalid_arguments', 400);
+      }
       // What a resource says about itself, for an agent to show and choose by; its attributes are
       // the integrator's, and stay on the application API.
       const output = (resource: SlotlockResource) => ({
@@ -1100,24 +1167,40 @@ export function createSlotlockStoreAgentBackend(
             location === undefined
               ? null
               : locationAndBelow(await tenantStore.listLocations({ tenantRef: context.principal.tenantRef }), location);
-          return {
-            resources: (
-              await tenantStore.listPoolMembers({
-                tenantRef: context.principal.tenantRef,
-                pool: input.pool as string,
-                visibility: 'shared',
-              })
-            )
-              .filter(
-                (resource) =>
-                  (kind === undefined || (resource.kind ?? 'other') === kind) &&
-                  (labels === undefined || slotlockResourceHasLabels(resource.labels, labels)) &&
-                  (places === null || (resource.location !== undefined && places.has(resource.location))) &&
-                  (group === undefined || resource.groups?.includes(group) === true),
-              )
-              .map(output),
-            next_cursor: null,
-          };
+          const members = (
+            await tenantStore.listPoolMembers({
+              tenantRef: context.principal.tenantRef,
+              pool: input.pool as string,
+              visibility: 'shared',
+            })
+          ).filter(
+            (resource) =>
+              (kind === undefined || (resource.kind ?? 'other') === kind) &&
+              (labels === undefined || slotlockResourceHasLabels(resource.labels, labels)) &&
+              (places === null || (resource.location !== undefined && places.has(resource.location))) &&
+              (group === undefined || resource.groups?.includes(group) === true),
+          );
+          // Searched, the best matches first; else in the order slotlock_book_pool tries them.
+          const shown =
+            words === undefined
+              ? members
+              : slotlockSearchResources(members, words)
+                  .slice(0, input.limit as number)
+                  .map((match) => match.resource);
+          return { resources: shown.map(output), next_cursor: null };
+        });
+      }
+      if (words !== undefined) {
+        // A search ranks every resource the filters allow (as many as a tenant may have), best first.
+        return withTenant(store, context, async (tenantStore) => {
+          const candidates = await sharedResources(tenantStore, context.principal.tenantRef, {
+            ...(kind !== undefined ? { kind } : {}),
+            ...(labels !== undefined ? { labels } : {}),
+            ...(location !== undefined ? { location } : {}),
+            ...(group !== undefined ? { group } : {}),
+          });
+          const best = slotlockSearchResources(candidates, words).slice(0, input.limit as number);
+          return { resources: best.map((match) => output(match.resource)), next_cursor: null };
         });
       }
       return withTenant(store, context, async (tenantStore) => {

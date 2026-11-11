@@ -163,8 +163,59 @@ button.ghost:hover { background: var(--hover); color: var(--ink); }
 .assistant.streaming .send .stop { display: block; }
 .jump { position: absolute; left: 50%; transform: translate(-50%, 0); top: -8px; width: 32px; height: 32px; padding: 0; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); display: grid; place-items: center; cursor: pointer; box-shadow: var(--pop-shadow); }
 .jump[hidden] { display: none; }
-.new-chat svg { width: 14px; height: 14px; }
+.new-chat svg, .chats-link svg { width: 14px; height: 14px; }
 .assistant-page[data-empty] .new-chat { display: none; }
+.assistant-actions { display: flex; gap: var(--space-2); }
+.chats-link { display: none; }
+/* Chats: the member's conversations beside the one shown, most recent first, grouped by day. */
+.assistant-shell { display: grid; grid-template-columns: 252px minmax(0, 1fr); gap: var(--space-6); align-items: start; }
+/* It scrolls with the page: a column that scrolled on its own would clip a row's menu. */
+.chats { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.chats-head { display: flex; align-items: center; justify-content: space-between; min-height: 36px; }
+.chats-head h2 { margin: 0; font-size: var(--text-md); font-weight: 600; color: var(--ink-2); }
+.icon-button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--radius-sm); color: var(--ink-2); transition: background var(--fast) var(--ease), color var(--fast) var(--ease); }
+.icon-button:hover { background: var(--hover); color: var(--ink); text-decoration: none; }
+.icon-button svg { width: 15px; height: 15px; }
+.chats-filter { height: 32px; font-size: var(--text-md); }
+.chats-filter[hidden] { display: none; }
+/* Sentence case, not the dashboard's uppercase h3. */
+.chat-group { margin: var(--space-3) 0 2px; padding: 0 var(--space-2); font-family: inherit; font-size: var(--text-xs); font-weight: 500; line-height: 1.5; text-transform: none; letter-spacing: 0; color: var(--ink-3); }
+.chat-group[hidden] { display: none; }
+.chat-list { min-width: 0; }
+/* minmax(0, 1fr): a long title is cut with an ellipsis, never widening the column. */
+.chat-rows { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; }
+.chat-row { position: relative; display: flex; align-items: center; border-radius: var(--radius); transition: background var(--fast) var(--ease); }
+.chat-row[hidden] { display: none; }
+.chat-row:hover, .chat-row:focus-within, .chat-row.current { background: var(--hover); }
+.chat-link { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: var(--space-2); padding: 7px 4px 7px var(--space-2); color: var(--ink-2); font-size: var(--text-md); }
+.chat-link:hover { color: var(--ink); text-decoration: none; }
+.chat-row.current .chat-link { color: var(--ink); font-weight: 500; }
+.chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-when { flex: none; font-size: var(--text-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.chat-menu { position: relative; flex: none; }
+.chat-menu summary { list-style: none; display: grid; place-items: center; width: 28px; height: 28px; margin-right: 2px; border-radius: var(--radius-sm); color: var(--ink-3); cursor: pointer; opacity: 0; transition: opacity var(--fast) var(--ease), background var(--fast) var(--ease); }
+.chat-menu summary::-webkit-details-marker { display: none; }
+.chat-row:hover .chat-menu summary, .chat-row:focus-within .chat-menu summary, .chat-row.current .chat-menu summary, .chat-menu[open] summary { opacity: 1; }
+.chat-menu summary:hover, .chat-menu[open] summary { background: var(--line-soft); color: var(--ink); }
+.chat-menu summary svg { width: 14px; height: 14px; }
+.chat-menu .pop { z-index: 20; width: 260px; display: grid; gap: var(--space-2); }
+.chat-menu .pop form { display: grid; gap: var(--space-2); margin: 0; }
+.chat-menu .pop form + form { padding-top: var(--space-2); border-top: 1px solid var(--line-soft); }
+.chat-menu .pop button.danger { background: none; border-color: transparent; box-shadow: none; color: var(--bad); }
+.chat-menu .pop button.danger:hover { background: var(--bad-wash); }
+.chat-rename input { width: 100%; min-width: 0; height: 34px; }
+.chats-empty { padding: var(--space-2); font-size: var(--text-md); }
+.chats-page .chats { max-width: 560px; }
+.chats-page .chats-head { display: none; }
+.chats-page .chat-menu summary { opacity: 1; }
+@media (max-width: 1100px) {
+  .assistant-shell { grid-template-columns: minmax(0, 1fr); }
+  .assistant-shell > .chats { display: none; }
+  .chats-link { display: inline-flex; }
+}
+@media (hover: none) {
+  .chat-menu summary { opacity: 1; }
+}
 @media (prefers-reduced-motion: reduce) {
   .live-steps .step.run, .thinking { animation: none; color: var(--ink-3); background: none; }
   .prose.streaming > :last-child::after { animation: none; }
@@ -203,6 +254,29 @@ button.ghost:hover { background: var(--hover); color: var(--ink); }
  */
 export function slotlockAssistantScript(markdownSource: string): string {
   return `
+// Search chats: rows whose title holds what is typed (ignoring case and accents) stay shown.
+function filterChats() {
+  var filter = document.getElementById('chats-filter');
+  if (!filter) return;
+  filter.hidden = false;
+  var fold = function (text) { return text.normalize('NFKD').replace(/\\p{M}/gu, '').toLowerCase(); };
+  var apply = function () {
+    var wanted = fold(filter.value.trim());
+    for (var group of document.querySelectorAll('.chat-rows')) {
+      var shown = 0;
+      for (var row of group.children) {
+        var title = row.querySelector('.chat-title');
+        row.hidden = wanted !== '' && fold(title ? title.textContent : '').indexOf(wanted) === -1;
+        if (!row.hidden) shown += 1;
+      }
+      var label = group.previousElementSibling;
+      if (label && label.classList.contains('chat-group')) label.hidden = shown === 0;
+    }
+  };
+  filter.addEventListener('input', apply);
+  apply();
+}
+filterChats();
 (function () {
   var page = document.querySelector('[data-assistant]');
   if (!page || typeof fetch !== 'function' || typeof TextDecoder !== 'function') return;
@@ -272,14 +346,20 @@ export function slotlockAssistantScript(markdownSource: string): string {
     event.preventDefault();
     if (!busy && box.value.trim() !== '') form.requestSubmit();
   });
-  for (var chip of page.querySelectorAll('button[data-fill]')) {
+  // A chip that asks sends through the box, so its reply streams; one that writes only fills it.
+  for (var chip of page.querySelectorAll('.chips button.chip')) {
     chip.addEventListener('click', function (event) {
       event.preventDefault();
-      box.value = this.getAttribute('data-fill') || '';
+      var fill = this.getAttribute('data-fill');
+      box.value = fill !== null ? fill : (this.value || '');
       grow();
       update();
-      box.focus();
-      box.setSelectionRange(box.value.length, box.value.length);
+      if (fill !== null) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      } else if (!busy && box.value.trim() !== '') {
+        form.requestSubmit();
+      }
     });
   }
   for (var decide of document.querySelectorAll('.change-buttons form')) {
@@ -328,7 +408,8 @@ export function slotlockAssistantScript(markdownSource: string): string {
     var prose = null;
     var proseText = '';
     var steps = null;
-    var stepNodes = {};
+    // Keyed by the provider's call id: no id, __proto__ included, may name an inherited property.
+    var stepNodes = Object.create(null);
     var frame = 0;
     follow(was);
     function draw() {
@@ -379,6 +460,18 @@ export function slotlockAssistantScript(markdownSource: string): string {
         added = [];
         thread.insertAdjacentHTML('beforeend', e.html || '');
         setOnce(e.once);
+        // The conversation it went to: a new one has its id now, its own address, and a place in Chats.
+        if (e.chat) {
+          for (var field of page.querySelectorAll('input[name="chat"]')) field.value = e.chat;
+          if (e.url && window.history && history.replaceState) history.replaceState(null, '', e.url);
+          var heading = document.querySelector('.assistant-page .page-head h1');
+          if (heading && e.title) heading.textContent = e.title;
+          var panel = document.querySelector('aside.chats');
+          if (panel && e.chats) {
+            panel.outerHTML = e.chats;
+            filterChats();
+          }
+        }
       }
       follow(was);
     }
@@ -391,7 +484,8 @@ export function slotlockAssistantScript(markdownSource: string): string {
     }).then(function (response) {
       var type = response.headers.get('content-type') || '';
       if (!response.body || type.indexOf('application/x-ndjson') !== 0) {
-        location.assign(page.getAttribute('data-page') + '#latest');
+        var current = form.querySelector('input[name="chat"]');
+        location.assign(page.getAttribute('data-page') + (current && current.value ? '?c=' + current.value : '') + '#latest');
         location.reload();
         return;
       }
@@ -437,7 +531,12 @@ export function slotlockAssistantScript(markdownSource: string): string {
   });
   grow();
   update();
-  if (location.hash === '#latest' || !page.hasAttribute('data-empty')) window.scrollTo(0, document.documentElement.scrollHeight);
+  // To the latest message only when it would be behind the box: a short conversation keeps its
+  // heading (and Chats) in view.
+  var dockAtLoad = page.querySelector('.dock');
+  var lastAtLoad = thread.lastElementChild;
+  var behind = !!lastAtLoad && lastAtLoad.getBoundingClientRect().bottom > window.innerHeight - (dockAtLoad ? dockAtLoad.offsetHeight : 0);
+  if (!page.hasAttribute('data-empty') && behind) window.scrollTo(0, document.documentElement.scrollHeight);
 })();
 `;
 }

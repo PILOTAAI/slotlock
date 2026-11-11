@@ -474,9 +474,11 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           model: 'your-model',
           key: { sealed: 'v1.sealed.key', hint: 'abcd' },
         });
-        await tenant.putAssistantConversation({
+        await tenant.putAssistantChat({
           tenantRef,
           memberRef: `github:${uid}`,
+          chatId: 'chat-0123456789a',
+          title: 'Anything free tomorrow?',
           messages: [{ role: 'user', text: 'Anything free tomorrow?' }],
           added: {},
           keep: [],
@@ -507,6 +509,10 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await superuser`
         INSERT INTO slotlock.overage_reports (tenant_ref, month, reported)
         VALUES (${tenantRef}, date_trunc('month', now())::date, 1)`;
+      // A conversation as 0.8 kept it, which a server of 0.8 still running during an upgrade writes.
+      await superuser`
+        INSERT INTO slotlock.assistant_conversations (tenant_ref, member_ref, expires_at)
+        VALUES (${tenantRef}, 'github:1', now() + interval '1 hour')`;
       // A booking an upgrade set aside, which only the deployment DDL writes.
       await superuser`
         INSERT INTO slotlock.reservation_conflict_archive (

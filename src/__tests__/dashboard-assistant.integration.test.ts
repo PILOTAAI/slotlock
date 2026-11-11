@@ -15,6 +15,9 @@ import { maintainSlotlockTenant } from '../maintenance.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { startFakeModel } from './helpers/fake-model.js';
 
+/** The conversation these tests keep, by the id a chat is named with. */
+const CHAT = 'chat-0123456789a';
+
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const SECRET = randomBytes(32).toString('hex');
 
@@ -51,20 +54,90 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     await admin.end();
   });
 
-  it('keeps both tables under forced row-level security', async () => {
+  it('keeps a member\u2019s chats until deleted, most recent first, at most 100, and only for that member', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const id = (n: number) => `history-${String(n).padStart(8, '0')}`;
+    for (let n = 0; n < 101; n += 1) {
+      await adapter.putChat(tenant, 'github:70', id(n), { title: `Chat ${String(n)}`, messages: [], added: {}, keep: [] }, null);
+    }
+    const listed = await adapter.listChats(tenant, 'github:70');
+    expect(listed).toHaveLength(100);
+    // The least recently used went: the first one.
+    expect(listed[0]?.id).toBe(id(100));
+    expect(listed.map((chat) => chat.id)).not.toContain(id(0));
+    expect(await adapter.getChat(tenant, 'github:70', id(0))).toBeNull();
+    const kept = await adapter.getChat(tenant, 'github:70', id(50));
+    expect(kept).toMatchObject({ id: id(50), title: 'Chat 50', expiresAt: null });
+    // Used again, it is the most recent; its title stays as given first.
+    await adapter.putChat(tenant, 'github:70', id(50), { title: 'Another', messages: [{ role: 'user', text: 'x' }], added: {}, keep: [] }, null);
+    expect((await adapter.listChats(tenant, 'github:70', 1))[0]).toMatchObject({ id: id(50), title: 'Chat 50' });
+    expect(await adapter.renameChat(tenant, 'github:70', id(50), '  Van plans  ')).toBe(true);
+    expect((await adapter.getChat(tenant, 'github:70', id(50)))?.title).toBe('Van plans');
+    await expect(adapter.renameChat(tenant, 'github:70', id(50), 'x'.repeat(121))).rejects.toMatchObject({ code: 'invalid_identity' });
+    // Another member, or another tenant, sees, renames and deletes none of them.
+    expect(await adapter.listChats(tenant, 'github:71')).toEqual([]);
+    expect(await adapter.getChat(tenant, 'github:71', id(50))).toBeNull();
+    expect(await adapter.renameChat(tenant, 'github:71', id(50), 'Mine now')).toBe(false);
+    expect(await adapter.deleteChat(other, 'github:70', id(50))).toBe(false);
+    expect(await adapter.getChat(other, 'github:70', id(50))).toBeNull();
+    expect(await adapter.deleteChat(tenant, 'github:70', id(50))).toBe(true);
+    expect(await adapter.getChat(tenant, 'github:70', id(50))).toBeNull();
+    expect(await adapter.listChats(tenant, 'github:70')).toHaveLength(99);
+    await expect(
+      adapter.putChat(tenant, 'github:70', 'not an id', { title: 'x', messages: [], added: {}, keep: [] }, null),
+    ).rejects.toMatchObject({ code: 'invalid_identity' });
+  });
+
+  it('moves the one conversation a member had before chats into their first chat, once', async () => {
+    const adapter = createSlotlockDashboardResources(store).assistant;
+    if (!adapter) throw new Error('the store adapter keeps assistant records');
+    const owner = createSlotlockStore(admin);
+    // As 0.8 kept it: one row a member, expiring.
+    await admin`
+      INSERT INTO slotlock.assistant_conversations (tenant_ref, member_ref, messages, actions, expires_at)
+      VALUES (${tenant}, 'github:80',
+              ${admin.json([{ role: 'user', text: 'When   is the  Mercedes free tomorrow morning, and the van?' }, { role: 'assistant', text: 'At 9.', calls: [] }] as never)},
+              '{}'::jsonb, now() + interval '1 hour'),
+             (${tenant}, 'github:81', '[]'::jsonb, '{}'::jsonb, now() - interval '1 minute')`;
+    // A release with this table runs the whole migration once.
+    await admin`UPDATE slotlock.schema_version SET ddl_sha256 = NULL WHERE singleton`;
+    await owner.applySchema();
+    await owner.applyTenantRls();
+    const [moved] = await adapter.listChats(tenant, 'github:80');
+    expect(moved?.title).toBe('When is the Mercedes free tomorrow morning, and the van?');
+    expect(moved?.id).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    const chat = await adapter.getChat(tenant, 'github:80', moved?.id as string);
+    expect(chat?.messages).toHaveLength(2);
+    expect(chat?.expiresAt).toBeNull();
+    // An expired one is not moved; neither row stays behind to be moved again.
+    expect(await adapter.listChats(tenant, 'github:81')).toEqual([]);
+    const [left] = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.assistant_conversations
+       WHERE tenant_ref = ${tenant} AND member_ref = 'github:80'`;
+    expect(left?.count).toBe(0);
+    await adapter.deleteChat(tenant, 'github:80', moved?.id as string);
+    await admin`UPDATE slotlock.schema_version SET ddl_sha256 = NULL WHERE singleton`;
+    await owner.applySchema();
+    expect(await adapter.listChats(tenant, 'github:80')).toEqual([]);
+  });
+
+  it('keeps every assistant table under forced row-level security', async () => {
     const rows = await admin<{ relname: string; enabled: boolean; forced: boolean }[]>`
       SELECT c.relname, c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced
         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = 'slotlock' AND c.relname IN ('assistant_settings', 'assistant_conversations')
+       WHERE n.nspname = 'slotlock' AND c.relname IN ('assistant_settings', 'assistant_conversations', 'assistant_chats')
        ORDER BY c.relname`;
     expect(rows).toEqual([
+      { relname: 'assistant_chats', enabled: true, forced: true },
       { relname: 'assistant_conversations', enabled: true, forced: true },
       { relname: 'assistant_settings', enabled: true, forced: true },
     ]);
     const contracts = await admin<{ table_name: string }[]>`
       SELECT table_name FROM slotlock.rls_policy_contracts
-       WHERE table_name IN ('assistant_settings', 'assistant_conversations') ORDER BY table_name`;
+       WHERE table_name IN ('assistant_settings', 'assistant_conversations', 'assistant_chats') ORDER BY table_name`;
     expect(contracts.map(({ table_name }) => table_name)).toEqual([
+      'assistant_chats',
       'assistant_conversations',
       'assistant_settings',
     ]);
@@ -79,13 +152,13 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
       { provider: 'anthropic', baseUrl: 'https://api.example.com', model: 'your-model', key: { sealed, hint: '1234' } },
       'github:1',
     );
-    await adapter.putConversation(tenant, 'github:1', { messages: [{ role: 'user', text: 'secret plans' }], added: {}, keep: [] }, 60_000);
+    await adapter.putChat(tenant, 'github:1', CHAT, { title: 'Chat', messages: [{ role: 'user', text: 'secret plans' }], added: {}, keep: [] }, 60_000);
 
     const mine = await adapter.getSettings(tenant);
     expect(mine).toMatchObject({ provider: 'anthropic', model: 'your-model', keyHint: '1234', updatedBy: 'github:1' });
     await expect(openSlotlockAssistantKey(SECRET, tenant, mine?.sealedKey as string)).resolves.toBe('sk-integration-key-1234');
     expect(await adapter.getSettings(other)).toBeNull();
-    expect(await adapter.getConversation(other, 'github:1')).toBeNull();
+    expect(await adapter.getChat(other, 'github:1', CHAT)).toBeNull();
 
     // Inside the other tenant's transaction, naming this tenant reads and writes nothing.
     await expect(
@@ -93,7 +166,7 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     ).resolves.toBeNull();
     await expect(
       store.withTenant(other, (scoped) =>
-        scoped.getAssistantConversation({ tenantRef: tenant, memberRef: 'github:1' }),
+        scoped.getAssistantChat({ tenantRef: tenant, memberRef: 'github:1', chatId: CHAT }),
       ),
     ).resolves.toBeNull();
     await expect(
@@ -107,7 +180,8 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     // Outside any tenant, the serving role sees no row at all.
     const [bare] = await application<{ count: string }[]>`
       SELECT (SELECT count(*) FROM slotlock.assistant_settings)
-           + (SELECT count(*) FROM slotlock.assistant_conversations) AS count`;
+           + (SELECT count(*) FROM slotlock.assistant_conversations)
+           + (SELECT count(*) FROM slotlock.assistant_chats) AS count`;
     expect(Number(bare?.count)).toBe(0);
     expect((await adapter.getSettings(tenant))?.baseUrl).toBe('https://api.example.com');
 
@@ -120,33 +194,33 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
     const action = { operation: 'slotlock_delete_event', input: { event_id: 'agent:x' }, status: 'pending' };
-    await adapter.putConversation(tenant, 'github:2', { messages: [], added: { a1: action }, keep: ['a1'] }, 60_000);
+    await adapter.putChat(tenant, 'github:2', CHAT, { title: 'Chat', messages: [], added: { a1: action }, keep: ['a1'] }, 60_000);
     // Stored again with the action pending: the stored state wins over the copy sent.
     const claims = await Promise.all(
-      Array.from({ length: 6 }, () => adapter.settleAction(tenant, 'github:2', 'a1', 'pending', { status: 'approved' })),
+      Array.from({ length: 6 }, () => adapter.settleAction(tenant, 'github:2', CHAT, 'a1', 'pending', { status: 'approved' })),
     );
     expect(claims.filter((claim) => claim !== null)).toEqual([{ ...action, status: 'approved' }]);
-    await adapter.putConversation(tenant, 'github:2', { messages: [{ role: 'note', text: 'n' }], added: { a1: action }, keep: ['a1'] }, 60_000);
-    expect((await adapter.getConversation(tenant, 'github:2'))?.actions.a1?.status).toBe('approved');
-    expect(await adapter.settleAction(other, 'github:2', 'a1', 'approved', { status: 'done' })).toBeNull();
+    await adapter.putChat(tenant, 'github:2', CHAT, { title: 'Chat', messages: [{ role: 'note', text: 'n' }], added: { a1: action }, keep: ['a1'] }, 60_000);
+    expect((await adapter.getChat(tenant, 'github:2', CHAT))?.actions.a1?.status).toBe('approved');
+    expect(await adapter.settleAction(other, 'github:2', CHAT, 'a1', 'approved', { status: 'done' })).toBeNull();
 
-    await adapter.putConversation(tenant, 'github:3', { messages: [], added: {}, keep: [] }, 1_000);
-    expect(await adapter.getConversation(tenant, 'github:3')).not.toBeNull();
+    await adapter.putChat(tenant, 'github:3', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 1_000);
+    expect(await adapter.getChat(tenant, 'github:3', CHAT)).not.toBeNull();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
-    expect(await adapter.getConversation(tenant, 'github:3')).toBeNull();
+    expect(await adapter.getChat(tenant, 'github:3', CHAT)).toBeNull();
   });
 
   it('L3: deletes expired conversations in the maintenance pass', async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
-    await adapter.putConversation(tenant, 'github:7', { messages: [], added: {}, keep: [] }, 1_000);
-    await adapter.putConversation(tenant, 'github:8', { messages: [], added: {}, keep: [] }, 60_000);
+    await adapter.putChat(tenant, 'github:7', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 1_000);
+    await adapter.putChat(tenant, 'github:8', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 60_000);
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     const count = async () =>
       Number(
         (
           await admin<{ count: string }[]>`
-          SELECT count(*) FROM slotlock.assistant_conversations
+          SELECT count(*) FROM slotlock.assistant_chats
            WHERE tenant_ref = ${tenant} AND member_ref IN ('github:7', 'github:8')`
         )[0]?.count,
       );
@@ -154,7 +228,7 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     const pass = await maintainSlotlockTenant(store, tenant);
     expect(pass.pruned).toBeGreaterThanOrEqual(1);
     expect(await count()).toBe(1);
-    expect(await adapter.getConversation(tenant, 'github:8')).not.toBeNull();
+    expect(await adapter.getChat(tenant, 'github:8', CHAT)).not.toBeNull();
   });
 
   it('L2: answers a long CJK conversation to the end, under the CHECK on messages and actions', async () => {
@@ -217,7 +291,7 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
       }
       const [row] = await admin<{ messages: number; actions: number }[]>`
         SELECT octet_length(messages::text) AS messages, octet_length(actions::text) AS actions
-          FROM slotlock.assistant_conversations WHERE tenant_ref = ${orgTenant} AND member_ref = 'github:31'`;
+          FROM slotlock.assistant_chats WHERE tenant_ref = ${orgTenant} AND member_ref = 'github:31'`;
       expect(row?.messages).toBeGreaterThan(100_000);
       expect(row?.messages).toBeLessThanOrEqual(262_144);
     } finally {
@@ -231,14 +305,14 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     if (!adapter) throw new Error('the store adapter keeps assistant records');
     const chatOnly = `github-org:${600_000 + Math.floor(Math.random() * 99_999)}`;
     try {
-      await adapter.putConversation(chatOnly, 'github:41', { messages: [], added: {}, keep: [] }, 1_000);
-      await adapter.putConversation(other, 'github:42', { messages: [], added: {}, keep: [] }, 1_000);
-      await adapter.putConversation(other, 'github:43', { messages: [], added: {}, keep: [] }, 60_000);
+      await adapter.putChat(chatOnly, 'github:41', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 1_000);
+      await adapter.putChat(other, 'github:42', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 1_000);
+      await adapter.putChat(other, 'github:43', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 60_000);
       await new Promise((resolve) => setTimeout(resolve, 1_100));
       const rows = async () =>
         (
           await admin<{ tenant_ref: string; member_ref: string }[]>`
-          SELECT tenant_ref, member_ref FROM slotlock.assistant_conversations
+          SELECT tenant_ref, member_ref FROM slotlock.assistant_chats
            WHERE member_ref IN ('github:41', 'github:42', 'github:43') ORDER BY member_ref`
         ).map(({ member_ref }) => member_ref);
       expect(await rows()).toEqual(['github:41', 'github:42', 'github:43']);
@@ -258,11 +332,11 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
   it("deletes a tenant's expired conversations when one of its conversations is read", async () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
-    await adapter.putConversation(other, 'github:51', { messages: [], added: {}, keep: [] }, 1_000);
+    await adapter.putChat(other, 'github:51', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 1_000);
     await new Promise((resolve) => setTimeout(resolve, 1_100));
-    await adapter.getConversation(other, 'github:52');
+    await adapter.getChat(other, 'github:52', CHAT);
     const [row] = await admin<{ count: string }[]>`
-      SELECT count(*) FROM slotlock.assistant_conversations WHERE tenant_ref = ${other} AND member_ref = 'github:51'`;
+      SELECT count(*) FROM slotlock.assistant_chats WHERE tenant_ref = ${other} AND member_ref = 'github:51'`;
     expect(Number(row?.count)).toBe(0);
   });
 
@@ -270,15 +344,15 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
     const pending = { operation: 'slotlock_delete_event', input: { event_id: 'agent:y' }, status: 'pending' };
-    await adapter.putConversation(other, 'github:61', { messages: [], added: { x1: pending }, keep: [] }, 60_000);
-    await adapter.settleAction(other, 'github:61', 'x1', 'pending', { status: 'done', input: {} });
+    await adapter.putChat(other, 'github:61', CHAT, { title: 'Chat', messages: [], added: { x1: pending }, keep: [] }, 60_000);
+    await adapter.settleAction(other, 'github:61', CHAT, 'x1', 'pending', { status: 'done', input: {} });
     // A stale turn carries x1 as it stood: the row's state stands.
-    await adapter.putConversation(other, 'github:61', { messages: [], added: { x1: pending }, keep: ['x1'] }, 60_000);
-    expect((await adapter.getConversation(other, 'github:61'))?.actions.x1).toMatchObject({ status: 'done', input: {} });
+    await adapter.putChat(other, 'github:61', CHAT, { title: 'Chat', messages: [], added: { x1: pending }, keep: ['x1'] }, 60_000);
+    expect((await adapter.getChat(other, 'github:61', CHAT))?.actions.x1).toMatchObject({ status: 'done', input: {} });
     // Reset while the turn ran: the row is gone, and only new actions go in.
-    await adapter.deleteConversation(other, 'github:61');
-    await adapter.putConversation(other, 'github:61', { messages: [], added: { x2: pending }, keep: ['x1'] }, 60_000);
-    expect(Object.keys((await adapter.getConversation(other, 'github:61'))?.actions ?? {})).toEqual(['x2']);
+    await adapter.deleteChat(other, 'github:61', CHAT);
+    await adapter.putChat(other, 'github:61', CHAT, { title: 'Chat', messages: [], added: { x2: pending }, keep: ['x1'] }, 60_000);
+    expect(Object.keys((await adapter.getChat(other, 'github:61', CHAT))?.actions ?? {})).toEqual(['x2']);
   });
 
   it('keeps the key only for the provider and base URL it was entered for, in the write itself', async () => {
@@ -334,16 +408,16 @@ describe.skipIf(!url)('assistant records (real Postgres)', () => {
     const adapter = createSlotlockDashboardResources(store).assistant;
     if (!adapter) throw new Error('the store adapter keeps assistant records');
     await adapter.putSettings(other, { provider: 'openai', baseUrl: 'https://api.example.com/v1', model: 'm', key: null });
-    await adapter.putConversation(other, 'github:9', { messages: [], added: {}, keep: [] }, 60_000);
+    await adapter.putChat(other, 'github:9', CHAT, { title: 'Chat', messages: [], added: {}, keep: [] }, 60_000);
     const erased = await store.eraseTenant({ tenantRef: tenant });
     expect(erased.rows.assistant_settings).toBe(1);
-    expect(erased.rows.assistant_conversations).toBeGreaterThanOrEqual(2);
+    expect(erased.rows.assistant_chats).toBeGreaterThanOrEqual(2);
     expect(await adapter.getSettings(tenant)).toBeNull();
-    expect(await adapter.getConversation(tenant, 'github:1')).toBeNull();
+    expect(await adapter.getChat(tenant, 'github:1', CHAT)).toBeNull();
     expect(await adapter.getSettings(other)).not.toBeNull();
-    expect(await adapter.getConversation(other, 'github:9')).not.toBeNull();
+    expect(await adapter.getChat(other, 'github:9', CHAT)).not.toBeNull();
     const again = await store.eraseTenant({ tenantRef: tenant });
     expect(again.rows.assistant_settings).toBe(0);
-    expect(again.rows.assistant_conversations).toBe(0);
+    expect(again.rows.assistant_chats).toBe(0);
   });
 });

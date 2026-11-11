@@ -45,6 +45,26 @@ describe('the dashboard Worker and a streamed reply', () => {
     await expect(done).resolves.toBeUndefined();
   });
 
+  it('waits, when the client goes, for the stream\u2019s own cancel to finish before it settles', async () => {
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    // The dashboard's stream: cancelling it stops the turn, which settles once the turn is kept.
+    const body = new ReadableStream<Uint8Array>({ start() {}, cancel: () => finished });
+    const { response, done } = slotlockRelayStream(new Response(body, { headers: { 'content-type': 'application/x-ndjson' } }));
+    let settled = false;
+    void done?.then(() => {
+      settled = true;
+    });
+    void response.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    finish();
+    await done;
+    expect(settled).toBe(true);
+  });
+
   it('passes any other response as it is, with nothing to wait for', () => {
     const page = new Response('<!doctype html>', { headers: { 'content-type': 'text/html; charset=utf-8' } });
     const relayed = slotlockRelayStream(page);

@@ -61,6 +61,7 @@ import {
   runSlotlockAssistantTurn,
   sealSlotlockAssistantKey,
   slotlockAssistantProviderMessage,
+  SLOTLOCK_ASSISTANT_DIRECTORY_SIZE,
   slotlockAssistantSystemPrompt,
   testSlotlockAssistantModel,
   listSlotlockAssistantModels,
@@ -69,7 +70,7 @@ import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js'
 import { createSlotlockRateLimiter } from './rate-limit.js';
 import { createSlotlockGuardedFetch } from './webhooks.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
+import { SLOTLOCK_ASSISTANT_CHAT_ID, SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
 import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
@@ -102,7 +103,12 @@ import {
   type SlotlockChange,
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
-import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
+import type {
+  SlotlockAssistantChatSummary,
+  SlotlockSql,
+  SlotlockStore,
+  SlotlockWaitlistEntry,
+} from './store.js';
 import { SlotlockAgentOperationError } from './agent-server.js';
 import { runSlotlockApprovalGrant } from './agent-store-backend.js';
 import {
@@ -188,6 +194,8 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/assistant/approve',
   '/assistant/dismiss',
   '/assistant/reset',
+  '/assistant/rename',
+  '/assistant/delete',
   '/settings/assistant',
   '/settings/assistant/test',
   '/settings/assistant/models',
@@ -495,7 +503,10 @@ export interface SlotlockDashboardAssistantOptions {
   turnTimeoutMs?: number;
   /** Model calls one message may make (8 by default, at most 20). */
   maxSteps?: number;
-  /** How long a conversation is kept after its last message: 2 hours by default. */
+  /**
+   * How long a conversation is kept after its last message (1 second to 3,650 days). Without it, a
+   * member keeps each conversation until they delete it, up to SLOTLOCK_ASSISTANT_MAX_CHATS.
+   */
   conversationTtlMs?: number;
 }
 
@@ -2146,11 +2157,13 @@ ${
         runs.push({ change, times: 1 });
       }
     }
+    // Own entries only: a type such as `constructor` names nothing here.
+    const own = <T,>(map: Readonly<Record<string, T>>, type: string) => (Object.hasOwn(map, type) ? map[type] : undefined);
     return html`<ol class="feed">${runs.map(({ change, times }) => {
-      const tone = CHANGE_LABELS[change.type]?.tone ?? 'neutral';
+      const tone = own(CHANGE_LABELS, change.type)?.tone ?? 'neutral';
       const where = change.resourceId ? resourceName(byId.get(change.resourceId), change.resourceId) : null;
       const object = where ?? (ABOUT_A_RESOURCE.test(change.type) ? 'a resource' : null);
-      const words = ACTIVITY[change.type];
+      const words = own(ACTIVITY, change.type);
       let sentence: Html;
       if (change.type === 'usage.threshold_reached') {
         const metric = typeof change.data.metric === 'string' ? change.data.metric : 'use';
@@ -2162,9 +2175,11 @@ ${
         const [before, rest] = words.passive.split('{X}') as [string, string | undefined];
         sentence = rest === undefined ? html`${before}` : html`${before}<strong>${object ?? 'a resource'}</strong>${rest}`;
       } else {
-        // A change type this dashboard does not know yet: its label, or its name in words.
-        const label = CHANGE_LABELS[change.type]?.text ?? change.type.replace(/[._]/g, ' ').replace(/^./, (first) => first.toUpperCase());
-        sentence = html`${label}${object ? html` <span class="on">on</span> <strong>${object}</strong>` : html``}`;
+        // A change this dashboard has no words for (a newer server's): its label, never its type.
+        const label = own(CHANGE_LABELS, change.type)?.text;
+        sentence = label
+          ? html`${label}${object ? html` <span class="on">on</span> <strong>${object}</strong>` : html``}`
+          : html`Something changed${where ? html` on <strong>${where}</strong>` : html``}`;
       }
       return html`<li class="event"><span class="dot ${tone}" aria-hidden="true"></span><span class="what"><span class="title">${sentence}${
         times > 1 ? html` <span class="times">${times === 2 ? 'twice' : `${String(times)} times`}</span>` : html``
@@ -3297,7 +3312,39 @@ ${
     'That URL is this Slotlock deployment’s own address. Give the address of the model’s API.';
   const assistantTimeout = assistantOptions?.timeoutMs ?? 30_000;
   const assistantTurnTimeout = assistantOptions?.turnTimeoutMs ?? 90_000;
-  const conversationTtl = assistantOptions?.conversationTtlMs ?? 2 * 3_600_000;
+  // Kept until the member deletes a conversation, unless the deployment gives them a lifetime.
+  const conversationTtl: number | null = assistantOptions?.conversationTtlMs ?? null;
+  /** How recently a conversation was used for the assistant page to open on it rather than a new one. */
+  const CHAT_RESUME_MS = 2 * 3_600_000;
+  const newChatId = () => randomBytes(12).toString('base64url');
+  /** The conversation a page or form names, or null for a new one. */
+  const chatOf = (value: string | null | undefined): string | null =>
+    value && SLOTLOCK_ASSISTANT_CHAT_ID.test(value) ? value : null;
+  const chatUrl = (id: string | null) => `${root}/assistant?c=${id ?? 'new'}`;
+  /**
+   * The conversation a form goes to: the one its `chat` names, a new one when it is empty, and with
+   * no `chat` at all (a page of an earlier release), the one the page would open: the member's most
+   * recent, used in the past two hours (`anyAge`: however long ago).
+   */
+  async function chatOfForm(
+    store: SlotlockAssistantStore,
+    session: Session,
+    form: URLSearchParams,
+    anyAge = false,
+  ): Promise<string | null> {
+    if (form.has('chat')) return chatOf(form.get('chat'));
+    const [latest] = await store.listChats(tenantOf(session), personOf(session), 1);
+    return latest && (anyAge || now() - latest.updatedAt.getTime() < CHAT_RESUME_MS) ? latest.id : null;
+  }
+  /** A conversation's first title: its first message on one line, cut at a word near 60 characters. */
+  const chatTitle = (text: string): string => {
+    const line = text.replace(/\s+/gu, ' ').trim();
+    const chars = [...line];
+    if (chars.length <= 60) return line || 'New chat';
+    const cut = chars.slice(0, 60).join('');
+    const space = cut.lastIndexOf(' ');
+    return `${(space > 30 ? cut.slice(0, space) : cut).replace(/[\s.,;:!?-]+$/u, '')}…`;
+  };
   if (assistantOptions && Buffer.byteLength(assistantOptions.secret, 'utf8') < 32) {
     throw new Error('Slotlock dashboard assistant secret must be at least 32 bytes');
   }
@@ -3597,6 +3644,7 @@ ${
     action: SlotlockAssistantAction,
     names: ReadonlyMap<string, string>,
     zones: ReadonlyMap<string, string>,
+    chatId: string | null,
   ): Html {
     const verb = slotlockAssistantActionVerb(action.operation);
     const title = action.summary || `${verb.verb}: ${toolTitles.get(action.operation) ?? action.operation}`;
@@ -3632,7 +3680,7 @@ ${
       );
     }
     const hidden = (id: string) =>
-      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${id}">`;
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${chatId ?? ''}"><input type="hidden" name="action" value="${id}">`;
     return html`<li class="turn action" id="action-${action.id}"><div class="change"><p class="change-title">${title}</p>${
       facts.length > 0 ? html`<dl class="facts">${facts}</dl>` : html``
     }${
@@ -3679,6 +3727,7 @@ ${
     actions: Record<string, unknown>,
     names: ReadonlyMap<string, string>,
     zones: ReadonlyMap<string, string>,
+    chatId: string | null,
   ): Html[] {
     const items: Html[] = [];
     let steps: { label: string; ok: boolean; why: string | null }[] = [];
@@ -3714,7 +3763,7 @@ ${
           const write = SLOTLOCK_ASSISTANT_TOOL_USE[result.name as SlotlockAgentOperation] === 'propose';
           const action = result.action ? readAction(result.action, actions[result.action]) : null;
           if (action) {
-            cards.push(actionCard(session, action, names, zones));
+            cards.push(actionCard(session, action, names, zones, chatId));
             continue;
           }
           const title = toolTitles.get(result.name) ?? result.name;
@@ -3730,7 +3779,7 @@ ${
         const last = index === entries.length - 1;
         if (last && !quietNote(entry.text) && lastUser?.role === 'user') {
           items.push(
-            html`<li class="turn error" role="alert"><span>${entry.text}</span><form method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="message" value="${lastUser.text}"><button class="text-button" type="submit">Retry</button></form></li>`,
+            html`<li class="turn error" role="alert"><span>${entry.text}</span><form method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${chatId ?? ''}"><input type="hidden" name="message" value="${lastUser.text}"><button class="text-button" type="submit">Retry</button></form></li>`,
           );
         } else {
           items.push(html`<li class="turn note">${entry.text}</li>`);
@@ -3756,16 +3805,73 @@ ${
     stop: new Html('<svg class="stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'),
     down: new Html('<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>'),
     plus: new Html('<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>'),
+    more: new Html('<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>'),
+    chats: new Html('<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h6"/></svg>'),
   };
 
-  async function assistantPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  /** How long ago a chat was used, as briefly as the list has room for: 4m, 3h, 5d, then the date. */
+  function chatSince(at: Date): string {
+    const minutes = Math.max(0, Math.floor((now() - at.getTime()) / 60_000));
+    if (minutes < 1) return 'now';
+    if (minutes < 60) return `${String(minutes)}m`;
+    if (minutes < 24 * 60) return `${String(Math.floor(minutes / 60))}h`;
+    if (minutes < 7 * 24 * 60) return `${String(Math.floor(minutes / (24 * 60)))}d`;
+    return zoned('UTC', { day: 'numeric', month: 'short' }).format(at);
+  }
+
+  /** When a conversation was last used, as the Chats list groups them: by day, in UTC. */
+  function chatGroup(at: Date): string {
+    const day = (ms: number) => Math.floor(ms / DAY_MS);
+    const daysAgo = day(now()) - day(at.getTime());
+    if (daysAgo <= 0) return 'Today';
+    if (daysAgo === 1) return 'Yesterday';
+    if (daysAgo < 7) return 'Previous 7 days';
+    if (daysAgo < 30) return 'Previous 30 days';
+    return 'Older';
+  }
+
+  /**
+   * A member's conversations, the most recent first, grouped by when they were last used: each
+   * opens with a link, and has Rename and Delete behind its menu. `current` is the one shown.
+   */
+  function chatsPanel(session: Session, chats: readonly SlotlockAssistantChatSummary[], current: string | null): Html {
+    const token = csrfToken(session);
+    const hidden = (id: string) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${id}">`;
+    const groups: { label: string; rows: Html[] }[] = [];
+    for (const chat of chats) {
+      const label = chatGroup(chat.updatedAt);
+      let group = groups.at(-1);
+      if (!group || group.label !== label) {
+        group = { label, rows: [] };
+        groups.push(group);
+      }
+      const here = chat.id === current;
+      group.rows.push(html`<li class="chat-row${here ? ' current' : ''}"><a class="chat-link" href="${chatUrl(chat.id)}"${here ? html` aria-current="page"` : html``}><span class="chat-title">${chat.title}</span><time class="chat-when" datetime="${chat.updatedAt.toISOString()}" title="${formatDate(chat.updatedAt)}">${chatSince(chat.updatedAt)}</time></a><details class="chat-menu"><summary aria-label="Options for ${chat.title}">${ASSISTANT_ICONS.more}</summary><div class="pop"><form class="chat-rename" method="post" action="${root}/assistant/rename">${hidden(chat.id)}<label class="visually-hidden" for="title-${chat.id}">Title</label><input id="title-${chat.id}" name="title" value="${chat.title}" maxlength="120" required><button type="submit">Rename</button></form><form method="post" action="${root}/assistant/delete">${hidden(chat.id)}<button class="danger" type="submit">Delete chat</button></form></div></details></li>`);
+    }
+    const list =
+      groups.length === 0
+        ? html`<p class="empty chats-empty">No chats yet.</p>`
+        : html`${groups.map((group) => html`<h3 class="chat-group">${group.label}</h3><ul class="chat-rows">${group.rows}</ul>`)}`;
+    return html`<aside class="chats" aria-label="Chats"><div class="chats-head"><h2>Chats</h2><a class="icon-button" href="${chatUrl(null)}" aria-label="New chat" title="New chat">${ASSISTANT_ICONS.plus}</a></div><label class="visually-hidden" for="chats-filter">Search chats</label><input id="chats-filter" class="chats-filter" type="search" placeholder="Search chats" autocomplete="off" hidden><nav class="chat-list" aria-label="Your chats">${list}</nav></aside>`;
+  }
+
+  /**
+   * The assistant: a conversation, with the member's others beside it. `requested` is the page's
+   * `c`: a conversation's id, `new` for a new one, or nothing for the last one used in the past two
+   * hours (else a new one).
+   */
+  async function assistantPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    requested?: string,
+  ): Promise<Response> {
     const store = assistantStore();
     if (!store) return notFound(session);
     const tenantRef = tenantOf(session);
-    const [settings, conversation] = await Promise.all([
-      store.getSettings(tenantRef),
-      store.getConversation(tenantRef, personOf(session)),
-    ]);
+    const member = personOf(session);
+    const [settings, chats] = await Promise.all([store.getSettings(tenantRef), store.listChats(tenantRef, member)]);
     if (!settings) {
       const content = html`${noticeOf(notice, status)}${pageHead('Assistant')}${emptyState(
         ICONS.assistant,
@@ -3773,6 +3879,20 @@ ${
         isAdmin(session) ? { href: `${root}/settings#assistant`, label: 'Connect a model' } : undefined,
       )}`;
       return respond(status, layout('Assistant', content, session, 'assistant'));
+    }
+    let chatId = chatOf(requested);
+    if (requested === undefined) {
+      const latest = chats[0];
+      if (latest && now() - latest.updatedAt.getTime() < CHAT_RESUME_MS) chatId = latest.id;
+    }
+    const conversation = chatId ? await store.getChat(tenantRef, member, chatId) : null;
+    if (chatId && !conversation) {
+      // Deleted, or never this member's: a new one instead, saying so.
+      chatId = null;
+      if (requested !== undefined && notice === undefined) {
+        notice = 'That chat is not here: it was deleted.';
+        status = 404;
+      }
     }
     const entries = readSlotlockAssistantEntries(conversation?.messages);
     const actions = conversation?.actions ?? {};
@@ -3783,7 +3903,7 @@ ${
         : { resources: [], names: new Map<string, string>(), zones: new Map<string, string>() };
     const token = csrfToken(session);
     const hidden = () =>
-      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${chatId ?? ''}">`;
     const first = resources.find((resource) => !resource.archivedAt);
     const named = first ? resourceName(first, first.id) : null;
     // A read chip asks at once; a write chip fills the box to finish (app.js), or asks (no script).
@@ -3801,16 +3921,29 @@ ${
         }>${prompt.label}</button></form>`,
     )}</div></div>`;
     const composer = html`<div class="dock"><button class="jump" type="button" hidden aria-label="Jump to the latest message">${ASSISTANT_ICONS.down}</button><form class="composer" method="post" action="${root}/assistant">${hidden()}<label class="visually-hidden" for="message">Message</label><textarea id="message" name="message" rows="2" maxlength="${String(SLOTLOCK_ASSISTANT_MAX_MESSAGE)}" required placeholder="${empty ? 'Ask about bookings' : 'Reply…'}"></textarea><div class="composer-bar"><span class="count" hidden></span><button class="send" type="submit" aria-label="Send">${ASSISTANT_ICONS.send}${ASSISTANT_ICONS.stop}</button></div></form></div>`;
-    const reset = html`<form class="inline new-chat" method="post" action="${root}/assistant/reset">${hidden()}<button class="ghost" type="submit">${ASSISTANT_ICONS.plus}New conversation</button></form>`;
+    const actionsHead = html`<div class="assistant-actions"><a class="button ghost chats-link" href="${root}/assistant/chats">${ASSISTANT_ICONS.chats}Chats</a><a class="button ghost new-chat" href="${chatUrl(null)}">${ASSISTANT_ICONS.plus}New chat</a></div>`;
     const flag = empty ? new Html(' data-empty') : html``;
-    const content = html`${noticeOf(notice, status)}<div class="assistant-page"${flag}>${pageHead('Assistant', reset)}<div class="assistant" data-assistant data-stream="${root}/assistant/stream" data-page="${root}/assistant"${flag}><ol class="thread">${assistantItems(
+    const content = html`${noticeOf(notice, status)}<div class="assistant-shell">${chatsPanel(session, chats, chatId)}<div class="assistant-page"${flag}>${pageHead(
+      conversation?.title ?? 'Assistant',
+      actionsHead,
+    )}<div class="assistant" data-assistant data-stream="${root}/assistant/stream" data-page="${root}/assistant"${flag}><ol class="thread">${assistantItems(
       session,
       entries,
       actions,
       names,
       zones,
-    )}</ol><span id="latest"></span>${chips}${composer}</div></div>`;
+      chatId,
+    )}</ol><span id="latest"></span>${chips}${composer}</div></div></div>`;
     return respond(status, layout('Assistant', content, session, 'assistant'));
+  }
+
+  /** The member's conversations on a page of their own: the Chats list where the page is narrow. */
+  async function chatsPage(session: Session): Promise<Response> {
+    const store = assistantStore();
+    if (!store) return notFound(session);
+    const chats = await store.listChats(tenantOf(session), personOf(session));
+    const content = html`<div class="chats-page">${pageHead('Chats', html`<a class="button ghost" href="${chatUrl(null)}">${ASSISTANT_ICONS.plus}New chat</a>`)}${chatsPanel(session, chats, null)}</div>`;
+    return respond(200, layout('Chats', content, session, 'assistant'));
   }
 
   /** The assistant form as a preset or a model list leaves it, not yet saved. */
@@ -4087,7 +4220,7 @@ ${
 
   type AssistantRun =
     | { ok: false; status: number; message: string }
-    | { ok: true; messages: SlotlockAssistantEntry[]; actions: Record<string, unknown> };
+    | { ok: true; messages: SlotlockAssistantEntry[]; actions: Record<string, unknown>; chatId: string; title: string };
 
   /**
    * One member message: check it, run the turn (streaming its text and steps to `onEvent` when
@@ -4125,7 +4258,16 @@ ${
     } catch {
       // Metering never changes an answer.
     }
-    const stored = await store.getConversation(tenantRef, member);
+    // The conversation the form continues (a new one when it names none, or one deleted meanwhile),
+    // and the resources agents may see, so a name is matched to its id without a lookup.
+    const asked = await chatOfForm(store, session, form);
+    const [stored, listed] = await Promise.all([
+      asked ? store.getChat(tenantRef, member, asked) : Promise.resolve(null),
+      options.resources.list(tenantRef).catch(() => [] as SlotlockResource[]),
+    ]);
+    const chatId = stored?.id ?? newChatId();
+    const title = stored?.title ?? chatTitle(text);
+    const bookable = listed.filter((resource) => resource.visibility !== 'private' && resource.archivedAt === undefined);
     const entries = boundSlotlockAssistantEntries([
       ...readSlotlockAssistantEntries(stored?.messages),
       { role: 'user', text },
@@ -4142,6 +4284,17 @@ ${
         workspace: current?.login ?? session.login,
         login: session.login,
         now: new Date(now()),
+        resources: bookable.slice(0, SLOTLOCK_ASSISTANT_DIRECTORY_SIZE).map((resource) => ({
+          id: resource.id,
+          ...(resource.name !== undefined ? { name: resource.name } : {}),
+          ...(resource.externalRef ? { ref: resource.externalRef } : {}),
+          ...(resource.kind !== undefined ? { kind: resource.kind } : {}),
+          ...(resource.locationName !== undefined || resource.location !== undefined
+            ? { location: (resource.locationName ?? resource.location) as string }
+            : {}),
+          timezone: resource.timezone,
+        })),
+        resourceCount: bookable.length,
       }),
       entries,
       fetch: assistantFetch,
@@ -4202,24 +4355,30 @@ ${
     // Only this turn's proposals are added; the rest are kept as the row holds them now, so one
     // approved (or a conversation reset) while the turn ran is never put back as it stood.
     const kept = pruneSlotlockAssistantActions(messages, { ...(stored?.actions ?? {}), ...proposed });
-    await store.putConversation(
+    await store.putChat(
       tenantRef,
       member,
+      chatId,
       {
+        title,
         messages,
         added: Object.fromEntries(Object.entries(proposed).filter(([id]) => id in kept)),
         keep: Object.keys(kept),
       },
       conversationTtl,
     );
-    return { ok: true, messages, actions: kept };
+    return { ok: true, messages, actions: kept, chatId, title };
   }
 
   /** The form's way (no script): run the turn, then show the conversation at its latest message. */
   async function sendToAssistant(session: Session, form: URLSearchParams): Promise<Response> {
     const run = await runAssistantMessage(session, form);
-    if (!run.ok) return run.status === 404 ? notFound(session) : assistantPage(session, run.status, run.message);
-    return redirect(303, `${root}/assistant#latest`);
+    if (!run.ok) {
+      return run.status === 404
+        ? notFound(session)
+        : assistantPage(session, run.status, run.message, chatOf(form.get('chat')) ?? 'new');
+    }
+    return redirect(303, `${chatUrl(run.chatId)}#latest`);
   }
 
   /**
@@ -4230,14 +4389,30 @@ ${
    */
   async function streamToAssistant(session: Session, form: URLSearchParams, request: Request): Promise<Response> {
     const encoder = new TextEncoder();
-    const pipe = new TransformStream<Uint8Array, Uint8Array>();
-    const writer = pipe.writable.getWriter();
+    // Stop, or a client gone, cancels the body. That stops the turn, which keeps what it had, and
+    // the cancel settles only once it has: a Worker closes the request's connection then, and a
+    // runtime that never aborts request.signal on a disconnect stops the turn all the same.
+    const stop = new AbortController();
     let open = true;
+    let sink: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let work: Promise<void> = Promise.resolve();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        sink = controller;
+      },
+      cancel() {
+        open = false;
+        stop.abort();
+        return work;
+      },
+    });
     const write = (event: Record<string, unknown>) => {
       if (!open) return;
-      writer.write(encoder.encode(`${JSON.stringify(event)}\n`)).catch(() => {
+      try {
+        sink?.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      } catch {
         open = false;
-      });
+      }
     };
     const label = (name: string, state: 'run' | 'ok' | 'bad') =>
       slotlockAssistantStepLabel(
@@ -4252,10 +4427,10 @@ ${
         html: html`<li class="turn error" role="alert"><span>${message}</span></li>`.value,
         once: formNonce(session),
       });
-    const work = (async () => {
+    work = (async () => {
       try {
         const run = await runAssistantMessage(session, form, {
-          signal: request.signal,
+          signal: AbortSignal.any([request.signal, stop.signal]),
           onEvent: (event) => {
             if (event.type === 'text') write({ t: 'text', d: event.delta });
             else if (event.type === 'call') write({ t: 'step', id: event.id, s: 'run', label: label(event.name, 'run') });
@@ -4273,17 +4448,29 @@ ${
           Object.keys(run.actions).length > 0
             ? await resourceLookups(tenantOf(session))
             : { names: new Map<string, string>(), zones: new Map<string, string>() };
+        const chats = await assistantStore()?.listChats(tenantOf(session), personOf(session));
         write({
           t: 'done',
-          html: assistantItems(session, turn, run.actions, lookups.names, lookups.zones).join(''),
+          html: assistantItems(session, turn, run.actions, lookups.names, lookups.zones, run.chatId).join(''),
           once: formNonce(session),
+          // The conversation it went to (a new one has its id now), its address, and the list again.
+          chat: run.chatId,
+          title: run.title,
+          url: chatUrl(run.chatId),
+          chats: chats ? chatsPanel(session, chats, run.chatId).value : undefined,
         });
       } catch (error) {
         report(error instanceof Error ? error.message : 'assistant stream failed');
         failed('Something went wrong. Reload the page and try again.');
       } finally {
-        await writer.close().catch(() => undefined);
-        open = false;
+        if (open) {
+          open = false;
+          try {
+            sink?.close();
+          } catch {
+            // Cancelled meanwhile.
+          }
+        }
       }
     })();
     ignoreRejection(work);
@@ -4292,7 +4479,7 @@ ${
     headers.set('Content-Type', 'application/x-ndjson; charset=utf-8');
     // Proxies that buffer (nginx) send each line as it is written.
     headers.set('X-Accel-Buffering', 'no');
-    return new Response(pipe.readable, { status: 200, headers });
+    return new Response(body, { status: 200, headers });
   }
 
   async function settleAction(
@@ -4303,25 +4490,29 @@ ${
     const store = assistantStore();
     if (!store || !assistantOptions) return notFound(session);
     const id = form.get('action') ?? '';
+    const chatId = await chatOfForm(store, session, form, true);
     const tenantRef = tenantOf(session);
     const member = personOf(session);
-    const claimed = ACTION_ID.test(id)
+    const claimed = ACTION_ID.test(id) && chatId
       ? await store.settleAction(
           tenantRef,
           member,
+          chatId,
           id,
           'pending',
           decision === 'approve' ? { status: 'approved' } : { status: 'dismissed', input: {} },
         )
       : null;
     const action = claimed ? readAction(id, claimed) : null;
-    if (!action) return assistantPage(session, 409, 'That change was already approved or dismissed.');
+    if (!action || !chatId) {
+      return assistantPage(session, 409, 'That change was already approved or dismissed.', chatId ?? undefined);
+    }
     const title = toolTitles.get(action.operation) ?? action.operation;
     let event: string;
     if (decision === 'dismiss') {
       event = `The member dismissed the proposed change ${id} (${title}); it did not run.`;
     } else if (SLOTLOCK_ASSISTANT_TOOL_USE[action.operation] !== 'propose') {
-      await store.settleAction(tenantRef, member, id, 'approved', { status: 'failed', outcome: 'tool_not_available', input: {} });
+      await store.settleAction(tenantRef, member, chatId, id, 'approved', { status: 'failed', outcome: 'tool_not_available', input: {} });
       event = `The proposed change ${id} (${title}) could not run: tool_not_available.`;
     } else {
       const outcome = await dispatch(session, action.operation, action.input, 'run');
@@ -4329,6 +4520,7 @@ ${
       await store.settleAction(
         tenantRef,
         member,
+        chatId,
         id,
         'approved',
         outcome.ok ? { status: 'done', input: {} } : { status: 'failed', outcome: outcome.code, input: {} },
@@ -4336,28 +4528,57 @@ ${
       const result = JSON.stringify(outcome.ok ? outcome.data : { error: { code: outcome.code } });
       event = `The member approved the proposed change ${id} (${title}). ${outcome.ok ? 'It ran' : 'It was refused'}: ${result.length > 4_000 ? `${result.slice(0, 4_000)} …[truncated]` : result}`;
     }
-    const stored = await store.getConversation(tenantRef, member);
+    const stored = await store.getChat(tenantRef, member, chatId);
     if (stored) {
       const entries: SlotlockAssistantEntry[] = [
         ...readSlotlockAssistantEntries(stored.messages),
         { role: 'event', text: event },
       ];
       const messages = boundSlotlockAssistantEntries(entries);
-      await store.putConversation(
+      await store.putChat(
         tenantRef,
         member,
-        { messages, added: {}, keep: Object.keys(pruneSlotlockAssistantActions(messages, stored.actions)) },
+        chatId,
+        {
+          title: stored.title,
+          messages,
+          added: {},
+          keep: Object.keys(pruneSlotlockAssistantActions(messages, stored.actions)),
+        },
         conversationTtl,
       );
     }
-    return redirect(303, `${root}/assistant#action-${id}`);
+    return redirect(303, `${chatUrl(chatId)}#action-${id}`);
   }
 
+  /** A new conversation: the others are kept, in Chats. (A form of an earlier release posts here.) */
   async function resetAssistant(session: Session): Promise<Response> {
+    if (!assistantStore()) return notFound(session);
+    return redirect(303, chatUrl(null));
+  }
+
+  /** Give one of the member's conversations a title of their own. */
+  async function renameChat(session: Session, form: URLSearchParams): Promise<Response> {
     const store = assistantStore();
     if (!store) return notFound(session);
-    await store.deleteConversation(tenantOf(session), personOf(session));
-    return redirect(303, `${root}/assistant`);
+    const chatId = chatOf(form.get('chat'));
+    const title = (form.get('title') ?? '').replace(/\s+/gu, ' ').trim();
+    if (!chatId) return assistantPage(session, 404, 'That chat is not here: it was deleted.', 'new');
+    if ([...title].length < 1 || [...title].length > 120) {
+      return assistantPage(session, 400, 'Give the chat a title of 1 to 120 characters.', chatId);
+    }
+    const renamed = await store.renameChat(tenantOf(session), personOf(session), chatId, title);
+    if (!renamed) return assistantPage(session, 404, 'That chat is not here: it was deleted.', 'new');
+    return redirect(303, chatUrl(chatId));
+  }
+
+  /** Delete one of the member's conversations, at once and for good. */
+  async function deleteChat(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore();
+    if (!store) return notFound(session);
+    const chatId = chatOf(form.get('chat'));
+    if (chatId) await store.deleteChat(tenantOf(session), personOf(session), chatId);
+    return redirect(303, chatUrl(null));
   }
 
   /**
@@ -5607,7 +5828,10 @@ ${
       }
       if (!first) {
         // The first one was taken: a second click, a reload or a resend shows what it did.
-        if (route.startsWith('/assistant')) return redirect(303, `${root}/assistant#latest`);
+        if (route.startsWith('/assistant')) {
+          const chat = chatOf(form.get('chat'));
+          return redirect(303, chat ? `${chatUrl(chat)}#latest` : `${root}/assistant#latest`);
+        }
         return pageFor(route)(
           session,
           409,
@@ -5683,6 +5907,10 @@ ${
         return settleAction(session, form, 'dismiss');
       case '/assistant/reset':
         return resetAssistant(session);
+      case '/assistant/rename':
+        return renameChat(session, form);
+      case '/assistant/delete':
+        return deleteChat(session, form);
       case '/settings/assistant':
         return saveAssistantSettings(session, form);
       case '/settings/assistant/models':
@@ -5729,6 +5957,7 @@ ${
             case '/waitlist':
             case '/approvals':
             case '/assistant':
+            case '/assistant/chats':
             case '/plan':
             case '/teams':
             case '/settings/endpoints':
@@ -5753,7 +5982,8 @@ ${
               if (route === '/webhooks') return await webhooksPage(session);
               if (route === '/waitlist') return await waitlistPage(session);
               if (route === '/approvals') return await approvalsPage(session);
-              if (route === '/assistant') return await assistantPage(session);
+              if (route === '/assistant') return await assistantPage(session, 200, undefined, url.searchParams.get('c') ?? undefined);
+              if (route === '/assistant/chats') return await chatsPage(session);
               if (route === '/settings/endpoints') return await settingsPage(session, 200, undefined, undefined, 'endpoints');
               if (route === '/settings/hours') return await settingsPage(session, 200, undefined, undefined, 'hours');
               if (route === '/settings/account') return await settingsPage(session, 200, undefined, undefined, 'account');
