@@ -61,6 +61,7 @@ import {
 } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 import { createSlotlockDashboardTeams } from '../../src/teams.js';
+import { type SlotlockDashboardWorkspaces, createSlotlockDashboardWorkspaces } from '../../src/workspaces.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT } from '../../src/overage.js';
 
 /**
@@ -112,6 +113,8 @@ interface RequestScope {
   quotas: SlotlockQuotas | null;
   resources: SlotlockDashboardResources;
   state: SlotlockDashboardState;
+  /** Who belongs to which workspace, as what, read for each request (workspaces.ts). */
+  workspaces: SlotlockDashboardWorkspaces;
 }
 
 /** Agent operations (the assistant's reads and approved writes) one dashboard request may run. */
@@ -440,6 +443,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       keys: perRequest(() => current().keys),
       resources: perRequest(() => current().resources),
       state: perRequest(() => current().state),
+      // Roles from the database on every request, and "Sign out everywhere" (workspaces.ts).
+      workspaces: perRequest(() => current().workspaces),
       onError: (error) =>
         console.error(
           JSON.stringify({
@@ -602,6 +607,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           // public internet; fetchHolidayCalendar takes https only, no redirects, 1 MB, 10 seconds.
           resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: (input, init) => fetch(input, init) }),
           state: createSlotlockDashboardState(sql),
+          workspaces: createSlotlockDashboardWorkspaces(sql),
         };
         const relayed = slotlockRelayStream(await scope.run(requestScope, () => dashboard.fetch(request)));
         streaming = relayed.done;

@@ -250,7 +250,12 @@ export const SLOTLOCK_API_KEY_FUNCTIONS = Object.freeze([
  * The table behind the dashboard's shared records (dashboard.ts). No role but its owner holds a
  * right on it; it is reached only through SLOTLOCK_DASHBOARD_FUNCTIONS.
  */
-export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze(['dashboard_tokens', 'dashboard_organizations'] as const);
+export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
+  'dashboard_tokens',
+  'dashboard_organizations',
+  'dashboard_people',
+  'workspace_memberships',
+] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
 export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
@@ -259,7 +264,18 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.enabled_organizations(text)',
   'slotlock.enable_organization(text, text, text)',
   'slotlock.disable_organization(text, text)',
+  'slotlock.dashboard_sign_in(text, text)',
+  'slotlock.dashboard_standing(text, text)',
+  'slotlock.dashboard_sign_out_everywhere(text)',
+  'slotlock.prune_audit_events(text)',
 ] as const);
+
+/**
+ * A workspace's roles (workspace-roles.ts), as workspace_memberships keeps them; and how long the
+ * audit log keeps an event.
+ */
+export const SLOTLOCK_WORKSPACE_ROLE_VALUES = Object.freeze(['owner', 'admin', 'developer', 'member', 'viewer', 'billing'] as const);
+export const SLOTLOCK_AUDIT_RETENTION_DAYS = 180;
 
 /** Live form records one person may leave in the dashboard's records (12 hours of forms). */
 export const SLOTLOCK_DASHBOARD_FORM_LIMIT = 1_000;
@@ -415,6 +431,12 @@ export const SLOTLOCK_DEFINER_FUNCTIONS = Object.freeze([
   ...SLOTLOCK_SCHEMA_FUNCTIONS,
   ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
 ]);
+
+/**
+ * Tenant tables the serving role may only add to and read (no UPDATE or DELETE): the audit log,
+ * whose rows go only through slotlock.prune_audit_events and erasure.
+ */
+export const SLOTLOCK_APPEND_ONLY_TABLES = Object.freeze(['audit_events'] as const);
 
 /** Tables no role but their owner reads or writes, reached only through SLOTLOCK_DEFINER_FUNCTIONS. */
 export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
@@ -1154,6 +1176,168 @@ AS $slotlock_disable_organization$
   RETURNING true;
 $slotlock_disable_organization$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[4]} FROM PUBLIC;
+
+-- The people who sign in to the dashboard, by their identity (github:<id> or google:<subject>,
+-- never an email): when they last signed in, and the epoch their sessions carry. The epoch is
+-- drawn at random: "Sign out everywhere" draws another, and a session sealed under any other is
+-- refused (ASVS 5.0 7.4.1's per-user revocation). A person without a row (erased) has no epoch,
+-- so none of their sessions passes, and a row made again draws afresh. Owner-only; reached
+-- through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.dashboard_people (
+  person_ref text PRIMARY KEY,
+  session_epoch integer NOT NULL DEFAULT (1 + floor(random() * 2147483646))::integer,
+  last_sign_in_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_dashboard_people_valid CHECK (
+    person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    AND session_epoch > 0
+  )
+);
+ALTER TABLE slotlock.dashboard_people ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.dashboard_people FROM PUBLIC;
+
+-- Who belongs to a shared workspace, and as what (workspace-roles.ts). A person's own workspace
+-- (their github:<id> or google:<subject> tenant) has no row: they are its Owner. The live tenant
+-- holds the rows; its test environment (~test) has the same members. Inactive rows are kept so
+-- someone added back gets their role again. Owner-only: the serving role reads and writes roles only
+-- through the functions below, which check what they are given; it cannot write the table itself.
+-- A change made in Slotlock (a role given, a member removed) sets source to 'created' or
+-- 'invitation', and sign-in's mirroring of GitHub never touches such a row again.
+CREATE TABLE IF NOT EXISTS slotlock.workspace_memberships (
+  tenant_ref text NOT NULL,
+  person_ref text NOT NULL,
+  role text NOT NULL,
+  status text NOT NULL DEFAULT 'active',
+  source text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  deactivated_at timestamptz,
+  CONSTRAINT slotlock_workspace_memberships_pkey PRIMARY KEY (tenant_ref, person_ref),
+  CONSTRAINT slotlock_workspace_memberships_valid CHECK (
+    tenant_ref ~ '^(github-org:[1-9][0-9]{0,19}|team:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+    AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
+    AND status IN ('active', 'inactive')
+    AND source IN ('github_org', 'invitation', 'created')
+    AND (status = 'active') = (deactivated_at IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_workspace_memberships_person_idx
+  ON slotlock.workspace_memberships (person_ref) WHERE status = 'active';
+ALTER TABLE slotlock.workspace_memberships ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.workspace_memberships FROM PUBLIC;
+
+-- A sign-in: the person is recorded (their epoch returned, to seal into the session) and, signing
+-- in with GitHub, the organizations GitHub lists them in, as JSON [{"id":"123","role":"admin"}],
+-- become their memberships there: GitHub's owners Owner, its members Developer. An organization
+-- GitHub no longer lists ends the membership it gave. A role given in Slotlock (source other than
+-- github_org) is never changed here.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_sign_in(requested_person text, requested_github_orgs text)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_sign_in$
+DECLARE
+  listed jsonb;
+  epoch integer;
+BEGIN
+  IF requested_person IS NULL
+     OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    RAISE EXCEPTION 'Slotlock dashboard: invalid person' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO slotlock.dashboard_people AS person (person_ref) VALUES (requested_person)
+  ON CONFLICT (person_ref) DO UPDATE SET last_sign_in_at = statement_timestamp()
+  RETURNING person.session_epoch INTO epoch;
+  IF requested_github_orgs IS NULL THEN
+    RETURN epoch;
+  END IF;
+  IF requested_person !~ '^github:' OR octet_length(requested_github_orgs) > 8192 THEN
+    RAISE EXCEPTION 'Slotlock dashboard: invalid organizations' USING ERRCODE = '22023';
+  END IF;
+  listed := requested_github_orgs::jsonb;
+  IF jsonb_typeof(listed) <> 'array' OR jsonb_array_length(listed) > 100 OR EXISTS (
+    SELECT 1 FROM jsonb_array_elements(listed) org
+     WHERE jsonb_typeof(org) <> 'object'
+        OR coalesce(org ->> 'id', '') !~ '^[1-9][0-9]{0,19}$'
+        OR coalesce(org ->> 'role', '') NOT IN ('admin', 'member')
+  ) THEN
+    RAISE EXCEPTION 'Slotlock dashboard: invalid organizations' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO slotlock.workspace_memberships AS member (tenant_ref, person_ref, role, status, source)
+  SELECT DISTINCT ON (org ->> 'id') 'github-org:' || (org ->> 'id'), requested_person,
+         CASE org ->> 'role' WHEN 'admin' THEN 'owner' ELSE 'developer' END, 'active', 'github_org'
+    FROM jsonb_array_elements(listed) org
+   ORDER BY org ->> 'id', org ->> 'role'
+  ON CONFLICT (tenant_ref, person_ref) DO UPDATE
+    SET role = EXCLUDED.role, status = 'active', deactivated_at = NULL,
+        updated_at = statement_timestamp()
+    WHERE member.source = 'github_org';
+  UPDATE slotlock.workspace_memberships member
+     SET status = 'inactive', deactivated_at = statement_timestamp(), updated_at = statement_timestamp()
+   WHERE member.person_ref = requested_person
+     AND member.source = 'github_org'
+     AND member.status = 'active'
+     AND NOT EXISTS (
+       SELECT 1 FROM jsonb_array_elements(listed) org
+        WHERE member.tenant_ref = 'github-org:' || (org ->> 'id'));
+  RETURN epoch;
+END
+$slotlock_dashboard_sign_in$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[5]} FROM PUBLIC;
+
+-- A person's standing in a workspace now: their role (Owner of their own; else an active
+-- membership's, or none) and their sessions' epoch. A test environment is its live tenant's.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_standing(requested_tenant text, requested_person text)
+RETURNS TABLE (role text, session_epoch integer)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_standing$
+  WITH live AS (
+    SELECT pg_catalog.regexp_replace(requested_tenant, '~test$', '') AS tenant_ref
+  )
+  SELECT CASE
+           WHEN live.tenant_ref = requested_person THEN 'owner'
+           ELSE (SELECT member.role FROM slotlock.workspace_memberships member
+                  WHERE member.tenant_ref = live.tenant_ref
+                    AND member.person_ref = requested_person
+                    AND member.status = 'active')
+         END,
+         (SELECT person.session_epoch FROM slotlock.dashboard_people person
+           WHERE person.person_ref = requested_person)
+    FROM live;
+$slotlock_dashboard_standing$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[6]} FROM PUBLIC;
+
+-- Sign a person out everywhere: a new epoch is drawn (never the old one), and every session sealed
+-- under the old is refused from now on. Returns the new epoch.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_sign_out_everywhere(requested_person text)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_sign_out_everywhere$
+DECLARE
+  epoch integer;
+BEGIN
+  IF requested_person IS NULL
+     OR requested_person !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    RAISE EXCEPTION 'Slotlock dashboard: invalid person' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO slotlock.dashboard_people AS person (person_ref) VALUES (requested_person)
+  ON CONFLICT (person_ref) DO UPDATE
+    SET session_epoch = (
+      SELECT CASE WHEN drawn.epoch = person.session_epoch THEN drawn.epoch % 2147483646 + 1 ELSE drawn.epoch END
+        FROM (SELECT (1 + floor(random() * 2147483646))::integer AS epoch) drawn)
+  RETURNING person.session_epoch INTO epoch;
+  RETURN epoch;
+END
+$slotlock_dashboard_sign_out_everywhere$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[7]} FROM PUBLIC;
 `;
 
 // The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly
@@ -2129,6 +2313,10 @@ BEGIN
   DELETE FROM slotlock.assistant_chats WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'audit_events';
+  DELETE FROM slotlock.audit_events WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'assistant_settings';
   DELETE FROM slotlock.assistant_settings WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -2210,6 +2398,19 @@ BEGIN
     ON CONFLICT DO NOTHING
   )
   SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  -- A shared workspace's members go with it; a person's own tenant takes their memberships of
+  -- every workspace, and their record of signing in, with it.
+  erased_table := 'workspace_memberships';
+  DELETE FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant_ref
+      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+          AND member.person_ref = requested_tenant_ref);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'dashboard_people';
+  DELETE FROM slotlock.dashboard_people person WHERE person.person_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   -- An organization's record of being turned on goes with its tenant (Teams on Cloud).
   erased_table := 'dashboard_organizations';
@@ -3174,6 +3375,67 @@ SELECT moved.tenant_ref, moved.member_ref,
      WHERE entry ->> 'role' = 'user' LIMIT 1
   ) first_user ON true
 ON CONFLICT DO NOTHING;
+
+-- A workspace's audit log: who did what to its people, keys, webhooks, billing and settings, from
+-- where, and whether it was refused. Not the change feed: that keeps 30 days and goes to the
+-- tenant's webhooks; this keeps SLOTLOCK_AUDIT_RETENTION_DAYS (180) and goes nowhere. The serving
+-- role may only add and read rows (no UPDATE, DELETE or TRUNCATE): an event once written stays as
+-- it was until slotlock.prune_audit_events, or erasure, takes it. Names are never stored, only
+-- references (github:<id>, api_key:<id>), resolved when the log is read.
+CREATE TABLE IF NOT EXISTS slotlock.audit_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  occurred_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  action text NOT NULL,
+  actor_type text NOT NULL,
+  actor_ref text NOT NULL,
+  actor_role text,
+  target_type text,
+  target_ref text,
+  outcome text NOT NULL DEFAULT 'success',
+  reason text,
+  ip_address text,
+  user_agent text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT slotlock_audit_events_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND action ~ '^[a-z][a-z_]{0,31}(\\.[a-z][a-z_]{0,31}){1,2}$'
+    AND actor_type IN ('person', 'api_key', 'assistant', 'system')
+    AND octet_length(actor_ref) BETWEEN 1 AND 500
+    AND (actor_role IS NULL OR actor_role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing'))
+    AND (target_type IS NULL OR target_type ~ '^[a-z][a-z_]{0,31}$')
+    AND (target_ref IS NULL OR octet_length(target_ref) BETWEEN 1 AND 500)
+    AND outcome IN ('success', 'denied')
+    AND (reason IS NULL OR octet_length(reason) BETWEEN 1 AND 200)
+    AND (ip_address IS NULL OR octet_length(ip_address) BETWEEN 1 AND 64)
+    AND (user_agent IS NULL OR octet_length(user_agent) BETWEEN 1 AND 256)
+    AND jsonb_typeof(metadata) = 'object'
+    AND pg_column_size(metadata) <= 4096
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_audit_events_recent_idx
+  ON slotlock.audit_events (tenant_ref, occurred_at DESC, id);
+
+-- A tenant's events past retention. The serving role cannot delete audit events itself: this is
+-- the one way they go, besides erasure, and it reaches only events retention has ended.
+CREATE OR REPLACE FUNCTION slotlock.prune_audit_events(requested_tenant text)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_prune_audit_events$
+DECLARE
+  pruned integer;
+BEGIN
+  DELETE FROM slotlock.audit_events gone
+   WHERE gone.tenant_ref = requested_tenant
+     AND gone.occurred_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_AUDIT_RETENTION_DAYS});
+  GET DIAGNOSTICS pruned = ROW_COUNT;
+  RETURN pruned;
+END
+$slotlock_prune_audit_events$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[8]} FROM PUBLIC;
 
 -- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
 CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()
@@ -6439,6 +6701,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'assistant_settings',
   'assistant_conversations',
   'assistant_chats',
+  'audit_events',
   'locations',
   'resource_groups',
   'resource_group_members',
@@ -6474,9 +6737,15 @@ export function createSlotlockApplicationRoleGrantsDdl(role: string): string {
       { code: 'invalid_role_name' as const },
     );
   }
-  const tables = SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ');
+  const appendOnly: readonly string[] = SLOTLOCK_APPEND_ONLY_TABLES;
+  const tables = SLOTLOCK_TENANT_TABLES.filter((table) => !appendOnly.includes(table))
+    .map((table) => `slotlock.${table}`)
+    .join(', ');
+  const added = SLOTLOCK_APPEND_ONLY_TABLES.map((table) => `slotlock.${table}`).join(', ');
   return `GRANT USAGE ON SCHEMA slotlock TO "${role}";
 GRANT SELECT, INSERT, UPDATE, DELETE ON ${tables} TO "${role}";
+GRANT SELECT, INSERT ON ${added} TO "${role}";
+REVOKE UPDATE, DELETE ON ${added} FROM "${role}";
 GRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "${role}";
 `;
 }
@@ -6599,6 +6868,8 @@ ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_chats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_chats FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.audit_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.audit_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.locations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.locations FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resource_groups ENABLE ROW LEVEL SECURITY;
@@ -6662,6 +6933,7 @@ BEGIN
          'assistant_settings',
          'assistant_conversations',
          'assistant_chats',
+         'audit_events',
          'locations',
          'resource_groups',
          'resource_group_members',
@@ -6930,6 +7202,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'audit_events'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.audit_events
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'locations'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -7122,6 +7404,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_chats
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.audit_events
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.locations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_groups
@@ -7197,6 +7481,7 @@ WHERE schemaname = 'slotlock'
     'assistant_settings',
     'assistant_conversations',
     'assistant_chats',
+    'audit_events',
     'locations',
     'resource_groups',
     'resource_group_members',

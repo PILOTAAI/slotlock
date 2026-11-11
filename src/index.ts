@@ -316,6 +316,29 @@ export { createSlotlockOtlpExporter, readSlotlockOtlpConfig, slotlockCallSpan } 
 export type { SlotlockOtlpConfig, SlotlockTraceExporter } from './otel.js';
 export type { SlotlockDashboardTeams } from './teams.js';
 export {
+  createSlotlockDashboardWorkspaces,
+  createSlotlockMemoryDashboardWorkspaces,
+} from './workspaces.js';
+export type {
+  SlotlockDashboardWorkspaces,
+  SlotlockGitHubMembership,
+  SlotlockWorkspaceStanding,
+} from './workspaces.js';
+export {
+  SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,
+  SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
+  SLOTLOCK_FRESH_CAPABILITIES,
+  SLOTLOCK_ROLE_CAPABILITIES,
+  SLOTLOCK_WORKSPACE_CAPABILITIES,
+  SLOTLOCK_WORKSPACE_ROLE_NAMES,
+  SLOTLOCK_WORKSPACE_ROLES,
+  isSlotlockWorkspaceRole,
+  slotlockRoleCan,
+  slotlockRoleKeyScopes,
+  slotlockRoleMayGrant,
+} from './workspace-roles.js';
+export type { SlotlockWorkspaceCapability, SlotlockWorkspaceRole } from './workspace-roles.js';
+export {
   closeSlotlockPartnerMonth,
   priceSlotlockPartnerMonth,
   slotlockClientLabel,
@@ -380,6 +403,8 @@ export {
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_DASHBOARD_FUNCTIONS,
   SLOTLOCK_DASHBOARD_TABLES,
+  SLOTLOCK_APPEND_ONLY_TABLES,
+  SLOTLOCK_AUDIT_RETENTION_DAYS,
   SLOTLOCK_DEFINER_FUNCTIONS,
   SLOTLOCK_DEFINER_TABLES,
   SLOTLOCK_OPERATOR_FUNCTIONS,
@@ -409,6 +434,8 @@ export {
   SLOTLOCK_MAX_CONTACTS_PER_TENANT,
   SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS,
   SLOTLOCK_TENANT_WRITE_METHODS,
+  type SlotlockAuditEvent,
+  type SlotlockAuditEventInput,
   type SlotlockHoldTenantOptions,
   type SlotlockMigrationOptions,
   type SlotlockSql,

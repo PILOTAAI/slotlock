@@ -93,6 +93,7 @@ import {
 } from './partners.js';
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
+import { createSlotlockDashboardWorkspaces } from './workspaces.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import {
   type SlotlockOtlpConfig,
@@ -1306,6 +1307,8 @@ export async function startSlotlockServer(
             // Holiday calendars by address (RFC 0004 B1), never from a private address.
             resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: createSlotlockGuardedFetch() }),
             state: createSlotlockDashboardState(sql),
+            // Roles from the database on every request, and "Sign out everywhere" (workspaces.ts).
+            workspaces: createSlotlockDashboardWorkspaces(sql),
             availability: config.availability,
             ...(config.usage ? { usage: true } : {}),
             ...(config.quotas ? { quotas: true } : {}),
