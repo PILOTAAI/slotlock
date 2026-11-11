@@ -84,9 +84,17 @@ versioning.
 - **The audit log over the API and the command line** (RFC 0004 D2): `GET /v1/audit` (on the Team
   plan where plans apply, as the dashboard's export) and `GET /v1/audit/verify`;
   `slotlock audit export` and `slotlock audit verify` (exit 1 when the chain breaks).
+- **Staff for the admin console** ([RFC 0006](docs/rfc/0006-admin-console.md), not yet live).
+  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL` grants the console's own role the admin
+  functions and no table. `slotlock staff list|add|role|reset|remove`, run as the schema owner,
+  manages who may use the console, and `add` and `reset` print a one-time code for the first
+  passkey. The console itself is `workers/admin`; SECURITY.md describes it.
 
 ### Changed
 
+- **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
+  a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
+  the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.
 - **The change history cannot be edited** (RFC 0004 D2). The serving role may only add changes
   and read them (`SLOTLOCK_APPEND_ONLY_TABLES` includes `outbox`): pruning goes through the
   definer `slotlock.prune_changes`, and the one edit is taking a person out

@@ -1,9 +1,10 @@
-// Draws the link-preview images (public/og/*.png, 1200 × 630), the touch icon
-// (public/apple-touch-icon.png, 180 × 180) and the logo for structured data
-// (public/brand/slotlock-512.png) with Chromium, from the logo in src/components/Lockup.astro, the
-// colour tokens and the self-hosted fonts. The PNGs are committed, like public/fonts; run this after
-// changing a title below, then `npm run build && npm run check:seo`, which fails on a page whose
-// og:image is missing or the wrong size.
+// Draws the link-preview images (public/og/*.png, 1200 × 630) with Chromium, from the logo in
+// src/components/Lockup.astro (its light-surface inks), the colour tokens and the self-hosted fonts.
+// The PNGs are committed, like public/fonts; run this after changing a title below or the logo, then
+// `npm run build && npm run check:seo`, which fails on a page whose og:image is missing or the wrong
+// size. The touch icon (public/apple-touch-icon.png, 180 × 180), the logo for structured data
+// (public/brand/slotlock-512.png) and public/favicon.svg are the Slotlock design system's own icon
+// files (Icons: apple-touch-icon-180, slotlock-icon-ink-512w, favicon), copied, never redrawn.
 //
 //   node scripts/og-images.mjs            needs Playwright and Chromium (not a site dependency:
 //                                         `npx -y playwright@1 install chromium` once, or set
@@ -72,9 +73,11 @@ function card(svg, { eyebrow, title }) {
   html, body { width: 1200px; height: 630px; }
   body { background: ${light.canvas}; color: ${light.ink}; font-family: 'Inter', sans-serif;
     display: flex; flex-direction: column; justify-content: space-between; padding: 72px 80px; }
-  .lockup__logo { height: 44px; width: auto; align-self: flex-start; }
-  .lockup__ink { fill: ${light.ink}; }
-  .lockup__slot { fill: #FF5B2E; }
+  .lockup__logo { height: 48px; width: auto; align-self: flex-start; }
+  .lockup__shackle { fill: none; stroke: #0a0b0d; stroke-width: 7; }
+  .lockup__body, .lockup__word { fill: #0a0b0d; }
+  .lockup__cut { display: none; }
+  .lockup__slot { fill: #d9ff43; }
   .eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 24px; letter-spacing: 0.08em;
     text-transform: uppercase; color: ${light['ink-3']}; margin-bottom: 22px; }
   h1 { font-family: 'Inter Tight', 'Inter', sans-serif; font-weight: 400; font-size: 68px;
@@ -87,17 +90,6 @@ function card(svg, { eyebrow, title }) {
   <div><p class="eyebrow">${escape(eyebrow)}</p><h1>${escape(title)}</h1></div>
   <div class="foot"><span>slotlock.pylota.io</span><span class="slot"></span></div>
   </body></html>`;
-}
-
-/** The padlock alone (the first two paths of the logo), centred on paper. */
-function icon(svg, size) {
-  const paths = [...svg.matchAll(/<path class="lockup__(?:ink|slot)"[^>]*><\/path>/g)].slice(0, 2).map((m) => m[0]);
-  return `<!doctype html><html><head><style>
-  * { margin: 0; } html, body { width: ${size}px; height: ${size}px; background: ${light.canvas}; }
-  body { display: flex; align-items: center; justify-content: center; }
-  svg { width: ${Math.round(size * 0.62)}px; height: auto; }
-  .lockup__ink { fill: ${light.ink}; } .lockup__slot { fill: #FF5B2E; }
-  </style></head><body><svg viewBox="-2 -2 89.32 81.12">${paths.join('')}</svg></body></html>`;
 }
 
 async function main() {
@@ -125,11 +117,9 @@ async function main() {
     await page.close();
   };
   for (const image of IMAGES) await shoot(card(svg, image), 1200, 630, `public/og/${image.name}.png`);
-  await shoot(icon(svg, 180), 180, 180, 'public/apple-touch-icon.png');
-  await shoot(icon(svg, 512), 512, 512, 'public/brand/slotlock-512.png');
   await browser.close();
   await rm(scratch, { recursive: true, force: true });
-  console.log(`og-images: ${IMAGES.length} previews, the touch icon and the 512 px logo`);
+  console.log(`og-images: ${IMAGES.length} previews`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

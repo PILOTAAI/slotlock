@@ -34,7 +34,7 @@ site/
   scripts/postbuild.mjs   pins the CSP in dist/_headers to the hashes of Starlight's inline code
   scripts/seo-check.mjs   titles, descriptions, canonicals, images, JSON-LD and the sitemap of
                           every built page (docs/rfc/0005-search.md)
-  scripts/og-images.mjs   draws public/og/*.png, the touch icon and the logo with Chromium
+  scripts/og-images.mjs   draws public/og/*.png with Chromium (the icons are the design system's files)
                           (`npm run og`; the PNGs are committed)
   scripts/contrast.mjs    WCAG AA check of every text/background pair, both themes
   scripts/copy-lint.mjs   Pylota's voice rules (no em dash, no filler words) and the word count

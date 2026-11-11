@@ -1598,8 +1598,9 @@ const icon = (paths: string) =>
   );
 const ICONS = Object.freeze({
   mark: new Html(
-    // The Slotlock mark: a padlock whose body holds one booked slot (the site's logo, without the wordmark).
-    '<svg class="mark" viewBox="0 0 85.32 77.12" aria-hidden="true" focusable="false"><path class="mark-ink" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"></path><path class="mark-slot" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"></path></svg>',
+    // The Slotlock mark (the design system's lock, without the wordmark): ink with a lime slot on a
+    // light surface, lime with the slot cut out on a dark one.
+    '<svg class="mark" viewBox="0 0 48 55.5" aria-hidden="true" focusable="false"><g transform="translate(-8 -4.5)"><path class="mark-shackle" d="M20 30V20a12 12 0 0 1 24 0V30"></path><rect class="mark-body" x="8" y="28" width="48" height="32" rx="9"></rect><path class="mark-cut" fill-rule="evenodd" d="M17 28h30a9 9 0 0 1 9 9v14a9 9 0 0 1-9 9H17a9 9 0 0 1-9-9V37a9 9 0 0 1 9-9ZM32 37a3 3 0 0 0-3 3v9a3 3 0 0 0 6 0v-9a3 3 0 0 0-3-3Z"></path><rect class="mark-slot" x="29" y="37" width="6" height="15" rx="3"></rect></g></svg>',
   ),
   overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
   resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
@@ -8187,12 +8188,14 @@ const DASHBOARD_CSS = `:root {
   --button: #18181b; --button-ink: #ffffff; --button-hover: #2e2e33;
   --good: #11764c; --good-wash: #e9f6ef; --bad: #c42b1c; --bad-ink: #ffffff; --bad-wash: #fdeeec; --bad-line: #f5c9c3;
   --warn: #8a5300; --warn-wash: #fff5e1; --warn-line: #f3dcae;
-  --brand: #ff5b2e;
+  /* The logo's inks (the Slotlock design system): ink lock and lime slot here, lime lock in the dark. */
+  --logo-lock: #0a0b0d; --logo-slot: #d9ff43;
   --pop-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 12px 32px -8px rgba(24, 24, 27, 0.18);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    --logo-lock: #d9ff43;
     --canvas: #0b0b0d; --surface: #111114; --surface-2: #141418; --sunken: #18181c; --hover: #1c1c21;
     --line: #26262c; --line-strong: #34343b; --line-soft: #1d1d22;
     --ink: #ededf0; --ink-2: #b4b4bc; --ink-3: #8e8e98;
@@ -8214,9 +8217,15 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .icon .fill { fill: currentColor; stroke: none; }
-.mark { width: 20px; height: 18px; flex: none; }
-.mark-ink { fill: currentColor; }
-.mark-slot { fill: var(--brand); }
+.mark { width: 17px; height: 20px; flex: none; }
+.mark-shackle { fill: none; stroke: var(--logo-lock); stroke-width: 7; }
+.mark-body, .mark-cut { fill: var(--logo-lock); }
+.mark-slot { fill: var(--logo-slot); }
+.mark-cut { display: none; }
+@media (prefers-color-scheme: dark) {
+  .mark-body, .mark-slot { display: none; }
+  .mark-cut { display: inline; }
+}
 .skip { position: absolute; left: var(--space-3); top: -48px; z-index: 10; padding: var(--space-2) var(--space-3); border-radius: var(--radius); background: var(--button); color: var(--button-ink); font-weight: 600; }
 .skip:focus { top: var(--space-3); text-decoration: none; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -8532,7 +8541,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 .bare-main { display: grid; place-items: start center; padding: 10vh var(--space-4) var(--space-12); }
 .sign-in { width: 100%; max-width: 400px; padding: var(--space-8); border: 1px solid var(--line); border-radius: 16px; background: var(--surface); display: grid; gap: var(--space-3); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 24px 48px -24px rgba(0, 0, 0, 0.12); }
 .sign-in-mark { display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: var(--space-2); border-radius: var(--radius-lg); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); }
-.sign-in-mark .mark { width: 24px; height: 22px; }
+.sign-in-mark .mark { width: 21px; height: 24px; }
 .sign-in h1 { font-size: 20px; }
 .sign-in p { margin: 0; }
 .sign-in .button { margin-top: var(--space-3); }
