@@ -417,6 +417,7 @@ export {
   SLOTLOCK_DASHBOARD_TABLES,
   SLOTLOCK_APPEND_ONLY_TABLES,
   SLOTLOCK_AUDIT_RETENTION_DAYS,
+  SLOTLOCK_CHANGE_RETENTION_BY_PLAN,
   SLOTLOCK_DEFINER_FUNCTIONS,
   SLOTLOCK_DEFINER_TABLES,
   SLOTLOCK_OPERATOR_FUNCTIONS,
@@ -446,8 +447,12 @@ export {
   SLOTLOCK_MAX_CONTACTS_PER_TENANT,
   SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS,
   SLOTLOCK_TENANT_WRITE_METHODS,
+  slotlockAuditEventRecord,
   type SlotlockAuditEvent,
   type SlotlockAuditEventInput,
+  type SlotlockSubject,
+  type SlotlockSubjectErasure,
+  type SlotlockSubjectExport,
   type SlotlockHoldTenantOptions,
   type SlotlockMigrationOptions,
   type SlotlockSql,
@@ -505,4 +510,6 @@ export type {
   TrustedICalendarEvent,
   SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
+  SlotlockSubjectTable,
 } from './types.js';
+export { SLOTLOCK_SUBJECT_TABLES } from './types.js';

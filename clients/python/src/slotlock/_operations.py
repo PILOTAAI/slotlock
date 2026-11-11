@@ -694,6 +694,34 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("from", "to"),
     ),
+    "slotlock_list_audit_events": Operation(
+        "slotlock_list_audit_events",
+        "GET",
+        "/v1/audit",
+        (),
+        ("limit", "cursor", "action", "actor_ref"),
+    ),
+    "slotlock_verify_audit_log": Operation(
+        "slotlock_verify_audit_log",
+        "GET",
+        "/v1/audit/verify",
+        (),
+        (),
+    ),
+    "slotlock_export_subject": Operation(
+        "slotlock_export_subject",
+        "POST",
+        "/v1/subjects/export",
+        (),
+        (),
+    ),
+    "slotlock_erase_subject": Operation(
+        "slotlock_erase_subject",
+        "POST",
+        "/v1/subjects/erase",
+        (),
+        (),
+    ),
     "slotlock_list_approval_policies": Operation(
         "slotlock_list_approval_policies",
         "GET",
@@ -3519,6 +3547,119 @@ class Operations(Transport):
         if to is not None:
             values["to"] = to
         return self.call("slotlock_get_usage", values)
+
+    def list_audit_events(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        action: str | None = None,
+        actor_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """List audit events.
+
+        The workspace audit log, newest first: who did what to its people, keys, webhooks, billing
+        and settings, from where, and whether it was refused. Actors are references (github:<id>,
+        api_key:<id>), never names. Each event carries its place in the tenant's hash chain and
+        its hash (slotlock_verify_audit_log checks them). Only events of action or actor_ref when
+        given; pass next_cursor as cursor for the next page, until it is null. Events are kept 180
+        days, 400 on the Team plan. Where hosted plans apply, the log is read this way on the Team
+        plan only (403 team_plan_required).
+        """
+        values: dict[str, Any] = {}
+        if limit is not None:
+            values["limit"] = limit
+        if cursor is not None:
+            values["cursor"] = cursor
+        if action is not None:
+            values["action"] = action
+        if actor_ref is not None:
+            values["actor_ref"] = actor_ref
+        return self.call("slotlock_list_audit_events", values)
+
+    def verify_audit_log(self) -> dict[str, Any]:
+        """Verify the audit log.
+
+        Check the workspace audit log's hash chain from its oldest event kept: each event numbered
+        after the one before, linked to its hash, and hashed over its own content. checked counts
+        the events that held; broken_at is the number of the first that does not (an event
+        changed, removed or reordered outside Slotlock), or null when every one does.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_verify_audit_log", values)
+
+    def export_subject(
+        self,
+        *,
+        email: str | None = None,
+        holder: str | None = None,
+        contact: str | None = None,
+        reference: str | None = None,
+    ) -> dict[str, Any]:
+        """Export a person's data.
+
+        What the tenant keeps about one person, for an access request: the rows that name them, as
+        kept, by table (contacts, calendar_event_attendees, calendar_events, reservations,
+        reservation_tombstones, reservation_conflict_archive, calendar_event_tombstones,
+        calendar_event_commands, waitlist_entries, approvals, outbox), up to 1,000 a table
+        (truncated: true when a table had more). Name them by exactly one of email (contacts,
+        event attendees and organizers, ignoring case), holder (holds, bookings and waitlist
+        entries), contact (a contact's reference) or reference (a booking's or an event's). It
+        lists what slotlock_erase_subject would delete or take them out of: the bookings, changes
+        and approvals that name their contacts too. An event lists its time and title, and an
+        approval its decision, never the other people they name. 400 invalid_subject when no
+        identifier, or more than one, is given.
+        """
+        values: dict[str, Any] = {}
+        if email is not None:
+            values["email"] = email
+        if holder is not None:
+            values["holder"] = holder
+        if contact is not None:
+            values["contact"] = contact
+        if reference is not None:
+            values["reference"] = reference
+        return self.call("slotlock_export_subject", values)
+
+    def erase_subject(
+        self,
+        *,
+        email: str | None = None,
+        holder: str | None = None,
+        contact: str | None = None,
+        reference: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Erase a person.
+
+        Take one person out of the tenant's data, for an erasure request, at once: their contacts,
+        attendee entries and waitlist entries are deleted; their email leaves events' attendee and
+        organizer lists and approvals' requests; their holder reference and booking reference
+        become one erased-<32 hex> name wherever they were (holds, bookings, ended bookings,
+        events, the change history, approvals), and their contact's reference leaves bookings and
+        changes. Bookings stay, as time taken, and nobody is told: the feed gets no change. Name
+        them as for slotlock_export_subject. erased counts, by table, the rows deleted or changed;
+        erasing again changes nothing. Recorded in the audit log (subject.erased) without the
+        identifier. 400 invalid_subject when no identifier, or more than one, is given.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {}
+        if email is not None:
+            values["email"] = email
+        if holder is not None:
+            values["holder"] = holder
+        if contact is not None:
+            values["contact"] = contact
+        if reference is not None:
+            values["reference"] = reference
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_erase_subject", values)
 
     def list_approval_policies(self) -> dict[str, Any]:
         """List approval policies.

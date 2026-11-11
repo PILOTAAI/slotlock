@@ -25911,6 +25911,733 @@
         }
       }
     },
+    "/v1/audit": {
+      "get": {
+        "operationId": "slotlock_list_audit_events",
+        "summary": "List audit events",
+        "description": "The workspace audit log, newest first: who did what to its people, keys, webhooks, billing and settings, from where, and whether it was refused. Actors are references (github:<id>, api_key:<id>), never names. Each event carries its place in the tenant's hash chain and its hash (slotlock_verify_audit_log checks them). Only events of action or actor_ref when given; pass next_cursor as cursor for the next page, until it is null. Events are kept 180 days, 400 on the Team plan. Where hosted plans apply, the log is read this way on the Team plan only (403 team_plan_required).",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z_]{0,31}(\\.[a-z][a-z_]{0,31}){1,2}$"
+            }
+          },
+          {
+            "name": "actor_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "maxItems": 200,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "occurred_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "action": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 100
+                          },
+                          "actor_type": {
+                            "type": "string",
+                            "enum": [
+                              "person",
+                              "api_key",
+                              "assistant",
+                              "system"
+                            ]
+                          },
+                          "actor_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "actor_role": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "owner",
+                                  "admin",
+                                  "developer",
+                                  "member",
+                                  "viewer",
+                                  "billing"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "target_type": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 32
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "target_ref": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "success",
+                              "denied"
+                            ]
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "ip_address": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "user_agent": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "metadata": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          },
+                          "chain_index": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "hash": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "occurred_at",
+                          "action",
+                          "actor_type",
+                          "actor_ref",
+                          "actor_role",
+                          "target_type",
+                          "target_ref",
+                          "outcome",
+                          "reason",
+                          "ip_address",
+                          "user_agent",
+                          "metadata",
+                          "chain_index",
+                          "hash"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "events",
+                    "next_cursor"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/audit/verify": {
+      "get": {
+        "operationId": "slotlock_verify_audit_log",
+        "summary": "Verify the audit log",
+        "description": "Check the workspace audit log's hash chain from its oldest event kept: each event numbered after the one before, linked to its hash, and hashed over its own content. checked counts the events that held; broken_at is the number of the first that does not (an event changed, removed or reordered outside Slotlock), or null when every one does.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "checked": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "broken_at": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "checked",
+                    "broken_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/subjects/export": {
+      "post": {
+        "operationId": "slotlock_export_subject",
+        "summary": "Export a person's data",
+        "description": "What the tenant keeps about one person, for an access request: the rows that name them, as kept, by table (contacts, calendar_event_attendees, calendar_events, reservations, reservation_tombstones, reservation_conflict_archive, calendar_event_tombstones, calendar_event_commands, waitlist_entries, approvals, outbox), up to 1,000 a table (truncated: true when a table had more). Name them by exactly one of email (contacts, event attendees and organizers, ignoring case), holder (holds, bookings and waitlist entries), contact (a contact's reference) or reference (a booking's or an event's). It lists what slotlock_erase_subject would delete or take them out of: the bookings, changes and approvals that name their contacts too. An event lists its time and title, and an approval its decision, never the other people they name. 400 invalid_subject when no identifier, or more than one, is given.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 320,
+                    "pattern": "^[^\\s@]+@[^\\s@]+$"
+                  },
+                  "holder": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "contact": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                  },
+                  "reference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "records": {
+                      "type": "object",
+                      "properties": {
+                        "contacts": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "calendar_event_attendees": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "calendar_events": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "reservations": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "reservation_tombstones": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "reservation_conflict_archive": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "calendar_event_tombstones": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "calendar_event_commands": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "waitlist_entries": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "approvals": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        },
+                        "outbox": {
+                          "maxItems": 1000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string"
+                            },
+                            "additionalProperties": {}
+                          }
+                        }
+                      },
+                      "required": [
+                        "contacts",
+                        "calendar_event_attendees",
+                        "calendar_events",
+                        "reservations",
+                        "reservation_tombstones",
+                        "reservation_conflict_archive",
+                        "calendar_event_tombstones",
+                        "calendar_event_commands",
+                        "waitlist_entries",
+                        "approvals",
+                        "outbox"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/subjects/erase": {
+      "post": {
+        "operationId": "slotlock_erase_subject",
+        "summary": "Erase a person",
+        "description": "Take one person out of the tenant's data, for an erasure request, at once: their contacts, attendee entries and waitlist entries are deleted; their email leaves events' attendee and organizer lists and approvals' requests; their holder reference and booking reference become one erased-<32 hex> name wherever they were (holds, bookings, ended bookings, events, the change history, approvals), and their contact's reference leaves bookings and changes. Bookings stay, as time taken, and nobody is told: the feed gets no change. Name them as for slotlock_export_subject. erased counts, by table, the rows deleted or changed; erasing again changes nothing. Recorded in the audit log (subject.erased) without the identifier. 400 invalid_subject when no identifier, or more than one, is given.",
+        "tags": [
+          "Application"
+        ],
+        "x-slotlock-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 320,
+                    "pattern": "^[^\\s@]+@[^\\s@]+$"
+                  },
+                  "holder": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "contact": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+                  },
+                  "reference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "erased": {
+                      "type": "object",
+                      "properties": {
+                        "contacts": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "calendar_event_attendees": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "calendar_events": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "reservations": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "reservation_tombstones": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "reservation_conflict_archive": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "calendar_event_tombstones": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "calendar_event_commands": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "waitlist_entries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "approvals": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "outbox": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "contacts",
+                        "calendar_event_attendees",
+                        "calendar_events",
+                        "reservations",
+                        "reservation_tombstones",
+                        "reservation_conflict_archive",
+                        "calendar_event_tombstones",
+                        "calendar_event_commands",
+                        "waitlist_entries",
+                        "approvals",
+                        "outbox"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dry_run": {
+                      "type": "boolean",
+                      "const": true,
+                      "description": "Present on a dry run only: nothing was stored."
+                    }
+                  },
+                  "required": [
+                    "erased"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/approval-policies": {
       "get": {
         "operationId": "slotlock_list_approval_policies",

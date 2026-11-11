@@ -88,12 +88,14 @@ refused.
   erasing a person ends them too.
 - A form needs every capability it touches: rotating someone else's Full-access key needs both
   changing anyone's keys and Full access, and so a recent sign-in.
-- An audit log (`slotlock.audit_events`, kept 180 days) records who created, rotated or revoked a
-  key, changed a webhook, the plan, billing or the assistant's model, forgot a contact, signed in or
+- An audit log (`slotlock.audit_events`, kept 180 days, 400 on the Team plan) records who created,
+  rotated or revoked a key, changed a webhook, the plan, billing or the assistant's model, forgot a
+  contact, erased a person, signed in or
   out, changed a team's people, and every refusal, with the address and browser it came from. The
   serving role can only add to it and read it. Owners and Admins read it on Settings, Audit log, 50
   events a page, filtered by action, and export it as CSV or JSON (on the Team plan where plans
-  apply; up to 10,000 events, the filter kept). Each tenant's events are chained: each holds the
+  apply; up to 10,000 events, the filter kept); an admin key reads it with `GET /v1/audit` on the
+  same terms, and `slotlock audit export` prints it. Each tenant's events are chained: each holds the
   SHA-256 of the one before it with its own content, and the database stamps its time. An event
   changed, removed or taken off the chain in the middle shows where (**Check the log**,
   `slotlock.verify_audit_chain`); someone who rewrites every later hash, or the newest events,

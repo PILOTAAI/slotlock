@@ -27,6 +27,7 @@ import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_SOURCE_BUSY_MAX } from './rules.js';
+import { SLOTLOCK_SUBJECT_TABLES, type SlotlockSubjectTable } from './types.js';
 import {
   SLOTLOCK_GROUPING_REF,
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
@@ -119,6 +120,10 @@ export type SlotlockApplicationOperation =
   | 'slotlock_delete_webhook'
   | 'slotlock_enable_webhook'
   | 'slotlock_get_usage'
+  | 'slotlock_list_audit_events'
+  | 'slotlock_verify_audit_log'
+  | 'slotlock_export_subject'
+  | 'slotlock_erase_subject'
   | 'slotlock_list_approval_policies'
   | 'slotlock_put_approval_policy'
   | 'slotlock_delete_approval_policy'
@@ -278,6 +283,10 @@ export interface SlotlockApplicationBackend {
   deleteWebhook: Handler;
   enableWebhook: Handler;
   getUsage: Handler;
+  listAuditEvents: Handler;
+  verifyAuditLog: Handler;
+  exportSubject: Handler;
+  eraseSubject: Handler;
   listApprovalPolicies: Handler;
   putApprovalPolicy: Handler;
   deleteApprovalPolicy: Handler;
@@ -840,6 +849,51 @@ const HOLD = z
     paid_amount: PAYMENT_AMOUNT.nullable().optional(),
   })
   .strict();
+
+/** An event of the workspace audit log (RFC 0004 D2): who did what, to what, from where. */
+const AUDIT_EVENT = z
+  .object({
+    id: z.string().uuid(),
+    occurred_at: DATE_TIME,
+    /** `<area>.<verb>`, such as `api_key.created`, `authz.denied` or `subject.erased`. */
+    action: z.string().min(3).max(100),
+    actor_type: z.enum(['person', 'api_key', 'assistant', 'system']),
+    /** `github:<id>`, `google:<subject>`, `api_key:<id>`: a reference, never a name or an email. */
+    actor_ref: z.string().min(1).max(500),
+    actor_role: z.enum(['owner', 'admin', 'developer', 'member', 'viewer', 'billing']).nullable(),
+    target_type: z.string().min(1).max(32).nullable(),
+    target_ref: z.string().min(1).max(500).nullable(),
+    outcome: z.enum(['success', 'denied']),
+    reason: z.string().min(1).max(200).nullable(),
+    ip_address: z.string().min(1).max(64).nullable(),
+    user_agent: z.string().min(1).max(256).nullable(),
+    metadata: z.record(z.string(), z.unknown()),
+    /** Its place in the tenant's chain, and its SHA-256 (hex) over the one before and itself. */
+    chain_index: z.number().int().min(1).nullable(),
+    hash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  })
+  .strict();
+
+/** Whom an access or erasure request is about (RFC 0004 D3): exactly one identifier. */
+const SUBJECT = z
+  .object({
+    /** Contacts, event attendees and organizers with this email (ignoring case). */
+    email: z.string().trim().min(3).max(320).regex(/^[^\s@]+@[^\s@]+$/, 'must be an email address').optional(),
+    /** Holds, bookings and waitlist entries held under this holder reference. */
+    holder: z.string().min(1).max(500).optional(),
+    /** The contact kept under this reference (slotlock_put_contact). */
+    contact: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/, 'must be 1-200 letters, digits, . _ : or -, starting with a letter or digit')
+      .optional(),
+    /** The booking or event with this reference. */
+    reference: z.string().min(1).max(500).optional(),
+  })
+  .strict()
+  .refine(
+    (input) => Object.values(input).filter((value) => value !== undefined).length === 1,
+    'Name the person by exactly one of email, holder, contact or reference',
+  );
 
 /** A person a booking may name to be told about it (RFC 0004 P3), by the tenant's reference. */
 const CONTACT_REF = z
@@ -2381,6 +2435,87 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: true, destructive: false, idempotent: true },
       invoke: 'getUsage',
       example: { from: '2026-11-01', to: '2026-11-30' },
+    },
+    // The audit log and requests about one person (RFC 0004 D2, D3).
+    {
+      name: 'slotlock_list_audit_events',
+      title: 'List audit events',
+      description:
+        "The workspace audit log, newest first: who did what to its people, keys, webhooks, billing and settings, from where, and whether it was refused. Actors are references (github:<id>, api_key:<id>), never names. Each event carries its place in the tenant's hash chain and its hash (slotlock_verify_audit_log checks them). Only events of action or actor_ref when given; pass next_cursor as cursor for the next page, until it is null. Events are kept 180 days, 400 on the Team plan. Where hosted plans apply, the log is read this way on the Team plan only (403 team_plan_required).",
+      method: 'GET',
+      path: '/v1/audit',
+      input: z
+        .object({
+          limit: z.number().int().min(1).max(200).default(50),
+          cursor: z.string().uuid().optional(),
+          action: z.string().regex(/^[a-z][a-z_]{0,31}(\.[a-z][a-z_]{0,31}){1,2}$/, 'must be an action, like api_key.created').optional(),
+          actor_ref: z.string().min(1).max(500).optional(),
+        })
+        .strict(),
+      output: z.object({ events: z.array(AUDIT_EVENT).max(200), next_cursor: z.string().uuid().nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listAuditEvents',
+      example: { limit: 50, action: 'api_key.created' },
+    },
+    {
+      name: 'slotlock_verify_audit_log',
+      title: 'Verify the audit log',
+      description:
+        "Check the workspace audit log's hash chain from its oldest event kept: each event numbered after the one before, linked to its hash, and hashed over its own content. checked counts the events that held; broken_at is the number of the first that does not (an event changed, removed or reordered outside Slotlock), or null when every one does.",
+      method: 'GET',
+      path: '/v1/audit/verify',
+      input: z.object({}).strict(),
+      output: z.object({ checked: z.number().int().min(0), broken_at: z.number().int().min(1).nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'verifyAuditLog',
+      example: {},
+    },
+    {
+      name: 'slotlock_export_subject',
+      title: "Export a person's data",
+      description: `What the tenant keeps about one person, for an access request: the rows that name them, as kept, by table (${SLOTLOCK_SUBJECT_TABLES.join(', ')}), up to 1,000 a table (truncated: true when a table had more). Name them by exactly one of email (contacts, event attendees and organizers, ignoring case), holder (holds, bookings and waitlist entries), contact (a contact's reference) or reference (a booking's or an event's). It lists what slotlock_erase_subject would delete or take them out of: the bookings, changes and approvals that name their contacts too. An event lists its time and title, and an approval its decision, never the other people they name. 400 invalid_subject when no identifier, or more than one, is given.`,
+      method: 'POST',
+      path: '/v1/subjects/export',
+      input: SUBJECT,
+      output: z
+        .object({
+          records: z
+            .object(
+              Object.fromEntries(
+                SLOTLOCK_SUBJECT_TABLES.map((table) => [table, z.array(z.record(z.string(), z.unknown())).max(1_000)]),
+              ) as Record<SlotlockSubjectTable, z.ZodArray<z.ZodRecord<z.ZodString, z.ZodUnknown>>>,
+            )
+            .strict(),
+          truncated: z.boolean(),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'exportSubject',
+      example: { email: 'ada@example.com' },
+    },
+    {
+      name: 'slotlock_erase_subject',
+      title: 'Erase a person',
+      description:
+        "Take one person out of the tenant's data, for an erasure request, at once: their contacts, attendee entries and waitlist entries are deleted; their email leaves events' attendee and organizer lists and approvals' requests; their holder reference and booking reference become one erased-<32 hex> name wherever they were (holds, bookings, ended bookings, events, the change history, approvals), and their contact's reference leaves bookings and changes. Bookings stay, as time taken, and nobody is told: the feed gets no change. Name them as for slotlock_export_subject. erased counts, by table, the rows deleted or changed; erasing again changes nothing. Recorded in the audit log (subject.erased) without the identifier. 400 invalid_subject when no identifier, or more than one, is given.",
+      method: 'POST',
+      path: '/v1/subjects/erase',
+      input: SUBJECT,
+      output: z
+        .object({
+          erased: z
+            .object(
+              Object.fromEntries(SLOTLOCK_SUBJECT_TABLES.map((table) => [table, z.number().int().min(0)])) as Record<
+                SlotlockSubjectTable,
+                z.ZodNumber
+              >,
+            )
+            .strict(),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'eraseSubject',
+      example: { email: 'ada@example.com' },
     },
     // Approval policies (RFC 0004 A4): writes a person approves before they are made.
     {

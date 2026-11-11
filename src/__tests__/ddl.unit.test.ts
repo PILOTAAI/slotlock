@@ -322,9 +322,10 @@ describe('application role grants', () => {
   it('grants schema usage, DML on those tables (only adding to and reading the append-only ones) and EXECUTE on the definer functions only', () => {
     const ddl = createSlotlockApplicationRoleGrantsDdl('slotlock_app');
     const appendOnly: readonly string[] = SLOTLOCK_APPEND_ONLY_TABLES;
-    expect(appendOnly).toEqual(['audit_events']);
+    // The change history and the workspace audit log (RFC 0004 D2).
+    expect(appendOnly).toEqual(['outbox', 'audit_events']);
     expect(ddl).toBe(
-      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.filter((table) => !appendOnly.includes(table)).map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT SELECT, INSERT ON slotlock.audit_events TO "slotlock_app";\nREVOKE UPDATE, DELETE ON slotlock.audit_events FROM "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
+      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.filter((table) => !appendOnly.includes(table)).map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT SELECT, INSERT ON slotlock.outbox, slotlock.audit_events TO "slotlock_app";\nREVOKE UPDATE, DELETE ON slotlock.outbox, slotlock.audit_events FROM "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
     );
     for (const signature of SLOTLOCK_DASHBOARD_FUNCTIONS) expect(ddl).toContain(signature);
     expect(ddl).not.toContain('rls_policy_contracts');

@@ -695,6 +695,34 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["from", "to"],
     },
     Operation {
+        name: "slotlock_list_audit_events",
+        method: "GET",
+        path: "/v1/audit",
+        path_params: &[],
+        query: &["limit", "cursor", "action", "actor_ref"],
+    },
+    Operation {
+        name: "slotlock_verify_audit_log",
+        method: "GET",
+        path: "/v1/audit/verify",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_export_subject",
+        method: "POST",
+        path: "/v1/subjects/export",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_erase_subject",
+        method: "POST",
+        path: "/v1/subjects/erase",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_list_approval_policies",
         method: "GET",
         path: "/v1/approval-policies",
@@ -2270,6 +2298,56 @@ pub struct GetUsageInput {
     pub to: Option<String>,
 }
 
+/// The arguments of [`Client::list_audit_events`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListAuditEventsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_ref: Option<String>,
+}
+
+/// The arguments of [`Client::verify_audit_log`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct VerifyAuditLogInput {
+}
+
+/// The arguments of [`Client::export_subject`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExportSubjectInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+/// The arguments of [`Client::erase_subject`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EraseSubjectInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::list_approval_policies`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListApprovalPoliciesInput {
@@ -3534,6 +3612,61 @@ impl Client {
     /// after today.
     pub fn get_usage(&self, input: &GetUsageInput) -> Result<Value, Error> {
         self.call("slotlock_get_usage", serde_json::to_value(input)?)
+    }
+
+    /// List audit events.
+    ///
+    /// The workspace audit log, newest first: who did what to its people, keys, webhooks, billing
+    /// and settings, from where, and whether it was refused. Actors are references (github:<id>,
+    /// api_key:<id>), never names. Each event carries its place in the tenant's hash chain and
+    /// its hash (slotlock_verify_audit_log checks them). Only events of action or actor_ref when
+    /// given; pass next_cursor as cursor for the next page, until it is null. Events are kept 180
+    /// days, 400 on the Team plan. Where hosted plans apply, the log is read this way on the Team
+    /// plan only (403 team_plan_required).
+    pub fn list_audit_events(&self, input: &ListAuditEventsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_audit_events", serde_json::to_value(input)?)
+    }
+
+    /// Verify the audit log.
+    ///
+    /// Check the workspace audit log's hash chain from its oldest event kept: each event numbered
+    /// after the one before, linked to its hash, and hashed over its own content. checked counts
+    /// the events that held; broken_at is the number of the first that does not (an event
+    /// changed, removed or reordered outside Slotlock), or null when every one does.
+    pub fn verify_audit_log(&self, input: &VerifyAuditLogInput) -> Result<Value, Error> {
+        self.call("slotlock_verify_audit_log", serde_json::to_value(input)?)
+    }
+
+    /// Export a person's data.
+    ///
+    /// What the tenant keeps about one person, for an access request: the rows that name them, as
+    /// kept, by table (contacts, calendar_event_attendees, calendar_events, reservations,
+    /// reservation_tombstones, reservation_conflict_archive, calendar_event_tombstones,
+    /// calendar_event_commands, waitlist_entries, approvals, outbox), up to 1,000 a table
+    /// (truncated: true when a table had more). Name them by exactly one of email (contacts,
+    /// event attendees and organizers, ignoring case), holder (holds, bookings and waitlist
+    /// entries), contact (a contact's reference) or reference (a booking's or an event's). It
+    /// lists what slotlock_erase_subject would delete or take them out of: the bookings, changes
+    /// and approvals that name their contacts too. An event lists its time and title, and an
+    /// approval its decision, never the other people they name. 400 invalid_subject when no
+    /// identifier, or more than one, is given.
+    pub fn export_subject(&self, input: &ExportSubjectInput) -> Result<Value, Error> {
+        self.call("slotlock_export_subject", serde_json::to_value(input)?)
+    }
+
+    /// Erase a person.
+    ///
+    /// Take one person out of the tenant's data, for an erasure request, at once: their contacts,
+    /// attendee entries and waitlist entries are deleted; their email leaves events' attendee and
+    /// organizer lists and approvals' requests; their holder reference and booking reference
+    /// become one erased-<32 hex> name wherever they were (holds, bookings, ended bookings,
+    /// events, the change history, approvals), and their contact's reference leaves bookings and
+    /// changes. Bookings stay, as time taken, and nobody is told: the feed gets no change. Name
+    /// them as for slotlock_export_subject. erased counts, by table, the rows deleted or changed;
+    /// erasing again changes nothing. Recorded in the audit log (subject.erased) without the
+    /// identifier. 400 invalid_subject when no identifier, or more than one, is given.
+    pub fn erase_subject(&self, input: &EraseSubjectInput) -> Result<Value, Error> {
+        self.call("slotlock_erase_subject", serde_json::to_value(input)?)
     }
 
     /// List approval policies.

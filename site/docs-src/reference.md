@@ -229,6 +229,10 @@ waits for a confirmation.
 | `DELETE /v1/tenant/events/{event_id}?expected_revision=…` | Cancel it, whichever key wrote it |
 | `GET /v1/tenant` | The key's tenant, and whether it is suspended |
 | `POST /v1/tenant/erase` | Erase the tenant, when the server allows it |
+| `POST /v1/subjects/export` | `{"email"\|"holder"\|"contact"\|"reference"}`: what the tenant keeps about one person, by table |
+| `POST /v1/subjects/erase` | The same: take that person out; bookings stay as time taken |
+| `GET /v1/audit?limit=…&cursor=…&action=…` | The workspace audit log, newest first, with each event's place in its hash chain (Team plan where plans apply) |
+| `GET /v1/audit/verify` | Check that chain: how many events held, and the first that does not |
 | `POST /v1/maintenance` | Run [maintenance](/docs/operations/) for the key's tenant |
 
 ```sh
@@ -261,6 +265,18 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
   `confirm_tenant_ref` to be the tenant's reference (`GET /v1/tenant`), deletes every key the tenant
   has, the caller's included, and is refused while the tenant is suspended. Suspending a tenant is
   never an API call: only the schema owner may, and a tenant could not lift its own.
+- An access or erasure request about one person (RFC 0004 D3) names them by exactly one of
+  `email` (contacts, event attendees and organizers, ignoring case), `holder` (holds, bookings and
+  waitlist entries), `contact` (a contact's reference) or `reference` (a booking's or an event's).
+  The export lists the rows that name them, as kept, up to 1,000 a table (`truncated: true` past
+  that); an event shows its time and title and an approval its decision, never the other people they
+  name. The erasure deletes their contacts, attendee entries and waitlist entries, takes their email
+  out of events' attendee and organizer lists and approvals' requests, and replaces their holder and
+  booking references with one `erased-<32 hex>` name everywhere (holds, bookings, cancelled
+  bookings, events, the change history, approvals). Bookings stay as time taken; the event keeps its
+  revision and no change goes on the feed. It takes `dry_run`, and is recorded in the audit log as
+  `subject.erased` without the person. `slotlock subject export` and `slotlock subject erase` do the
+  same from the command line.
 - The tenant is the key's. Another tenant's resource or hold is `404`, whatever the database role.
 - With the library, pass `application` beside `rest: true`:
   `{ backend: createSlotlockStoreApplicationBackend(store, { maxTenantResources }), authorize }`.
@@ -307,7 +323,10 @@ webhook URLs or secrets.
   extension attributes `slotlockorigin` and `slotlockkeyid` when the change records them. Follow
   `next_cursor`, which comes back even when nothing is new: it never skips a change, even one whose
   transaction commits after a later one's. Changes are kept 30 days (`SLOTLOCK_RETENTION_DAYS`,
-  `retentionDays` in `createSlotlockStore`, 1-3,650, for `serve` and `maintain` alike); a cursor
+  `retentionDays` in `createSlotlockStore`, 1-3,650, for `serve` and `maintain` alike), or the
+  tenant's hosted plan's days if longer (Free 30, Developer 90, Team 400). The serving role may
+  only add changes and read them: they leave through `slotlock.prune_changes` alone, and the one
+  edit is taking a person out of them (`POST /v1/subjects/erase`); a cursor
   that a pruned change came after, whichever server pruned it, answers `410 cursor_expired`. A change keeps who made
   it (`actor`) and a booking's or waitlist entry's reference: keep references opaque, not emails,
   when the feed is kept long. A shorter retention never shortens how long a retried write is

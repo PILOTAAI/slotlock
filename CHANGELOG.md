@@ -52,8 +52,31 @@ versioning.
   `SLOTLOCK_INVITATION_EMAIL_KEY` and `SLOTLOCK_INVITATION_EMAIL_FROM`
   (`createSlotlockInvitationEmailSender`). Each person is held to 50 invitations a day across their
   teams, as each team is.
+- **Requests about one person** (RFC 0004 D3). `POST /v1/subjects/export` (`exportSubject`,
+  `slotlock subject export`) lists what the tenant keeps about one person, found by exactly one of
+  `email`, `holder`, `contact` or `reference`: the rows that name them, by table
+  (`SLOTLOCK_SUBJECT_TABLES`). `POST /v1/subjects/erase` (`eraseSubject`,
+  `slotlock subject erase`) takes them out in one transaction: their contacts, attendee entries and
+  waitlist entries are deleted, their email leaves events' attendee and organizer lists and
+  approvals' requests, and their holder and booking references become one `erased-<32 hex>` name
+  in holds, bookings, cancelled bookings, events, approvals and the change history. Bookings stay
+  as time taken; nothing goes on the feed; the audit log records `subject.erased` without the
+  person.
+- **The audit log over the API and the command line** (RFC 0004 D2): `GET /v1/audit` (on the Team
+  plan where plans apply, as the dashboard's export) and `GET /v1/audit/verify`;
+  `slotlock audit export` and `slotlock audit verify` (exit 1 when the chain breaks).
 
 ### Changed
+
+- **The change history cannot be edited** (RFC 0004 D2). The serving role may only add changes
+  and read them (`SLOTLOCK_APPEND_ONLY_TABLES` includes `outbox`): pruning goes through the
+  definer `slotlock.prune_changes`, and the one edit is taking a person out
+  (`slotlock.erase_subject_changes`, which writes nothing but an `erased-` name). Both act only for
+  the tenant the caller acts in. Rerun `slotlock migrate` and the role grants.
+- **History is kept by plan**: 30 days on Free, 90 on Developer and 400 on Team
+  (`SLOTLOCK_CHANGE_RETENTION_BY_PLAN`), or `retentionDays` if longer; a tenant with no plan keeps
+  `retentionDays`. The workspace audit log keeps 180 days, or 400 on Team. The privacy notice says
+  so, and how an account holder answers a person's request themselves.
 
 - **The privacy notice lists contacts, busy time from other calendars, and payments for holds**,
   with how long each is kept: a contact until it is deleted; busy time 30 days after it ends; a

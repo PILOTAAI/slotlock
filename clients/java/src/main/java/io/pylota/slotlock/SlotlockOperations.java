@@ -110,6 +110,10 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_delete_webhook", new Operation("DELETE", "/v1/webhooks/{webhook_id}", List.of("webhook_id"), List.of("dry_run"))),
           Map.entry("slotlock_enable_webhook", new Operation("POST", "/v1/webhooks/{webhook_id}/enable", List.of("webhook_id"), List.of())),
           Map.entry("slotlock_get_usage", new Operation("GET", "/v1/usage", List.of(), List.of("from", "to"))),
+          Map.entry("slotlock_list_audit_events", new Operation("GET", "/v1/audit", List.of(), List.of("limit", "cursor", "action", "actor_ref"))),
+          Map.entry("slotlock_verify_audit_log", new Operation("GET", "/v1/audit/verify", List.of(), List.of())),
+          Map.entry("slotlock_export_subject", new Operation("POST", "/v1/subjects/export", List.of(), List.of())),
+          Map.entry("slotlock_erase_subject", new Operation("POST", "/v1/subjects/erase", List.of(), List.of())),
           Map.entry("slotlock_list_approval_policies", new Operation("GET", "/v1/approval-policies", List.of(), List.of())),
           Map.entry("slotlock_put_approval_policy", new Operation("PUT", "/v1/approval-policies/{policy_ref}", List.of("policy_ref"), List.of())),
           Map.entry("slotlock_delete_approval_policy", new Operation("DELETE", "/v1/approval-policies/{policy_ref}", List.of("policy_ref"), List.of("dry_run"))),
@@ -3562,6 +3566,139 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> getUsage() {
     return getUsage(null);
+  }
+
+  /**
+   * List audit events. The workspace audit log, newest first: who did what to its people, keys,
+   * webhooks, billing and settings, from where, and whether it was refused. Actors are references
+   * (github:&lt;id&gt;, api_key:&lt;id&gt;), never names. Each event carries its place in the
+   * tenant's hash chain and its hash (slotlock_verify_audit_log checks them). Only events of
+   * action or actor_ref when given; pass next_cursor as cursor for the next page, until it is
+   * null. Events are kept 180 days, 400 on the Team plan. Where hosted plans apply, the log is
+   * read this way on the Team plan only (403 team_plan_required).
+   *
+   * @param optional the optional arguments, or null: {@code limit} (integer), {@code cursor}
+   * (string), {@code action} (string), {@code actor_ref} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listAuditEvents(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("limit", "cursor", "action", "actor_ref"), "slotlock_list_audit_events");
+    return call("slotlock_list_audit_events", values);
+  }
+
+  /**
+   * List audit events. The workspace audit log, newest first: who did what to its people, keys,
+   * webhooks, billing and settings, from where, and whether it was refused. Actors are references
+   * (github:&lt;id&gt;, api_key:&lt;id&gt;), never names. Each event carries its place in the
+   * tenant's hash chain and its hash (slotlock_verify_audit_log checks them). Only events of
+   * action or actor_ref when given; pass next_cursor as cursor for the next page, until it is
+   * null. Events are kept 180 days, 400 on the Team plan. Where hosted plans apply, the log is
+   * read this way on the Team plan only (403 team_plan_required).
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listAuditEvents() {
+    return listAuditEvents(null);
+  }
+
+  /**
+   * Verify the audit log. Check the workspace audit log's hash chain from its oldest event kept:
+   * each event numbered after the one before, linked to its hash, and hashed over its own
+   * content. checked counts the events that held; broken_at is the number of the first that does
+   * not (an event changed, removed or reordered outside Slotlock), or null when every one does.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> verifyAuditLog() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_verify_audit_log", values);
+  }
+
+  /**
+   * Export a person's data. What the tenant keeps about one person, for an access request: the
+   * rows that name them, as kept, by table (contacts, calendar_event_attendees, calendar_events,
+   * reservations, reservation_tombstones, reservation_conflict_archive,
+   * calendar_event_tombstones, calendar_event_commands, waitlist_entries, approvals, outbox), up
+   * to 1,000 a table (truncated: true when a table had more). Name them by exactly one of email
+   * (contacts, event attendees and organizers, ignoring case), holder (holds, bookings and
+   * waitlist entries), contact (a contact's reference) or reference (a booking's or an event's).
+   * It lists what slotlock_erase_subject would delete or take them out of: the bookings, changes
+   * and approvals that name their contacts too. An event lists its time and title, and an
+   * approval its decision, never the other people they name. 400 invalid_subject when no
+   * identifier, or more than one, is given.
+   *
+   * @param optional the optional arguments, or null: {@code email} (string), {@code holder}
+   * (string), {@code contact} (string), {@code reference} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> exportSubject(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("email", "holder", "contact", "reference"), "slotlock_export_subject");
+    return call("slotlock_export_subject", values);
+  }
+
+  /**
+   * Export a person's data. What the tenant keeps about one person, for an access request: the
+   * rows that name them, as kept, by table (contacts, calendar_event_attendees, calendar_events,
+   * reservations, reservation_tombstones, reservation_conflict_archive,
+   * calendar_event_tombstones, calendar_event_commands, waitlist_entries, approvals, outbox), up
+   * to 1,000 a table (truncated: true when a table had more). Name them by exactly one of email
+   * (contacts, event attendees and organizers, ignoring case), holder (holds, bookings and
+   * waitlist entries), contact (a contact's reference) or reference (a booking's or an event's).
+   * It lists what slotlock_erase_subject would delete or take them out of: the bookings, changes
+   * and approvals that name their contacts too. An event lists its time and title, and an
+   * approval its decision, never the other people they name. 400 invalid_subject when no
+   * identifier, or more than one, is given.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> exportSubject() {
+    return exportSubject(null);
+  }
+
+  /**
+   * Erase a person. Take one person out of the tenant's data, for an erasure request, at once:
+   * their contacts, attendee entries and waitlist entries are deleted; their email leaves events'
+   * attendee and organizer lists and approvals' requests; their holder reference and booking
+   * reference become one erased-&lt;32 hex&gt; name wherever they were (holds, bookings, ended
+   * bookings, events, the change history, approvals), and their contact's reference leaves
+   * bookings and changes. Bookings stay, as time taken, and nobody is told: the feed gets no
+   * change. Name them as for slotlock_export_subject. erased counts, by table, the rows deleted
+   * or changed; erasing again changes nothing. Recorded in the audit log (subject.erased) without
+   * the identifier. 400 invalid_subject when no identifier, or more than one, is given.
+   *
+   * @param optional the optional arguments, or null: {@code email} (string), {@code holder}
+   * (string), {@code contact} (string), {@code reference} (string), {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> eraseSubject(Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    putOptional(values, optional, Set.of("email", "holder", "contact", "reference", "dry_run"), "slotlock_erase_subject");
+    return call("slotlock_erase_subject", values);
+  }
+
+  /**
+   * Erase a person. Take one person out of the tenant's data, for an erasure request, at once:
+   * their contacts, attendee entries and waitlist entries are deleted; their email leaves events'
+   * attendee and organizer lists and approvals' requests; their holder reference and booking
+   * reference become one erased-&lt;32 hex&gt; name wherever they were (holds, bookings, ended
+   * bookings, events, the change history, approvals), and their contact's reference leaves
+   * bookings and changes. Bookings stay, as time taken, and nobody is told: the feed gets no
+   * change. Name them as for slotlock_export_subject. erased counts, by table, the rows deleted
+   * or changed; erasing again changes nothing. Recorded in the audit log (subject.erased) without
+   * the identifier. 400 invalid_subject when no identifier, or more than one, is given.
+   *
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> eraseSubject() {
+    return eraseSubject(null);
   }
 
   /**
