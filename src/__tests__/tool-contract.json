@@ -3586,7 +3586,7 @@
     "annotations": {
       "title": "Update resource event",
       "readOnlyHint": false,
-      "destructiveHint": false,
+      "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": false
     },
@@ -4828,7 +4828,7 @@
     "annotations": {
       "title": "Reschedule an event",
       "readOnlyHint": false,
-      "destructiveHint": false,
+      "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": false
     },
