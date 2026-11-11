@@ -10,6 +10,9 @@ site/.astro/
 workers/dashboard/node_modules
 workers/dashboard/.dev.vars
 workers/dashboard/dist/
+workers/admin/node_modules
+workers/admin/.dev.vars
+workers/admin/dist/
 # Language clients' build output
 clients/rust/target/
 clients/java/build/

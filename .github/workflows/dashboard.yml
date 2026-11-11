@@ -1,17 +1,19 @@
-# Bundles the dashboard Worker (workers/dashboard) to check it builds. It never deploys and holds no
-# Cloudflare credentials: whoever runs the dashboard deploys it from their own pipeline, with their own
-# wrangler configuration and token (docs: "Dashboard on Cloudflare Workers"). A Workers deploy token
-# can replace the Worker and so read its session secret, which signs in as any tenant, so it belongs
-# with the deployment, not in this repository.
+# Bundles the dashboard Worker (workers/dashboard) and the admin console Worker (workers/admin) to
+# check they build. It never deploys and holds no Cloudflare credentials: whoever runs them deploys
+# them from their own pipeline, with their own wrangler configuration and token (docs: "Dashboard on
+# Cloudflare Workers"). A Workers deploy token can replace a Worker and so read its session secret,
+# which signs in as any tenant (or, for the console, as staff), so it belongs with the deployment,
+# not in this repository.
 #
 # Every action is pinned to the commit SHA site.yml uses (resolved on 2026-10-09). Wrangler is
-# pinned exactly in workers/dashboard/package-lock.json.
+# pinned exactly in workers/dashboard/package-lock.json and workers/admin/package-lock.json.
 name: Dashboard
 
 on:
   pull_request:
     paths:
       - "workers/dashboard/**"
+      - "workers/admin/**"
       - "src/**"
       - "package.json"
       - "package-lock.json"
@@ -20,6 +22,7 @@ on:
     branches: [main]
     paths:
       - "workers/dashboard/**"
+      - "workers/admin/**"
       - "src/**"
       - "package.json"
       - "package-lock.json"
@@ -52,4 +55,10 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Bundle the Worker
         working-directory: workers/dashboard
+        run: npm run check
+      - name: Install Wrangler for the admin console from the lockfile
+        working-directory: workers/admin
+        run: npm ci --no-audit --no-fund
+      - name: Bundle the admin console Worker
+        working-directory: workers/admin
         run: npm run check

@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phase 1 is in progress. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phase 1 is built (1a and 1b) and waits for its independent security review and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -510,6 +510,31 @@ so the estimates below include them.
 - **1b, the console:**
   - the Worker, with the Access check, sign-in and passkeys;
   - the pages for Home, Accounts, an account, staff and the staff log, with ⌘K.
+
+**Where Phase 1 stands.** Both parts are built and tested:
+
+- `src/admin/` holds the app, the pages, the passkey verifier (WebAuthn, ES256 and RS256, attestation
+  "none", user verification required) and the Access token verifier. `workers/admin` holds the
+  Worker and its example configuration. The Dashboard workflow bundles the Worker.
+- The end-to-end test (`admin-console.integration.test.ts`) runs against PostgreSQL. It drives
+  GitHub sign-in through a fake GitHub and a passkey through a software authenticator. It also
+  checks:
+  - which pages each role may open;
+  - the Origin and form-token checks;
+  - tampered, idle and removed-member sessions;
+  - what each step writes to the staff log.
+- The pages were checked in light and dark, at desktop and phone widths. axe found no violations.
+
+What is left before the console goes live:
+
+- the owner's Phase 0 settings: the Access application, the console's own GitHub OAuth app, a
+  Hyperdrive configuration for `slotlock_admin_app`, the Worker's secrets, and the first Owner from
+  `slotlock staff add`;
+- PRIVACY.md (staff access, GitHub profile lookups, how long the staff log is kept), posted 30 days
+  before it takes effect, as the notice itself promises;
+- the independent security review, recorded on the pull request.
+
+SECURITY.md already describes the console.
 
 The database keeps no GitHub login or email for a person, only the numeric id, and that does not
 change. The console reads logins from GitHub's public profile API when it shows or searches an

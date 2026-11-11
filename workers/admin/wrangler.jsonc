@@ -1,0 +1,63 @@
+// The admin console (src/admin/app.ts, RFC 0006) as a Worker: an example configuration to copy, and
+// the one this repository's Dashboard workflow bundles to check the Worker builds. Deploy it from your
+// own pipeline with your own Cloudflare credentials and your own values for everything marked below;
+// this repository never holds a deploy token.
+// Config reference: https://developers.cloudflare.com/workers/wrangler/configuration/ (read 2026-10-18).
+//
+// Before the first deploy:
+//   - `slotlock migrate` with SLOTLOCK_ADMIN_DATABASE_URL set, so the console's own database role
+//     exists with its grants (the admin functions, and no table);
+//   - a Hyperdrive configuration with caching disabled that connects AS THAT ROLE, never as the
+//     serving role or the schema owner; its id goes in `hyperdrive` below;
+//   - a Cloudflare Access self-hosted application for the hostname, allowing only Slotlock staff
+//     (by email or an identity provider group). Its Application Audience (AUD) tag and your team
+//     domain go in the vars below; the console refuses any request without a valid Access token;
+//   - a GitHub OAuth app of its own (not the dashboard's), with the callback
+//     https://<hostname>/callback;
+//   - the secrets, with `npx wrangler secret put <NAME>`:
+//       SLOTLOCK_ADMIN_GITHUB_CLIENT_ID      the console's GitHub OAuth app's Client ID
+//       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET  a client secret of that app
+//       SLOTLOCK_ADMIN_SESSION_SECRET        32+ random characters (openssl rand -hex 32); not the
+//                                            dashboard's
+//     and, optionally:
+//       SLOTLOCK_ADMIN_GITHUB_TOKEN          a fine-grained token with no permissions, to raise
+//                                            GitHub's rate limit on reading public profiles
+//   - the first Owner, as the schema owner: `slotlock staff add <github-id> owner`, which prints a
+//     one-time code to create their passkey.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-admin",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  // Yours: the console's hostname. Cloudflare Access must protect exactly this hostname.
+  "routes": [{ "pattern": "admin.example.com", "custom_domain": true }],
+  // No workers.dev or preview address: those would sit outside the Access application.
+  "workers_dev": false,
+  "preview_urls": false,
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Yours: the id of the Hyperdrive configuration that connects as the console's role.
+      "id": "set-this-to-the-admin-hyperdrive-configuration-id"
+    }
+  ],
+  "ratelimits": [
+    {
+      // Every request, per client address. The console answers 503 without it.
+      "name": "SLOTLOCK_ADMIN_RATE_LIMIT",
+      "namespace_id": "42001",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ],
+  "placement": { "mode": "smart" },
+  "vars": {
+    // Yours: this Worker's origin. Sessions, the GitHub callback and passkeys are bound to it.
+    "SLOTLOCK_ADMIN_PUBLIC_URL": "https://admin.example.com",
+    // Yours: the Access team domain, a bare host (<team>.cloudflareaccess.com), and the
+    // application's Application Audience (AUD) tag.
+    "SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "example.cloudflareaccess.com",
+    "SLOTLOCK_ADMIN_ACCESS_AUD": "set-this-to-the-access-application-aud"
+  },
+  // A sign-in callback's query holds its OAuth code and state: keep query strings out of the logs.
+  "observability": { "enabled": true, "redact_query_string": true }
+}

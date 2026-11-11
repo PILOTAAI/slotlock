@@ -182,6 +182,34 @@ never offered to agents over MCP or A2A. Every application operation checks the 
 only through row-level security: another tenant's resource or hold is not found even on a connection
 that bypasses RLS.
 
+## Admin console
+
+The people who run Slotlock Cloud use an admin console ([RFC 0006](docs/rfc/0006-admin-console.md),
+`src/admin/`, `workers/admin`) on its own hostname. It is the only place where staff can see more
+than one account at a time, so it sits behind three locks, and each one stops someone who got past
+the one before:
+
+- Cloudflare Access in front of the hostname. The console also checks Access's signed token on
+  every request itself, rather than trusting that a request came through Access.
+- GitHub sign-in, with state and PKCE and no scope. The database maps the GitHub id to an active
+  staff member.
+- A passkey with user verification before any page that shows data. A staff member's first passkey
+  needs a one-time code from `slotlock staff add` or `reset`. The database stores only the code's
+  digest, and the code can be used once, for two days.
+
+The session is a signed `__Host-` cookie. It lasts 8 hours at most and ends after 30 minutes idle.
+Every POST checks its Origin and a token bound to the session. The console connects to the database
+as its own role (`SLOTLOCK_ADMIN_DATABASE_URL`), which can read no table. It can only run the admin
+functions, and each of those checks the staff member's role again and records the call in a
+hash-chained staff log. The log only grows: an erasure never removes it.
+
+Staff are added, have their role changed and are removed only with the deployment role's
+credentials (`slotlock staff`), never from the console. The console shows account metadata: plan,
+usage, key prefixes and the audit log. It never shows booking titles, descriptions or attendees.
+
+Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
+anyone who is not staff.
+
 ## Dependencies
 
 The published package depends on `ical.js`, `rrule` and `zod`, and on `postgres` as a peer; the
