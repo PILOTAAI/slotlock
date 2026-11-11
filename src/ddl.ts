@@ -281,7 +281,7 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.invitation_preview(bytea)',
   'slotlock.accept_invitation(bytea, uuid, text, text[], integer)',
   'slotlock.revoke_invitation(text, text, uuid)',
-  'slotlock.resend_invitation(text, text, uuid, bytea, integer, integer)',
+  'slotlock.resend_invitation(text, text, uuid, bytea, integer, integer, integer)',
   'slotlock.change_member_role(text, text, text, text)',
   'slotlock.remove_member(text, text, text)',
   'slotlock.pending_invitations_for(text, text[])',
@@ -1650,10 +1650,15 @@ BEGIN
     RETURN QUERY SELECT NULL::uuid, 'already_member'::text;
     RETURN;
   END IF;
+  -- The team's invitations a day, and the inviter's across every team they are in.
   IF requested_daily_limit IS NOT NULL AND (
-    SELECT count(*) FROM slotlock.workspace_invitations sent
-     WHERE sent.tenant_ref = requested_tenant AND sent.sent_at > statement_timestamp() - interval '1 day'
-  ) >= requested_daily_limit THEN
+    (SELECT count(*) FROM slotlock.workspace_invitations sent
+      WHERE sent.tenant_ref = requested_tenant AND sent.sent_at > statement_timestamp() - interval '1 day')
+      >= requested_daily_limit
+    OR (SELECT count(*) FROM slotlock.workspace_invitations sent
+         WHERE sent.inviter_ref = requested_inviter AND sent.sent_at > statement_timestamp() - interval '1 day')
+      >= requested_daily_limit
+  ) THEN
     RETURN QUERY SELECT NULL::uuid, 'invitation_limit'::text;
     RETURN;
   END IF;
@@ -1818,16 +1823,20 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_revoke_invitation$
 DECLARE
+  actor_role text;
   changed integer;
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM slotlock.workspace_memberships member
-                  WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor
-                    AND member.status = 'active' AND member.role IN ('owner', 'admin')) THEN
+  PERFORM 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant AND ws.status = 'active' FOR UPDATE;
+  IF NOT FOUND THEN
     RETURN false;
   END IF;
+  SELECT member.role INTO actor_role FROM slotlock.workspace_memberships member
+   WHERE member.tenant_ref = requested_tenant AND member.person_ref = requested_actor AND member.status = 'active';
+  -- Only an invitation whose role the actor could give: an Admin never withdraws an Owner's.
   UPDATE slotlock.workspace_invitations invitation SET revoked_at = statement_timestamp()
    WHERE invitation.id = requested_id AND invitation.tenant_ref = requested_tenant
-     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL;
+     AND invitation.accepted_at IS NULL AND invitation.revoked_at IS NULL
+     AND actor_role IS NOT NULL AND slotlock.workspace_may_grant(actor_role, invitation.role);
   GET DIAGNOSTICS changed = ROW_COUNT;
   RETURN changed > 0;
 END
@@ -1838,7 +1847,7 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[18]} FROM PUBLIC;
 -- within the daily limit. The old token stops working.
 CREATE OR REPLACE FUNCTION slotlock.resend_invitation(
   requested_tenant text, requested_actor text, requested_id uuid, requested_token bytea,
-  requested_days integer, requested_daily_limit integer)
+  requested_days integer, requested_daily_limit integer, requested_member_cap integer)
 RETURNS text
 LANGUAGE plpgsql
 VOLATILE
@@ -1869,10 +1878,25 @@ BEGIN
     RETURN 'not_allowed';
   END IF;
   IF requested_daily_limit IS NOT NULL AND (
-    SELECT count(*) FROM slotlock.workspace_invitations sent
-     WHERE sent.tenant_ref = requested_tenant AND sent.sent_at > statement_timestamp() - interval '1 day'
-  ) >= requested_daily_limit THEN
+    (SELECT count(*) FROM slotlock.workspace_invitations sent
+      WHERE sent.tenant_ref = requested_tenant AND sent.sent_at > statement_timestamp() - interval '1 day')
+      >= requested_daily_limit
+    OR (SELECT count(*) FROM slotlock.workspace_invitations sent
+         WHERE sent.inviter_ref = requested_actor AND sent.sent_at > statement_timestamp() - interval '1 day')
+      >= requested_daily_limit
+  ) THEN
     RETURN 'invitation_limit';
+  END IF;
+  -- Sent again, it is open again: held to the cap with the members and the other open invitations.
+  IF requested_member_cap IS NOT NULL AND
+     (SELECT count(*) FROM slotlock.workspace_memberships member
+       WHERE member.tenant_ref = requested_tenant AND member.status = 'active')
+     + (SELECT count(*) FROM slotlock.workspace_invitations pending
+         WHERE pending.tenant_ref = requested_tenant AND pending.id <> requested_id
+           AND pending.accepted_at IS NULL AND pending.revoked_at IS NULL
+           AND pending.expires_at > statement_timestamp())
+     >= requested_member_cap THEN
+    RETURN 'member_cap';
   END IF;
   UPDATE slotlock.workspace_invitations invitation
      SET token_sha256 = requested_token, sent_at = statement_timestamp(), inviter_ref = requested_actor,
@@ -2865,7 +2889,14 @@ BEGIN
       USING ERRCODE = 'object_in_use', HINT = 'billing_active';
   END IF;
   -- Erasing a person never takes other people's workspace with it: a team's only Owner hands it
-  -- on, or deletes it, first.
+  -- on, or deletes it, first. The teams they own are locked first, as every change to a team's
+  -- people locks it, so an Owner leaving meanwhile waits, and this check sees what it left.
+  PERFORM 1 FROM slotlock.workspaces ws
+   WHERE ws.tenant_ref IN (SELECT mine.tenant_ref FROM slotlock.workspace_memberships mine
+                            WHERE mine.person_ref = requested_tenant_ref AND mine.status = 'active'
+                              AND mine.role = 'owner')
+   ORDER BY ws.tenant_ref
+   FOR UPDATE;
   IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' AND EXISTS (
     SELECT 1 FROM slotlock.workspace_memberships mine
       JOIN slotlock.workspaces ws ON ws.tenant_ref = mine.tenant_ref AND ws.status = 'active'

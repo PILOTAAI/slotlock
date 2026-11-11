@@ -128,7 +128,11 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const page = await response.text();
     const link = /<code id="invite-link">([^<]+)<\/code>/.exec(page)?.[1];
     expect(link, 'the invitation link').toBeDefined();
-    return new URL(link as string).pathname;
+    // The token rides in the query, which request logs leave out, never in the path.
+    const parsed = new URL((link as string).replaceAll('&amp;', '&'));
+    expect(parsed.pathname).toBe('/dashboard/invite');
+    expect(parsed.searchParams.get('t')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    return `${parsed.pathname}${parsed.search}`;
   };
   const teamOf = async (browser: Browser) => {
     const page = await (await browser.get('/dashboard/teams')).text();

@@ -6394,7 +6394,7 @@ ${
     });
     if ('refusal' in sent) return refusalPage(session, sent.refusal);
     await audit(session, { action: 'member.invited', targetType: 'invitation', targetRef: sent.id, metadata: { role } }, tenantRef);
-    const link = `${publicRoot}/invite/${raw}`;
+    const link = `${publicRoot}/invite?t=${raw}`;
     const expiresAt = new Date(now() + INVITATION_DAYS * DAY_MS);
     const delivered = await deliverInvitation(session, email, role, link, expiresAt);
     return settingsPage(
@@ -6414,11 +6414,19 @@ ${
     const invitation = (await teamStore.invitations(tenantRef)).find((candidate) => candidate.id === id);
     if (!invitation) return refusalPage(session, 'not_found');
     const raw = randomBytes(32).toString('base64url');
-    const refusal = await teamStore.resend(tenantRef, personOf(session), id, tokenDigest(raw), INVITATION_DAYS, INVITATION_DAILY_LIMIT);
+    const refusal = await teamStore.resend(
+      tenantRef,
+      personOf(session),
+      id,
+      tokenDigest(raw),
+      INVITATION_DAYS,
+      INVITATION_DAILY_LIMIT,
+      await memberCapOf(tenantRef),
+    );
     if (refusal) return refusalPage(session, refusal);
     await audit(session, { action: 'invitation.resent', targetType: 'invitation', targetRef: id }, tenantRef);
     const to = invitation.email ?? `@${invitation.githubLogin ?? 'GitHub account'}`;
-    const link = `${publicRoot}/invite/${raw}`;
+    const link = `${publicRoot}/invite?t=${raw}`;
     const expiresAt = new Date(now() + INVITATION_DAYS * DAY_MS);
     const delivered = invitation.email !== null && (await deliverInvitation(session, invitation.email, invitation.role, link, expiresAt));
     return settingsPage(
@@ -7640,6 +7648,17 @@ ${
             }
             case '/invite': {
               if (!teamStore) return nothingHere404();
+              // An invitation's link: its token (in the query, which request logs leave out) is kept
+              // in this browser for the sign-in that accepts it, and nothing else; opening it twice
+              // (a link scanner, a preview) consumes nothing.
+              const raw = url.searchParams.get('t');
+              if (raw !== null) {
+                if (!INVITE_TOKEN.test(raw)) return nothingHere404();
+                const opened = seal('slotlock-dashboard-invite-v1', { t: raw, exp: now() + INVITE_LINK_TTL_MS });
+                return respond(303, '', { Location: `${root}/invite`, 'Referrer-Policy': 'no-referrer' }, [
+                  setCookie(INVITE_COOKIE, opened, INVITE_LINK_TTL_MS / 1000),
+                ]);
+              }
               const session = await readSession(request);
               return await invitePage(session, inviteTokenOf(request), 200, undefined, url.searchParams.get('checked') === '1');
             }
@@ -7667,16 +7686,6 @@ ${
               return authorizePage(session, route) ?? (await locationsPage(session));
             }
             default: {
-              // An invitation's link: kept in this browser for the sign-in that accepts it, and
-              // nothing else; opening it twice (a link scanner, a preview) consumes nothing.
-              if (route.startsWith('/invite/')) {
-                const raw = route.slice('/invite/'.length);
-                if (!teamStore || !INVITE_TOKEN.test(raw)) return nothingHere404();
-                const opened = seal('slotlock-dashboard-invite-v1', { t: raw, exp: now() + INVITE_LINK_TTL_MS });
-                return respond(303, '', { Location: `${root}/invite`, 'Referrer-Policy': 'no-referrer' }, [
-                  setCookie(INVITE_COOKIE, opened, INVITE_LINK_TTL_MS / 1000),
-                ]);
-              }
               const resourceId = RESOURCE_PAGE.exec(route)?.[1];
               if (resourceId !== undefined) {
                 const session = await readSession(request);

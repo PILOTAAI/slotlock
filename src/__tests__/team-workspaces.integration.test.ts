@@ -237,15 +237,16 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
   });
 
   it('holds sending to the daily limit, and a re-sent invitation drops its old token', async () => {
-    const tenantRef = await team(ada);
+    // Lou has sent no invitations elsewhere: the limit counts the team's and the inviter's.
+    const tenantRef = await team(lou);
     const limit = { dailyLimit: 2 };
-    const first = await invite(tenantRef, ada, { email: 'a@example.com' }, 'member', limit);
-    expect((await invite(tenantRef, ada, { email: 'b@example.com' }, 'member', limit)).result).toHaveProperty('id');
-    expect((await invite(tenantRef, ada, { email: 'c@example.com' }, 'member', limit)).result).toEqual({ refusal: 'invitation_limit' });
+    const first = await invite(tenantRef, lou, { email: 'a@example.com' }, 'member', limit);
+    expect((await invite(tenantRef, lou, { email: 'b@example.com' }, 'member', limit)).result).toHaveProperty('id');
+    expect((await invite(tenantRef, lou, { email: 'c@example.com' }, 'member', limit)).result).toEqual({ refusal: 'invitation_limit' });
     const id = (first.result as { id: string }).id;
     const fresh = token();
-    expect(await teams.resend(tenantRef, ada, id, fresh.digest, 7, 2)).toBe('invitation_limit');
-    expect(await teams.resend(tenantRef, ada, id, fresh.digest, 7, null)).toBeNull();
+    expect(await teams.resend(tenantRef, lou, id, fresh.digest, 7, 2, null)).toBe('invitation_limit');
+    expect(await teams.resend(tenantRef, lou, id, fresh.digest, 7, null, null)).toBeNull();
     expect(await teams.preview(first.digest)).toBeNull();
     expect(await teams.accept({ tokenSha256: first.digest, person: bea, emails: ['a@example.com'], memberCap: null })).toEqual({ refusal: 'not_found' });
     expect(await teams.accept({ tokenSha256: fresh.digest, person: bea, emails: ['a@example.com'], memberCap: null })).toEqual({ tenantRef });
@@ -273,8 +274,8 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     // Ada, Owner of hers, reaching into Bea's with Bea's invitation and people.
     expect(await teams.revoke(mine, ada, id)).toBe(false);
     expect(await teams.revoke(theirs, ada, id)).toBe(false);
-    expect(await teams.resend(mine, ada, id, token().digest, 7, null)).toBe('not_found');
-    expect(await teams.resend(theirs, ada, id, token().digest, 7, null)).toBe('not_allowed');
+    expect(await teams.resend(mine, ada, id, token().digest, 7, null, null)).toBe('not_found');
+    expect(await teams.resend(theirs, ada, id, token().digest, 7, null, null)).toBe('not_allowed');
     expect(await teams.changeRole(theirs, ada, bea, 'viewer')).toBe('not_allowed');
     expect(await teams.remove(theirs, ada, bea)).toBe('not_found');
     expect((await invite(theirs, ada, { email: 'w@example.com' }, 'member')).result).toEqual({ refusal: 'not_allowed' });
@@ -282,6 +283,66 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     expect((await teams.preview(sent.digest))?.state).toBe('pending');
     expect(await teams.revoke(theirs, bea, id)).toBe(true);
     expect((await teams.preview(sent.digest))?.state).toBe('revoked');
+  });
+
+  it("lets an Admin revoke only the invitations whose role they could give", async () => {
+    const tenantRef = await team(ada);
+    await join(tenantRef, ada, bea, 'admin');
+    const toOwner = await invite(tenantRef, ada, { email: 'boss@example.com' }, 'owner');
+    const toBilling = await invite(tenantRef, ada, { email: 'books@example.com' }, 'billing');
+    const toMember = await invite(tenantRef, ada, { email: 'desk@example.com' }, 'member');
+    expect(await teams.revoke(tenantRef, bea, (toOwner.result as { id: string }).id)).toBe(false);
+    expect(await teams.revoke(tenantRef, bea, (toBilling.result as { id: string }).id)).toBe(false);
+    expect((await teams.preview(toOwner.digest))?.state).toBe('pending');
+    expect(await teams.revoke(tenantRef, bea, (toMember.result as { id: string }).id)).toBe(true);
+    expect(await teams.revoke(tenantRef, ada, (toOwner.result as { id: string }).id)).toBe(true);
+  });
+
+  it('holds sending again to the member cap, and each inviter to the daily limit across their teams', async () => {
+    const tenantRef = await team(gus);
+    const cap = { memberCap: 3 };
+    await invite(tenantRef, gus, { email: 'x@example.com' }, 'member', cap);
+    const lapsed = await invite(tenantRef, gus, { email: 'y@example.com' }, 'member', cap);
+    const id = (lapsed.result as { id: string }).id;
+    await admin`UPDATE slotlock.workspace_invitations SET expires_at = now() - interval '1 hour', created_at = now() - interval '8 days' WHERE id = ${id}::uuid`;
+    expect((await invite(tenantRef, gus, { email: 'z@example.com' }, 'member', cap)).result).toHaveProperty('id');
+    // y's lapsed invitation would make four: sending it again is refused.
+    expect(await teams.resend(tenantRef, gus, id, token().digest, 7, null, 3)).toBe('member_cap');
+    expect((await teams.preview(lapsed.digest))?.state).toBe('expired');
+    expect(await teams.resend(tenantRef, gus, id, token().digest, 7, null, null)).toBeNull();
+
+    // One person across two teams: the daily limit is theirs as well as each team's.
+    const other = await team(gus);
+    const limit = { dailyLimit: 6 };
+    for (const n of [1, 2, 3]) expect((await invite(other, gus, { email: `o${n}@example.com` }, 'member', limit)).result).toHaveProperty('id');
+    // gus has sent 6 today, 3 here and 3 in the first team.
+    expect((await invite(other, gus, { email: 'o4@example.com' }, 'member', limit)).result).toEqual({ refusal: 'invitation_limit' });
+  });
+
+  it('keeps an Owner when an Owner is erased while another leaves', async () => {
+    const tenantRef = await team(ivy);
+    await join(tenantRef, ivy, jo, 'owner');
+    await join(tenantRef, ivy, kim, 'owner');
+    expect(await teams.remove(tenantRef, ivy, ivy)).toBeNull();
+    // Jo's erasure holds its transaction open; Kim leaves meanwhile.
+    const held = postgres(url as string, { max: 1, onnotice: () => {} });
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const erasing = held.begin(async (sql) => {
+      await sql`SELECT * FROM slotlock.erase_tenant(${jo}::text)`;
+      await gate;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const leaving = teams.remove(tenantRef, kim, kim);
+    const early = await Promise.race([leaving, new Promise((resolve) => setTimeout(() => resolve('waiting'), 500))]);
+    expect(early).toBe('waiting');
+    release();
+    await erasing;
+    await held.end();
+    expect(await leaving).toBe('last_owner');
+    expect((await teams.members(tenantRef)).filter((member) => member.role === 'owner').map((member) => member.person)).toEqual([kim]);
   });
 
   it("keeps team tables to their functions: the serving role can't read or write them", async () => {

@@ -137,7 +137,16 @@ export interface SlotlockWorkspaceTeams {
     memberCap: number | null;
   }): Promise<{ tenantRef: string } | { refusal: SlotlockTeamRefusal }>;
   revoke(tenantRef: string, actor: string, id: string): Promise<boolean>;
-  resend(tenantRef: string, actor: string, id: string, tokenSha256: Buffer, days: number, dailyLimit: number | null): Promise<SlotlockTeamRefusal | null>;
+  /** Send again with a new token (the old stops working), held to the limits a new one is. */
+  resend(
+    tenantRef: string,
+    actor: string,
+    id: string,
+    tokenSha256: Buffer,
+    days: number,
+    dailyLimit: number | null,
+    memberCap: number | null,
+  ): Promise<SlotlockTeamRefusal | null>;
   changeRole(tenantRef: string, actor: string, person: string, role: SlotlockWorkspaceRole): Promise<SlotlockTeamRefusal | null>;
   /** Remove a member; the actor removing themselves leaves. */
   remove(tenantRef: string, actor: string, person: string): Promise<SlotlockTeamRefusal | null>;
@@ -318,11 +327,11 @@ function createTeams(sql: SlotlockSql): SlotlockWorkspaceTeams {
         SELECT slotlock.revoke_invitation(${tenantRef}::text, ${actor}::text, ${id}::uuid) AS revoked`;
       return row?.revoked === true;
     },
-    async resend(tenantRef, actor, id, tokenSha256, days, dailyLimit) {
+    async resend(tenantRef, actor, id, tokenSha256, days, dailyLimit, memberCap) {
       if (!UUID.test(id)) return 'not_found';
       const [row] = await sql<{ refusal: string | null }[]>`
         SELECT slotlock.resend_invitation(${tenantRef}::text, ${actor}::text, ${id}::uuid,
-          ${digest(tokenSha256)}::bytea, ${days}::integer, ${dailyLimit}::integer) AS refusal`;
+          ${digest(tokenSha256)}::bytea, ${days}::integer, ${dailyLimit}::integer, ${memberCap}::integer) AS refusal`;
       return refusalOf(row?.refusal);
     },
     async changeRole(tenantRef, actor, person, role) {
