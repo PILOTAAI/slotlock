@@ -376,6 +376,8 @@ const ALTERNATIVE_REFUSALS: ReadonlySet<string> = new Set([
   'booking_rule_max_advance',
   'booking_rule_slot_step',
   'booking_rule_outside_hours',
+  'booking_rule_pickup_time',
+  'booking_rule_return_time',
 ]);
 /** At most this many alternatives, the earliest first. */
 export const SLOTLOCK_MAX_ALTERNATIVES = 3;
@@ -424,7 +426,8 @@ async function alternativesFor(
       {
         resource_ids: resourceIds,
         start: new Date(from).toISOString(),
-        end: new Date(from + ALTERNATIVES_WINDOW_MS).toISOString(),
+        // Starts over the next seven days, however long the booking runs.
+        end: new Date(from + ALTERNATIVES_WINDOW_MS + durationMs).toISOString(),
         duration_minutes: durationMs / 60_000,
         limit: SLOTLOCK_MAX_ALTERNATIVES,
         ...(want.needed !== undefined ? { require_free: Math.min(want.needed, resourceIds.length) } : {}),

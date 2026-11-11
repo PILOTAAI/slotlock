@@ -39,6 +39,7 @@ import {
   type SlotlockBookingRule,
   type SlotlockBookingRules,
   bookingSearch,
+  hoursApplyOf,
   bookingSearchBlocked,
   bookingSearchReach,
 } from './booking-rules.js';
@@ -596,6 +597,57 @@ async function overlapDetails(
     ...(booking.status === 'held' && booking.holderRef === owner ? { conflicting_hold_id: booking.id } : {}),
     ...(booking.eventRef !== null && booking.eventOwnerRef === owner ? { conflicting_event_id: booking.eventRef } : {}),
   };
+}
+
+/**
+ * Slots on a resource whose hours hold a hire only at its ends (`hoursApply`): up to `limit` of
+ * `durationMs` from `from` to the window's end, each the range search's earliest after the last,
+ * so a slot may run from one local day to another and is judged as a write of it is.
+ */
+async function rangedSlots(
+  tenantStore: SlotlockTenantStore,
+  context: SlotlockAgentInvocationContext,
+  resource: SlotlockResource,
+  window: Interval,
+  from: number,
+  durationMs: number,
+  busy: readonly Interval[],
+  limit: number,
+  availabilityRules: (context: SlotlockAgentInvocationContext, resource: SlotlockResource) => Promise<WeeklyAvailabilityRule[]>,
+): Promise<Interval[]> {
+  const fallback =
+    resource.availabilityRules === undefined && resource.inheritedAvailability === undefined
+      ? await availabilityRules(context, resource)
+      : [];
+  const exceptions =
+    (
+      await tenantStore.availabilityExceptionsFor({
+        tenantRef: context.principal.tenantRef,
+        resourceIds: [resource.id],
+        window: { start: new Date(window.start.getTime() - 86_400_000), end: new Date(window.end.getTime() + 86_400_000) },
+      })
+    ).get(resource.id) ?? [];
+  const rules = { ...resource.effectiveBookingRules, allowedDurations: [Math.round(durationMs / 60_000)] };
+  const hours = applicableHours(resource, fallback).rules;
+  const now = new Date();
+  const lastStart = window.end.getTime() - durationMs;
+  const slots: Interval[] = [];
+  for (let start = from; slots.length < limit && start <= lastStart; ) {
+    const range = findEarliestRange({
+      busy,
+      rules,
+      timezone: resource.timezone,
+      hours,
+      exceptions,
+      now,
+      pickup: { start: new Date(start), end: new Date(lastStart) },
+      return: { start: new Date(start + durationMs), end: window.end },
+    });
+    if (!range) break;
+    slots.push(range);
+    start = range.end.getTime();
+  }
+  return slots;
 }
 
 /** Resource and event ids: the UUIDs the store issues and validates. */
@@ -1457,6 +1509,12 @@ export function createSlotlockStoreAgentBackend(
         charge(freeBusy.busy.length);
         if (freeBusy.coverage.state !== 'complete') return { slots: [], certain: false };
         if (!search) return { slots: [], certain: true };
+        // Where the hours hold a hire only at its ends (hoursApply), a slot may run from one local
+        // day to another: each from the range search, judged as a write of it is.
+        if (hoursApplyOf(resource.effectiveBookingRules) === 'ends') {
+          const ranged = await rangedSlots(tenantStore, context, resource, window, search.window.start.getTime(), durationMs, freeBusy.busy, input.limit, options.availabilityRules);
+          return { slots: ranged.map((slot) => ({ start: slot.start.toISOString(), end: slot.end.toISOString() })), certain: true };
+        }
         const windows =
           (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
         if (windows.length > MAX_REQUEST_RULE_WINDOWS) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
@@ -1609,16 +1667,22 @@ export function createSlotlockStoreAgentBackend(
             continue;
           }
           if (!search) continue;
-          const windows =
-            (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
-          windowsLeft -= windows.length;
-          if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
-          const candidate = findNextAvailable({
-            busy: bookingSearchBlocked(freeBusy.busy, search),
-            windows,
-            durationMs,
-            ...(search.align ? { align: search.align } : {}),
-          });
+          let candidate: Interval | null;
+          if (hoursApplyOf(resource.effectiveBookingRules) === 'ends') {
+            // A slot may run from one local day to another: the range search's earliest.
+            [candidate = null] = await rangedSlots(tenantStore, context, resource, window, search.window.start.getTime(), durationMs, freeBusy.busy, 1, options.availabilityRules);
+          } else {
+            const windows =
+              (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
+            windowsLeft -= windows.length;
+            if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+            candidate = findNextAvailable({
+              busy: bookingSearchBlocked(freeBusy.busy, search),
+              windows,
+              durationMs,
+              ...(search.align ? { align: search.align } : {}),
+            });
+          }
           if (
             candidate &&
             (!best ||
@@ -2660,6 +2724,7 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.defaultDurationMinutes !== undefined ? { default_duration_minutes: rules.defaultDurationMinutes } : {}),
     ...(rules.pickupTimes !== undefined ? { pickup_times: dayWindowsOutput(rules.pickupTimes) } : {}),
     ...(rules.returnTimes !== undefined ? { return_times: dayWindowsOutput(rules.returnTimes) } : {}),
+    ...(rules.hoursApply !== undefined ? { hours_apply: rules.hoursApply } : {}),
     ...(rules.cancelCutoffMinutes !== undefined ? { cancel_cutoff_minutes: rules.cancelCutoffMinutes } : {}),
     ...(rules.rescheduleCutoffMinutes !== undefined ? { reschedule_cutoff_minutes: rules.rescheduleCutoffMinutes } : {}),
     ...(rules.cancellationFee !== undefined
@@ -2705,6 +2770,7 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   }
   if (input.pickup_times !== undefined) rules.pickupTimes = dayWindowsInput(input.pickup_times);
   if (input.return_times !== undefined) rules.returnTimes = dayWindowsInput(input.return_times);
+  if (input.hours_apply === 'whole' || input.hours_apply === 'ends') rules.hoursApply = input.hours_apply;
   if (input.cancel_cutoff_minutes !== undefined) rules.cancelCutoffMinutes = input.cancel_cutoff_minutes as number;
   if (input.reschedule_cutoff_minutes !== undefined) {
     rules.rescheduleCutoffMinutes = input.reschedule_cutoff_minutes as number;

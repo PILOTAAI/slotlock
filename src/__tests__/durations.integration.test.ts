@@ -165,6 +165,45 @@ describe.skipIf(!url)('durations and hires (real Postgres)', () => {
     ).toBe('invalid_arguments');
   });
 
+  it('finds slots across days where the hours hold a hire at its ends, and offers them for a refused pick-up', async () => {
+    const van = await resource('van-ends');
+    const truck = await resource('truck-whole');
+    expect(
+      (await call('PUT', `/v1/resources/${van}/booking-rules`, {
+        rules: { enforce_hours: true, hours_apply: 'ends', pickup_times: [{ start_minutes: 9 * 60, duration_minutes: 3 * 60 }] },
+      })).status,
+    ).toBe(200);
+    expect((await call('PUT', `/v1/resources/${truck}/booking-rules`, { rules: { enforce_hours: true, hours_apply: 'whole' } })).status).toBe(200);
+    const twoDays = 2 * 1_440;
+    const slots = await agent('slotlock_find_available_slots', {
+      resource_ids: [van],
+      start: iso(friday),
+      end: iso(friday + 6 * DAY),
+      duration_minutes: twoDays,
+      limit: 2,
+    });
+    // Each from a pick-up time, ending inside the hours (08:00-18:00) two days later.
+    expect(slots.data?.slots).toEqual([
+      { resource_id: van, start: iso(friday + 9 * HOUR), end: iso(friday + 2 * DAY + 9 * HOUR) },
+      { resource_id: van, start: iso(friday + 2 * DAY + 9 * HOUR), end: iso(friday + 4 * DAY + 9 * HOUR) },
+    ]);
+    expect(
+      (await agent('slotlock_find_next_available', { resource_ids: [van], start: iso(friday), end: iso(friday + 6 * DAY), duration_minutes: twoDays }))
+        .data,
+    ).toMatchObject({ resource_id: van, start: iso(friday + 9 * HOUR), end: iso(friday + 2 * DAY + 9 * HOUR) });
+    // A pick-up outside the pick-up times is refused with the earliest hires of its length after it.
+    const refused = (await book(van, friday + 13 * HOUR, friday + 2 * DAY + 13 * HOUR)) as { ok: boolean; code?: string; alternatives?: unknown[] };
+    expect(refused).toMatchObject({ ok: false, code: 'booking_rule_pickup_time' });
+    expect(refused.alternatives?.[0]).toEqual({ resource_id: van, start: iso(friday + DAY + 9 * HOUR), end: iso(friday + 3 * DAY + 9 * HOUR) });
+    expect(await book(van, friday + 9 * HOUR, friday + 2 * DAY + 9 * HOUR)).toMatchObject({ ok: true });
+    // Held wholly to its hours, a two-day hire fits nowhere, in the search as in the write.
+    expect(
+      (await agent('slotlock_find_available_slots', { resource_ids: [truck], start: iso(friday), end: iso(friday + 6 * DAY), duration_minutes: twoDays, limit: 2 }))
+        .data?.slots,
+    ).toEqual([]);
+    expect(await book(truck, friday + 9 * HOUR, friday + 2 * DAY + 9 * HOUR)).toMatchObject({ ok: false, code: 'booking_rule_outside_hours' });
+  });
+
   it('offers the usual length when a search names none, and only allowed lengths', async () => {
     const desk = await resource('desk-1');
     const bare = await resource('desk-2');

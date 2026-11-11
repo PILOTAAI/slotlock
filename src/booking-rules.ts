@@ -48,6 +48,14 @@ export interface SlotlockBookingRules {
   /** Such a booking ends inside one of these windows of the day, alike. */
   returnTimes?: SlotlockDayWindow[];
   /**
+   * How the bookable hours hold a booking from one local day to another (a hire): `whole`, every
+   * minute of it inside them; `ends`, only its start and end, the resource being out between. A
+   * booking within one day lies inside them either way. By default `ends` where `pickupTimes` or
+   * `returnTimes` are given, else `whole`. Writes are held to it under `enforceHours`; searches
+   * (slots and ranges) follow it always.
+   */
+  hoursApply?: SlotlockHoursApply;
+  /**
    * A booking is cancelled at least this many minutes before it starts (RFC 0004 B5): 0-525,600.
    * Later, cancelling it is refused (`cancel_cutoff`) unless an admin overrides with a reason.
    */
@@ -128,6 +136,20 @@ export const SLOTLOCK_MAX_ALLOWED_DURATIONS = 20;
 /** Windows `pickupTimes` and `returnTimes` may each hold. */
 export const SLOTLOCK_MAX_DAY_WINDOWS = 4;
 const LIST_RULES = new Set(['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee']);
+
+/** How the hours hold a hire (`hoursApply`). */
+export type SlotlockHoursApply = 'whole' | 'ends';
+
+/** The `hoursApply` a resource's rules mean: as given, else `ends` with pick-up or return times. */
+export function hoursApplyOf(rules: SlotlockBookingRules | undefined): SlotlockHoursApply {
+  if (rules?.hoursApply !== undefined) return rules.hoursApply;
+  return rules?.pickupTimes !== undefined || rules?.returnTimes !== undefined ? 'ends' : 'whole';
+}
+
+function parseHoursApply(value: unknown): SlotlockHoursApply {
+  if (value !== 'whole' && value !== 'ends') throw new TypeError("Slotlock booking rule hoursApply must be 'whole' or 'ends'");
+  return value;
+}
 
 /** `cancellationFee` from untrusted input, or a TypeError. */
 function parseCancellationFee(value: unknown): SlotlockCancellationFee {
@@ -262,10 +284,11 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
   const input = value as Record<string, unknown>;
   const rules: SlotlockBookingRules = {};
   for (const key of Object.keys(input)) {
-    if (!(key in LIMITS) && key !== 'enforceHours' && key !== 'requireCertain' && !LIST_RULES.has(key)) {
+    if (!(key in LIMITS) && key !== 'enforceHours' && key !== 'requireCertain' && key !== 'hoursApply' && !LIST_RULES.has(key)) {
       throw new TypeError(`Slotlock booking rules have no ${key}`);
     }
   }
+  if (input.hoursApply !== undefined) rules.hoursApply = parseHoursApply(input.hoursApply);
   if (input.allowedDurations !== undefined) rules.allowedDurations = parseAllowedDurations(input.allowedDurations);
   if (input.cancellationFee !== undefined) rules.cancellationFee = parseCancellationFee(input.cancellationFee);
   if (input.pickupTimes !== undefined) rules.pickupTimes = parseDayWindows('pickupTimes', input.pickupTimes);
@@ -316,6 +339,11 @@ export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBoo
   for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
     if (key === 'enforceHours' || key === 'requireCertain') {
       if (typeof field === 'boolean') rules[key] = field;
+      else dropped.push(key);
+      continue;
+    }
+    if (key === 'hoursApply') {
+      if (field === 'whole' || field === 'ends') rules.hoursApply = field;
       else dropped.push(key);
       continue;
     }
@@ -447,7 +475,8 @@ export function withinDayWindows(
  * The rule a booking of `interval` made at `now` breaks, or null. `hours` (the resource's own, else
  * inherited, else the default) and `exceptions` are read only when enforced. A hire (a booking from
  * one local day to another) under `pickupTimes` or `returnTimes` starts and ends in them, and under
- * `enforceHours` only its start and end must lie inside the hours: the resource is out between.
+ * `enforceHours` lies inside the hours as `hoursApply` says: wholly, or only at its start and end
+ * (the resource being out between).
  */
 export function bookingRuleBroken(params: {
   rules: SlotlockBookingRules | undefined;
@@ -477,14 +506,15 @@ export function bookingRuleBroken(params: {
   }
   const duration = durationRuleBroken(rules, (interval.end.getTime() - start) / MINUTE_MS);
   if (duration) return duration;
-  const hire =
-    (rules.pickupTimes !== undefined || rules.returnTimes !== undefined) && isMultiDay(interval, params.timezone);
-  if (hire && rules.pickupTimes && !withinDayWindows(interval.start, rules.pickupTimes, params.timezone)) {
+  const multiDay = isMultiDay(interval, params.timezone);
+  if (multiDay && rules.pickupTimes && !withinDayWindows(interval.start, rules.pickupTimes, params.timezone)) {
     return 'pickup_time';
   }
-  if (hire && rules.returnTimes && !withinDayWindows(interval.end, rules.returnTimes, params.timezone, true)) {
+  if (multiDay && rules.returnTimes && !withinDayWindows(interval.end, rules.returnTimes, params.timezone, true)) {
     return 'return_time';
   }
+  // A hire the hours hold only at its ends.
+  const hire = multiDay && hoursApplyOf(rules) === 'ends';
   if (rules.enforceHours === true) {
     const open = (window: Interval) =>
       openWindows({

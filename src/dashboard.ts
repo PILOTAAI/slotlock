@@ -1251,11 +1251,13 @@ const INHERITED_NAMES: Readonly<Record<keyof SlotlockBookingRules, string>> = Ob
   pickupTimes: 'Pick-up times',
   returnTimes: 'Return times',
   cancellationFee: 'Cancellation fee',
+  hoursApply: 'Hours hold a hire at',
 });
 
 type RuleValue =
   | number
   | boolean
+  | string
   | readonly number[]
   | readonly { startMinutes: number; durationMinutes: number }[]
   | { amountMinor: number; currency: string; withinMinutes?: number };
@@ -1265,6 +1267,7 @@ type InheritedRules = Map<keyof SlotlockBookingRules, { value: RuleValue; from: 
 function ruleValueText(value: RuleValue): string {
   if (typeof value === 'number') return value.toLocaleString('en');
   if (typeof value === 'boolean') return value ? 'on' : 'off';
+  if (typeof value === 'string') return value === 'ends' ? 'its start and end' : 'all of it';
   if (!Array.isArray(value)) {
     const fee = value as { amountMinor: number; currency: string; withinMinutes?: number };
     return `${(fee.amountMinor / 100).toFixed(2)} ${fee.currency}${fee.withinMinutes !== undefined ? ` within ${fee.withinMinutes.toLocaleString('en')} min` : ''}`;

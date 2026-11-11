@@ -478,6 +478,12 @@ const BOOKING_RULES = z
     pickup_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
     /** And ends in one of these. */
     return_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
+    /**
+     * How the hours hold a booking from one local day to another: whole (all of it inside them) or
+     * ends (only its start and end); by default ends with pickup_times or return_times, else whole.
+     * Writes under enforce_hours, and every search, follow it.
+     */
+    hours_apply: z.enum(['whole', 'ends']).optional(),
     /** Cancelling, or moving, is refused this many minutes before the start (RFC 0004 B5). */
     cancel_cutoff_minutes: z.number().int().min(0).max(525_600).optional(),
     reschedule_cutoff_minutes: z.number().int().min(0).max(525_600).optional(),

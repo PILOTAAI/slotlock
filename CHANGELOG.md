@@ -109,6 +109,12 @@ versioning.
   `booking_rule_min_duration`, `booking_rule_max_duration`, `booking_rule_duration_not_allowed`,
   `booking_rule_pickup_time`, `booking_rule_return_time`. Searches offer only allowed lengths, and
   take `defaultDurationMinutes` when they name none (`400 duration_required` otherwise).
+  `hoursApply` (`hours_apply`) says how the hours hold a hire: `whole` (all of it) or `ends` (its
+  start and end only), by default `ends` with pick-up or return times, else `whole`. Writes follow
+  it under `enforceHours`; `slotlock_find_available_slots` and `slotlock_find_next_available`
+  follow it always, so with `ends` they offer slots from one day to another, judged as the write
+  would be, and `slotlock_find_available_ranges` judges ranges as the write would where hours are
+  enforced. A pick-up or return refusal comes with alternatives, as other refusals of a time do.
 - Zone rule changes reach everything (RFC 0004 B9): `followZoneRules` also re-checks a recurring
   series' occurrences to come (each kept with its wall time, reported once as
   `event.timezone_shifted` with its `recurrence_id`), and reservations written with the new

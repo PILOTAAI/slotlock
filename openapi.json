@@ -607,6 +607,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -769,6 +776,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -6935,6 +6949,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -7097,6 +7118,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -7627,6 +7655,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -7789,6 +7824,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -9379,6 +9421,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -9541,6 +9590,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -10091,6 +10147,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -10253,6 +10316,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -10941,6 +11011,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -11103,6 +11180,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -11728,6 +11812,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -11890,6 +11981,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -12348,6 +12446,13 @@
                               "additionalProperties": false
                             }
                           },
+                          "hours_apply": {
+                            "type": "string",
+                            "enum": [
+                              "whole",
+                              "ends"
+                            ]
+                          },
                           "cancel_cutoff_minutes": {
                             "type": "integer",
                             "minimum": 0,
@@ -12605,6 +12710,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -12767,6 +12879,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -13330,6 +13449,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -13492,6 +13618,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -14056,6 +14189,13 @@
                                     "additionalProperties": false
                                   }
                                 },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
+                                },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
                                   "minimum": 0,
@@ -14218,6 +14358,13 @@
                                     ],
                                     "additionalProperties": false
                                   }
+                                },
+                                "hours_apply": {
+                                  "type": "string",
+                                  "enum": [
+                                    "whole",
+                                    "ends"
+                                  ]
                                 },
                                 "cancel_cutoff_minutes": {
                                   "type": "integer",
@@ -14858,6 +15005,13 @@
                                 "additionalProperties": false
                               }
                             },
+                            "hours_apply": {
+                              "type": "string",
+                              "enum": [
+                                "whole",
+                                "ends"
+                              ]
+                            },
                             "cancel_cutoff_minutes": {
                               "type": "integer",
                               "minimum": 0,
@@ -15023,6 +15177,13 @@
                                   ],
                                   "additionalProperties": false
                                 }
+                              },
+                              "hours_apply": {
+                                "type": "string",
+                                "enum": [
+                                  "whole",
+                                  "ends"
+                                ]
                               },
                               "cancel_cutoff_minutes": {
                                 "type": "integer",
@@ -15230,6 +15391,13 @@
                               "additionalProperties": false
                             }
                           },
+                          "hours_apply": {
+                            "type": "string",
+                            "enum": [
+                              "whole",
+                              "ends"
+                            ]
+                          },
                           "cancel_cutoff_minutes": {
                             "type": "integer",
                             "minimum": 0,
@@ -15408,6 +15576,13 @@
                                 ],
                                 "additionalProperties": false
                               }
+                            },
+                            "hours_apply": {
+                              "type": "string",
+                              "enum": [
+                                "whole",
+                                "ends"
+                              ]
                             },
                             "cancel_cutoff_minutes": {
                               "type": "integer",
@@ -15621,6 +15796,13 @@
                               "additionalProperties": false
                             }
                           },
+                          "hours_apply": {
+                            "type": "string",
+                            "enum": [
+                              "whole",
+                              "ends"
+                            ]
+                          },
                           "cancel_cutoff_minutes": {
                             "type": "integer",
                             "minimum": 0,
@@ -15814,6 +15996,13 @@
                                 ],
                                 "additionalProperties": false
                               }
+                            },
+                            "hours_apply": {
+                              "type": "string",
+                              "enum": [
+                                "whole",
+                                "ends"
+                              ]
                             },
                             "cancel_cutoff_minutes": {
                               "type": "integer",

@@ -7,6 +7,7 @@ import {
   bookingBufferAfterMs,
   bookingBufferBeforeMs,
   bookingRuleBroken,
+  hoursApplyOf,
   isMultiDay,
   nextStepStart,
   withinDayWindows,
@@ -50,7 +51,13 @@ export function sameTimeDaysLater(instant: Date, days: number, timezone: string)
  */
 export function findEarliestRange(search: SlotlockRangeSearch): Interval | null {
   const { timezone, now } = search;
-  const rules: SlotlockBookingRules = { ...(search.rules ?? {}), enforceHours: true };
+  // Judged as a write is, inside the hours always: as the write is held to them where it is
+  // (enforceHours), else at a hire's start and end, what a hire needs.
+  const rules: SlotlockBookingRules = {
+    ...(search.rules ?? {}),
+    enforceHours: true,
+    hoursApply: search.rules?.hoursApply ?? (search.rules?.enforceHours === true ? hoursApplyOf(search.rules) : 'ends'),
+  };
   const before = bookingBufferBeforeMs(rules);
   const after = bookingBufferAfterMs(rules);
   const busy = mergeIntervals([...search.busy]);

@@ -73,7 +73,8 @@ slotlock rules clear --resource vehicle-42
 | `defaultDurationMinutes` | (a search) is this long when the search names no length |
 | `cancelCutoffMinutes`, `rescheduleCutoffMinutes` | (a cancel or move of it) comes at least this long before its start, unless an admin gives a reason |
 | `cancellationFee` | (a cancellation of it) records this fee, within `withinMinutes` of its start when given |
-| `pickupTimes`, `returnTimes` | from one local day to another (a hire), starts in one of these windows of the day and ends in one of those; it then needs only its start and end inside the hours under `enforceHours` |
+| `pickupTimes`, `returnTimes` | from one local day to another (a hire), starts in one of these windows of the day and ends in one of those |
+| `hoursApply` | how the hours hold a hire: `whole` (all of it inside them) or `ends` (only its start and end, the resource being out between); by default `ends` with `pickupTimes` or `returnTimes`, else `whole`. Writes follow it under `enforceHours`, and every search follows it: with `ends`, `slotlock_find_available_slots` and `slotlock_find_next_available` offer slots that run from one day to another, as `slotlock_find_available_ranges` does |
 | `enforceHours` | lies inside the resource's bookable hours |
 | `checkInMinutes` | is claimed (`checkInReservation`) this long after its start, or maintenance releases it |
 | `requireCertain` | lies in time every calendar sync recording coverage for the resource has read within a day |
