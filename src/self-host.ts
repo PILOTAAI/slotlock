@@ -204,6 +204,8 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_INVITATION_EMAIL',
   'SLOTLOCK_INVITATION_EMAIL_KEY',
   'SLOTLOCK_INVITATION_EMAIL_FROM',
+  'SLOTLOCK_VERIFIED_DOMAINS',
+  'SLOTLOCK_DNS_RESOLVER',
   'HOST',
   'PORT',
 ] as const);
@@ -2816,6 +2818,10 @@ Environment:
                                  workspaces; without it, the person inviting sends the link)
   SLOTLOCK_INVITATION_EMAIL_KEY  Resend's API key, or Postmark's server token
   SLOTLOCK_INVITATION_EMAIL_FROM The sender the provider verified: team@example.com or Name <...>
+  SLOTLOCK_VERIFIED_DOMAINS      on or off (default): team Owners verify their domain with a DNS
+                                 record, and people at it may ask to join (with team workspaces)
+  SLOTLOCK_DNS_RESOLVER          doh (default: Cloudflare, checked by Google) or system: how a
+                                 verified domain's record is looked up each day
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 
