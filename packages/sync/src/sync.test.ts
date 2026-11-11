@@ -358,7 +358,9 @@ describe('the syncer, where a calendar or a connection fails', () => {
     await store.putMapping(mapping('m-other', 'c-fleet', 'main', 'other'));
     calls.length = 0;
     expect(await syncer.syncMapping('m-other', true)).toMatchObject({ ok: false, error: 'connection_not_found' });
-    expect(calls.filter((call) => call.includes('googleapis.com'))).toEqual([]);
+    // No call to Google at all: every host it was asked of is Slotlock's.
+    const hosts = new Set(calls.map((call) => new URL(call.slice(call.indexOf(' ') + 1)).hostname));
+    expect([...hosts].filter((host) => host !== 'slotlock.test')).toEqual([]);
     // Tokens sealed for one tenant do not open as another's, though the row says so.
     const sealed = (await store.getConnection('c-fleet'))?.sealed as string;
     expect(() => open(keys, sealed, sealedFor('other', 'c-fleet'))).toThrow();
