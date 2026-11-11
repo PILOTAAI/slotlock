@@ -69,6 +69,7 @@ import {
   slotlockCoverageChangeRenameSql,
   slotlockTenantLockKey,
 } from './ddl.js';
+import { createSlotlockAdminRoleGrantsDdl } from './staff-ddl.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import {
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
@@ -3087,6 +3088,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   grantApplicationRole(role: string, options?: SlotlockMigrationOptions): Promise<void>;
   /**
+   * Grant the admin console's role (RFC 0006) EXECUTE on the admin functions and nothing else, after
+   * the same checks as grantApplicationRole. Never the serving role: `slotlock migrate` refuses
+   * that.
+   */
+  grantAdminRole(role: string, options?: SlotlockMigrationOptions): Promise<void>;
+  /**
    * Run store operations with one transaction-local tenant context on the same connection. On a
    * client it opens a READ COMMITTED transaction. Inside a caller's transaction of another level,
    * writes are refused (`invalid_transaction_isolation`), since that snapshot can miss a
@@ -5211,6 +5218,130 @@ function buildSlotlockStore(
     return resource?.tenant_ref ?? null;
   }
 
+  /**
+   * Grant a role its runtime access, after checking that it cannot get around forced RLS or the
+   * exclusion arbiter (grantApplicationRole, and grantAdminRole for the admin console's role).
+   */
+  async function grantCheckedRole(
+    role: string,
+    ddl: string,
+    noun: 'application' | 'admin',
+    migrationOptions: SlotlockMigrationOptions | undefined,
+  ): Promise<void> {
+    await inMigration(sql, migrationOptions, (tx) =>
+      (async () => {
+        // Every role the target belongs to counts, not only the target: a member can SET ROLE to
+        // it or use its privileges, and one holding only ADMIN OPTION can grant itself either.
+        // MEMBER also counts a PostgreSQL 16 grant made with none of ADMIN, INHERIT or SET, which
+        // confers nothing; refusing that one is the price of never missing a usable path. The
+        // privilege functions, and the PUBLIC grantee (0) in an ACL, count what every role holds.
+        // Unsafe, one reason each:
+        // - RLS is skipped (superuser, BYPASSRLS); data leaves outside SQL (REPLICATION, the server
+        //   file and program roles); a role can grant itself one of those (CREATEROLE before 16).
+        // - The role can drop or replace what enforces isolation: it owns the database (and so
+        //   public, where btree_gist usually lives), anything in it, or btree_gist. Its temporary
+        //   objects and its default privileges (for tables it cannot create) reach no other
+        //   session, so they do not count.
+        // - It can create objects: in a schema on some search path (its own "$user" schema, or
+        //   one named after the deployment role) a function or operator decides what a call with
+        //   that name runs, in every tenant's session or in the next deployment.
+        // - It holds a right RLS does not filter: TRUNCATE empties a table for every tenant, a
+        //   foreign key check reads every tenant's keys, a trigger sees every tenant's rows; or a
+        //   default privilege that grants one on the table a later release adds, set by a role
+        //   that can create slotlock tables (a default applies only to the tables its role creates).
+        // - It can change a server setting (ALTER SYSTEM reaches archive_command, a shell command).
+        // A superuser holds every right, so its privilege-based reasons would only repeat it.
+        const [check] = await tx<{ found: boolean; reasons: string[] }[]>`
+          WITH target AS (
+            SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ${role}
+          ), granted AS (
+            SELECT member_of.oid, member_of.rolname, member_of.rolsuper, member_of.rolbypassrls,
+                   member_of.rolreplication, member_of.rolcreaterole
+              FROM target
+              JOIN pg_catalog.pg_roles member_of
+                ON pg_catalog.pg_has_role(target.oid, member_of.oid, 'MEMBER')
+          ), ordinary AS (
+            SELECT oid FROM granted WHERE NOT rolsuper
+          ), here AS (
+            SELECT oid, datdba
+              FROM pg_catalog.pg_database
+             WHERE datname = pg_catalog.current_database()
+          ), slotlock AS (
+            SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'slotlock'
+          ), reasons (reason) AS (
+            SELECT 'superuser' FROM granted WHERE rolsuper
+            UNION SELECT 'BYPASSRLS' FROM granted WHERE rolbypassrls
+            UNION SELECT 'REPLICATION' FROM granted WHERE rolreplication
+            UNION SELECT 'CREATEROLE' FROM granted WHERE rolcreaterole
+            UNION SELECT 'member of ' || rolname
+                    FROM granted
+                   WHERE rolname IN ('pg_execute_server_program',
+                                     'pg_read_server_files',
+                                     'pg_write_server_files')
+            UNION SELECT 'owner of the database'
+                    FROM granted, here
+                   WHERE here.datdba = granted.oid
+            UNION SELECT 'owner of objects in the database'
+                    FROM granted, here, pg_catalog.pg_shdepend owned
+                   CROSS JOIN LATERAL pg_catalog.pg_identify_object(
+                     owned.classid, owned.objid, owned.objsubid
+                   ) ident
+                   WHERE owned.dbid = here.oid
+                     AND owned.deptype = 'o'
+                     AND owned.refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
+                     AND owned.refobjid = granted.oid
+                     AND owned.classid <> 'pg_catalog.pg_default_acl'::pg_catalog.regclass
+                     AND COALESCE(ident.schema, '') !~ '^pg_(toast_)?temp_'
+            UNION SELECT 'owner of the btree_gist extension'
+                    FROM granted, pg_catalog.pg_extension ext
+                   WHERE ext.extname = 'btree_gist' AND ext.extowner = granted.oid
+            UNION SELECT 'CREATE on the database'
+                    FROM ordinary, here
+                   WHERE pg_catalog.has_database_privilege(ordinary.oid, here.oid, 'CREATE')
+            UNION SELECT 'owner of or CREATE on schema ' || ns.nspname
+                    FROM ordinary, pg_catalog.pg_namespace ns
+                   WHERE ns.nspname !~ '^pg_(toast_)?temp_'
+                     AND (ns.nspowner = ordinary.oid
+                          OR pg_catalog.has_schema_privilege(ordinary.oid, ns.oid, 'CREATE'))
+            UNION SELECT 'TRUNCATE, REFERENCES or TRIGGER on a slotlock table'
+                    FROM ordinary, slotlock, pg_catalog.pg_class rel
+                   WHERE rel.relnamespace = slotlock.oid
+                     AND rel.relkind IN ('r', 'p', 'v', 'm', 'f')
+                     AND (pg_catalog.has_table_privilege(ordinary.oid, rel.oid, 'TRUNCATE, TRIGGER')
+                          OR pg_catalog.has_any_column_privilege(ordinary.oid, rel.oid, 'REFERENCES'))
+            UNION SELECT 'TRUNCATE, REFERENCES or TRIGGER by default on new slotlock tables'
+                    FROM ordinary, pg_catalog.pg_default_acl def
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(def.defaclacl) acl
+                   WHERE def.defaclobjtype = 'r'
+                     AND pg_catalog.has_schema_privilege(def.defaclrole, (SELECT oid FROM slotlock), 'CREATE')
+                     AND (def.defaclnamespace = 0 OR def.defaclnamespace IN (SELECT oid FROM slotlock))
+                     AND acl.grantee IN (ordinary.oid, 0)
+                     AND acl.privilege_type IN ('TRUNCATE', 'REFERENCES', 'TRIGGER')
+            UNION SELECT 'a right on server setting ' || setting.parname
+                    FROM ordinary, pg_catalog.pg_parameter_acl setting
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(setting.paracl) acl
+                   WHERE acl.grantee IN (ordinary.oid, 0)
+          )
+          SELECT EXISTS (SELECT 1 FROM target) AS found,
+                 ARRAY(SELECT reason FROM reasons ORDER BY reason) AS reasons`;
+        if (!check?.found) {
+          throw Object.assign(new Error(`Slotlock ${noun} role ${role} does not exist`), {
+            code: 'role_not_found' as const,
+          });
+        }
+        if (check.reasons.length > 0) {
+          throw Object.assign(
+            new Error(
+              `Slotlock ${noun} role ${role} could get around forced RLS or the exclusion arbiter, itself, through a role it belongs to or through PUBLIC (${check.reasons.join('; ')}); use a plain NOBYPASSRLS login role that owns nothing and can create nothing`,
+            ),
+            { code: 'unsafe_application_role' as const, reasons: check.reasons },
+          );
+        }
+        await tx.unsafe(ddl);
+      })(),
+    );
+  }
+
   const store: SlotlockStore = {
     ...slotlockEventFeedMethods(sql, retentionDays),
     async applySchema(migrationOptions) {
@@ -5283,119 +5414,11 @@ function buildSlotlockStore(
     },
 
     async grantApplicationRole(role, migrationOptions) {
-      const ddl = createSlotlockApplicationRoleGrantsDdl(role);
-      await inMigration(sql, migrationOptions, (tx) =>
-        (async () => {
-          // Every role the target belongs to counts, not only the target: a member can SET ROLE to
-          // it or use its privileges, and one holding only ADMIN OPTION can grant itself either.
-          // MEMBER also counts a PostgreSQL 16 grant made with none of ADMIN, INHERIT or SET, which
-          // confers nothing; refusing that one is the price of never missing a usable path. The
-          // privilege functions, and the PUBLIC grantee (0) in an ACL, count what every role holds.
-          // Unsafe, one reason each:
-          // - RLS is skipped (superuser, BYPASSRLS); data leaves outside SQL (REPLICATION, the server
-          //   file and program roles); a role can grant itself one of those (CREATEROLE before 16).
-          // - The role can drop or replace what enforces isolation: it owns the database (and so
-          //   public, where btree_gist usually lives), anything in it, or btree_gist. Its temporary
-          //   objects and its default privileges (for tables it cannot create) reach no other
-          //   session, so they do not count.
-          // - It can create objects: in a schema on some search path (its own "$user" schema, or
-          //   one named after the deployment role) a function or operator decides what a call with
-          //   that name runs, in every tenant's session or in the next deployment.
-          // - It holds a right RLS does not filter: TRUNCATE empties a table for every tenant, a
-          //   foreign key check reads every tenant's keys, a trigger sees every tenant's rows; or a
-          //   default privilege that grants one on the table a later release adds, set by a role
-          //   that can create slotlock tables (a default applies only to the tables its role creates).
-          // - It can change a server setting (ALTER SYSTEM reaches archive_command, a shell command).
-          // A superuser holds every right, so its privilege-based reasons would only repeat it.
-          const [check] = await tx<{ found: boolean; reasons: string[] }[]>`
-            WITH target AS (
-              SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ${role}
-            ), granted AS (
-              SELECT member_of.oid, member_of.rolname, member_of.rolsuper, member_of.rolbypassrls,
-                     member_of.rolreplication, member_of.rolcreaterole
-                FROM target
-                JOIN pg_catalog.pg_roles member_of
-                  ON pg_catalog.pg_has_role(target.oid, member_of.oid, 'MEMBER')
-            ), ordinary AS (
-              SELECT oid FROM granted WHERE NOT rolsuper
-            ), here AS (
-              SELECT oid, datdba
-                FROM pg_catalog.pg_database
-               WHERE datname = pg_catalog.current_database()
-            ), slotlock AS (
-              SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'slotlock'
-            ), reasons (reason) AS (
-              SELECT 'superuser' FROM granted WHERE rolsuper
-              UNION SELECT 'BYPASSRLS' FROM granted WHERE rolbypassrls
-              UNION SELECT 'REPLICATION' FROM granted WHERE rolreplication
-              UNION SELECT 'CREATEROLE' FROM granted WHERE rolcreaterole
-              UNION SELECT 'member of ' || rolname
-                      FROM granted
-                     WHERE rolname IN ('pg_execute_server_program',
-                                       'pg_read_server_files',
-                                       'pg_write_server_files')
-              UNION SELECT 'owner of the database'
-                      FROM granted, here
-                     WHERE here.datdba = granted.oid
-              UNION SELECT 'owner of objects in the database'
-                      FROM granted, here, pg_catalog.pg_shdepend owned
-                     CROSS JOIN LATERAL pg_catalog.pg_identify_object(
-                       owned.classid, owned.objid, owned.objsubid
-                     ) ident
-                     WHERE owned.dbid = here.oid
-                       AND owned.deptype = 'o'
-                       AND owned.refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
-                       AND owned.refobjid = granted.oid
-                       AND owned.classid <> 'pg_catalog.pg_default_acl'::pg_catalog.regclass
-                       AND COALESCE(ident.schema, '') !~ '^pg_(toast_)?temp_'
-              UNION SELECT 'owner of the btree_gist extension'
-                      FROM granted, pg_catalog.pg_extension ext
-                     WHERE ext.extname = 'btree_gist' AND ext.extowner = granted.oid
-              UNION SELECT 'CREATE on the database'
-                      FROM ordinary, here
-                     WHERE pg_catalog.has_database_privilege(ordinary.oid, here.oid, 'CREATE')
-              UNION SELECT 'owner of or CREATE on schema ' || ns.nspname
-                      FROM ordinary, pg_catalog.pg_namespace ns
-                     WHERE ns.nspname !~ '^pg_(toast_)?temp_'
-                       AND (ns.nspowner = ordinary.oid
-                            OR pg_catalog.has_schema_privilege(ordinary.oid, ns.oid, 'CREATE'))
-              UNION SELECT 'TRUNCATE, REFERENCES or TRIGGER on a slotlock table'
-                      FROM ordinary, slotlock, pg_catalog.pg_class rel
-                     WHERE rel.relnamespace = slotlock.oid
-                       AND rel.relkind IN ('r', 'p', 'v', 'm', 'f')
-                       AND (pg_catalog.has_table_privilege(ordinary.oid, rel.oid, 'TRUNCATE, TRIGGER')
-                            OR pg_catalog.has_any_column_privilege(ordinary.oid, rel.oid, 'REFERENCES'))
-              UNION SELECT 'TRUNCATE, REFERENCES or TRIGGER by default on new slotlock tables'
-                      FROM ordinary, pg_catalog.pg_default_acl def
-                     CROSS JOIN LATERAL pg_catalog.aclexplode(def.defaclacl) acl
-                     WHERE def.defaclobjtype = 'r'
-                       AND pg_catalog.has_schema_privilege(def.defaclrole, (SELECT oid FROM slotlock), 'CREATE')
-                       AND (def.defaclnamespace = 0 OR def.defaclnamespace IN (SELECT oid FROM slotlock))
-                       AND acl.grantee IN (ordinary.oid, 0)
-                       AND acl.privilege_type IN ('TRUNCATE', 'REFERENCES', 'TRIGGER')
-              UNION SELECT 'a right on server setting ' || setting.parname
-                      FROM ordinary, pg_catalog.pg_parameter_acl setting
-                     CROSS JOIN LATERAL pg_catalog.aclexplode(setting.paracl) acl
-                     WHERE acl.grantee IN (ordinary.oid, 0)
-            )
-            SELECT EXISTS (SELECT 1 FROM target) AS found,
-                   ARRAY(SELECT reason FROM reasons ORDER BY reason) AS reasons`;
-          if (!check?.found) {
-            throw Object.assign(new Error(`Slotlock application role ${role} does not exist`), {
-              code: 'role_not_found' as const,
-            });
-          }
-          if (check.reasons.length > 0) {
-            throw Object.assign(
-              new Error(
-                `Slotlock application role ${role} could get around forced RLS or the exclusion arbiter, itself, through a role it belongs to or through PUBLIC (${check.reasons.join('; ')}); use a plain NOBYPASSRLS login role that owns nothing and can create nothing`,
-              ),
-              { code: 'unsafe_application_role' as const, reasons: check.reasons },
-            );
-          }
-          await tx.unsafe(ddl);
-        })(),
-      );
+      await grantCheckedRole(role, createSlotlockApplicationRoleGrantsDdl(role), 'application', migrationOptions);
+    },
+
+    async grantAdminRole(role, migrationOptions) {
+      await grantCheckedRole(role, createSlotlockAdminRoleGrantsDdl(role), 'admin', migrationOptions);
     },
 
     async withTenant(tenantRef, callback, options) {

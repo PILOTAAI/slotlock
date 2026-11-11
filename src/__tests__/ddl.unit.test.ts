@@ -25,6 +25,7 @@ import {
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
 } from '../ddl.js';
+import { SLOTLOCK_ADMIN_FUNCTIONS, SLOTLOCK_STAFF_TABLES } from '../staff-ddl.js';
 
 describe('tenant RLS DDL', () => {
   it('persists bounded owner namespaces and upgrades legacy event identities idempotently', () => {
@@ -174,8 +175,12 @@ describe('deployment DDL name resolution', () => {
       ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
     ]);
     const definers = functions.filter(([, , , header]) => header?.includes('SECURITY DEFINER'));
+    // The serving role's definer functions, and the admin console's, which only its role runs
+    // (staff-ddl.ts; staff-ddl.unit.test.ts checks them).
     expect(definers.map(([, name]) => name).sort()).toEqual(
-      SLOTLOCK_DEFINER_FUNCTIONS.map((signature) => signature.slice(0, signature.indexOf('('))).sort(),
+      [...SLOTLOCK_DEFINER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS]
+        .map((signature) => signature.slice(0, signature.indexOf('(')))
+        .sort(),
     );
     for (const signature of SLOTLOCK_DEFINER_FUNCTIONS) {
       expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
@@ -212,6 +217,7 @@ describe('deployment DDL name resolution', () => {
       ...SLOTLOCK_DASHBOARD_TABLES,
       ...SLOTLOCK_SCHEMA_TABLES,
       ...SLOTLOCK_TENANT_ADMIN_TABLES,
+      ...SLOTLOCK_STAFF_TABLES,
     ]);
     for (const table of SLOTLOCK_DEFINER_TABLES) {
       expect(SLOTLOCK_CORE_DDL).toContain(`CREATE TABLE IF NOT EXISTS slotlock.${table} (`);

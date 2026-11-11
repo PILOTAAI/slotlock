@@ -8,6 +8,7 @@
 // role can write to ("$user", public) would run with that ownership. The DDL pins search_path to
 // pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
 // transaction: under autocommit the pin ends with its own statement.
+import { SLOTLOCK_STAFF_DDL, SLOTLOCK_STAFF_OPERATOR_FUNCTIONS, SLOTLOCK_STAFF_TABLES } from './staff-ddl.js';
 import {
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
   SLOTLOCK_MAX_LOCATION_DEPTH,
@@ -440,6 +441,8 @@ export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.suspend_tenant(text, text)',
   'slotlock.unsuspend_tenant(text)',
   'slotlock.set_plan_default(text, integer, integer, integer, timestamptz)',
+  // Adding, changing and removing the admin console's staff (staff-ddl.ts, `slotlock staff …`).
+  ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS,
 ] as const);
 
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
@@ -494,6 +497,8 @@ export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_DASHBOARD_TABLES,
   ...SLOTLOCK_SCHEMA_TABLES,
   ...SLOTLOCK_TENANT_ADMIN_TABLES,
+  // The admin console's staff, passkeys and staff log, reached only through SLOTLOCK_ADMIN_FUNCTIONS.
+  ...SLOTLOCK_STAFF_TABLES,
 ]);
 
 /**
@@ -7907,7 +7912,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${SLOTLOCK_STAFF_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id

@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Proposed |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phase 1 is in progress. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -489,16 +489,31 @@ so the estimates below include them.
 
 ## Part 7: Decisions for the owner
 
-| # | Decision | Recommendation |
-| --- | --- | --- |
-| E1 | Where the console runs | `admin.slotlock.pylota.io`, its own Worker, behind Cloudflare Access |
-| E2 | Staff sign-in | GitHub through Access, plus a passkey in the console |
-| E3 | Booking content | Never shown by default; break-glass with a reason, the Owner's approval, one hour, and a notice to the customer |
-| E4 | CMS | Git-backed: Markdown files, published as pull requests that pass the site's checks |
-| E5 | Who publishes | Editors submit; the Owner publishes |
-| E6 | Self-hosters | Cloud only in the first version; an opt-in for `slotlock serve` later |
-| E7 | Staff log retention | Two years, never deleted by an erasure |
-| E8 | Staff actions visible to customers | Yes, in the customer's audit log, with the reason |
+| # | Decision | Recommendation | Owner's decision (2026-11-11) |
+| --- | --- | --- | --- |
+| E1 | Where the console runs | `admin.slotlock.pylota.io`, its own Worker, behind Cloudflare Access | As recommended |
+| E2 | Staff sign-in | GitHub through Access, plus a passkey in the console | As recommended |
+| E3 | Booking content | Never shown by default; break-glass with a reason, the Owner's approval, one hour, and a notice to the customer | As recommended |
+| E4 | CMS | Git-backed: Markdown files, published as pull requests that pass the site's checks | As recommended |
+| E5 | Who publishes | Editors submit; the Owner publishes | As recommended |
+| E6 | Self-hosters | Cloud only in the first version; an opt-in for `slotlock serve` later | As recommended |
+| E7 | Staff log retention | Two years, never deleted by an erasure | As recommended |
+| E8 | Staff actions visible to customers | Yes, in the customer's audit log, with the reason | As recommended |
+
+**Phase 1 is built in two parts**, each its own commit with its tests:
+
+- **1a, the database:** `staff_members`, `staff_passkeys` and `staff_audit_events`; the admin
+  functions with their role checks and logging; the grants for `slotlock_admin_app`, applied by
+  `slotlock migrate` when `SLOTLOCK_ADMIN_DATABASE_URL` is set; and `slotlock staff
+  add|list|role|remove`, run with the deployment role's credentials, which is how the first Owner
+  is added.
+- **1b, the console:**
+  - the Worker, with the Access check, sign-in and passkeys;
+  - the pages for Home, Accounts, an account, staff and the staff log, with ⌘K.
+
+The database keeps no GitHub login or email for a person, only the numeric id, and that does not
+change. The console reads logins from GitHub's public profile API when it shows or searches an
+account, and caches them for an hour. PRIVACY.md says so before the console goes live.
 
 ## Part 8: Non-goals and risks
 

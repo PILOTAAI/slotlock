@@ -92,6 +92,7 @@ const ADMINISTRATION = [
   'applySchema',
   'applyTenantRls',
   'grantApplicationRole',
+  'grantAdminRole',
   'withTenant',
   'suspendTenant',
   'unsuspendTenant',
