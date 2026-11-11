@@ -198,10 +198,16 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     expect(await teams.setScope(tenantRef, cy, bea, north)).toBe('not_allowed');
     expect(await teams.setScope(tenantRef, hal, cy, null)).toBe('not_allowed');
     expect(await teams.setScope(tenantRef, bea, hal, north)).toBe('not_found');
-    // Made an Owner, they reach all of it.
+    // Made an Owner, they reach all of it, and their limit is gone: made an Admin again, they
+    // still reach all of it.
     expect(await teams.changeRole(tenantRef, ada, dee, 'owner')).toBeNull();
     expect(await scopeOf(dee)).toBeNull();
     expect([...(await teams.scopes(tenantRef))].map(([person]) => person)).toEqual([cy]);
+    expect(await teams.changeRole(tenantRef, ada, dee, 'admin')).toBeNull();
+    expect(await scopeOf(dee)).toBeNull();
+    const [kept] = await admin<{ resource_scope: unknown }[]>`
+      SELECT resource_scope FROM slotlock.workspace_memberships WHERE tenant_ref = ${tenantRef} AND person_ref = ${dee}`;
+    expect(kept?.resource_scope).toBeNull();
     // Given all of it again.
     expect(await teams.setScope(tenantRef, ada, cy, null)).toBeNull();
     expect(await scopeOf(cy)).toBeNull();

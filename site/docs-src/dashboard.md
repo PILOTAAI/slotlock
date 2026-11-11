@@ -153,8 +153,8 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
   locations and groups"). Keys they created reached the whole workspace, so limiting them revokes
   those unless the form keeps them. **All of the workspace** gives it back. Each change is in the
   audit log (`member.scope_changed`); Members shows what each person reaches. Made an Owner, a
-  limited person reaches all of it; their limit returns if they stop being one, until it is
-  changed. A dashboard whose
+  limited person reaches all of it, and their limit is cleared: it does not return if they stop
+  being one. A dashboard whose
   resources are not `createSlotlockDashboardResources`'s (no `keepsToScope`) gives a limited person
   only their own account.
 - **Limits**: a team sends at most 50 invitations a day, and so does each person across their

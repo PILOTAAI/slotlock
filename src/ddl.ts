@@ -2017,8 +2017,30 @@ BEGIN
 END
 $slotlock_membership_scope$;
 
+-- An Owner reaches the whole workspace: made one by any path (a role change, an invitation, a
+-- GitHub organization's sign-in), their limit is cleared, so it does not return if they stop being
+-- one.
+CREATE OR REPLACE FUNCTION slotlock.workspace_owner_unlimited()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_workspace_owner_unlimited$
+BEGIN
+  IF NEW.role = 'owner' THEN
+    NEW.resource_scope := NULL;
+  END IF;
+  RETURN NEW;
+END
+$slotlock_workspace_owner_unlimited$;
+CREATE OR REPLACE TRIGGER slotlock_workspace_owner_unlimited
+  BEFORE INSERT OR UPDATE OF role, resource_scope ON slotlock.workspace_memberships
+  FOR EACH ROW EXECUTE FUNCTION slotlock.workspace_owner_unlimited();
+-- Owners limited before this trigger: none should be, but a database that has one is cleared.
+UPDATE slotlock.workspace_memberships SET resource_scope = NULL
+ WHERE role = 'owner' AND resource_scope IS NOT NULL;
+
 -- The part of a workspace (its test environment is its live tenant's) a person is limited to, or
--- null for all of it. An Owner, made one since, reaches all of it.
+-- null for all of it. An Owner reaches all of it.
 CREATE OR REPLACE FUNCTION slotlock.member_scope(requested_tenant text, requested_person text)
 RETURNS jsonb
 LANGUAGE sql
