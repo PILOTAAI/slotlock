@@ -77,7 +77,8 @@ const md = (text: string) => text.replace(SITE_LINK, `](${absolute('/')}`);
 const link = (l: PageLink) => `[${l.label}](${l.href.startsWith('/') ? absolute(l.href) : l.href})`;
 const heading = (level: string, h: Heading, topic?: string) =>
   `${level} ${topic ? `${topic}: ` : ''}${h.soft} ${h.strong}`;
-const cell = (text: string) => md(text).replace(/\|/g, '\\|');
+/** A Markdown table cell: backslashes first, so an escaped pipe in the text stays one. */
+const cell = (text: string) => md(text).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 
 function blockMarkdown(block: Block): string {
   switch (block.kind) {
