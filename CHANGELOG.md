@@ -67,6 +67,12 @@ notes first.
 
 ### Added
 
+- **A Claude Code plugin marketplace in this repository** (`.claude-plugin/marketplace.json`). Its
+  `slotlock` plugin connects Claude Code to Slotlock Cloud's MCP endpoint with the key in
+  `SLOTLOCK_API_KEY`, and adds two skills: `book-with-slotlock` (find, hold, book and change time
+  without double-booking, and what each refusal means) and `set-up-slotlock` (the docs site's setup
+  prompt). `/plugin marketplace add PILOTAAI/slotlock`, then `/plugin install slotlock@slotlock`. It
+  follows the repository's main branch, so it carries no version of its own.
 - **slotlock.pylota.io, for search engines** ([RFC 0005](docs/rfc/0005-search.md)). A page per
   search intent: `/pricing/`, `/mcp-server/`, `/booking-api/`, `/open-source/`, `/about/`,
   `/use-cases/` with eight industries, `/compare/` (a bookings table of your own, Cal.com, Cronofy,
@@ -212,6 +218,11 @@ notes first.
 
 ### Changed
 
+- **`slotlock_update_event` and `slotlock_reschedule` are marked destructive** (`destructiveHint:
+  true`): each overwrites a booking's time or details, and the time it frees can be taken at once. A
+  client that confirms destructive calls, Claude among them, now asks a person before either, as it
+  already did for `slotlock_cancel` and `slotlock_delete_event`. `slotlock_release_slots` stays
+  non-destructive: it lets go of the caller's own holds, which lapse within minutes anyway.
 - **The change history cannot be edited** (RFC 0004 D2). The serving role may only add changes
   and read them (`SLOTLOCK_APPEND_ONLY_TABLES` includes `outbox`): pruning goes through the
   definer `slotlock.prune_changes`, and the one edit is taking a person out

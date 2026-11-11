@@ -100,6 +100,15 @@ claude mcp add --transport http slotlock http://localhost:8080/mcp \
   --header "Authorization: Bearer $SLOTLOCK_AUTH_TOKEN"
 ```
 
+On Slotlock Cloud, Claude Code can also install Slotlock as a plugin: its tools, and skills for
+booking without double-booking and for setting Slotlock up in a project. Put your API key in
+`SLOTLOCK_API_KEY`, then:
+
+```text
+/plugin marketplace add PILOTAAI/slotlock
+/plugin install slotlock@slotlock
+```
+
 Cursor, VS Code, the Claude API and the MCP and A2A SDKs are in
 [Connect an agent](https://slotlock.pylota.io/docs/connect/), and every `slotlock_*` tool's input,
 output and errors in the [Tools reference](https://slotlock.pylota.io/docs/tools/).
