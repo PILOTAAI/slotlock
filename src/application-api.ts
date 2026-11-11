@@ -64,6 +64,8 @@ export type SlotlockApplicationOperation =
   | 'slotlock_create_availability_exception'
   | 'slotlock_delete_availability_exception'
   | 'slotlock_import_holidays'
+  | 'slotlock_list_holiday_calendars'
+  | 'slotlock_delete_holiday_calendar'
   | 'slotlock_export_resource_availability'
   | 'slotlock_import_resource_availability'
   | 'slotlock_set_resource_booking_rules'
@@ -221,6 +223,8 @@ export interface SlotlockApplicationBackend {
   createAvailabilityException: Handler;
   deleteAvailabilityException: Handler;
   importHolidays: Handler;
+  listHolidayCalendars: Handler;
+  deleteHolidayCalendar: Handler;
   exportResourceAvailability: Handler;
   importResourceAvailability: Handler;
   setResourceBookingRules: Handler;
@@ -678,6 +682,27 @@ const AVAILABILITY_EXCEPTION = z
     label: z.string().max(200),
     /** manual, ics (a holiday calendar) or vavailability (a resource's imported hours). */
     source: z.enum(['manual', 'ics', 'vavailability']),
+    /** The holiday calendar it was imported from (slotlock_list_holiday_calendars); `null` when none. */
+    calendar_id: z.string().uuid().nullable(),
+    created_at: DATE_TIME,
+  })
+  .strict();
+/** A holiday calendar imported into closures (RFC 0004 B1). */
+const HOLIDAY_CALENDAR = z
+  .object({
+    calendar_id: z.string().uuid(),
+    /** Unique at its scope: importing under the same name replaces what that calendar said. */
+    name: z.string().min(1).max(200),
+    location: GROUPING_REF.nullable(),
+    resource_id: z.string().uuid().nullable(),
+    /** A subscription's URL, imported again every 30 days; `null` for one pasted or uploaded. */
+    url: z.string().max(2_048).nullable(),
+    imported_at: DATE_TIME.nullable(),
+    next_import_at: DATE_TIME.nullable(),
+    /** Why a subscription's last import failed; it is tried again a day later. */
+    last_error: z.string().max(500).nullable(),
+    /** Its closures. */
+    closures: z.number().int().min(0),
     created_at: DATE_TIME,
   })
   .strict();
@@ -1443,13 +1468,15 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_import_holidays',
       title: 'Import a holiday calendar',
       description:
-        "Close the days an iCalendar holiday calendar names, for the whole tenant, one location or one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the days it covers, and each occurrence of a recurring one within from to to (default today to two years on, at most three years); timed and cancelled events are skipped. Importing the same calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.",
+        "Close the days an iCalendar holiday calendar names, for the whole tenant, one location or one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the days it covers, and each occurrence of a recurring one within from to to (default today to two years on, at most three years); timed and cancelled events are skipped. The calendar is kept by name at its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else Holidays): importing it again updates its closures instead of adding more, and deletes the ones it made that it no longer names within the span (removed), so a holiday it dropped goes too. With subscribe (and a url), the server keeps the url and imports it again every 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400 invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.",
       method: 'POST',
       path: '/v1/availability/holidays',
       input: z
         .object({
           icalendar: z.string().min(1).max(1_048_576).optional(),
           url: z.string().url().max(2_000).optional(),
+          name: z.string().trim().min(1).max(200).optional(),
+          subscribe: z.boolean().optional(),
           location: GROUPING_REF.optional(),
           resource_id: z.string().uuid().optional(),
           from: LOCAL_DATE.optional(),
@@ -1462,11 +1489,40 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           imported: z.number().int().min(0),
           /** Events that were not all-day, were cancelled, or fell outside the span. */
           skipped: z.number().int().min(0),
+          /** Closures this calendar made before that it no longer names in the span, deleted. */
+          removed: z.number().int().min(0),
+          calendar: HOLIDAY_CALENDAR,
         })
         .strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'importHolidays',
-      example: { url: 'https://example.com/holidays/gb.ics', location: 'london-depot' },
+      example: { url: 'https://example.com/holidays/gb.ics', location: 'london-depot', subscribe: true },
+    },
+    {
+      name: 'slotlock_list_holiday_calendars',
+      title: 'List holiday calendars',
+      description:
+        "The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each with its scope, how many closures it made, and for a subscription its url, when it was last imported, when it will be again, and why the last import failed if it did.",
+      method: 'GET',
+      path: '/v1/availability/holiday-calendars',
+      input: z.object({}).strict(),
+      output: z.object({ calendars: z.array(HOLIDAY_CALENDAR).max(50) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listHolidayCalendars',
+      example: {},
+    },
+    {
+      name: 'slotlock_delete_holiday_calendar',
+      title: 'Delete a holiday calendar',
+      description:
+        'Delete a holiday calendar and every closure it made, and stop importing it again. deleted is false when the tenant has no such calendar; closures counts those deleted with it.',
+      method: 'DELETE',
+      path: '/v1/availability/holiday-calendars/{calendar_id}',
+      input: z.object({ calendar_id: z.string().uuid() }).strict(),
+      output: z.object({ deleted: z.boolean(), closures: z.number().int().min(0) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteHolidayCalendar',
+      example: { calendar_id: '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d' },
     },
     {
       name: 'slotlock_acquire_hold',

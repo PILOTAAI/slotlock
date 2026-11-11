@@ -208,7 +208,8 @@ waits for a confirmation.
 | `PUT /v1/locations/{location}/availability` | `{"rules":[…]}`: a location's weekly hours, inherited by resources at it or inside it |
 | `GET /v1/availability/exceptions` | Closures and special days: `?resource_id=` those that apply to it, `?location=` one location's own |
 | `POST /v1/availability/exceptions` | `{"starts_on","ends_on"?,"outcome":"closed"\|"open","hours"?,"label","location"?,"resource_id"?}`; `DELETE …/{exception_id}` removes one |
-| `POST /v1/availability/holidays` | `{"icalendar"}` or `{"url"}`: each all-day event of a holiday calendar closes its days |
+| `POST /v1/availability/holidays` | `{"icalendar"}` or `{"url"}`, `name`?, `subscribe`?: each all-day event of a holiday calendar closes its days; importing the calendar again (by name) removes the holidays it dropped, and `subscribe` imports a URL again every 30 days |
+| `GET /v1/availability/holiday-calendars` | The calendars imported, with their closures, and for a subscription its next import and last error; `DELETE …/{calendar_id}` deletes one with its closures |
 | `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
 | `GET /v1/holds/{hold_id}` | One live hold; `GET /v1/resources/{resource_id}/holds` lists them |
 | `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation (`409 payment_required` while a hold made with `payment_required` is unpaid) |

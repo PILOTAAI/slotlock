@@ -474,6 +474,15 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 540, durationMinutes: 60 }],
         });
         await tenant.createAvailabilityException({ tenantRef, location: 'depot', startsOn: '2027-12-25', outcome: 'closed', label: 'Christmas' });
+        // A holiday calendar and the closure it made (RFC 0004 B1).
+        await tenant.importHolidayCalendar({
+          tenantRef,
+          location: 'depot',
+          name: 'Depot holidays',
+          url: 'https://example.com/holidays.ics',
+          holidays: [{ uid: 'boxing-day', startsOn: '2027-12-26', endsOn: '2027-12-26', label: 'Boxing Day' }],
+          span: { from: '2027-01-01', to: '2027-12-31' },
+        });
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',

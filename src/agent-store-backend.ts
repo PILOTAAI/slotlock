@@ -53,8 +53,12 @@ import {
   exceptionRanges,
   openWindows,
 } from './hours.js';
-import { fetchHolidayCalendar, parseHolidayCalendar } from './holidays.js';
-import { SLOTLOCK_OVERRIDE_RESOURCES, type SlotlockOverrideResources } from './availability-store.js';
+import { readSlotlockHolidayCalendar } from './holiday-import.js';
+import {
+  SLOTLOCK_OVERRIDE_RESOURCES,
+  type SlotlockHolidayCalendar,
+  type SlotlockOverrideResources,
+} from './availability-store.js';
 import { findEarliestRange } from './ranges.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
@@ -1929,7 +1933,23 @@ function exceptionOutput(exception: SlotlockAvailabilityException) {
       null,
     label: exception.label,
     source: exception.source,
+    calendar_id: exception.calendarId ?? null,
     created_at: exception.createdAt.toISOString(),
+  };
+}
+
+function holidayCalendarOutput(calendar: SlotlockHolidayCalendar) {
+  return {
+    calendar_id: calendar.id,
+    name: calendar.name,
+    location: calendar.location ?? null,
+    resource_id: calendar.resourceId ?? null,
+    url: calendar.url ?? null,
+    imported_at: calendar.importedAt?.toISOString() ?? null,
+    next_import_at: calendar.nextImportAt?.toISOString() ?? null,
+    last_error: calendar.lastError ?? null,
+    closures: calendar.closures,
+    created_at: calendar.createdAt.toISOString(),
   };
 }
 
@@ -3473,61 +3493,59 @@ export function createSlotlockStoreApplicationBackend(
     },
 
     async importHolidays(context, input) {
-      const given = [input.icalendar, input.url].filter((value) => value !== undefined);
-      if (given.length !== 1) {
-        throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, { reason: 'give icalendar or url' });
-      }
       if (input.location !== undefined && input.resource_id !== undefined) {
         throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, { reason: 'a location or a resource, not both' });
       }
-      const today = Math.floor(Date.now() / 86_400_000);
-      const from = (input.from as string | undefined) ?? dayToDate(today);
-      const to = (input.to as string | undefined) ?? dayToDate((epochDay(from) ?? today) + 730);
-      const first = epochDay(from);
-      const last = epochDay(to);
-      if (first === null || last === null || last < first || last - first > 1_096) {
-        throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, {
-          reason: 'from and to must be days at most three years apart',
-        });
-      }
-      let text: string;
-      if (input.url !== undefined) {
-        if (!options.holidayFetch) throw new SlotlockAgentOperationError('holiday_url_not_served', 400);
-        try {
-          text = await fetchHolidayCalendar(options.holidayFetch, input.url as string);
-        } catch (error) {
-          throw storeRefusal(error);
-        }
-      } else {
-        text = input.icalendar as string;
-      }
-      let parsed: ReturnType<typeof parseHolidayCalendar>;
+      // Read (a URL fetched) before the transaction opens.
+      let read: Awaited<ReturnType<typeof readSlotlockHolidayCalendar>>;
       try {
-        parsed = parseHolidayCalendar(text, { from, to });
+        read = await readSlotlockHolidayCalendar(
+          {
+            ...(input.icalendar !== undefined ? { icalendar: input.icalendar as string } : {}),
+            ...(input.url !== undefined ? { url: input.url as string } : {}),
+            ...(input.name !== undefined ? { name: input.name as string } : {}),
+            ...(input.subscribe !== undefined ? { subscribe: input.subscribe as boolean } : {}),
+            ...(input.from !== undefined ? { from: input.from as string } : {}),
+            ...(input.to !== undefined ? { to: input.to as string } : {}),
+          },
+          options.holidayFetch,
+        );
       } catch (error) {
         throw storeRefusal(error);
       }
       return withTenant(store, context, async (tenant) => {
-        let imported = 0;
         try {
-          for (const holiday of parsed.holidays) {
-            await tenant.createAvailabilityException({
-              tenantRef: tenantOf(context),
-              ...(input.location !== undefined ? { location: input.location as string } : {}),
-              ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
-              startsOn: holiday.startsOn,
-              endsOn: holiday.endsOn,
-              outcome: 'closed',
-              label: holiday.label,
-              source: 'ics',
-              sourceUid: `ics:${holiday.uid}`,
-            });
-            imported++;
-          }
+          const result = await tenant.importHolidayCalendar({
+            tenantRef: tenantOf(context),
+            ...(input.location !== undefined ? { location: input.location as string } : {}),
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            name: read.name,
+            ...(read.url !== undefined ? { url: read.url } : {}),
+            holidays: read.holidays,
+            span: read.span,
+          });
+          return {
+            imported: result.imported,
+            skipped: read.skipped,
+            removed: result.removed,
+            calendar: holidayCalendarOutput(result.calendar),
+          };
         } catch (error) {
           throw storeRefusal(error);
         }
-        return { imported, skipped: parsed.skipped };
+      });
+    },
+
+    async listHolidayCalendars(context) {
+      return withTenant(store, context, async (tenant) => ({
+        calendars: (await tenant.listHolidayCalendars({ tenantRef: tenantOf(context) })).map(holidayCalendarOutput),
+      }));
+    },
+
+    async deleteHolidayCalendar(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const deleted = await tenant.deleteHolidayCalendar({ tenantRef: tenantOf(context), id: input.calendar_id as string });
+        return { deleted: deleted !== null, closures: deleted?.closures ?? 0 };
       });
     },
 
@@ -4440,9 +4458,10 @@ export function createSlotlockStoreApplicationBackend(
     async runMaintenance(context) {
       assertActive(context);
       try {
-        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, bookingsCompleted, remindersDue, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, holidayCalendarsImported: _holidays, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, bookingsCompleted, remindersDue, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
+          ...(options.holidayFetch ? { holidayFetch: options.holidayFetch } : {}),
         });
         return {
           ...result,

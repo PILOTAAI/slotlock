@@ -2014,6 +2014,10 @@ BEGIN
   DELETE FROM slotlock.availability_exceptions WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'holiday_calendars';
+  DELETE FROM slotlock.holiday_calendars WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'availability_defaults';
   DELETE FROM slotlock.availability_defaults WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -2293,7 +2297,8 @@ BEGIN
   FOREACH emptied IN ARRAY ARRAY[
     'calendar_event_attendees', 'calendar_event_reminders', 'calendar_event_exceptions',
     'calendar_event_occurrences', 'composite_claims', 'approvals', 'approval_policies',
-    'availability_exceptions', 'availability_defaults', 'contacts', 'reminder_dispatches', 'reservation_reminder_dispatches',
+    'availability_exceptions', 'holiday_calendars', 'availability_defaults', 'contacts', 'reminder_dispatches',
+    'reservation_reminder_dispatches',
     'hold_payments', 'source_busy', 'calendar_events', 'calendar_event_tombstones', 'calendar_event_commands',
     'reservation_tombstones', 'reservation_conflict_archive', 'calendar_coverage', 'hold_commands',
     'waitlist_entries', 'booking_rule_defaults', 'pool_settings', 'resource_group_members',
@@ -5152,6 +5157,58 @@ CREATE INDEX IF NOT EXISTS slotlock_availability_exceptions_days_idx
 CREATE INDEX IF NOT EXISTS slotlock_availability_exceptions_resource_idx
   ON slotlock.availability_exceptions (resource_id) WHERE resource_id IS NOT NULL;
 
+-- A holiday calendar imported into closures (RFC 0004 B1), for the tenant, a location or a
+-- resource, by name: its closures name it, so importing it again removes the holidays it has
+-- dropped. With a URL it is a subscription, which maintenance imports again by next_import_at.
+-- Deleting it deletes its closures.
+CREATE TABLE IF NOT EXISTS slotlock.holiday_calendars (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_ref text NOT NULL,
+  location_ref text,
+  resource_id uuid,
+  name text NOT NULL,
+  url text,
+  imported_at timestamptz,
+  next_import_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_holiday_calendars_tenant_key UNIQUE (id, tenant_ref),
+  CONSTRAINT slotlock_holiday_calendars_location_fkey FOREIGN KEY (tenant_ref, location_ref)
+    REFERENCES slotlock.locations (tenant_ref, ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_holiday_calendars_resource_fkey FOREIGN KEY (resource_id, tenant_ref)
+    REFERENCES slotlock.resources (id, tenant_ref) ON DELETE CASCADE,
+  CONSTRAINT slotlock_holiday_calendars_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND (location_ref IS NULL OR resource_id IS NULL)
+    AND char_length(name) BETWEEN 1 AND 200 AND btrim(name) <> ''
+    AND (url IS NULL OR (url ~ '^https://' AND octet_length(url) <= 2048))
+    AND (next_import_at IS NULL OR url IS NOT NULL)
+    AND (last_error IS NULL OR char_length(last_error) <= 500)
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_holiday_calendars_name_idx
+  ON slotlock.holiday_calendars (tenant_ref, (COALESCE(location_ref, '')), (COALESCE(resource_id::text, '')), name);
+CREATE INDEX IF NOT EXISTS slotlock_holiday_calendars_due_idx
+  ON slotlock.holiday_calendars (tenant_ref, next_import_at) WHERE next_import_at IS NOT NULL;
+-- The calendar an imported closure came from: NULL for one added by hand, or imported before
+-- calendars were kept (claimed by the next import of a calendar that names it).
+ALTER TABLE slotlock.availability_exceptions ADD COLUMN IF NOT EXISTS calendar_id uuid;
+DO $slotlock_exception_calendar$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_availability_exceptions_calendar_fkey'
+       AND conrelid = 'slotlock.availability_exceptions'::regclass
+  ) THEN
+    ALTER TABLE slotlock.availability_exceptions
+      ADD CONSTRAINT slotlock_availability_exceptions_calendar_fkey FOREIGN KEY (calendar_id, tenant_ref)
+      REFERENCES slotlock.holiday_calendars (id, tenant_ref) ON DELETE CASCADE;
+  END IF;
+END
+$slotlock_exception_calendar$;
+CREATE INDEX IF NOT EXISTS slotlock_availability_exceptions_calendar_idx
+  ON slotlock.availability_exceptions (calendar_id) WHERE calendar_id IS NOT NULL;
+
 -- The hours a resource without its own inherits: its location's, the nearest up the chain, else its
 -- tenant's, as {source, location?, rules}; NULL leaves the server's default. Runs as the caller, so
 -- row-level security keeps it inside the tenant.
@@ -6358,6 +6415,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'approvals',
   'availability_defaults',
   'availability_exceptions',
+  'holiday_calendars',
   'contacts',
   'reminder_dispatches',
   'reservation_reminder_dispatches',
@@ -6422,6 +6480,7 @@ export const SLOTLOCK_RESOURCE_SCOPED_TABLES: Readonly<Record<string, string>> =
   waitlist_entries: resourceScopeAllows('resource_id'),
   // The tenant's and locations' exceptions shape every resource's hours, so every key reads them.
   availability_exceptions: `(resource_id IS NULL OR ${resourceScopeAllows('resource_id')})`,
+  holiday_calendars: `(resource_id IS NULL OR ${resourceScopeAllows('resource_id')})`,
   source_busy: resourceScopeAllows('resource_id'),
   hold_payments: resourceScopeAllows('resource_id'),
   ...Object.fromEntries(
@@ -6533,6 +6592,8 @@ ALTER TABLE slotlock.reservation_reminder_dispatches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.reservation_reminder_dispatches FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.hold_payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.hold_payments FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.holiday_calendars ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.holiday_calendars FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.source_busy ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.source_busy FORCE ROW LEVEL SECURITY;
 
@@ -6577,6 +6638,7 @@ BEGIN
          'approvals',
          'availability_defaults',
          'availability_exceptions',
+         'holiday_calendars',
          'contacts',
          'reminder_dispatches',
          'reservation_reminder_dispatches',
@@ -6965,6 +7027,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'holiday_calendars'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.holiday_calendars
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'source_busy'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -7043,6 +7115,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.reservation_reminder_dispatche
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.hold_payments
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.holiday_calendars
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.source_busy
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 ${SLOTLOCK_RESOURCE_SCOPE_POLICIES}
@@ -7099,6 +7173,7 @@ WHERE schemaname = 'slotlock'
     'approvals',
     'availability_defaults',
     'availability_exceptions',
+    'holiday_calendars',
     'contacts',
     'reminder_dispatches',
     'reservation_reminder_dispatches',

@@ -103,7 +103,7 @@ import {
 import { readFile } from 'node:fs/promises';
 import type { SlotlockAvailabilityException } from './hours.js';
 import type { SlotlockOverrideResources } from './availability-store.js';
-import { parseHolidayCalendar } from './holidays.js';
+import { readSlotlockHolidayCalendar } from './holiday-import.js';
 import {
   SLOTLOCK_DASHBOARD_FUNCTIONS,
   SLOTLOCK_QUOTA_FUNCTIONS,
@@ -1303,7 +1303,8 @@ export async function startSlotlockServer(
               : {}),
             ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             keys: createSlotlockApiKeyStore(sql),
-            resources: createSlotlockDashboardResources(store, { agentBackend }),
+            // Holiday calendars by address (RFC 0004 B1), never from a private address.
+            resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: createSlotlockGuardedFetch() }),
             state: createSlotlockDashboardState(sql),
             availability: config.availability,
             ...(config.usage ? { usage: true } : {}),
@@ -1372,6 +1373,8 @@ export async function startSlotlockServer(
           SELECT slotlock.maintenance_tenants(${after}::text) AS tenant`),
       intervalMs: SERVE_MAINTENANCE_INTERVAL_MS,
       ...(config.usage ? { usage: true } : {}),
+      // Holiday calendar subscriptions (RFC 0004 B1), never from a private address.
+      holidayFetch: createSlotlockGuardedFetch(),
       // Counts only, never the tenant.
       onPass: (result) => {
         metrics?.maintenance(result);
@@ -1693,31 +1696,23 @@ async function runClosures(
         line(exception);
         return 0;
       }
-      // closures import <file>
+      // closures import <file> [--label <calendar name>]
       let text: string;
       try {
         text = await readFile(operands[0] as string, 'utf8');
       } catch {
         return fail('that file cannot be read');
       }
-      const today = Math.floor(Date.now() / 86_400_000);
-      const day = (offset: number) => new Date((today + offset) * 86_400_000).toISOString().slice(0, 10);
-      const parsed = parseHolidayCalendar(text, { from: day(0), to: day(730) });
-      await store.withTenant(tenantRef, async (tenant) => {
-        for (const holiday of parsed.holidays) {
-          await tenant.createAvailabilityException({
-            tenantRef,
-            ...scope,
-            startsOn: holiday.startsOn,
-            endsOn: holiday.endsOn,
-            outcome: 'closed',
-            label: holiday.label,
-            source: 'ics',
-            sourceUid: `ics:${holiday.uid}`,
-          });
-        }
+      const read = await readSlotlockHolidayCalendar({
+        icalendar: text,
+        ...(given.label !== undefined ? { name: given.label } : {}),
       });
-      io.stdout.write(`${JSON.stringify({ imported: parsed.holidays.length, skipped: parsed.skipped })}\n`);
+      const result = await store.withTenant(tenantRef, (tenant) =>
+        tenant.importHolidayCalendar({ tenantRef, ...scope, name: read.name, holidays: read.holidays, span: read.span }),
+      );
+      io.stdout.write(
+        `${JSON.stringify({ imported: result.imported, removed: result.removed, skipped: read.skipped, calendar: result.calendar.name })}\n`,
+      );
       return 0;
     } catch (error) {
       const code = (error as { code?: unknown }).code;
@@ -1726,7 +1721,8 @@ async function runClosures(
         code === 'invalid_holiday_calendar' ||
         code === 'location_not_found' ||
         code === 'resource_not_found' ||
-        code === 'availability_exceptions_limit_reached'
+        code === 'availability_exceptions_limit_reached' ||
+        code === 'holiday_calendars_limit_reached'
       ) {
         return fail((error as Error).message);
       }
@@ -2343,11 +2339,14 @@ async function maintainTenant(
         approvalsExpired: 0,
         bookingsCompleted: 0,
         remindersDue: 0,
+        holidayCalendarsImported: 0,
         capped: true,
         passes: 0,
       };
+      // Holiday calendar subscriptions by URL (RFC 0004 B1), never from a private address.
+      const holidayFetch = createSlotlockGuardedFetch();
       while (sum.capped && sum.passes < MAINTAIN_MAX_PASSES) {
-        const pass = await maintainSlotlockTenant(store, config.tenantRef);
+        const pass = await maintainSlotlockTenant(store, config.tenantRef, { holidayFetch });
         sum.passes += 1;
         sum.extended += pass.extended;
         sum.conflicts += pass.conflicts;
@@ -2360,6 +2359,7 @@ async function maintainTenant(
         sum.approvalsExpired += pass.approvalsExpired;
         sum.bookingsCompleted += pass.bookingsCompleted;
         sum.remindersDue += pass.remindersDue;
+        sum.holidayCalendarsImported += pass.holidayCalendarsImported;
         // A capped pass that got nowhere met only series it cannot extend. While its roll stopped
         // before the series it had put back, the next pass meets new ones (and perhaps a healthy
         // one); once it reached them, another pass would meet them again.
@@ -2458,9 +2458,10 @@ Commands:
                            Close whole days (YYYY-MM-DD), or with --open give them those hours
                            instead, everywhere or for one location or resource
   closures delete <id>     Remove a closure
-  closures import <file> [--resource <ref> | --location <ref>]
+  closures import <file> [--resource <ref> | --location <ref>] [--label <calendar name>]
                            Close the days an iCalendar file of holidays names (each all-day
-                           event, for the next two years); importing again updates them
+                           event, for the next two years); importing the calendar again (by its
+                           name: --label, else its own) updates them and removes those it dropped
   rules set <json> --resource <ref>
                            Set what a booking on the resource must satisfy, like
                            {"minNoticeMinutes":120,"slotStepMinutes":30,"turnaroundMinutes":30,"enforceHours":true}
@@ -2809,8 +2810,11 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
   if (values.location !== undefined && !subcommand.startsWith('hours ') && !subcommand.startsWith('closures ')) {
     return usage('--location applies only to hours and closures commands');
   }
-  if ((values.label !== undefined || values.open !== undefined) && subcommand !== 'closures add') {
-    return usage('--label and --open apply only to closures add');
+  if (values.label !== undefined && subcommand !== 'closures add' && subcommand !== 'closures import') {
+    return usage('--label applies only to closures add and closures import');
+  }
+  if (values.open !== undefined && subcommand !== 'closures add') {
+    return usage('--open applies only to closures add');
   }
   if (subcommand.startsWith('closures ') && values.resource !== undefined && values.location !== undefined) {
     return usage(`${subcommand} takes --resource or --location, not both`);

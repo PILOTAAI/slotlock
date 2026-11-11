@@ -20,6 +20,8 @@ const READS = [
   'listAvailabilityExceptions',
   'holdGroup',
   'availabilityExceptionsFor',
+  'listHolidayCalendars',
+  'dueHolidayCalendars',
   'listChanges',
   'listWebhookEndpoints',
   'getResource',

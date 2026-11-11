@@ -138,6 +138,13 @@ import {
   type SlotlockAvailabilityExceptionInput,
   type SlotlockOverrideResources,
   createAvailabilityException,
+  deleteHolidayCalendar,
+  dueHolidayCalendars,
+  importHolidayCalendar,
+  listHolidayCalendars,
+  noteHolidayCalendarFailure,
+  type SlotlockHolidayCalendar,
+  type SlotlockHolidayImport,
   deleteAvailabilityException,
   getAvailabilityDefaults,
   listAvailabilityExceptions,
@@ -148,6 +155,7 @@ import {
   storedInheritedAvailability,
 } from './availability-store.js';
 import type { SlotlockAvailabilityException, SlotlockRankedException } from './hours.js';
+import type { SlotlockHoliday } from './holidays.js';
 import {
   type PutApprovalPolicyParams,
   APPROVAL_COLUMNS,
@@ -3216,6 +3224,29 @@ export interface SlotlockStore extends SlotlockEventFeed {
     }[];
   }): Promise<number>;
   /**
+   * Import a holiday calendar's days off as closures at its scope, as the calendar named `name`
+   * there (RFC 0004 B1): holidays added or updated, and those it made before and no longer names
+   * in `span` deleted. With `url`, a subscription maintenance imports again. See
+   * availability-store.ts importHolidayCalendar for its refusals.
+   */
+  importHolidayCalendar(params: {
+    tenantRef: string;
+    location?: string;
+    resourceId?: string;
+    name: string;
+    url?: string;
+    holidays: readonly SlotlockHoliday[];
+    span: { from: string; to: string };
+  }): Promise<SlotlockHolidayImport>;
+  /** The tenant's holiday calendars. */
+  listHolidayCalendars(params: { tenantRef: string }): Promise<SlotlockHolidayCalendar[]>;
+  /** Delete a holiday calendar and its closures; null for one the tenant does not have. */
+  deleteHolidayCalendar(params: { tenantRef: string; id: string }): Promise<{ closures: number } | null>;
+  /** Subscriptions due to be imported again, the longest waiting first. */
+  dueHolidayCalendars(params: { tenantRef: string; limit: number }): Promise<SlotlockHolidayCalendar[]>;
+  /** Note why a subscription's import failed; it is tried again a day later. */
+  noteHolidayCalendarFailure(params: { tenantRef: string; id: string; error: string }): Promise<void>;
+  /**
    * Each resource's exceptions that reach `window`, in the order the evaluator applies them, by
    * resource id.
    */
@@ -4655,6 +4686,9 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'createAvailabilityException',
   'deleteAvailabilityException',
   'replaceImportedExceptions',
+  'importHolidayCalendar',
+  'deleteHolidayCalendar',
+  'noteHolidayCalendarFailure',
   'createReservation',
   'createExternalReservation',
   'rescheduleExternalReservation',
@@ -5795,6 +5829,32 @@ function buildSlotlockStore(
 
     async replaceImportedExceptions(params) {
       return replaceImportedExceptions(sql, params);
+    },
+
+    async importHolidayCalendar(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw Object.assign(new Error('Slotlock tenant reference must be 1-500 UTF-8 bytes'), {
+          code: 'invalid_identity' as const,
+        });
+      }
+      // The calendar, its holidays and what it dropped, all or none.
+      return inTransaction(sql, (tx) => importHolidayCalendar(tx, params), 'read committed');
+    },
+
+    async listHolidayCalendars(params) {
+      return listHolidayCalendars(sql, params);
+    },
+
+    async deleteHolidayCalendar(params) {
+      return inTransaction(sql, (tx) => deleteHolidayCalendar(tx, params), 'read committed');
+    },
+
+    async dueHolidayCalendars(params) {
+      return dueHolidayCalendars(sql, params);
+    },
+
+    async noteHolidayCalendarFailure(params) {
+      return noteHolidayCalendarFailure(sql, params);
     },
 
     async availabilityExceptionsFor(params) {

@@ -42,8 +42,10 @@ closure empties them, `--open` gives them hours of their own. Each is the tenant
 (and every location inside it) or one resource's. Where several fall on a day, the nearest wins.
 Search leaves those days as they say. Writes are refused `booking_rule_outside_hours` only under
 the `enforceHours` rule, as for weekly hours. `closures import` reads an iCalendar file of days
-off: each all-day event closes its days for the next two years, and importing it again updates
-them.
+off: each all-day event closes its days for the next two years. The calendar is kept by name
+(`--label`, else its own): importing it again updates its closures and removes the holidays it
+dropped. Through the API or the dashboard, a calendar's address can be subscribed to, and is
+imported again every 30 days.
 
 A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`. The
 REST application API spells every field in snake_case, so there it is `rrule`, `start_minutes` and

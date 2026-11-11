@@ -68,6 +68,8 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_create_availability_exception", new Operation("POST", "/v1/availability/exceptions", List.of(), List.of())),
           Map.entry("slotlock_delete_availability_exception", new Operation("DELETE", "/v1/availability/exceptions/{exception_id}", List.of("exception_id"), List.of("dry_run"))),
           Map.entry("slotlock_import_holidays", new Operation("POST", "/v1/availability/holidays", List.of(), List.of())),
+          Map.entry("slotlock_list_holiday_calendars", new Operation("GET", "/v1/availability/holiday-calendars", List.of(), List.of())),
+          Map.entry("slotlock_delete_holiday_calendar", new Operation("DELETE", "/v1/availability/holiday-calendars/{calendar_id}", List.of("calendar_id"), List.of("dry_run"))),
           Map.entry("slotlock_acquire_hold", new Operation("POST", "/v1/holds", List.of(), List.of())),
           Map.entry("slotlock_get_hold", new Operation("GET", "/v1/holds/{hold_id}", List.of("hold_id"), List.of())),
           Map.entry("slotlock_release_hold", new Operation("DELETE", "/v1/holds/{hold_id}", List.of("hold_id"), List.of("dry_run"))),
@@ -2089,20 +2091,25 @@ public abstract class SlotlockOperations {
    * tenant, one location or one resource: the text in icalendar, or an https url the server
    * fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the
    * days it covers, and each occurrence of a recurring one within from to to (default today to
-   * two years on, at most three years); timed and cancelled events are skipped. Importing the
-   * same calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar
-   * for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
-   * holiday_url_not_served where the server fetches no urls.
+   * two years on, at most three years); timed and cancelled events are skipped. The calendar is
+   * kept by name at its scope (name, by default its own X-WR-CALNAME, else the url's host and
+   * path, else Holidays): importing it again updates its closures instead of adding more, and
+   * deletes the ones it made that it no longer names within the span (removed), so a holiday it
+   * dropped goes too. With subscribe (and a url), the server keeps the url and imports it again
+   * every 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+   * invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the
+   * url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
    *
    * @param optional the optional arguments, or null: {@code icalendar} (string), {@code url}
-   * (string), {@code location} (string), {@code resource_id} (string), {@code from} (string),
-   * {@code to} (string), {@code dry_run} (boolean)
+   * (string), {@code name} (string), {@code subscribe} (boolean), {@code location} (string),
+   * {@code resource_id} (string), {@code from} (string), {@code to} (string), {@code dry_run}
+   * (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> importHolidays(Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    putOptional(values, optional, Set.of("icalendar", "url", "location", "resource_id", "from", "to", "dry_run"), "slotlock_import_holidays");
+    putOptional(values, optional, Set.of("icalendar", "url", "name", "subscribe", "location", "resource_id", "from", "to", "dry_run"), "slotlock_import_holidays");
     return call("slotlock_import_holidays", values);
   }
 
@@ -2111,16 +2118,63 @@ public abstract class SlotlockOperations {
    * tenant, one location or one resource: the text in icalendar, or an https url the server
    * fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the
    * days it covers, and each occurrence of a recurring one within from to to (default today to
-   * two years on, at most three years); timed and cancelled events are skipped. Importing the
-   * same calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar
-   * for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
-   * holiday_url_not_served where the server fetches no urls.
+   * two years on, at most three years); timed and cancelled events are skipped. The calendar is
+   * kept by name at its scope (name, by default its own X-WR-CALNAME, else the url's host and
+   * path, else Holidays): importing it again updates its closures instead of adding more, and
+   * deletes the ones it made that it no longer names within the span (removed), so a holiday it
+   * dropped goes too. With subscribe (and a url), the server keeps the url and imports it again
+   * every 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+   * invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the
+   * url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
    *
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> importHolidays() {
     return importHolidays(null);
+  }
+
+  /**
+   * List holiday calendars. The holiday calendars imported into the tenant's closures
+   * (slotlock_import_holidays), each with its scope, how many closures it made, and for a
+   * subscription its url, when it was last imported, when it will be again, and why the last
+   * import failed if it did.
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> listHolidayCalendars() {
+    Map<String, Object> values = new LinkedHashMap<>();
+    return call("slotlock_list_holiday_calendars", values);
+  }
+
+  /**
+   * Delete a holiday calendar. Delete a holiday calendar and every closure it made, and stop
+   * importing it again. deleted is false when the tenant has no such calendar; closures counts
+   * those deleted with it.
+   *
+   * @param calendarId {@code calendar_id}, string
+   * @param optional the optional arguments, or null: {@code dry_run} (boolean)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteHolidayCalendar(String calendarId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("calendar_id", calendarId);
+    putOptional(values, optional, Set.of("dry_run"), "slotlock_delete_holiday_calendar");
+    return call("slotlock_delete_holiday_calendar", values);
+  }
+
+  /**
+   * Delete a holiday calendar. Delete a holiday calendar and every closure it made, and stop
+   * importing it again. deleted is false when the tenant has no such calendar; closures counts
+   * those deleted with it.
+   *
+   * @param calendarId {@code calendar_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> deleteHolidayCalendar(String calendarId) {
+    return deleteHolidayCalendar(calendarId, null);
   }
 
   /**

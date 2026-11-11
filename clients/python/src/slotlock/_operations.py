@@ -400,6 +400,20 @@ OPERATIONS: dict[str, Operation] = {
         (),
         (),
     ),
+    "slotlock_list_holiday_calendars": Operation(
+        "slotlock_list_holiday_calendars",
+        "GET",
+        "/v1/availability/holiday-calendars",
+        (),
+        (),
+    ),
+    "slotlock_delete_holiday_calendar": Operation(
+        "slotlock_delete_holiday_calendar",
+        "DELETE",
+        "/v1/availability/holiday-calendars/{calendar_id}",
+        ("calendar_id",),
+        ("dry_run",),
+    ),
     "slotlock_acquire_hold": Operation(
         "slotlock_acquire_hold",
         "POST",
@@ -2372,6 +2386,8 @@ class Operations(Transport):
         *,
         icalendar: str | None = None,
         url: str | None = None,
+        name: str | None = None,
+        subscribe: bool | None = None,
         location: str | None = None,
         resource_id: str | None = None,
         from_: str | None = None,
@@ -2384,10 +2400,14 @@ class Operations(Transport):
         one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
         seconds; private addresses refused). Each all-day event closes the days it covers, and
         each occurrence of a recurring one within from to to (default today to two years on, at
-        most three years); timed and cancelled events are skipped. Importing the same calendar
-        again updates its closures instead of adding more. 400 invalid_holiday_calendar for text
-        that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
-        holiday_url_not_served where the server fetches no urls.
+        most three years); timed and cancelled events are skipped. The calendar is kept by name at
+        its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
+        Holidays): importing it again updates its closures instead of adding more, and deletes the
+        ones it made that it no longer names within the span (removed), so a holiday it dropped
+        goes too. With subscribe (and a url), the server keeps the url and imports it again every
+        30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+        invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
+        the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2400,6 +2420,10 @@ class Operations(Transport):
             values["icalendar"] = icalendar
         if url is not None:
             values["url"] = url
+        if name is not None:
+            values["name"] = name
+        if subscribe is not None:
+            values["subscribe"] = subscribe
         if location is not None:
             values["location"] = location
         if resource_id is not None:
@@ -2411,6 +2435,38 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_import_holidays", values)
+
+    def list_holiday_calendars(self) -> dict[str, Any]:
+        """List holiday calendars.
+
+        The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each
+        with its scope, how many closures it made, and for a subscription its url, when it was
+        last imported, when it will be again, and why the last import failed if it did.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_holiday_calendars", values)
+
+    def delete_holiday_calendar(
+        self,
+        calendar_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Delete a holiday calendar.
+
+        Delete a holiday calendar and every closure it made, and stop importing it again. deleted
+        is false when the tenant has no such calendar; closures counts those deleted with it.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"calendar_id": calendar_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_holiday_calendar", values)
 
     def acquire_hold(
         self,

@@ -401,6 +401,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_list_holiday_calendars",
+        method: "GET",
+        path: "/v1/availability/holiday-calendars",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_holiday_calendar",
+        method: "DELETE",
+        path: "/v1/availability/holiday-calendars/{calendar_id}",
+        path_params: &["calendar_id"],
+        query: &["dry_run"],
+    },
+    Operation {
         name: "slotlock_acquire_hold",
         method: "POST",
         path: "/v1/holds",
@@ -1683,6 +1697,10 @@ pub struct ImportHolidaysInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscribe: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<String>,
@@ -1690,6 +1708,23 @@ pub struct ImportHolidaysInput {
     pub from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_holiday_calendars`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListHolidayCalendarsInput {
+}
+
+/// The arguments of [`Client::delete_holiday_calendar`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteHolidayCalendarInput {
+    pub calendar_id: String,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -3010,12 +3045,33 @@ impl Client {
     /// one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
     /// seconds; private addresses refused). Each all-day event closes the days it covers, and
     /// each occurrence of a recurring one within from to to (default today to two years on, at
-    /// most three years); timed and cancelled events are skipped. Importing the same calendar
-    /// again updates its closures instead of adding more. 400 invalid_holiday_calendar for text
-    /// that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
-    /// holiday_url_not_served where the server fetches no urls.
+    /// most three years); timed and cancelled events are skipped. The calendar is kept by name at
+    /// its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
+    /// Holidays): importing it again updates its closures instead of adding more, and deletes the
+    /// ones it made that it no longer names within the span (removed), so a holiday it dropped
+    /// goes too. With subscribe (and a url), the server keeps the url and imports it again every
+    /// 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+    /// invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
+    /// the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
     pub fn import_holidays(&self, input: &ImportHolidaysInput) -> Result<Value, Error> {
         self.call("slotlock_import_holidays", serde_json::to_value(input)?)
+    }
+
+    /// List holiday calendars.
+    ///
+    /// The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each
+    /// with its scope, how many closures it made, and for a subscription its url, when it was
+    /// last imported, when it will be again, and why the last import failed if it did.
+    pub fn list_holiday_calendars(&self, input: &ListHolidayCalendarsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_holiday_calendars", serde_json::to_value(input)?)
+    }
+
+    /// Delete a holiday calendar.
+    ///
+    /// Delete a holiday calendar and every closure it made, and stop importing it again. deleted
+    /// is false when the tenant has no such calendar; closures counts those deleted with it.
+    pub fn delete_holiday_calendar(&self, input: &DeleteHolidayCalendarInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_holiday_calendar", serde_json::to_value(input)?)
     }
 
     /// Hold time.

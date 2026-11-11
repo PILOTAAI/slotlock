@@ -112,10 +112,12 @@ import type {
 import type {
   SlotlockAvailabilityDefaults,
   SlotlockAvailabilityExceptionInput,
+  SlotlockHolidayCalendar,
   SlotlockOverrideResources,
 } from './availability-store.js';
 import { type SlotlockAvailabilityException, dayToDate, epochDay } from './hours.js';
-import { parseHolidayCalendar } from './holidays.js';
+import { SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES } from './holidays.js';
+import { type SlotlockHolidaySource, readSlotlockHolidayCalendar } from './holiday-import.js';
 import { SlotlockAgentOperationError } from './agent-server.js';
 import { runSlotlockApprovalGrant } from './agent-store-backend.js';
 import {
@@ -161,6 +163,8 @@ const GOOGLE_KEYS_DEFAULT_TTL_MS = 3_600_000;
 const MAX_FORM_BYTES = 8_192;
 /** A message to the assistant: 2,000 characters, each up to 9 bytes as a form encodes it. */
 const MAX_ASSISTANT_FORM_BYTES = 24_576;
+/** A holiday calendar import's form: the calendar (SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES) and its fields. */
+const MAX_IMPORT_FORM_BYTES = SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES + 65_536;
 /**
  * Sign-ins (record, then GitHub's token and user) one instance runs at once; more are told to retry.
  * This also bounds how fast unauthenticated callbacks can write sign-in records.
@@ -200,6 +204,7 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/closures',
   '/closures/delete',
   '/closures/import',
+  '/closures/calendars/delete',
   '/contacts/forget',
   '/organization',
   '/environment',
@@ -326,13 +331,22 @@ export interface SlotlockDashboardResources {
       actor?: string,
     ): Promise<SlotlockAvailabilityException>;
     deleteException(tenantRef: string, id: string, actor?: string): Promise<boolean>;
-    /** Each all-day event of an iCalendar text closes its days for the next two years. */
+    /**
+     * Import a holiday calendar (its text, or a URL with `byUrl`): each all-day event closes its
+     * days for the next two years. Kept by name at its scope, so importing it again updates it and
+     * removes the holidays it dropped; `subscribe` imports a URL again every 30 days.
+     */
     importHolidays(
       tenantRef: string,
-      icalendar: string,
+      source: SlotlockHolidaySource,
       scope: { location?: string; resourceId?: string },
       actor?: string,
-    ): Promise<{ imported: number; skipped: number }>;
+    ): Promise<{ imported: number; skipped: number; removed: number }>;
+    /** Whether importHolidays reads calendars by URL. */
+    byUrl?: boolean;
+    /** The tenant's holiday calendars, and deleting one with its closures (false: not the tenant's). */
+    calendars?(tenantRef: string): Promise<SlotlockHolidayCalendar[]>;
+    deleteCalendar?(tenantRef: string, id: string, actor?: string): Promise<boolean>;
   };
   /** What occupies the tenant's resources in `window`, by start: the overview's agenda. */
   agenda?(tenantRef: string, window: Interval, limit: number): Promise<SlotlockAgendaEntry[]>;
@@ -735,6 +749,11 @@ export function createSlotlockDashboardResources(
      * through: with it, the dashboard lists approvals and decides them.
      */
     agentBackend?: SlotlockAgentCalendarBackend;
+    /**
+     * Fetches holiday calendars by URL (the guarded fetch under `serve`): with it, Closures imports
+     * and subscribes to a calendar's address.
+     */
+    holidayFetch?: typeof fetch;
   } = {},
 ): SlotlockDashboardResources {
   // Every change here is the dashboard's, made by the person signed in (actor) when known.
@@ -848,29 +867,29 @@ export function createSlotlockDashboardResources(
         store.withTenant(tenantRef, (tenant) => tenant.createAvailabilityException({ ...exception, tenantRef }), by(actor)),
       deleteException: (tenantRef, id, actor) =>
         store.withTenant(tenantRef, (tenant) => tenant.deleteAvailabilityException({ tenantRef, id }), by(actor)),
-      importHolidays: (tenantRef, icalendar, scope, actor) => {
-        const today = Math.floor(Date.now() / 86_400_000);
-        const parsed = parseHolidayCalendar(icalendar, { from: dayToDate(today), to: dayToDate(today + 730) });
+      importHolidays: async (tenantRef, source, scope, actor) => {
+        // Read (a URL fetched) before the transaction opens.
+        const read = await readSlotlockHolidayCalendar(source, options.holidayFetch);
         return store.withTenant(
           tenantRef,
           async (tenant) => {
-            for (const holiday of parsed.holidays) {
-              await tenant.createAvailabilityException({
-                tenantRef,
-                ...scope,
-                startsOn: holiday.startsOn,
-                endsOn: holiday.endsOn,
-                outcome: 'closed',
-                label: holiday.label,
-                source: 'ics',
-                sourceUid: `ics:${holiday.uid}`,
-              });
-            }
-            return { imported: parsed.holidays.length, skipped: parsed.skipped };
+            const result = await tenant.importHolidayCalendar({
+              tenantRef,
+              ...scope,
+              name: read.name,
+              ...(read.url !== undefined ? { url: read.url } : {}),
+              holidays: read.holidays,
+              span: read.span,
+            });
+            return { imported: result.imported, skipped: read.skipped, removed: result.removed };
           },
           by(actor),
         );
       },
+      byUrl: options.holidayFetch !== undefined,
+      calendars: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listHolidayCalendars({ tenantRef })),
+      deleteCalendar: (tenantRef, id, actor) =>
+        store.withTenant(tenantRef, async (tenant) => (await tenant.deleteHolidayCalendar({ tenantRef, id })) !== null, by(actor)),
     },
     agenda: (tenantRef, window, limit) =>
       store.withTenant(tenantRef, (tenant) => tenant.listAgenda({ tenantRef, window, limit })),
@@ -5318,15 +5337,25 @@ ${target === 'all' ? ownHoursChoice(state.own ?? []) : html``}
     return redirect(303, `${root}/${place ? 'locations' : 'resources'}`);
   }
 
+  /** A subscription's address as the page names it: its host, never its path or query (which may hold a token). */
+  const hostOfUrl = (url: string) => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return 'its address';
+    }
+  };
+
   /** The tenant's closures and special days from yesterday on, with forms to add and import more. */
   async function closuresPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const hours = options.resources.hours;
     if (!hours) return nothingHere(session);
     const tenantRef = tenantOf(session);
-    const [exceptions, locations, resources] = await Promise.all([
+    const [exceptions, locations, resources, calendars] = await Promise.all([
       hours.exceptions(tenantRef, SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS + 1),
       options.resources.grouping?.locations(tenantRef) ?? Promise.resolve([] as SlotlockLocation[]),
       options.resources.list(tenantRef),
+      hours.calendars?.(tenantRef) ?? Promise.resolve([] as SlotlockHolidayCalendar[]),
     ]);
     const token = csrfToken(session);
     const sent = () => html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
@@ -5375,11 +5404,36 @@ ${exceptions.length > SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS ? html`<p class="fine">T
 <label>Label <input name="label" maxlength="200" required placeholder="Christmas Day"></label>
 <button class="primary" type="submit">Add</button>
 </form>
+${calendars.length > 0 ? html`<h2>Holiday calendars</h2>
+<div class="table"><table><thead><tr><th>Calendar</th><th>Applies to</th><th>From</th><th>Closures</th><th></th></tr></thead><tbody>${calendars.map(
+        (calendar) => html`<tr><td data-label="Calendar" class="wrap">${calendar.name}${
+          calendar.lastError ? html`<span class="meta bad" role="status">The last import failed: ${calendar.lastError}</span>` : html``
+        }</td><td data-label="Applies to">${
+          calendar.resourceId
+            ? names.get(calendar.resourceId) ?? calendar.resourceId
+            : calendar.location
+              ? `${places.get(calendar.location) ?? calendar.location} (location)`
+              : 'Everywhere'
+        }</td><td data-label="From" class="wrap">${
+          calendar.url
+            ? html`${hostOfUrl(calendar.url)}<span class="meta">Imported again every 30 days${calendar.nextImportAt ? html`, next ${calendar.nextImportAt.toISOString().slice(0, 10)}` : html``}</span>`
+            : html`Uploaded or pasted${calendar.importedAt ? html`<span class="meta">${calendar.importedAt.toISOString().slice(0, 10)}</span>` : html``}`
+        }</td><td data-label="Closures">${String(calendar.closures)}</td><td class="actions">${
+          hours.deleteCalendar
+            ? html`<form method="post" action="${root}/closures/calendars/delete">${sent()}<input type="hidden" name="id" value="${calendar.id}"><button type="submit" class="danger">Delete</button></form>`
+            : html``
+        }</td></tr>`,
+      )}</tbody></table></div>
+<p class="fine">Deleting a calendar deletes its closures too.</p>` : html``}
 <h2>Import a holiday calendar</h2>
-<p>Paste an iCalendar file of days off: each all-day event closes its days for the next two years. Importing it again updates them.</p>
-<form method="post" action="${root}/closures/import" class="stack">${sent()}
+<p>Upload or paste an iCalendar file of days off${hours.byUrl ? html`, or give its address` : html``}: each all-day event closes its days for the next two years. A calendar is kept by its name where it applies: importing it again updates its closures and removes the holidays it no longer has.</p>
+<form method="post" action="${root}/closures/import" class="stack" enctype="multipart/form-data">${sent()}
 <label>Applies to <select name="scope">${scopeOptions}</select></label>
-<label>iCalendar <textarea name="icalendar" rows="6" required placeholder="BEGIN:VCALENDAR"></textarea></label>
+<label>Name <input name="name" maxlength="200" placeholder="Its own name, else its address, else Holidays"></label>
+<label>File <input type="file" name="icalendar_file" accept=".ics,text/calendar"></label>
+<label>Or paste it <textarea name="icalendar" rows="6" placeholder="BEGIN:VCALENDAR"></textarea></label>
+${hours.byUrl ? html`<label>Or its address <input type="url" name="url" maxlength="2000" placeholder="https://example.com/holidays.ics"></label>
+<label class="choice"><input type="checkbox" name="subscribe" value="on"> Import it again every 30 days</label>` : html``}
 <button type="submit">Import</button>
 </form>
 </section>`;
@@ -5504,24 +5558,56 @@ ${listed.length > SLOTLOCK_DASHBOARD_CONTACTS_PAGE ? html`<p><a class="button" h
     if (!hours) return nothingHere(session);
     const scope = await closureScope(session, form.get('scope') ?? '');
     if (!scope) return closuresPage(session, 400, 'Choose where it applies.');
+    // An uploaded file, else what was pasted, else (where the server reads them) an address.
+    const text = (form.get('icalendar_file') ?? '').trim() || (form.get('icalendar') ?? '').trim();
+    const url = hours.byUrl ? (form.get('url') ?? '').trim() : '';
+    if ((text === '') === (url === '')) {
+      return closuresPage(session, 400, hours.byUrl ? 'Upload or paste a calendar, or give its address: one of them.' : 'Upload or paste a calendar.');
+    }
+    const name = (form.get('name') ?? '').trim();
+    const source: SlotlockHolidaySource = {
+      ...(text !== '' ? { icalendar: text } : { url }),
+      ...(name !== '' ? { name } : {}),
+      ...(url !== '' && form.get('subscribe') === 'on' ? { subscribe: true } : {}),
+    };
     try {
-      const result = await hours.importHolidays(tenantOf(session), form.get('icalendar') ?? '', scope, personOf(session));
+      const result = await hours.importHolidays(tenantOf(session), source, scope, personOf(session));
+      const plural = (count: number, word: string) => `${String(count)} ${word}${count === 1 ? '' : 's'}`;
       return closuresPage(
         session,
         200,
-        `Imported ${String(result.imported)} closure${result.imported === 1 ? '' : 's'}${result.skipped > 0 ? `; skipped ${String(result.skipped)} event${result.skipped === 1 ? '' : 's'} that were not all-day or not in the next two years` : ''}.`,
+        `Imported ${plural(result.imported, 'closure')}${
+          result.removed > 0 ? `; removed ${plural(result.removed, 'holiday')} the calendar no longer has` : ''
+        }${result.skipped > 0 ? `; skipped ${plural(result.skipped, 'event')} that were not all-day or not in the next two years` : ''}.`,
       );
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (
         code === 'invalid_holiday_calendar' ||
         code === 'invalid_availability_exception' ||
-        code === 'availability_exceptions_limit_reached'
+        code === 'holiday_calendar_unreachable' ||
+        code === 'holiday_url_not_served' ||
+        code === 'location_not_found' ||
+        code === 'resource_not_found'
       ) {
-        return closuresPage(session, code === 'availability_exceptions_limit_reached' ? 409 : 400, (error as Error).message);
+        return closuresPage(session, 400, (error as Error).message);
+      }
+      if (code === 'availability_exceptions_limit_reached' || code === 'holiday_calendars_limit_reached') {
+        return closuresPage(session, 409, (error as Error).message);
       }
       throw error;
     }
+  }
+
+  /** Delete a holiday calendar and the closures it made. */
+  async function deleteHolidayCalendar(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours?.deleteCalendar) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    if (!(await hours.deleteCalendar(tenantOf(session), id, personOf(session)))) {
+      return closuresPage(session, 404, 'That calendar is not one of yours.');
+    }
+    return redirect(303, `${root}/closures`);
   }
 
   function shownOncePage(
@@ -6037,9 +6123,12 @@ ${
   async function readForm(
     request: Request,
     maxBytes = MAX_FORM_BYTES,
+    multipart = false,
   ): Promise<URLSearchParams | 'too_large' | null> {
-    const type = request.headers.get('content-type')?.split(';')[0]?.trim();
-    if (type !== 'application/x-www-form-urlencoded') return null;
+    const header = request.headers.get('content-type') ?? '';
+    const type = header.split(';')[0]?.trim();
+    const isMultipart = multipart && type === 'multipart/form-data';
+    if (type !== 'application/x-www-form-urlencoded' && !isMultipart) return null;
     const declared = Number(request.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > maxBytes) return 'too_large';
     if (!request.body) return new URLSearchParams();
@@ -6056,7 +6145,20 @@ ${
       }
       chunks.push(value);
     }
-    return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    if (!isMultipart) return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    // A file field is read as text under its name; nothing else a form sends is kept apart.
+    let data: FormData;
+    try {
+      data = await new Response(Buffer.concat(chunks), { headers: { 'content-type': header } }).formData();
+    } catch {
+      return null;
+    }
+    const form = new URLSearchParams();
+    for (const [name, value] of data.entries()) {
+      if (typeof value === 'string') form.append(name, value);
+      else if (value.size > 0) form.append(name, await value.text());
+    }
+    return form;
   }
 
   async function createKey(session: Session, form: URLSearchParams): Promise<Response> {
@@ -6219,9 +6321,16 @@ ${
     }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
+    // A holiday calendar may be uploaded, or pasted, up to its own limit.
+    const importing = route === '/closures/import';
     const form = await readForm(
       request,
-      route === '/assistant' || route === '/assistant/stream' ? MAX_ASSISTANT_FORM_BYTES : MAX_FORM_BYTES,
+      importing
+        ? MAX_IMPORT_FORM_BYTES
+        : route === '/assistant' || route === '/assistant/stream'
+          ? MAX_ASSISTANT_FORM_BYTES
+          : MAX_FORM_BYTES,
+      importing,
     );
     if (form === 'too_large') {
       return respond(
@@ -6323,6 +6432,8 @@ ${
         return deleteClosure(session, form);
       case '/closures/import':
         return importClosures(session, form);
+      case '/closures/calendars/delete':
+        return deleteHolidayCalendar(session, form);
       case '/contacts/forget':
         return forgetContact(session, form);
       case '/organization':

@@ -48,6 +48,18 @@ const RESOURCE = {
   inherited_availability: null,
 };
 
+const HOLIDAY_CALENDAR = {
+  calendar_id: '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d',
+  name: 'UK bank holidays',
+  location: 'london-depot',
+  resource_id: null,
+  url: 'https://example.com/holidays/gb.ics',
+  imported_at: '2026-11-01T09:00:00.000Z',
+  next_import_at: '2026-12-01T09:00:00.000Z',
+  last_error: null,
+  closures: 8,
+  created_at: '2026-11-01T09:00:00.000Z',
+};
 const AVAILABILITY_EXCEPTION = {
   id: '7b3c1d9e-4f2a-4e8b-9c6d-1a2b3c4d5e6f',
   location: null,
@@ -58,6 +70,7 @@ const AVAILABILITY_EXCEPTION = {
   hours: null,
   label: 'Christmas',
   source: 'manual',
+  calendar_id: null,
   created_at: '2026-11-10T09:00:00.000Z',
 };
 const LOCATION = { ref: 'leeds', name: 'Leeds clinic', parent_ref: null, timezone: 'Europe/London', resources: 2 };
@@ -161,6 +174,8 @@ const backend = {
   createAvailabilityException: vi.fn(),
   deleteAvailabilityException: vi.fn(),
   importHolidays: vi.fn(),
+  listHolidayCalendars: vi.fn(),
+  deleteHolidayCalendar: vi.fn(),
   acquireHold: vi.fn(),
   getHold: vi.fn(),
   listHolds: vi.fn(),
@@ -439,7 +454,9 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   listAvailabilityExceptions: { exceptions: [AVAILABILITY_EXCEPTION], next: null },
   createAvailabilityException: { exception: AVAILABILITY_EXCEPTION },
   deleteAvailabilityException: { deleted: true },
-  importHolidays: { imported: 8, skipped: 1 },
+  importHolidays: { imported: 8, skipped: 1, removed: 0, calendar: HOLIDAY_CALENDAR },
+  listHolidayCalendars: { calendars: [HOLIDAY_CALENDAR] },
+  deleteHolidayCalendar: { deleted: true, closures: 8 },
   exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
   importResourceAvailability: { resource: RESOURCE },
   checkInReservation: { reference: 'BK-42', checked_in_at: '2027-03-29T09:05:00.000Z' },

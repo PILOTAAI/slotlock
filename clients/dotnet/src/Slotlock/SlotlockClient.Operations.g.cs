@@ -71,6 +71,8 @@ public sealed partial class SlotlockClient
         ["slotlock_create_availability_exception"] = new("POST", "/v1/availability/exceptions", [], []),
         ["slotlock_delete_availability_exception"] = new("DELETE", "/v1/availability/exceptions/{exception_id}", ["exception_id"], ["dry_run"]),
         ["slotlock_import_holidays"] = new("POST", "/v1/availability/holidays", [], []),
+        ["slotlock_list_holiday_calendars"] = new("GET", "/v1/availability/holiday-calendars", [], []),
+        ["slotlock_delete_holiday_calendar"] = new("DELETE", "/v1/availability/holiday-calendars/{calendar_id}", ["calendar_id"], ["dry_run"]),
         ["slotlock_acquire_hold"] = new("POST", "/v1/holds", [], []),
         ["slotlock_get_hold"] = new("GET", "/v1/holds/{hold_id}", ["hold_id"], []),
         ["slotlock_release_hold"] = new("DELETE", "/v1/holds/{hold_id}", ["hold_id"], ["dry_run"]),
@@ -2158,13 +2160,19 @@ public sealed partial class SlotlockClient
     /// one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
     /// seconds; private addresses refused). Each all-day event closes the days it covers, and
     /// each occurrence of a recurring one within from to to (default today to two years on, at
-    /// most three years); timed and cancelled events are skipped. Importing the same calendar
-    /// again updates its closures instead of adding more. 400 invalid_holiday_calendar for text
-    /// that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
-    /// holiday_url_not_served where the server fetches no urls.
+    /// most three years); timed and cancelled events are skipped. The calendar is kept by name at
+    /// its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
+    /// Holidays): importing it again updates its closures instead of adding more, and deletes the
+    /// ones it made that it no longer names within the span (removed), so a holiday it dropped
+    /// goes too. With subscribe (and a url), the server keeps the url and imports it again every
+    /// 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+    /// invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
+    /// the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
     /// </remarks>
     /// <param name="icalendar">icalendar</param>
     /// <param name="url">url</param>
+    /// <param name="name">name</param>
+    /// <param name="subscribe">subscribe</param>
     /// <param name="location">location</param>
     /// <param name="resourceId">resource_id</param>
     /// <param name="from">from</param>
@@ -2179,6 +2187,8 @@ public sealed partial class SlotlockClient
     public Task<JsonObject> ImportHolidaysAsync(
         Optional<string> icalendar = default,
         Optional<string> url = default,
+        Optional<string> name = default,
+        Optional<bool> subscribe = default,
         Optional<string> location = default,
         Optional<string> resourceId = default,
         Optional<string> from = default,
@@ -2189,12 +2199,54 @@ public sealed partial class SlotlockClient
         var values = new JsonObject();
         if (icalendar.HasValue) values["icalendar"] = Json.ToNode(icalendar.Value);
         if (url.HasValue) values["url"] = Json.ToNode(url.Value);
+        if (name.HasValue) values["name"] = Json.ToNode(name.Value);
+        if (subscribe.HasValue) values["subscribe"] = Json.ToNode(subscribe.Value);
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         if (resourceId.HasValue) values["resource_id"] = Json.ToNode(resourceId.Value);
         if (from.HasValue) values["from"] = Json.ToNode(from.Value);
         if (to.HasValue) values["to"] = Json.ToNode(to.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_import_holidays", values, cancellationToken);
+    }
+
+    /// <summary>List holiday calendars.</summary>
+    /// <remarks>
+    /// The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each
+    /// with its scope, how many closures it made, and for a subscription its url, when it was
+    /// last imported, when it will be again, and why the last import failed if it did.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> ListHolidayCalendarsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        return CallAsync("slotlock_list_holiday_calendars", values, cancellationToken);
+    }
+
+    /// <summary>Delete a holiday calendar.</summary>
+    /// <remarks>
+    /// Delete a holiday calendar and every closure it made, and stop importing it again. deleted
+    /// is false when the tenant has no such calendar; closures counts those deleted with it.
+    /// </remarks>
+    /// <param name="calendarId">calendar_id</param>
+    /// <param name="dryRun">Check the write without making it: it runs with every check, the
+    /// database's included, and is then undone, so nothing is stored, recorded or sent. The
+    /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
+    /// refusal it would have met, alternatives included. Charged as a read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> DeleteHolidayCalendarAsync(
+        string calendarId,
+        Optional<bool> dryRun = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["calendar_id"] = Json.ToNode(calendarId);
+        if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
+        return CallAsync("slotlock_delete_holiday_calendar", values, cancellationToken);
     }
 
     /// <summary>Hold time.</summary>

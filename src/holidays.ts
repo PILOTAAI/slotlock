@@ -24,6 +24,8 @@ export interface ParsedHolidayCalendar {
   holidays: SlotlockHoliday[];
   /** Events that were not all-day, cancelled, or outside the span. */
   skipped: number;
+  /** The calendar's own name (X-WR-CALNAME), when it gives one: at most 200 characters. */
+  name?: string;
 }
 
 export function invalidHolidayCalendar(message: string): Error & { code: 'invalid_holiday_calendar' } {
@@ -101,7 +103,9 @@ export function parseHolidayCalendar(text: string, span: { from: string; to: str
       occurrence(day, `${uid || label}:${dateOf(next)}`);
     }
   }
-  return { holidays, skipped };
+  const given = String(root.getFirstPropertyValue('x-wr-calname') ?? '').replace(/\s+/g, ' ').trim();
+  const name = [...given].slice(0, MAX_LABEL).join('');
+  return { holidays, skipped, ...(name ? { name } : {}) };
 }
 
 /**

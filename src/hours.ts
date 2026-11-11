@@ -53,6 +53,8 @@ export interface SlotlockAvailabilityException {
   source: SlotlockExceptionSource;
   /** For imports: the source's own id, so importing again updates rather than adds. */
   sourceUid?: string;
+  /** The holiday calendar it was imported from (listHolidayCalendars), if any. */
+  calendarId?: string;
   createdAt: Date;
 }
 

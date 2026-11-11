@@ -112,8 +112,19 @@ export type {
   SlotlockAvailabilityDefaultsResult,
   SlotlockAvailabilityExceptionInput,
   SlotlockOverrideResources,
+  SlotlockHolidayCalendar,
+  SlotlockHolidayImport,
 } from './availability-store.js';
-export { SLOTLOCK_OVERRIDE_RESOURCES } from './availability-store.js';
+export {
+  SLOTLOCK_OVERRIDE_RESOURCES,
+  SLOTLOCK_HOLIDAY_REIMPORT_DAYS,
+  SLOTLOCK_MAX_HOLIDAY_CALENDARS,
+} from './availability-store.js';
+export {
+  type SlotlockHolidayCalendarRead,
+  type SlotlockHolidaySource,
+  readSlotlockHolidayCalendar,
+} from './holiday-import.js';
 export {
   fetchHolidayCalendar,
   parseHolidayCalendar,

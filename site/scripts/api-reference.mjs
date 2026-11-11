@@ -59,6 +59,8 @@ export const GROUPS = [
       'slotlock_create_availability_exception',
       'slotlock_delete_availability_exception',
       'slotlock_import_holidays',
+      'slotlock_list_holiday_calendars',
+      'slotlock_delete_holiday_calendar',
       'slotlock_export_resource_availability',
       'slotlock_import_resource_availability',
       'slotlock_record_coverage',

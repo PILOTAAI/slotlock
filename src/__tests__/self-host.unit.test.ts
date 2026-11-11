@@ -861,7 +861,7 @@ describe('slotlock command line', () => {
     [['hours', 'show', '--all'], /--all applies only to hours set and hours clear/],
     [['resource', 'list', '--resource', 'van'], /--resource applies only to hours, closures and rules commands/],
     [['closures', 'add', '2027-12-25'], /closures add needs <first-day> \[<last-day>\] --label/],
-    [['closures', 'list', '--label', 'x'], /--label and --open apply only to closures add/],
+    [['closures', 'list', '--label', 'x'], /--label applies only to closures add and closures import/],
     [['hours', 'set', '[]', '--location', 'depot', '--all'], /one of them/],
     [['hours', 'set', '[]', '--resource', 'van', '--override'], /--override applies only to hours set --all/],
     [['hours', 'set', '[]', '--resource', 'van', '--matching'], /--matching applies only to hours set --all/],

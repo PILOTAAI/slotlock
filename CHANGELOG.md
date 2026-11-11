@@ -85,9 +85,23 @@ versioning.
   list|add|delete|import`.
 - Holiday calendars (B1): `slotlock_import_holidays` (`POST /v1/availability/holidays`) and
   `closures import` close the days an iCalendar file's all-day events cover, recurring ones
-  expanded over a bounded span; importing again updates them. `serve` fetches an `https` URL
-  through the guarded fetch (no private addresses, 1 MB, 10 seconds); the store-backed application
-  backend fetches none unless given `holidayFetch`.
+  expanded over a bounded span. `serve` fetches an `https` URL through the guarded fetch (no
+  private addresses, 1 MB, 10 seconds); the store-backed application backend fetches none unless
+  given `holidayFetch`. Each import is a calendar (new table `holiday_calendars`, under RLS, erased
+  with the tenant), kept by name where it applies: its `name`, else its own `X-WR-CALNAME`, else
+  the URL. Importing it again updates its closures and removes those it no longer names in the
+  span (`removed`), so a holiday a calendar dropped goes too; a closure imported before calendars
+  were kept becomes the calendar's that names it. With `subscribe`, the URL is kept and maintenance
+  imports it again every 30 days (`holidayFetch` on `maintainSlotlockTenant` and the scheduler;
+  `serve` and `slotlock maintain` pass the guarded fetch), a failed import keeping its closures,
+  noting why (`last_error`) and trying again a day later. `slotlock_list_holiday_calendars`
+  (`GET /v1/availability/holiday-calendars`) and `slotlock_delete_holiday_calendar`
+  (`DELETE …/{calendar_id}`, its closures with it); closures answer `calendar_id`; at most 50
+  calendars a tenant. The dashboard's Closures page takes a file upload (the form was limited to
+  8 KB, too small for most calendars, and now takes 1 MB), a paste or, where the server fetches
+  them (`serve`, Cloud), an address with "Import it again every 30 days", and lists the calendars
+  with their next import, a failed one's error, and Delete. `closures import` names the calendar
+  with `--label`.
 - Durations and hires (RFC 0004 B3). Booking rules gain `minDurationMinutes`, `maxDurationMinutes`,
   `allowedDurations` and `defaultDurationMinutes`, and for a booking from one local day to another
   `pickupTimes` and `returnTimes` (it starts and ends in them, and under `enforceHours` needs only

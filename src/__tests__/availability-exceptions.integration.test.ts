@@ -11,6 +11,7 @@ import {
 } from '../agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { maintainSlotlockTenant } from '../maintenance.js';
 import type { WeeklyAvailabilityRule } from '../types.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -71,6 +72,8 @@ describe.skipIf(!url)('stored hours and closures (real Postgres)', () => {
     other: { subject: 'other-admin', tenantRef: otherTenant, scopes: ['read', 'write', 'admin'] },
   };
   const fetched: string[] = [];
+  // What the calendar URL serves; null answers 503.
+  let served: string | null = '';
   const call = async (who: keyof typeof principals, method: string, path: string, body?: unknown): Promise<Answer> => {
     const response = await server.fetch(
       new Request(`${BASE}${path}`, {
@@ -134,7 +137,8 @@ describe.skipIf(!url)('stored hours and closures (real Postgres)', () => {
           agentBackend,
           holidayFetch: async (input) => {
             fetched.push(String(input));
-            return new Response(HOLIDAYS(year), { headers: { 'content-type': 'text/calendar' } });
+            if (served === null) return new Response('gone', { status: 503 });
+            return new Response(served, { headers: { 'content-type': 'text/calendar' } });
           },
         }),
         authorize: async ({ principal }) => principal.scopes?.includes('admin') === true,
@@ -280,20 +284,93 @@ describe.skipIf(!url)('stored hours and closures (real Postgres)', () => {
     });
   });
 
-  it('imports a holiday calendar as closures, again without adding more (B1)', async () => {
+  it('imports a holiday calendar as closures, again without adding more, and removes what it dropped (B1)', async () => {
     const icalendar = HOLIDAYS(year);
     const span = { from: `${year}-01-01`, to: `${year + 1}-12-31` };
-    const first = await call('admin', 'POST', '/v1/availability/holidays', { icalendar, location: 'region', ...span });
-    expect(first.body).toEqual({ imported: 3, skipped: 1 });
-    const again = await call('admin', 'POST', '/v1/availability/holidays', { url: 'https://example.com/holidays.ics', location: 'region', ...span });
-    expect(again.body).toEqual({ imported: 3, skipped: 1 });
+    const name = 'Region holidays';
+    const first = await call('admin', 'POST', '/v1/availability/holidays', { icalendar, location: 'region', name, ...span });
+    expect(first.body).toMatchObject({
+      imported: 3,
+      skipped: 1,
+      removed: 0,
+      calendar: { name, location: 'region', resource_id: null, url: null, next_import_at: null, closures: 3 },
+    });
+    const calendarId = (first.body.calendar as { calendar_id: string }).calendar_id;
+    // The same calendar by its URL, kept and imported again every 30 days.
+    served = HOLIDAYS(year);
+    const again = await call('admin', 'POST', '/v1/availability/holidays', {
+      url: 'https://example.com/holidays.ics',
+      location: 'region',
+      name,
+      subscribe: true,
+      ...span,
+    });
+    expect(again.body).toMatchObject({
+      imported: 3,
+      removed: 0,
+      calendar: { calendar_id: calendarId, url: 'https://example.com/holidays.ics', closures: 3 },
+    });
+    expect(Date.parse((again.body.calendar as { next_import_at: string }).next_import_at) - Date.now()).toBeGreaterThan(29 * DAY);
     expect(fetched).toEqual(['https://example.com/holidays.ics']);
-    const imported = (await call('admin', 'GET', '/v1/availability/exceptions?location=region')).body.exceptions as Record<string, unknown>[];
-    expect(imported.map((exception) => [exception.starts_on, exception.ends_on, exception.label, exception.source])).toEqual([
-      [`${year}-01-01`, `${year}-01-01`, "New Year's Day", 'ics'],
-      [`${year}-08-03`, `${year}-08-07`, 'Summer shutdown', 'ics'],
-      [`${year + 1}-01-01`, `${year + 1}-01-01`, "New Year's Day", 'ics'],
+    const regional = async () =>
+      ((await call('admin', 'GET', '/v1/availability/exceptions?location=region')).body.exceptions as Record<string, unknown>[]).map(
+        (exception) => [exception.starts_on, exception.ends_on, exception.label, exception.source, exception.calendar_id],
+      );
+    expect(await regional()).toEqual([
+      [`${year}-01-01`, `${year}-01-01`, "New Year's Day", 'ics', calendarId],
+      [`${year}-08-03`, `${year}-08-07`, 'Summer shutdown', 'ics', calendarId],
+      [`${year + 1}-01-01`, `${year + 1}-01-01`, "New Year's Day", 'ics', calendarId],
     ]);
+
+    // Maintenance imports a due subscription again: the shutdown it dropped goes, and a closure
+    // added by hand at the same place stays.
+    const manual = await call('admin', 'POST', '/v1/availability/exceptions', {
+      location: 'region',
+      starts_on: `${year}-08-04`,
+      outcome: 'closed',
+      label: 'Stocktake',
+    });
+    expect(manual.status).toBe(200);
+    served = HOLIDAYS(year).replace(/BEGIN:VEVENT\r\nUID:summer-shutdown[\s\S]*?END:VEVENT\r\n/, '');
+    await sql`UPDATE slotlock.holiday_calendars SET next_import_at = now() - interval '1 minute' WHERE id = ${calendarId}::uuid`;
+    const holidayFetch: typeof fetch = async (input) => {
+      fetched.push(String(input));
+      return served === null ? new Response('gone', { status: 503 }) : new Response(served);
+    };
+    const pass = await maintainSlotlockTenant(store, tenantRef, { holidayFetch });
+    expect(pass.holidayCalendarsImported).toBe(1);
+    expect((await regional()).map((row) => row[2])).toEqual(["New Year's Day", 'Stocktake', "New Year's Day"]);
+    // A failed import keeps the closures, says why, and is tried again a day later.
+    served = null;
+    await sql`UPDATE slotlock.holiday_calendars SET next_import_at = now() - interval '1 minute' WHERE id = ${calendarId}::uuid`;
+    expect((await maintainSlotlockTenant(store, tenantRef, { holidayFetch })).holidayCalendarsImported).toBe(0);
+    const [failed] = (await call('admin', 'GET', '/v1/availability/holiday-calendars')).body.calendars as {
+      calendar_id: string;
+      last_error: string | null;
+      next_import_at: string;
+      closures: number;
+    }[];
+    expect(failed).toMatchObject({ calendar_id: calendarId, last_error: 'The calendar URL answered 503', closures: 2 });
+    expect(Date.parse(failed?.next_import_at as string) - Date.now()).toBeGreaterThan(23 * 3_600_000);
+    expect((await maintainSlotlockTenant(store, tenantRef, { holidayFetch })).holidayCalendarsImported).toBe(0);
+
+    // A closure imported before calendars were kept becomes the calendar's that names it.
+    await sql`
+      INSERT INTO slotlock.availability_exceptions (tenant_ref, location_ref, starts_on, ends_on, outcome, label, source, source_uid)
+      VALUES (${tenantRef}, 'depot', ${`${year}-01-01`}::date, ${`${year}-01-01`}::date, 'closed', 'Old import', 'ics', 'ics:new-year:' || ${`${year}-01-01`})`;
+    const claimed = await call('admin', 'POST', '/v1/availability/holidays', { icalendar, location: 'depot', ...span });
+    expect(claimed.body).toMatchObject({ imported: 3, calendar: { name: 'Holidays', closures: 3 } });
+
+    // Deleting a calendar deletes its closures; the one added by hand stays.
+    expect((await call('admin', 'DELETE', `/v1/availability/holiday-calendars/${calendarId}`)).body).toEqual({ deleted: true, closures: 2 });
+    expect((await regional()).map((row) => row[2])).toEqual(['Stocktake']);
+    expect((await call('admin', 'DELETE', `/v1/availability/holiday-calendars/${calendarId}`)).body).toEqual({ deleted: false, closures: 0 });
+    expect(
+      ((await call('admin', 'GET', '/v1/availability/holiday-calendars')).body.calendars as { name: string }[]).map((calendar) => calendar.name),
+    ).toEqual(['Holidays']);
+    expect((await call('admin', 'POST', '/v1/availability/holidays', { icalendar, subscribe: true })).body).toMatchObject({
+      error: { code: 'invalid_holiday_calendar' },
+    });
     expect((await call('admin', 'POST', '/v1/availability/holidays', { icalendar: 'not a calendar' })).body).toMatchObject({
       error: { code: 'invalid_holiday_calendar' },
     });

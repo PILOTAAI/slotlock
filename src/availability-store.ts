@@ -14,6 +14,7 @@ import {
   parseExceptionDays,
   storedExceptionWindows,
 } from './hours.js';
+import type { SlotlockHoliday } from './holidays.js';
 import type { SlotlockInheritedAvailability, WeeklyAvailabilityRule } from './types.js';
 import { parseAvailabilityRules } from './weekly-hours.js';
 
@@ -64,6 +65,8 @@ export interface SlotlockAvailabilityExceptionInput {
   source?: SlotlockExceptionSource;
   /** An import's own id for the exception: importing again updates the same one. */
   sourceUid?: string;
+  /** The holiday calendar it is imported from (importHolidayCalendar); internal. */
+  calendarId?: string;
 }
 
 /** Inherited hours as slotlock.inherited_availability gives them; rules that do not parse read as closed. */
@@ -235,12 +238,13 @@ type ExceptionRow = {
   label: string;
   source: SlotlockExceptionSource;
   source_uid: string | null;
+  calendar_id: string | null;
   created_at: Date;
 };
 
 const EXCEPTION_COLUMNS = `id, tenant_ref, location_ref, resource_id,
   to_char(starts_on, 'YYYY-MM-DD') AS starts_on, to_char(ends_on, 'YYYY-MM-DD') AS ends_on,
-  outcome, hours, label, source, source_uid, created_at`;
+  outcome, hours, label, source, source_uid, calendar_id, created_at`;
 
 function toException(row: ExceptionRow): SlotlockAvailabilityException {
   return {
@@ -255,6 +259,7 @@ function toException(row: ExceptionRow): SlotlockAvailabilityException {
     label: row.label,
     source: row.source,
     ...(row.source_uid !== null ? { sourceUid: row.source_uid } : {}),
+    ...(row.calendar_id !== null ? { calendarId: row.calendar_id } : {}),
     createdAt: row.created_at,
   };
 }
@@ -311,12 +316,14 @@ export async function createAvailabilityException(
   const location = input.location ?? null;
   const resourceId = input.resourceId ?? null;
   const sourceUid = input.sourceUid ?? null;
+  const calendarId = input.calendarId ?? null;
   const rows = await sql<ExceptionRow[]>`
     INSERT INTO slotlock.availability_exceptions (
-      tenant_ref, location_ref, resource_id, starts_on, ends_on, outcome, hours, label, source, source_uid
+      tenant_ref, location_ref, resource_id, starts_on, ends_on, outcome, hours, label, source, source_uid,
+      calendar_id
     )
     SELECT ${input.tenantRef}, ${location}, ${resourceId}::uuid, ${days.startsOn}::date, ${days.endsOn}::date,
-           ${days.outcome}, ${hours}::jsonb, ${label}, ${source}, ${sourceUid}
+           ${days.outcome}, ${hours}::jsonb, ${label}, ${source}, ${sourceUid}, ${calendarId}::uuid
      WHERE (SELECT count(*) FROM slotlock.availability_exceptions WHERE tenant_ref = ${input.tenantRef})
              < ${SLOTLOCK_MAX_AVAILABILITY_EXCEPTIONS}
         OR (${sourceUid}::text IS NOT NULL AND EXISTS (
@@ -328,7 +335,8 @@ export async function createAvailabilityException(
     ON CONFLICT (tenant_ref, (COALESCE(location_ref, '')), (COALESCE(resource_id::text, '')), source_uid)
       WHERE source_uid IS NOT NULL
     DO UPDATE SET starts_on = EXCLUDED.starts_on, ends_on = EXCLUDED.ends_on, outcome = EXCLUDED.outcome,
-                  hours = EXCLUDED.hours, label = EXCLUDED.label, source = EXCLUDED.source
+                  hours = EXCLUDED.hours, label = EXCLUDED.label, source = EXCLUDED.source,
+                  calendar_id = EXCLUDED.calendar_id
     RETURNING ${sql.unsafe(EXCEPTION_COLUMNS)}`;
   const row = rows[0];
   if (!row) {
@@ -491,4 +499,248 @@ export async function replaceImportedExceptions(
     });
   }
   return params.ranges.length;
+}
+
+/** A holiday calendar imported into closures (RFC 0004 B1): a pasted or uploaded one, or a subscription. */
+export interface SlotlockHolidayCalendar {
+  id: string;
+  /** Unique at its scope: importing under the same name replaces what that calendar said. */
+  name: string;
+  location?: string;
+  resourceId?: string;
+  /** A subscription's https URL, imported again by maintenance by `nextImportAt`. */
+  url?: string;
+  importedAt?: Date;
+  nextImportAt?: Date;
+  /** Why the last import of a subscription failed; cleared by the next that works. */
+  lastError?: string;
+  /** Its closures. */
+  closures: number;
+  createdAt: Date;
+}
+
+/** What one import of a holiday calendar did. */
+export interface SlotlockHolidayImport {
+  calendar: SlotlockHolidayCalendar;
+  /** Holidays added or updated. */
+  imported: number;
+  /** Closures this calendar made that it no longer names in the import's span, deleted. */
+  removed: number;
+}
+
+/** How long a subscription waits between imports, and after a failed one. */
+export const SLOTLOCK_HOLIDAY_REIMPORT_DAYS = 30;
+export const SLOTLOCK_HOLIDAY_RETRY_HOURS = 24;
+/** Holiday calendars a tenant may keep. */
+export const SLOTLOCK_MAX_HOLIDAY_CALENDARS = 50;
+
+type HolidayCalendarRow = {
+  id: string;
+  name: string;
+  location_ref: string | null;
+  resource_id: string | null;
+  url: string | null;
+  imported_at: Date | null;
+  next_import_at: Date | null;
+  last_error: string | null;
+  closures: number;
+  created_at: Date;
+};
+
+const HOLIDAY_CALENDAR_COLUMNS = `calendar.id, calendar.name, calendar.location_ref, calendar.resource_id,
+  calendar.url, calendar.imported_at, calendar.next_import_at, calendar.last_error, calendar.created_at,
+  (SELECT count(*)::int FROM slotlock.availability_exceptions closure
+    WHERE closure.calendar_id = calendar.id AND closure.tenant_ref = calendar.tenant_ref) AS closures`;
+
+function toHolidayCalendar(row: HolidayCalendarRow): SlotlockHolidayCalendar {
+  return {
+    id: row.id,
+    name: row.name,
+    ...(row.location_ref !== null ? { location: row.location_ref } : {}),
+    ...(row.resource_id !== null ? { resourceId: row.resource_id } : {}),
+    ...(row.url !== null ? { url: row.url } : {}),
+    ...(row.imported_at !== null ? { importedAt: row.imported_at } : {}),
+    ...(row.next_import_at !== null ? { nextImportAt: row.next_import_at } : {}),
+    ...(row.last_error !== null ? { lastError: row.last_error } : {}),
+    closures: Number(row.closures),
+    createdAt: row.created_at,
+  };
+}
+
+/** A calendar's name: 1-200 characters, spaces folded. */
+function calendarName(value: string): string {
+  const name = value.replace(/\s+/g, ' ').trim();
+  if (name.length < 1 || [...name].length > MAX_LABEL) {
+    throw Object.assign(new Error(`A holiday calendar's name is 1-${MAX_LABEL} characters`), {
+      code: 'invalid_holiday_calendar' as const,
+    });
+  }
+  return name;
+}
+
+/** A subscription's URL: https, no credentials, at most 2,048 bytes. */
+function calendarUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw Object.assign(new Error('The calendar URL is not a URL'), { code: 'invalid_holiday_calendar' as const });
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || Buffer.byteLength(parsed.href) > 2_048) {
+    throw Object.assign(new Error('The calendar URL must be https, without credentials, at most 2,048 bytes'), {
+      code: 'invalid_holiday_calendar' as const,
+    });
+  }
+  return parsed.href;
+}
+
+/**
+ * Import a holiday calendar's days off as closures at its scope (the tenant, a location or a
+ * resource), as the calendar named `name` there: each holiday added or updated by its UID, then
+ * the closures this calendar made earlier that it no longer names between `span.from` and
+ * `span.to` deleted, so a holiday it dropped goes too. A closure imported before calendars were
+ * kept, with the UID of one it names, becomes this calendar's. With `url`, the calendar is a
+ * subscription maintenance imports again every SLOTLOCK_HOLIDAY_REIMPORT_DAYS; without, it stops
+ * being one. Refuses `invalid_holiday_calendar`, `location_not_found`, `resource_not_found`,
+ * `holiday_calendars_limit_reached` and `availability_exceptions_limit_reached`.
+ */
+export async function importHolidayCalendar(
+  sql: StoreSql,
+  params: {
+    tenantRef: string;
+    location?: string;
+    resourceId?: string;
+    name: string;
+    url?: string;
+    holidays: readonly SlotlockHoliday[];
+    span: { from: string; to: string };
+  },
+): Promise<SlotlockHolidayImport> {
+  if (params.location !== undefined && params.resourceId !== undefined) {
+    throw invalidException('A holiday calendar is for a location or a resource, not both');
+  }
+  const name = calendarName(params.name);
+  const url = params.url === undefined ? null : calendarUrl(params.url);
+  if (params.location !== undefined) {
+    const [place] = LOCATION_REF.test(params.location)
+      ? await sql<{ ref: string }[]>`
+          SELECT ref FROM slotlock.locations
+           WHERE tenant_ref = ${params.tenantRef} AND ref = ${params.location} FOR KEY SHARE`
+      : [];
+    if (!place) throw notFound('location_not_found', 'Slotlock has no such location');
+  }
+  if (params.resourceId !== undefined) {
+    const [resource] = UUID.test(params.resourceId)
+      ? await sql<{ id: string }[]>`
+          SELECT id FROM slotlock.resources
+           WHERE tenant_ref = ${params.tenantRef} AND id = ${params.resourceId}::uuid FOR KEY SHARE`
+      : [];
+    if (!resource) throw notFound('resource_not_found', 'Slotlock has no such resource');
+  }
+  const location = params.location ?? null;
+  const resourceId = params.resourceId ?? null;
+  const [calendar] = await sql<{ id: string }[]>`
+    INSERT INTO slotlock.holiday_calendars (tenant_ref, location_ref, resource_id, name, url, imported_at, next_import_at)
+    SELECT ${params.tenantRef}, ${location}, ${resourceId}::uuid, ${name}, ${url}, statement_timestamp(),
+           CASE WHEN ${url}::text IS NULL THEN NULL
+                ELSE statement_timestamp() + make_interval(days => ${SLOTLOCK_HOLIDAY_REIMPORT_DAYS}) END
+     WHERE (SELECT count(*) FROM slotlock.holiday_calendars WHERE tenant_ref = ${params.tenantRef})
+             < ${SLOTLOCK_MAX_HOLIDAY_CALENDARS}
+        OR EXISTS (
+             SELECT 1 FROM slotlock.holiday_calendars
+              WHERE tenant_ref = ${params.tenantRef}
+                AND COALESCE(location_ref, '') = COALESCE(${location}::text, '')
+                AND COALESCE(resource_id::text, '') = COALESCE(${resourceId}::text, '')
+                AND name = ${name})
+    ON CONFLICT (tenant_ref, (COALESCE(location_ref, '')), (COALESCE(resource_id::text, '')), name)
+    DO UPDATE SET url = EXCLUDED.url, imported_at = EXCLUDED.imported_at,
+                  next_import_at = EXCLUDED.next_import_at, last_error = NULL
+    RETURNING id`;
+  if (!calendar) {
+    throw Object.assign(new Error(`Slotlock keeps at most ${SLOTLOCK_MAX_HOLIDAY_CALENDARS} holiday calendars a tenant`), {
+      code: 'holiday_calendars_limit_reached' as const,
+    });
+  }
+  const uids: string[] = [];
+  for (const holiday of params.holidays) {
+    const sourceUid = `ics:${holiday.uid}`;
+    uids.push(sourceUid);
+    await createAvailabilityException(sql, {
+      tenantRef: params.tenantRef,
+      ...(params.location !== undefined ? { location: params.location } : {}),
+      ...(params.resourceId !== undefined ? { resourceId: params.resourceId } : {}),
+      startsOn: holiday.startsOn,
+      endsOn: holiday.endsOn,
+      outcome: 'closed',
+      label: holiday.label,
+      source: 'ics',
+      sourceUid,
+      calendarId: calendar.id,
+    });
+  }
+  // What this calendar said before and no longer says, in the span it was read for.
+  const removed = await sql`
+    DELETE FROM slotlock.availability_exceptions
+     WHERE tenant_ref = ${params.tenantRef} AND calendar_id = ${calendar.id}::uuid
+       AND ends_on >= ${params.span.from}::date AND starts_on <= ${params.span.to}::date
+       AND NOT (source_uid = ANY(${uids}::text[]))`;
+  const [row] = await sql<HolidayCalendarRow[]>`
+    SELECT ${sql.unsafe(HOLIDAY_CALENDAR_COLUMNS)} FROM slotlock.holiday_calendars calendar
+     WHERE calendar.tenant_ref = ${params.tenantRef} AND calendar.id = ${calendar.id}::uuid`;
+  return { calendar: toHolidayCalendar(row as HolidayCalendarRow), imported: params.holidays.length, removed: removed.count };
+}
+
+/** The tenant's holiday calendars, by scope and name. */
+export async function listHolidayCalendars(sql: StoreSql, params: { tenantRef: string }): Promise<SlotlockHolidayCalendar[]> {
+  const rows = await sql<HolidayCalendarRow[]>`
+    SELECT ${sql.unsafe(HOLIDAY_CALENDAR_COLUMNS)} FROM slotlock.holiday_calendars calendar
+     WHERE calendar.tenant_ref = ${params.tenantRef}
+     ORDER BY calendar.location_ref NULLS FIRST, calendar.resource_id NULLS FIRST, calendar.name
+     LIMIT ${SLOTLOCK_MAX_HOLIDAY_CALENDARS}`;
+  return rows.map(toHolidayCalendar);
+}
+
+/** Delete a holiday calendar and its closures. Null for one the tenant does not have. */
+export async function deleteHolidayCalendar(
+  sql: StoreSql,
+  params: { tenantRef: string; id: string },
+): Promise<{ closures: number } | null> {
+  if (!UUID.test(params.id)) return null;
+  const [found] = await sql<{ closures: number }[]>`
+    SELECT (SELECT count(*)::int FROM slotlock.availability_exceptions
+             WHERE tenant_ref = ${params.tenantRef} AND calendar_id = ${params.id}::uuid) AS closures
+      FROM slotlock.holiday_calendars
+     WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}::uuid
+       FOR UPDATE`;
+  if (!found) return null;
+  // Its closures go with it (ON DELETE CASCADE).
+  await sql`DELETE FROM slotlock.holiday_calendars WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}::uuid`;
+  return { closures: Number(found.closures) };
+}
+
+/** Subscriptions due to be imported again, the longest waiting first. */
+export async function dueHolidayCalendars(
+  sql: StoreSql,
+  params: { tenantRef: string; limit: number },
+): Promise<SlotlockHolidayCalendar[]> {
+  const rows = await sql<HolidayCalendarRow[]>`
+    SELECT ${sql.unsafe(HOLIDAY_CALENDAR_COLUMNS)} FROM slotlock.holiday_calendars calendar
+     WHERE calendar.tenant_ref = ${params.tenantRef} AND calendar.next_import_at <= statement_timestamp()
+     ORDER BY calendar.next_import_at, calendar.id
+     LIMIT ${params.limit}`;
+  return rows.map(toHolidayCalendar);
+}
+
+/** Note why a subscription's import failed, and try again in SLOTLOCK_HOLIDAY_RETRY_HOURS. */
+export async function noteHolidayCalendarFailure(
+  sql: StoreSql,
+  params: { tenantRef: string; id: string; error: string },
+): Promise<void> {
+  if (!UUID.test(params.id)) return;
+  const error = [...params.error.replace(/\s+/g, ' ').trim()].slice(0, 500).join('') || 'The import failed';
+  await sql`
+    UPDATE slotlock.holiday_calendars
+       SET last_error = ${error},
+           next_import_at = statement_timestamp() + make_interval(hours => ${SLOTLOCK_HOLIDAY_RETRY_HOURS})
+     WHERE tenant_ref = ${params.tenantRef} AND id = ${params.id}::uuid AND url IS NOT NULL`;
 }

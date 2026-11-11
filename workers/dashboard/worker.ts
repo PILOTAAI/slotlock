@@ -598,7 +598,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               : null,
           agent: agentBackend,
           // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with.
-          resources: createSlotlockDashboardResources(store, { agentBackend }),
+          // Holiday calendars by address (RFC 0004 B1): the Worker's fetch, which reaches only the
+          // public internet; fetchHolidayCalendar takes https only, no redirects, 1 MB, 10 seconds.
+          resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: (input, init) => fetch(input, init) }),
           state: createSlotlockDashboardState(sql),
         };
         const relayed = slotlockRelayStream(await scope.run(requestScope, () => dashboard.fetch(request)));

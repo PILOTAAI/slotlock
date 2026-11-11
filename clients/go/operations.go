@@ -66,6 +66,8 @@ var operations = func() map[string]operation {
 		{name: "slotlock_create_availability_exception", method: "POST", path: "/v1/availability/exceptions", pathParams: nil, query: nil},
 		{name: "slotlock_delete_availability_exception", method: "DELETE", path: "/v1/availability/exceptions/{exception_id}", pathParams: []string{"exception_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_import_holidays", method: "POST", path: "/v1/availability/holidays", pathParams: nil, query: nil},
+		{name: "slotlock_list_holiday_calendars", method: "GET", path: "/v1/availability/holiday-calendars", pathParams: nil, query: nil},
+		{name: "slotlock_delete_holiday_calendar", method: "DELETE", path: "/v1/availability/holiday-calendars/{calendar_id}", pathParams: []string{"calendar_id"}, query: []string{"dry_run"}},
 		{name: "slotlock_acquire_hold", method: "POST", path: "/v1/holds", pathParams: nil, query: nil},
 		{name: "slotlock_get_hold", method: "GET", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: nil},
 		{name: "slotlock_release_hold", method: "DELETE", path: "/v1/holds/{hold_id}", pathParams: []string{"hold_id"}, query: []string{"dry_run"}},
@@ -2278,6 +2280,10 @@ type ImportHolidaysInput struct {
 
 	URL *string
 
+	Name *string
+
+	Subscribe *bool
+
 	Location *string
 
 	ResourceID *string
@@ -2301,6 +2307,12 @@ func (in ImportHolidaysInput) values() map[string]any {
 	if in.URL != nil {
 		values["url"] = *in.URL
 	}
+	if in.Name != nil {
+		values["name"] = *in.Name
+	}
+	if in.Subscribe != nil {
+		values["subscribe"] = *in.Subscribe
+	}
 	if in.Location != nil {
 		values["location"] = *in.Location
 	}
@@ -2323,12 +2335,60 @@ func (in ImportHolidaysInput) values() map[string]any {
 // for the whole tenant, one location or one resource: the text in icalendar, or an https url the
 // server fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes
 // the days it covers, and each occurrence of a recurring one within from to to (default today to
-// two years on, at most three years); timed and cancelled events are skipped. Importing the same
-// calendar again updates its closures instead of adding more. 400 invalid_holiday_calendar for
-// text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400
-// holiday_url_not_served where the server fetches no urls.
+// two years on, at most three years); timed and cancelled events are skipped. The calendar is
+// kept by name at its scope (name, by default its own X-WR-CALNAME, else the url's host and path,
+// else Holidays): importing it again updates its closures instead of adding more, and deletes the
+// ones it made that it no longer names within the span (removed), so a holiday it dropped goes
+// too. With subscribe (and a url), the server keeps the url and imports it again every 30 days.
+// At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+// invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the
+// url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
 func (c *Client) ImportHolidays(ctx context.Context, in ImportHolidaysInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_import_holidays", in.values())
+}
+
+// ListHolidayCalendarsInput holds the arguments of [Client.ListHolidayCalendars].
+type ListHolidayCalendarsInput struct {
+}
+
+func (in ListHolidayCalendarsInput) values() map[string]any {
+	values := map[string]any{}
+	return values
+}
+
+// ListHolidayCalendars: List holiday calendars. The holiday calendars imported into the tenant's
+// closures (slotlock_import_holidays), each with its scope, how many closures it made, and for a
+// subscription its url, when it was last imported, when it will be again, and why the last import
+// failed if it did.
+func (c *Client) ListHolidayCalendars(ctx context.Context, in ListHolidayCalendarsInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_list_holiday_calendars", in.values())
+}
+
+// DeleteHolidayCalendarInput holds the arguments of [Client.DeleteHolidayCalendar].
+type DeleteHolidayCalendarInput struct {
+	CalendarID string
+
+	// Check the write without making it: it runs with every check, the database's included, and is
+	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
+	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
+	// alternatives included. Charged as a read.
+	DryRun *bool
+}
+
+func (in DeleteHolidayCalendarInput) values() map[string]any {
+	values := map[string]any{}
+	values["calendar_id"] = in.CalendarID
+	if in.DryRun != nil {
+		values["dry_run"] = *in.DryRun
+	}
+	return values
+}
+
+// DeleteHolidayCalendar: Delete a holiday calendar. Delete a holiday calendar and every closure
+// it made, and stop importing it again. deleted is false when the tenant has no such calendar;
+// closures counts those deleted with it.
+func (c *Client) DeleteHolidayCalendar(ctx context.Context, in DeleteHolidayCalendarInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_delete_holiday_calendar", in.values())
 }
 
 // AcquireHoldInput holds the arguments of [Client.AcquireHold].

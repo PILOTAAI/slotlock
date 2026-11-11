@@ -173,6 +173,7 @@ const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMai
   approvalsExpired: 0,
       bookingsCompleted: 0,
       remindersDue: 0,
+      holidayCalendarsImported: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,
