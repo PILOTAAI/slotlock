@@ -2518,12 +2518,13 @@ func (in MarkHoldPaidInput) values() map[string]any {
 // MarkHoldPaid: Record a hold as paid. Record that a hold made with payment_required is paid, by
 // the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have
 // verified it: the hold may then be confirmed. Slotlock records payment state and never moves
-// money. The same reference again answers the same hold (replayed: true); another answers 409
-// payment_conflict. When the hold names its payment, received must be at least that amount in
-// that currency (409 payment_amount_mismatch). The feed says so (hold.paid). A hold that does not
-// wait for payment answers 409 payment_not_required; one that expired, 409 hold_expired (refund
-// the payment: its time may be someone else's); a confirmed, released or unknown one, 404
-// hold_not_found.
+// money. The same reference again answers the same hold (replayed: true), whatever became of it
+// since (confirmed, booked as an event, expired): the payment is kept apart from the hold.
+// Another reference answers 409 payment_conflict. When the hold names its payment, received must
+// be at least that amount in that currency (409 payment_amount_mismatch). The feed says so
+// (hold.paid). A hold that does not wait for payment answers 409 payment_not_required; one that
+// expired before it was paid, 409 hold_expired (refund the payment: its time may be someone
+// else's); one released before it was paid, or unknown, 404 hold_not_found.
 func (c *Client) MarkHoldPaid(ctx context.Context, in MarkHoldPaidInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_mark_hold_paid", in.values())
 }

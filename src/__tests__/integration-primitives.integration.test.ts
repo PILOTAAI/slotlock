@@ -210,7 +210,8 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     expect((await call('POST', `/v1/holds/${held.id}/paid`, { payment_ref: 'pi_999' })).body).toMatchObject({ error: { code: 'payment_conflict' } });
     expect((await feed('hold.paid')).map((change) => change.data)).toEqual([expect.objectContaining({ id: held.id, payment_ref: 'pi_123' })]);
     expect((await call('POST', `/v1/holds/${held.id}/confirm`, {})).status).toBe(200);
-    expect((await call('POST', `/v1/holds/${held.id}/paid`, { payment_ref: 'pi_123' })).status).toBe(404);
+    // Once booked, the same payment told again is the one recorded, not a refusal to refund.
+    expect((await call('POST', `/v1/holds/${held.id}/paid`, { payment_ref: 'pi_123' })).body).toMatchObject({ replayed: true });
 
     const free = (await call('POST', '/v1/holds', { resource_id: desk, start: at(11), end: at(12), ttl_seconds: 900 })).body.hold as { id: string };
     expect(free).not.toHaveProperty('payment_required');
@@ -327,5 +328,16 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
     // The system the agent books for records the payment; the agent books it.
     expect((await call('POST', `/v1/holds/${hold?.hold_id}/paid`, { payment_ref: 'pi_y', received: { amount_minor: 2000, currency: 'GBP' } })).status).toBe(200);
     expect(await book()).toMatchObject({ ok: true });
+    // Booked as an event, the hold's row is gone; its payment told again is still the one recorded.
+    expect((await call('POST', `/v1/holds/${hold?.hold_id}/paid`, { payment_ref: 'pi_y', received: { amount_minor: 2000, currency: 'GBP' } })).body).toMatchObject({
+      replayed: true,
+      hold: { payment_ref: 'pi_y' },
+    });
+    expect((await call('POST', `/v1/holds/${hold?.hold_id}/paid`, { payment_ref: 'pi_z' })).body).toMatchObject({ error: { code: 'payment_conflict' } });
+    // And the hold confirmed in place answers the same.
+    expect((await call('POST', `/v1/holds/${priced.id}/confirm`, {})).status).toBe(200);
+    expect((await call('POST', `/v1/holds/${priced.id}/paid`, { payment_ref: 'pi_x', received: { amount_minor: 4500, currency: 'GBP' } })).body).toMatchObject({
+      replayed: true,
+    });
   });
 });

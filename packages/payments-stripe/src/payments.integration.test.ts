@@ -138,6 +138,14 @@ describe.skipIf(!url)('@slotlock/payments-stripe with Slotlock (real Postgres)',
       paid_amount: { amount_minor: 4500, currency: 'GBP' },
     });
     expect((await call('POST', `/v1/holds/${held}/confirm`, {})).status).toBe(200);
+    // Told again once booked (a reloaded return page, a redelivered webhook): the payment already
+    // recorded, never a refund.
+    expect(await payments.confirmPaymentIntent('pi_ok')).toMatchObject({ status: 'paid', replayed: true });
+    expect(await payments.handleWebhook({ payload, signatureHeader: signed(payload), webhookSecret: SECRET })).toMatchObject({
+      status: 'paid',
+      replayed: true,
+    });
+    expect(refunds).toEqual(['pi_cheap', 'pi_euro']);
     await expect(payments.handleWebhook({ payload, signatureHeader: signed(payload, undefined, 'whsec_x'), webhookSecret: SECRET })).rejects.toThrow();
     expect(
       await payments.handleWebhook({ payload: JSON.stringify({ type: 'charge.refunded' }), signatureHeader: signed(JSON.stringify({ type: 'charge.refunded' })), webhookSecret: SECRET }),

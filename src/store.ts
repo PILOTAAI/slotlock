@@ -3338,8 +3338,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
   /**
    * Record that a hold waiting for payment is paid (RFC 0004 C3), by the payment's reference at the
    * integrator's processor: the integrator says so, or an adapter that verified it. Once paid it
-   * may be confirmed. The same reference again answers the same hold; another is
-   * `payment_conflict`. The feed says so (`hold.paid`). A hold that does not wait for payment is
+   * may be confirmed. The same reference again answers the same hold, whatever became of it since
+   * (confirmed, booked, expired: the payment is kept apart); another is `payment_conflict`. The feed says so (`hold.paid`). A hold that does not wait for payment is
    * `payment_not_required`; an expired one `hold_expired`; one confirmed, released or unknown
    * `hold_not_found`.
    */
@@ -6641,6 +6641,21 @@ function buildSlotlockStore(
       if (params.received !== undefined && !isValidAmount(params.received)) return { ok: false, code: 'invalid_payment' };
       if (!isValidResourceId(params.holdId)) return { ok: false, code: 'hold_not_found' };
       return inTransaction(sql, async (tx): Promise<MarkHoldPaidResult> => {
+        // One payment record per hold, kept however the hold ends: the same payment told again
+        // (a reloaded return page, a redelivered webhook) after the hold was booked is answered as
+        // recorded, never as a refusal a payment adapter would refund.
+        await lockExternalIdentity(tx, params.tenantRef, `hold-payment:${params.holdId}`);
+        const [recorded] = await tx<HoldRow[]>`
+          SELECT hold_id AS id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at,
+                 NULL::text AS source, true AS payment_required, payment_ref, paid_at,
+                 payment_amount_minor, payment_currency, paid_amount_minor, paid_currency
+            FROM slotlock.hold_payments
+           WHERE hold_id = ${params.holdId} AND tenant_ref = ${params.tenantRef}`;
+        if (recorded) {
+          return recorded.payment_ref === params.paymentRef
+            ? { ok: true, hold: toHold(recorded), idempotent: true }
+            : { ok: false, code: 'payment_conflict' };
+        }
         const [row] = await tx<(HoldRow & { status: string; live: boolean })[]>`
           SELECT hold.id, hold.resource_id, hold.starts_at, hold.ends_at, hold.buffer_after_ms,
                  hold.expires_at, hold.source, hold.hold_group_id, hold.payment_required,
@@ -6680,6 +6695,16 @@ function buildSlotlockStore(
            RETURNING id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at, source,
                      hold_group_id, ${tx.unsafe(HOLD_PAYMENT_COLUMNS)}`;
         if (!paid) throw new Error('slotlock: hold payment update returned no row');
+        await tx`
+          INSERT INTO slotlock.hold_payments (
+            tenant_ref, hold_id, resource_id, starts_at, ends_at, buffer_after_ms, expires_at,
+            payment_ref, paid_at, payment_amount_minor, payment_currency, paid_amount_minor, paid_currency
+          ) VALUES (
+            ${params.tenantRef}, ${paid.id}, ${paid.resource_id}, ${paid.starts_at}, ${paid.ends_at},
+            ${paid.buffer_after_ms}, ${paid.expires_at}, ${params.paymentRef}, ${paid.paid_at ?? null},
+            ${paid.payment_amount_minor ?? null}, ${paid.payment_currency ?? null},
+            ${params.received?.amountMinor ?? null}, ${params.received?.currency ?? null}
+          )`;
         await tx`
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
           VALUES (${params.tenantRef}, ${paid.resource_id}, 'hold.paid', ${paid.id},

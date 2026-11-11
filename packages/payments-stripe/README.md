@@ -19,8 +19,12 @@ PaymentIntent has succeeded for a hold, tells Slotlock `POST /v1/holds/{hold_id}
 4. Confirm the hold (`POST /v1/holds/{hold_id}/confirm`).
 
 A payment that arrives after its hold expired is refused (`hold_expired`): its time may be someone
-else's by then. With `refundRefused: true` the adapter refunds a refused payment (idempotently, by
-the PaymentIntent).
+else's by then. With `refundRefused: true` the adapter refunds, idempotently by the PaymentIntent,
+only a payment Slotlock says it did not take: `hold_expired`, `payment_conflict` or
+`payment_amount_mismatch`. A payment told again after its hold was booked (a reloaded return page,
+a redelivered webhook) is answered as the payment already recorded, since Slotlock keeps each
+hold's payment apart from the hold, and is never refunded. Any other refusal (`hold_not_found`) is
+left for a person to look at.
 
 ```ts
 import { createStripePayments } from '@slotlock/payments-stripe';

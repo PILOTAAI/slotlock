@@ -11,6 +11,9 @@ export const STRIPE_API_VERSION = '2026-04-22.dahlia';
 /** The PaymentIntent metadata key that names the hold it pays for. */
 export const HOLD_METADATA_KEY = 'slotlock_hold_id';
 
+/** Refusals that prove a payment was not applied to its hold: only these are refunded. */
+const REFUNDABLE = new Set(['hold_expired', 'payment_conflict', 'payment_amount_mismatch']);
+
 const HOLD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Why a Stripe webhook delivery was refused: not from Stripe, or not now. */
@@ -105,8 +108,11 @@ export function createStripePayments(options: StripePaymentsOptions) {
     if (response.status >= 500 || response.status === 401 || response.status === 403 || response.status === 429) {
       throw new Error(`Slotlock answered ${response.status} ${code}`);
     }
+    // Refund only what Slotlock says it did not take: a hold that expired first, one paid by another
+    // payment, or a payment short of the hold's. Anything else (a hold not found, say) may be a
+    // payment already applied, and is left for a person.
     let refunded = false;
-    if (options.refundRefused && code !== 'payment_not_required') {
+    if (options.refundRefused && REFUNDABLE.has(code)) {
       const refund = await stripe('/refunds', { form: { payment_intent: paymentRef }, idempotencyKey: `slotlock-refund-${paymentRef}` });
       refunded = refund.status < 300;
     }

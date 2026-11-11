@@ -7,6 +7,13 @@ versioning.
 
 ### Added
 
+- Each hold's payment is kept apart from the hold (new table `hold_payments`, under RLS, erased with
+  the tenant), so `slotlock_mark_hold_paid` with the same payment answers `replayed: true` however
+  the hold ended: confirmed in place or booked as an event. Before, a confirmed hold answered
+  `404 hold_not_found`, which `@slotlock/payments-stripe` with `refundRefused` refunded: a customer
+  reloading the return page, or Stripe redelivering a webhook, got a booked time refunded (found by
+  the security audit). The adapter now refunds only `hold_expired`, `payment_conflict` and
+  `payment_amount_mismatch`.
 - Three integration packages in `packages/` (RFC 0004 P3), each its own process with its own
   schema and secrets, talking to Slotlock over its API:
   - `@slotlock/sync` (C1, C4, T2): busy time from Google freeBusy, Microsoft getSchedule and

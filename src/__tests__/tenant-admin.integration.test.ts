@@ -541,6 +541,20 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         });
         if (!remindedBooking.ok) throw new Error(remindedBooking.code);
         expect(await tenant.dueReminders({ tenantRef })).toBe(2);
+        // A hold's payment, kept apart from the hold (RFC 0004 C3).
+        const paying = await tenant.acquireHold({
+          tenantRef,
+          resourceId,
+          ...slot(40),
+          ttlMs: 600_000,
+          paymentRequired: true,
+          payment: { amountMinor: 1000, currency: 'GBP' },
+        });
+        if (!paying.ok) throw new Error(paying.code);
+        expect(
+          (await tenant.markHoldPaid({ tenantRef, holdId: paying.hold.id, paymentRef: 'pi_seed', received: { amountMinor: 1000, currency: 'GBP' } }))
+            .ok,
+        ).toBe(true);
         return resourceId;
       });
       const resourceId = (
