@@ -5405,6 +5405,20 @@ ${
     );
   }
 
+  /**
+   * The page a form's route belongs to, for an answer about the form itself (already sent, too many
+   * forms, another organization's page), only to a person whose role reads that page: anyone else
+   * gets the notice alone. These answers come before the role is checked.
+   */
+  function pageOrNotice(route: string) {
+    const page = pageFor(route);
+    return (session: Session, status: number, notice: string): Promise<Response> | Response => {
+      const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[backOf(route) || '/'];
+      if (capability !== undefined && can(session, capability)) return page(session, status, notice);
+      return respond(status, layout('Refused', html`<p class="notice" role="alert">${notice}</p>`, session));
+    };
+  }
+
   function pageFor(route: string) {
     if (route.startsWith('/keys')) return keysPage;
     if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
@@ -6715,7 +6729,7 @@ ${
     if (once !== null) {
       const checked = checkFormNonce(session, once);
       if (checked === 'other_org') {
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           409,
           'That page was for another organization. Nothing was changed: check the organization and try again.',
@@ -6728,7 +6742,7 @@ ${
           (await options.state.use('form', once, session.exp, session.idp === 'google' ? personOf(session) : session.uid));
       } catch (error) {
         if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           429,
           'Too many forms sent from this account in the last 12 hours. Try again later.',
@@ -6740,7 +6754,7 @@ ${
           const chat = chatOf(form.get('chat'));
           return redirect(303, chat ? `${chatUrl(chat)}#latest` : `${root}/assistant#latest`);
         }
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           409,
           'That form was already sent. Reload the page to start again.',

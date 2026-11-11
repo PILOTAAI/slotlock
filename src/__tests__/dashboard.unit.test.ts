@@ -2001,6 +2001,17 @@ describe('organizations', () => {
     expect(nav).toContain('/base/dashboard/plan');
     expect(nav).not.toContain('/base/dashboard/keys');
     expect((await get(target, '/base/dashboard/keys', session)).status).toBe(403);
+    // A form sent twice is answered before the role is checked: never with a page the role does
+    // not read (the keys page lists every key's name).
+    await keys.store.create({ tenantRef: `github-org:${ACME.id}`, name: 'SECRET-PARTNER-KEY', scopes: ['read'], createdBy: 'github:1' });
+    const formPage = await (await get(target, '/base/dashboard/settings/account', session)).text();
+    const once = /name="once" value="([^"]+)"/.exec(formPage)?.[1] as string;
+    const formToken = /name="csrf" value="([^"]+)"/.exec(formPage)?.[1] as string;
+    const first = await post(target, '/base/dashboard/keys/revoke', { csrf: formToken, once, id: randomUUID() }, session);
+    expect(first.status).toBe(403);
+    const replayed = await post(target, '/base/dashboard/keys/revoke', { csrf: formToken, once, id: randomUUID() }, session);
+    expect(replayed.status).toBe(409);
+    expect(await replayed.text()).not.toContain('SECRET-PARTNER-KEY');
   });
 });
 
