@@ -760,3 +760,57 @@ export const SLOTLOCK_SUBJECT_TABLES = Object.freeze([
   'outbox',
 ] as const);
 export type SlotlockSubjectTable = (typeof SLOTLOCK_SUBJECT_TABLES)[number];
+
+/**
+ * What a tenant export holds (RFC 0004 D3), in this order: each table's rows as kept, without the
+ * tenant and without secrets (a webhook's signing secret, the assistant's sealed provider key, API
+ * key digests: `api_keys` is each key's name, prefix, scopes and dates). Every other tenant table
+ * is in SLOTLOCK_TENANT_EXPORT_LEFT_OUT, with why.
+ */
+export const SLOTLOCK_TENANT_EXPORT_TABLES = Object.freeze([
+  'resources',
+  'locations',
+  'resource_groups',
+  'resource_group_members',
+  'pool_settings',
+  'booking_rule_defaults',
+  'availability_defaults',
+  'availability_exceptions',
+  'holiday_calendars',
+  'reservations',
+  'reservation_tombstones',
+  'reservation_conflict_archive',
+  'hold_payments',
+  'calendar_events',
+  'calendar_event_attendees',
+  'calendar_event_reminders',
+  'calendar_event_exceptions',
+  'calendar_event_tombstones',
+  'calendar_coverage',
+  'source_busy',
+  'waitlist_entries',
+  'approval_policies',
+  'approvals',
+  'contacts',
+  'webhook_endpoints',
+  'assistant_settings',
+  'api_keys',
+  'outbox',
+  'audit_events',
+] as const);
+export type SlotlockTenantExportTable = (typeof SLOTLOCK_TENANT_EXPORT_TABLES)[number];
+
+/** The tenant tables an export leaves out, and why: each is derived, internal or one member's own. */
+export const SLOTLOCK_TENANT_EXPORT_LEFT_OUT: Readonly<Record<string, string>> = Object.freeze({
+  calendar_event_occurrences: "derived from each event's time and recurrence",
+  calendar_event_commands: 'records of retried writes',
+  hold_commands: 'records of retried writes',
+  outbox_pruned: 'where the history was last pruned to',
+  composite_claims: 'derived from bookings',
+  reminder_dispatches: 'which reminders were put on the feed',
+  reservation_reminder_dispatches: 'which reminders were put on the feed',
+  assistant_conversations: "each member's own conversations with the assistant",
+  assistant_chats: "each member's own conversations with the assistant",
+  tenant_exports: 'the exports themselves',
+  tenant_export_parts: 'the exports themselves',
+});

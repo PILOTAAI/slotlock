@@ -546,8 +546,10 @@ writes take turns, which A7 avoids.
 - `GET /v1/audit` exports it.
 - Optionally, a hash chain per tenant, checked by `slotlock audit verify`.
 
-**D3. Data export and per-person erasure (T2).** Status: per-person export and erasure built;
-the whole-tenant export is not. `POST /v1/subjects/export` and `/erase` (`slotlock subject export`,
+**D3. Data export and per-person erasure (T2).** Status: built. The whole-tenant export is
+`POST /v1/tenant/exports`: read in one snapshot, built in the background into parts of one table's
+rows that the API serves to the tenant's admin key (rather than a signed URL, which would carry the
+export's access in logs), kept 24 hours; and `slotlock tenant export`, which stores nothing. `POST /v1/subjects/export` and `/erase` (`slotlock subject export`,
 `slotlock subject erase`) find a person by email, holder, contact or booking reference. Erasure
 deletes their contacts, attendee and waitlist entries, takes their email out of events and
 approvals, and gives their references one `erased-` name in bookings, holds, tombstones, events,

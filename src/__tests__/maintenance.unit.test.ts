@@ -102,6 +102,9 @@ function fakeStore() {
         async pruneAuditEvents() {
           return 0;
         },
+        async pruneTenantExports() {
+          return { deleted: 0, pending: [] };
+        },
         async offerWaitlist() {
           return { offered: 0, expired: 0, next: null };
         },

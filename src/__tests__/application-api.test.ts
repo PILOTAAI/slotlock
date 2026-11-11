@@ -233,6 +233,11 @@ const backend = {
   verifyAuditLog: vi.fn(),
   exportSubject: vi.fn(),
   eraseSubject: vi.fn(),
+  createTenantExport: vi.fn(),
+  listTenantExports: vi.fn(),
+  getTenantExport: vi.fn(),
+  getTenantExportPart: vi.fn(),
+  deleteTenantExport: vi.fn(),
   listApprovalPolicies: vi.fn(),
   putApprovalPolicy: vi.fn(),
   deleteApprovalPolicy: vi.fn(),
@@ -341,6 +346,20 @@ function exampleRequest(name: string, token = 'admin'): Request {
   }
   return call(definition.method, path, { body: rest, token });
 }
+
+const TENANT_EXPORT = {
+  id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e',
+  status: 'ready',
+  requested_by: 'api_key:00000000-0000-4000-8000-0000000000b2',
+  created_at: '2026-11-10T09:00:00.000Z',
+  finished_at: '2026-11-10T09:00:02.000Z',
+  expires_at: '2026-11-11T09:00:02.000Z',
+  parts: 1,
+  rows: 1,
+  bytes: 64,
+  tables: { resources: 1 },
+  error: null,
+};
 
 const HISTORY = {
     history: [
@@ -621,6 +640,16 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
       outbox: 3,
     },
   },
+  createTenantExport: { export: TENANT_EXPORT },
+  listTenantExports: { exports: [TENANT_EXPORT] },
+  getTenantExport: { export: TENANT_EXPORT },
+  getTenantExportPart: {
+    export_id: TENANT_EXPORT.id,
+    part: 1,
+    table: 'resources',
+    rows: [{ id: '00000000-0000-4000-8000-000000000001', external_ref: 'van-1' }],
+  },
+  deleteTenantExport: { deleted: true },
   listApprovalPolicies: { policies: [APPROVAL_POLICY] },
   putApprovalPolicy: { policy: APPROVAL_POLICY },
   deleteApprovalPolicy: { deleted: true },
