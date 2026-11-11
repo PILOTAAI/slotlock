@@ -148,7 +148,7 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
     ]);
     // Your hours are stored once; the override clears the van's own so it inherits them (RFC 0004 B2).
     expect(
-      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed', override: 'yes' }, session)).status,
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed', override: 'all' }, session)).status,
     ).toBe(303);
     expect(await read()).not.toHaveProperty('availabilityRules');
     expect((await read())?.inheritedAvailability).toEqual({ source: 'tenant', rules: [] });

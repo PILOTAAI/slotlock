@@ -5255,9 +5255,9 @@ ${target === 'all' ? ownHoursChoice(state.own ?? []) : html``}
     return hoursPage(session, { target: resource, ...hoursState(resource.availabilityRules) });
   }
 
-  /** The form's choice for resources' own hours; anything else keeps them. */
+  /** The form's choice for resources' own hours (`yes`: the checkbox of a page from before); anything else keeps them. */
   const overrideOf = (value: string | null): SlotlockOverrideResources =>
-    value === 'all' || value === 'matching' ? value : 'none';
+    value === 'all' || value === 'yes' ? 'all' : value === 'matching' ? 'matching' : 'none';
 
   async function saveHours(session: Session, form: URLSearchParams): Promise<Response> {
     const ref = form.get('location');
