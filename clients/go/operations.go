@@ -10,7 +10,7 @@ import "context"
 // operations is every operation, by name: its method, path, path parameters and query parameters.
 var operations = func() map[string]operation {
 	list := []operation{
-		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "limit", "pool", "kind", "labels", "location", "group"}},
+		{name: "slotlock_list_resources", method: "GET", path: "/v1/resources", pathParams: nil, query: []string{"cursor", "query", "limit", "pool", "kind", "labels", "location", "group"}},
 		{name: "slotlock_create_resource", method: "POST", path: "/v1/resources", pathParams: nil, query: nil},
 		{name: "slotlock_get_free_busy", method: "GET", path: "/v1/free-busy", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"}},
 		{name: "slotlock_find_next_available", method: "GET", path: "/v1/next-available", pathParams: nil, query: []string{"resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"}},
@@ -122,6 +122,8 @@ var operations = func() map[string]operation {
 type ListResourcesInput struct {
 	Cursor *string
 
+	Query *string
+
 	Limit *int64
 
 	Pool *string
@@ -139,6 +141,9 @@ func (in ListResourcesInput) values() map[string]any {
 	values := map[string]any{}
 	if in.Cursor != nil {
 		values["cursor"] = *in.Cursor
+	}
+	if in.Query != nil {
+		values["query"] = *in.Query
 	}
 	if in.Limit != nil {
 		values["limit"] = *in.Limit
@@ -167,7 +172,14 @@ func (in ListResourcesInput) values() map[string]any {
 // department), and the pool it belongs to (a vehicle class, a room type). With kind, only
 // resources of that kind; with labels, only those with every label given; with location, only
 // those there or at a location in it; with group, only that group's. With pool, only that pool's
-// members, in the order slotlock_book_pool tries them.
+// members, in the order slotlock_book_pool tries them. With query, the resources that best match
+// what a person calls one, best first, at most limit and with no next_cursor: each word is looked
+// for in the name, reference, labels, kind, location and description, ignoring case and accents,
+// and forgiving a typo, a word cut short or words run together ("mercedez", "merc 2025" and
+// "mercedesbenz" find "Mercedes-Benz 2025"); numbers match exactly. It is the way to find the id
+// of a resource a person names, since other tools take ids only. When several match about
+// equally, ask which one is meant. A resource that states no kind, labels or location is left out
+// by those filters, so search without them before saying a resource does not exist.
 func (c *Client) ListResources(ctx context.Context, in ListResourcesInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_list_resources", in.values())
 }

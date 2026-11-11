@@ -19,7 +19,8 @@ versioning.
     place in the list without a reload.
 
   Chats are kept until the member deletes one, at most 100 per member (`SLOTLOCK_ASSISTANT_MAX_CHATS`;
-  past it, the least recently used goes). They live in the new table `slotlock.assistant_chats`,
+  past it, the least recently used goes, even with many started at once). A chat deleted while its
+  reply is being written stays deleted. They live in the new table `slotlock.assistant_chats`,
   under forced RLS, erased with the tenant. `slotlock migrate` makes each member's 0.8 conversation
   their first chat, once. Run `slotlock migrate`.
 - **Finding a resource by name.** `slotlock_list_resources` takes `query` and ranks the resources
@@ -27,7 +28,9 @@ versioning.
   - each word is looked for in the name, reference, labels, kind, location and description;
   - case and accents are ignored, and a typo, a word cut short or words run together are forgiven
     (`mercedez`, `merc 2025` and `mercedesbenz` all find "Mercedes-Benz 2025");
-  - numbers match exactly.
+  - numbers match exactly;
+  - a search does bounded work, whatever the resources hold: past a budget of typo checks, it
+    matches exactly, by prefix and by words run together only.
 
   `resource_not_found` for a name or reference given where an id belongs names the likeliest
   resources in `details.candidate_1` to `candidate_3`.

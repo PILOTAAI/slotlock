@@ -3202,7 +3202,9 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * put back into a conversation that no longer has it. It is kept until deleted, or for `ttlMs`
    * (1 second to 3,650 days) from now when given, and then the tenant is listed for
    * sweepAssistantConversations. The member keeps at most SLOTLOCK_ASSISTANT_MAX_CHATS: past it,
-   * the least recently used go.
+   * the least recently used go (the member's writes take turns, so two at once keep the bound).
+   * True when it was written; false when `create` is false and it was not there. Run it in a
+   * transaction (withTenant does) so its lock lasts until the trim commits.
    */
   putAssistantChat(params: {
     tenantRef: string;
@@ -3213,7 +3215,12 @@ export interface SlotlockStore extends SlotlockEventFeed {
     added: Record<string, Record<string, unknown>>;
     keep: readonly string[];
     ttlMs: number | null;
-  }): Promise<void>;
+    /**
+     * False to only change a conversation that is still there: one the member deleted while a turn
+     * on it ran is not written back. True (the default) creates it when it is not.
+     */
+    create?: boolean;
+  }): Promise<boolean>;
   /** Give one of a member's conversations a new title (1-120 characters). False when there is none. */
   renameAssistantChat(params: {
     tenantRef: string;
@@ -7926,6 +7933,40 @@ function buildSlotlockStore(
       const messages = sql.json(params.messages as never);
       const added = sql.json(params.added as never);
       const keep = [...params.keep];
+      // One member's chats are written one at a time, so the trim below sees every insert before it.
+      await sql`
+        SELECT pg_advisory_xact_lock(hashtextextended(
+          ${`slotlock:assistant-chats:${params.tenantRef}\n${params.memberRef}`}::text, 0))`;
+      if (params.create === false) {
+        // Only one still there: a chat deleted while its turn ran stays deleted.
+        const changed = await sql`
+          UPDATE slotlock.assistant_chats AS stored
+             SET messages = ${messages},
+                 actions = (
+                   SELECT coalesce(jsonb_object_agg(existing.key, existing.value), '{}'::jsonb)
+                     FROM jsonb_each(stored.actions) AS existing
+                    WHERE existing.key = ANY(${keep}::text[])
+                 ) || (
+                   SELECT coalesce(jsonb_object_agg(fresh.key, fresh.value), '{}'::jsonb)
+                     FROM jsonb_each(${added}::jsonb) AS fresh
+                    WHERE NOT stored.actions ? fresh.key
+                 ),
+                 updated_at = statement_timestamp(),
+                 expires_at = CASE WHEN ${ttlSeconds}::double precision IS NULL THEN NULL
+                                   ELSE statement_timestamp() + make_interval(secs => ${ttlSeconds}::double precision) END
+           WHERE stored.tenant_ref = ${params.tenantRef} AND stored.member_ref = ${params.memberRef}
+             AND stored.chat_id = ${params.chatId}
+             AND (stored.expires_at IS NULL OR stored.expires_at > statement_timestamp())
+          RETURNING 1`;
+        if (changed.length === 0) return false;
+        if (ttlSeconds !== null) {
+          await sql`
+            SELECT slotlock.register_assistant_tenant(
+              ${params.tenantRef}::text,
+              statement_timestamp() + make_interval(secs => ${ttlSeconds}::double precision))`;
+        }
+        return true;
+      }
       await sql`
         INSERT INTO slotlock.assistant_chats AS stored
           (tenant_ref, member_ref, chat_id, title, messages, actions, created_at, updated_at, expires_at)
@@ -7962,6 +8003,7 @@ function buildSlotlockStore(
             ${params.tenantRef}::text,
             statement_timestamp() + make_interval(secs => ${ttlSeconds}::double precision))`;
       }
+      return true;
     },
 
     async renameAssistantChat(params) {

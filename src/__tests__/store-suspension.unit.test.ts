@@ -47,7 +47,8 @@ const READS = [
   'isTenantSuspended',
   'listWaitlist',
   'getAssistantSettings',
-  'getAssistantConversation',
+  'listAssistantChats',
+  'getAssistantChat',
 ];
 const UPKEEP = [
   'rollCalendarEventHorizon',

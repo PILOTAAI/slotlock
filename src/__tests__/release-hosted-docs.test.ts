@@ -60,10 +60,13 @@ describe('the published policies', () => {
     expect(privacy).toContain(`\`${cookie('SIGN_IN_COOKIE')}\` for the ten minutes a sign-in takes`);
     expect(declared('src/dashboard.ts', /const SIGN_IN_TTL_MS = ([0-9_ *]+);/) / 60_000).toBe(10);
     expect(privacy).toContain('| The sign-in in progress, in a cookie | The service | 10 minutes |');
-    // Assistant conversations, and the hourly maintenance that deletes what retention ends.
-    const conversationHours =
-      declared('src/dashboard.ts', /conversationTtlMs \?\? ([0-9_ *]+);/) / 3_600_000;
-    expect(privacy).toContain(`a conversation ${conversationHours} hours after its last message`);
+    // Assistant chats are kept until deleted (no lifetime unless a deployment sets one), at most
+    // so many a person; and the hourly maintenance that deletes what retention ends.
+    expect(read('src/dashboard.ts')).toContain('conversationTtlMs ?? null;');
+    const maxChats = declared('src/ddl.ts', /const SLOTLOCK_ASSISTANT_MAX_CHATS = ([0-9_]+);/);
+    expect(privacy).toContain(
+      `each conversation until the person who had it deletes it or the account is erased, at most ${String(maxChats)} per person`,
+    );
     const maintenanceMinutes =
       declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
     expect(maintenanceMinutes).toBe(60);
@@ -236,13 +239,14 @@ describe('the hosted service page', () => {
     const dashboard = read('src/dashboard.ts');
     const steps = /SLOTLOCK_ASSISTANT_MAX_STEPS = (\d+);/.exec(source)?.[1];
     const perMinute = /rate \?\? \{ perSecond: (\d+) \/ 60,/.exec(dashboard)?.[1];
-    const hours = /conversationTtlMs \?\? (\d+) \* 3_600_000/.exec(dashboard)?.[1];
-    expect([steps, perMinute, hours]).toEqual(['8', '10', '2']);
+    const maxChats = /const SLOTLOCK_ASSISTANT_MAX_CHATS = (\d+);/.exec(read('src/ddl.ts'))?.[1];
+    expect([steps, perMinute, maxChats]).toEqual(['8', '10', '100']);
+    expect(dashboard).toContain('conversationTtlMs ?? null;');
     expect(assistant).toContain('in Settings, Assistant');
     expect(assistant).toContain('the Anthropic Messages API, or any OpenAI-compatible API');
     expect(assistant).toContain(`up to ${String(steps)} model calls a message`);
     expect(assistant).toContain(`${String(perMinute)} messages a minute per person`);
-    expect(assistant).toContain(`kept for ${String(hours)} hours after its last message`);
+    expect(assistant).toContain(`until you delete it (or the account is erased), up to ${String(maxChats)} per person`);
     expect(assistant).toContain('**Approve** or **Dismiss**');
     expect(assistant).toContain('needs a public HTTPS address, or a hosted provider');
     // Its privacy notice row is the one for a dashboard that offers the assistant.
