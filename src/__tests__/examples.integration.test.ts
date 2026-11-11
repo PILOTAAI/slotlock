@@ -489,6 +489,7 @@ describe.skipIf(!url)('Slotlock docs examples (real Postgres)', () => {
       approvalsExpired: 0,
       bookingsCompleted: 0,
       remindersDue: 0,
+      holidayCalendarsImported: 0,
       extended: 1,
       conflicts: 0,
       refused: 0,
