@@ -5405,36 +5405,43 @@ ${
     );
   }
 
+  /** A page as the answers about a form render it: the person, the status, and a notice. */
+  type FormAnswerPage = (session: Session, status: number, notice: string) => Promise<Response> | Response;
+
+  /**
+   * The page a form's route belongs to, and the page path whose capability reading it needs: the
+   * page rendered, not the one the route names (without the store a page needs, it is the overview).
+   */
+  function pageEntryFor(route: string): { path: string; page: FormAnswerPage } {
+    if (route.startsWith('/keys')) return { path: '/keys', page: keysPage };
+    if (route.startsWith('/webhooks') && options.resources.webhooks) return { path: '/webhooks', page: webhooksPage };
+    if (route.startsWith('/waitlist') && options.resources.waitlist) return { path: '/waitlist', page: waitlistPage };
+    if (route.startsWith('/approvals') && options.resources.approvals) return { path: '/approvals', page: approvalsPage };
+    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
+      return { path: '/locations', page: locationsPage };
+    }
+    if (route.startsWith('/closures') && options.resources.hours) return { path: '/closures', page: closuresPage };
+    if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
+    if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
+    if (route.startsWith('/assistant') && assistantStore()) return { path: '/assistant', page: assistantPage };
+    if (route.startsWith('/settings')) return { path: '/settings', page: settingsPage };
+    if (route.startsWith('/plan') && plans) return { path: '/plan', page: planPage };
+    if (route.startsWith('/teams') && teams) return { path: '/teams', page: teamsPage };
+    return { path: '/', page: overviewPage };
+  }
+
   /**
    * The page a form's route belongs to, for an answer about the form itself (already sent, too many
-   * forms, another organization's page), only to a person whose role reads that page: anyone else
-   * gets the notice alone. These answers come before the role is checked.
+   * forms, another organization's page), only to a person whose role reads the page rendered:
+   * anyone else gets the notice alone. These answers come before the role is checked.
    */
-  function pageOrNotice(route: string) {
-    const page = pageFor(route);
-    return (session: Session, status: number, notice: string): Promise<Response> | Response => {
-      const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[backOf(route) || '/'];
+  function pageOrNotice(route: string): FormAnswerPage {
+    const { path, page } = pageEntryFor(route);
+    return (session, status, notice) => {
+      const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[path];
       if (capability !== undefined && can(session, capability)) return page(session, status, notice);
       return respond(status, layout('Refused', html`<p class="notice" role="alert">${notice}</p>`, session));
     };
-  }
-
-  function pageFor(route: string) {
-    if (route.startsWith('/keys')) return keysPage;
-    if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
-    if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
-    if (route.startsWith('/approvals') && options.resources.approvals) return approvalsPage;
-    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
-      return locationsPage;
-    }
-    if (route.startsWith('/closures') && options.resources.hours) return closuresPage;
-    if (route.startsWith('/contacts') && options.resources.contacts) return contactsPage;
-    if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
-    if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
-    if (route.startsWith('/settings')) return settingsPage;
-    if (route.startsWith('/plan') && plans) return planPage;
-    if (route.startsWith('/teams') && teams) return teamsPage;
-    return overviewPage;
   }
 
   /** Whose hours an editor sets: the tenant's, one location's, or one resource's. */

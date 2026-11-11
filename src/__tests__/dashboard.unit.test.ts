@@ -1980,6 +1980,25 @@ describe('organizations', () => {
     expect((await post(plain, '/base/dashboard/sign-out-everywhere', { csrf: await csrf(plain, own) }, own)).status).toBe(404);
   });
 
+  it("answers a form sent twice with the page it renders only where the role reads that page", async () => {
+    // Without the Teams or Plans stores, their forms fall back to the overview, which Billing does not read.
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const target = orgDashboard([ACME], { workspaces });
+    const { session } = await signIn(target);
+    workspaces.setRole(`github-org:${ACME.id}`, `github:${GITHUB_USER.id}`, 'billing');
+    const formPage = await (await get(target, '/base/dashboard/settings/account', session)).text();
+    const once = /name="once" value="([^"]+)"/.exec(formPage)?.[1] as string;
+    const formToken = /name="csrf" value="([^"]+)"/.exec(formPage)?.[1] as string;
+    for (const route of ['/teams/enable', '/plan/upgrade']) {
+      await post(target, `/base/dashboard${route}`, { csrf: formToken, once, organization: String(ACME.id) }, session);
+      const replayed = await post(target, `/base/dashboard${route}`, { csrf: formToken, once, organization: String(ACME.id) }, session);
+      expect(replayed.status, route).toBe(409);
+      const text = await replayed.text();
+      expect(text, route).not.toContain('<h1>Overview</h1>');
+      expect(text, route).toContain('That form was already sent.');
+    }
+  });
+
   it('lets a viewer read and change nothing, and sends a billing manager to Usage', async () => {
     const workspaces = createSlotlockMemoryDashboardWorkspaces();
     const plans = { plan: vi.fn(async () => null), contact: 'mailto:founder@example.com' };
