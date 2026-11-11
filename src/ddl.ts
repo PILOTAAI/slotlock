@@ -7579,6 +7579,11 @@ CREATE INDEX IF NOT EXISTS slotlock_reminder_dispatches_tenant_idx
 -- A booking's reminders (RFC 0004 P3): minutes before its start, at most five; each said once on
 -- the feed as reminder.due, and again if the booking moves.
 ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS reminder_minutes integer[];
+-- The start a booking or event had when it was moved while cancelling it was already late (past its
+-- cancel cutoff, or inside its fee's window): a later cancellation is judged from it, so moving
+-- cannot take a booking out of what a late cancellation owes (RFC 0004 B5).
+ALTER TABLE slotlock.reservations ADD COLUMN IF NOT EXISTS cutoff_anchor timestamptz;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS cutoff_anchor timestamptz;
 DO $slotlock_reservation_reminders$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'slotlock_reservations_reminders_valid'

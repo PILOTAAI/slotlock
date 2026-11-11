@@ -114,6 +114,24 @@ versioning.
 
 ### Security
 
+The four questions the review left open, now closed:
+
+- **Moving a booking no longer avoids a late cancellation.** Where the reschedule cutoff was
+  shorter than the cancel cutoff, a booking could be moved far ahead and then cancelled free. A
+  booking or event moved when cancelling it would already be late now keeps the start it had
+  (`cutoff_anchor`), and a later cancellation is judged, and its fee recorded, from it.
+- **An agent no longer sets its own hold price.** The new booking rule `holdPrice` (`hold_price`)
+  is the tenant's price: an agent's hold of the resource waits for it whatever the agent asks, a
+  `payment` it names that is not the price is refused (`payment_price_mismatch`), and an agent
+  books the resource only from a paid hold. Without a price, an agent names none.
+- **A key's caps count its pending approvals.** The time an agent's approvals hold while a person
+  decides counts against its key's `max_holds` and `max_held_hours`, so asking for approval never
+  holds more than the agent could hold itself (`hold_limit_reached`, `held_time_limit_reached`).
+- **ISK and UGX in `@slotlock/payments-stripe`.** Stripe counts them in hundredths ISO 4217 has
+  not, so 1 krona paid read as 100 against a hold's price. The adapter converts
+  (`isoMinorUnits`), refuses an amount that is not whole, and `stripeAmount` gives the
+  PaymentIntent's.
+
 From a review of RFC 0004's T2 changes, in five areas, each finding reproduced against a real
 database first. This was not a human review, so it does not count as the independent review
 GOVERNANCE.md requires.

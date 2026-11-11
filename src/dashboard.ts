@@ -1534,6 +1534,7 @@ const INHERITED_NAMES: Readonly<Record<keyof SlotlockBookingRules, string>> = Ob
   pickupTimes: 'Pick-up times',
   returnTimes: 'Return times',
   cancellationFee: 'Cancellation fee',
+  holdPrice: 'Hold price',
   hoursApply: 'Hours hold a hire at',
 });
 
@@ -3317,11 +3318,12 @@ ${field('defaultDurationMinutes', 'Usual length, offered when none is asked', 'm
 ${field('cancelCutoffMinutes', 'Cancel up to, before the start', 'min')}
 ${field('rescheduleCutoffMinutes', 'Move up to, before the start', 'min')}
 </div>
-${resource.bookingRules?.allowedDurations || resource.bookingRules?.pickupTimes || resource.bookingRules?.returnTimes || resource.bookingRules?.cancellationFee ? html`<p class="fine">Set through the API, and kept when you save: ${[
+${resource.bookingRules?.allowedDurations || resource.bookingRules?.pickupTimes || resource.bookingRules?.returnTimes || resource.bookingRules?.cancellationFee || resource.bookingRules?.holdPrice ? html`<p class="fine">Set through the API, and kept when you save: ${[
       resource.bookingRules.allowedDurations ? `lengths ${ruleValueText(resource.bookingRules.allowedDurations)} min` : '',
       resource.bookingRules.pickupTimes ? `pick-up ${ruleValueText(resource.bookingRules.pickupTimes)}` : '',
       resource.bookingRules.returnTimes ? `return ${ruleValueText(resource.bookingRules.returnTimes)}` : '',
       resource.bookingRules.cancellationFee ? `cancellation fee ${ruleValueText(resource.bookingRules.cancellationFee)}` : '',
+      resource.bookingRules.holdPrice ? `hold price ${ruleValueText(resource.bookingRules.holdPrice)}` : '',
     ].filter(Boolean).join('; ')}.</p>` : html``}
 ${toggle('enforceHours', 'enforce_hours', 'Only inside bookable hours')}
 ${toggle('requireCertain', 'require_certain', 'Only in time its calendar syncs have read today')}
@@ -3461,7 +3463,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     const requireCertain = choice('require_certain');
     if (requireCertain !== undefined) rules.requireCertain = requireCertain;
     // Rules the form does not edit (set through the API) are kept.
-    for (const name of ['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee'] as const) {
+    for (const name of ['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee', 'holdPrice'] as const) {
       const kept = resource.bookingRules?.[name];
       if (kept !== undefined) (rules as Record<string, unknown>)[name] = kept;
     }

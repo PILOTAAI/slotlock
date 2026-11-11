@@ -93,6 +93,23 @@ export interface StripePaymentsOptions {
   fetch?: typeof fetch;
 }
 
+/**
+ * Currencies Stripe gives as two-decimal amounts (always ending 00) where ISO 4217, and so
+ * Slotlock's minor unit, has none: 5 ISK is 500 to Stripe and 5 to Slotlock.
+ */
+const STRIPE_TWO_DECIMAL_WHOLE_CURRENCIES = new Set(['ISK', 'UGX']);
+
+/** Stripe's amount in the currency's ISO 4217 minor unit, as Slotlock keeps it; null if not whole. */
+export function isoMinorUnits(amount: number, currency: string): number | null {
+  if (!STRIPE_TWO_DECIMAL_WHOLE_CURRENCIES.has(currency.toUpperCase())) return amount;
+  return amount % 100 === 0 ? amount / 100 : null;
+}
+
+/** A hold's payment (ISO 4217 minor unit) as Stripe's amount, for the PaymentIntent you create. */
+export function stripeAmount(amountMinor: number, currency: string): number {
+  return STRIPE_TWO_DECIMAL_WHOLE_CURRENCIES.has(currency.toUpperCase()) ? amountMinor * 100 : amountMinor;
+}
+
 export function createStripePayments(options: StripePaymentsOptions) {
   const send = options.fetch ?? fetch;
   const stripe = async (path: string, post?: { form: Record<string, string>; idempotencyKey: string }) => {
@@ -181,10 +198,12 @@ export function createStripePayments(options: StripePaymentsOptions) {
     if (intent.status !== 'succeeded') return { status: 'not_paid', reason: 'not_succeeded' };
     const amount = intent.amount_received;
     const currency = typeof intent.currency === 'string' ? intent.currency.toUpperCase() : null;
-    const received =
+    const minor =
       Number.isSafeInteger(amount) && currency && /^[A-Z]{3}$/.test(currency)
-        ? { amount_minor: amount as number, currency }
+        ? isoMinorUnits(amount as number, currency)
         : null;
+    // An amount the adapter cannot read is no amount: Slotlock refuses it for a hold with a price.
+    const received = minor !== null && currency ? { amount_minor: minor, currency } : null;
     return markPaid(holdId, intent.id, received, named === tenant);
   }
 

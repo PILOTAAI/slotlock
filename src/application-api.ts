@@ -522,6 +522,17 @@ const BOOKING_RULES = z
       })
       .strict()
       .optional(),
+    /**
+     * What holding it costs, your price (RFC 0004 C3): an agent's hold waits for this payment,
+     * whatever it asks, and an agent books it only from such a hold, once paid.
+     */
+    hold_price: z
+      .object({
+        amount_minor: z.number().int().min(1).max(1_000_000_000_000),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -280,6 +280,23 @@ function tenantExportOutput(made: SlotlockTenantExport): Record<string, unknown>
   };
 }
 
+/** A key's own caps on what its agent holds (RFC 0004 A5), or undefined when it has none. */
+function keyHoldCaps(context: SlotlockAgentInvocationContext): { maxHolds?: number; maxHeldHours?: number } | undefined {
+  const limits = context.principal.limits;
+  return limits?.maxHolds !== undefined || limits?.maxHeldHours !== undefined
+    ? {
+        ...(limits.maxHolds !== undefined ? { maxHolds: limits.maxHolds } : {}),
+        ...(limits.maxHeldHours !== undefined ? { maxHeldHours: limits.maxHeldHours } : {}),
+      }
+    : undefined;
+}
+
+/** The agent an approval holds time for, and its key's caps. */
+function approvalHolder(context: SlotlockAgentInvocationContext): { ref: string; caps?: { maxHolds?: number; maxHeldHours?: number } } {
+  const caps = keyHoldCaps(context);
+  return caps ? { ref: agentOwnerRef(context), caps } : { ref: agentOwnerRef(context) };
+}
+
 /** The person an access or erasure request names (RFC 0004 D3), as the schema checked it. */
 function subjectOf(input: Record<string, unknown>): SlotlockSubject {
   for (const kind of ['email', 'holder', 'contact', 'reference'] as const) {
@@ -932,6 +949,8 @@ export function createSlotlockStoreAgentBackend(
             source: 'agent-server',
             // The key's own caps, below the server's (RFC 0004 A5).
             ...(holderCaps ? { holderCaps } : {}),
+            // Its price is the tenant's (holdPrice), never the agent's own (RFC 0004 C3).
+            priceFromRules: true,
             // Booked only once your system records its payment (RFC 0004 C3).
             ...(input.payment_required === true ? { paymentRequired: true } : {}),
             ...(input.payment !== undefined ? { payment: amountInput(input.payment) as { amountMinor: number; currency: string } } : {}),
@@ -994,6 +1013,8 @@ export function createSlotlockStoreAgentBackend(
             ttlMs: input.ttl_seconds * 1_000,
             source: 'slotlock:together',
             ...(holderCaps ? { holderCaps } : {}),
+            // Its price is the tenant's (holdPrice), never the agent's own (RFC 0004 C3).
+            priceFromRules: true,
           });
           // All or nothing: thrown, so the holds already made roll back with it.
           if (!result.ok) {
@@ -2610,9 +2631,15 @@ function withApprovalPolicies(
           end: ask.end,
           expiresAt,
           ...(ask.consumeHold ? { consumeHold: ask.consumeHold } : {}),
+          // An agent's approvals hold time against its own caps (RFC 0004 A5); the tenant's own
+          // systems have none.
+          ...(forTenant(context) ? {} : { holder: approvalHolder(context) }),
         }),
       WRITE);
       if (!result.ok) {
+        if (result.code === 'hold_limit_reached' || result.code === 'held_time_limit_reached') {
+          throw new SlotlockAgentOperationError(result.code, 409, { limit: String(result.limit) });
+        }
         if (result.code === 'approval_limit_reached') {
           throw new SlotlockAgentOperationError('approval_limit_reached', 429, { limit: String(result.limit ?? '') });
         }
@@ -2797,6 +2824,9 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
           },
         }
       : {}),
+    ...(rules.holdPrice !== undefined
+      ? { hold_price: { amount_minor: rules.holdPrice.amountMinor, currency: rules.holdPrice.currency } }
+      : {}),
   };
 }
 
@@ -2843,6 +2873,10 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
       currency: fee.currency,
       ...(fee.within_minutes !== undefined ? { withinMinutes: fee.within_minutes } : {}),
     };
+  }
+  if (input.hold_price !== undefined) {
+    const price = input.hold_price as { amount_minor: number; currency: string };
+    rules.holdPrice = { amountMinor: price.amount_minor, currency: price.currency };
   }
   return rules;
 }

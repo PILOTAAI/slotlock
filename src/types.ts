@@ -334,6 +334,8 @@ export type AcquireHoldResult =
   | { ok: false; code: 'invalid_ttl' }
   /** `payment` without `paymentRequired`, or not an amount and an ISO 4217 currency. */
   | { ok: false; code: 'invalid_payment' }
+  /** An agent's `payment` that is not the resource's hold price, or where it sets none. */
+  | { ok: false; code: 'payment_price_mismatch' }
   | { ok: false; code: 'invalid_buffer' }
   /** A tenant, principal or idempotency key that is malformed, or a key without both of the others. */
   | { ok: false; code: 'invalid_identity' }

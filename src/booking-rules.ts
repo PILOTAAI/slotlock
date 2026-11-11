@@ -67,6 +67,12 @@ export interface SlotlockBookingRules {
    * money. With `withinMinutes`, only a cancellation that late before the start.
    */
   cancellationFee?: SlotlockCancellationFee;
+  /**
+   * What holding the resource costs, set by the tenant (RFC 0004 C3): an agent's hold of it waits for
+   * this payment (at most 30 minutes) whatever the agent asks, an agent names no other price, and an
+   * agent books it only from such a hold, once paid. The tenant's own systems set their own.
+   */
+  holdPrice?: SlotlockHoldPrice;
   /** A booking lies inside the resource's bookable hours. */
   enforceHours?: boolean;
   /**
@@ -89,6 +95,12 @@ export interface SlotlockCancellationFee {
   currency: string;
   /** Only a cancellation this many minutes or fewer before the start: 0-525,600. */
   withinMinutes?: number;
+}
+
+/** A hold's price: an amount in the currency's minor unit (cents), ISO 4217 currency. */
+export interface SlotlockHoldPrice {
+  amountMinor: number;
+  currency: string;
 }
 
 /** A window of a day: minutes after local midnight, and how long (it may run past midnight). */
@@ -135,7 +147,7 @@ const LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
 export const SLOTLOCK_MAX_ALLOWED_DURATIONS = 20;
 /** Windows `pickupTimes` and `returnTimes` may each hold. */
 export const SLOTLOCK_MAX_DAY_WINDOWS = 4;
-const LIST_RULES = new Set(['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee']);
+const LIST_RULES = new Set(['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee', 'holdPrice']);
 
 /** How the hours hold a hire (`hoursApply`). */
 export type SlotlockHoursApply = 'whole' | 'ends';
@@ -149,6 +161,27 @@ export function hoursApplyOf(rules: SlotlockBookingRules | undefined): SlotlockH
 function parseHoursApply(value: unknown): SlotlockHoursApply {
   if (value !== 'whole' && value !== 'ends') throw new TypeError("Slotlock booking rule hoursApply must be 'whole' or 'ends'");
   return value;
+}
+
+/** `holdPrice` from untrusted input, or a TypeError. */
+function parseHoldPrice(value: unknown): SlotlockHoldPrice {
+  const price = value as Record<string, unknown> | null;
+  if (
+    typeof price !== 'object' ||
+    price === null ||
+    Array.isArray(price) ||
+    Object.keys(price).some((key) => !['amountMinor', 'currency'].includes(key)) ||
+    !Number.isSafeInteger(price.amountMinor) ||
+    (price.amountMinor as number) < 1 ||
+    (price.amountMinor as number) > 1_000_000_000_000 ||
+    typeof price.currency !== 'string' ||
+    !/^[A-Z]{3}$/.test(price.currency)
+  ) {
+    throw new TypeError(
+      'Slotlock booking rule holdPrice needs amountMinor (a whole 1-1,000,000,000,000) and currency (ISO 4217, like EUR)',
+    );
+  }
+  return { amountMinor: price.amountMinor as number, currency: price.currency };
 }
 
 /** `cancellationFee` from untrusted input, or a TypeError. */
@@ -291,6 +324,7 @@ export function parseBookingRules(value: unknown): SlotlockBookingRules {
   if (input.hoursApply !== undefined) rules.hoursApply = parseHoursApply(input.hoursApply);
   if (input.allowedDurations !== undefined) rules.allowedDurations = parseAllowedDurations(input.allowedDurations);
   if (input.cancellationFee !== undefined) rules.cancellationFee = parseCancellationFee(input.cancellationFee);
+  if (input.holdPrice !== undefined) rules.holdPrice = parseHoldPrice(input.holdPrice);
   if (input.pickupTimes !== undefined) rules.pickupTimes = parseDayWindows('pickupTimes', input.pickupTimes);
   if (input.returnTimes !== undefined) rules.returnTimes = parseDayWindows('returnTimes', input.returnTimes);
   for (const [key, [min, max]] of Object.entries(LIMITS) as [keyof typeof LIMITS, readonly [number, number]][]) {
@@ -351,6 +385,7 @@ export function parseEffectiveBookingRules(value: unknown): { rules: SlotlockBoo
       try {
         if (key === 'allowedDurations') rules.allowedDurations = parseAllowedDurations(field);
         else if (key === 'cancellationFee') rules.cancellationFee = parseCancellationFee(field);
+        else if (key === 'holdPrice') rules.holdPrice = parseHoldPrice(field);
         else rules[key as 'pickupTimes' | 'returnTimes'] = parseDayWindows(key, field);
       } catch {
         dropped.push(key);
