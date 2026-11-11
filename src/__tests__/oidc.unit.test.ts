@@ -21,7 +21,9 @@ const seconds = Math.floor(NOW / 1000);
 
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const attacker = generateKeyPairSync('rsa', { modulusLength: 2048 });
-const small = generateKeyPairSync('rsa', { modulusLength: 1024 });
+// A 1024-bit RSA public key, fixed here: the verifier must refuse it before any
+// signature is checked (none is made with it, so no weak key is generated here).
+const SMALL_RSA_JWK: SlotlockJwk = { kty: 'RSA', n: 'y2_zejn4NrYjxYhlqs_GX-IoqjXqlEOBuKZeXd1CMaxGipnY3b1ILXVpz4tpWbB3GJis0Qov9guuAYOYeE3Xio2ITiCvpDkeTf5slFMnygs9q60tSylMgPus91YGwlGwA2o9K7yJFNebtHVMNQmFvmaIYFOTUCimANTjWNXKuzs', e: 'AQAB' };
 const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const jwkOf = (key: typeof rsa.publicKey, kid: string, extra: Record<string, unknown> = {}): SlotlockJwk => ({ ...key.export({ format: 'jwk' }), kid, ...extra });
 
@@ -98,10 +100,10 @@ describe('verifySlotlockIdToken', () => {
     expect(await importSlotlockJwk(jwkOf(ec.publicKey, 'x'), 'RS256')).toBeNull();
     expect(await importSlotlockJwk(jwkOf(rsa.publicKey, 'x', { use: 'enc' }), 'RS256')).toBeNull();
     expect(await importSlotlockJwk(jwkOf(rsa.publicKey, 'x', { alg: 'PS256' }), 'RS256')).toBeNull();
-    expect(await importSlotlockJwk(jwkOf(small.publicKey, 'x'), 'RS256')).toBeNull();
+    expect(await importSlotlockJwk({ ...SMALL_RSA_JWK, kid: 'x' }, 'RS256')).toBeNull();
     expect(await importSlotlockJwk(jwkOf(rsa.publicKey, 'x', { use: 'sig', alg: 'RS256' }), 'RS256')).not.toBeNull();
-    const weak = { k1: jwkOf(small.publicKey, 'k1') };
-    expect(await verifySlotlockIdToken(token(good(), { key: small.privateKey }), expectation(weak))).toEqual({ refusal: 'key' });
+    const weak = { k1: { ...SMALL_RSA_JWK, kid: 'k1' } };
+    expect(await verifySlotlockIdToken(token(good()), expectation(weak))).toEqual({ refusal: 'key' });
   });
 
   it('holds the issuer, audience and azp exactly', async () => {
