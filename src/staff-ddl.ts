@@ -27,15 +27,20 @@ export type SlotlockStaffRole = (typeof SLOTLOCK_STAFF_ROLES)[number];
  * - `billing.read` opens revenue, payments, partners and job runs;
  * - `billing.act` gives a plan override of up to 90 days and resolves billing alerts;
  * - `plans.approve` asks for an override longer than 90 days, and approves another Owner's (four
- *   eyes).
+ *   eyes);
+ * - `content.write` writes blog posts in the CMS and submits them for review;
+ * - `content.publish` publishes or schedules a submitted post (E5: Owner only).
  * The database checks the same map (slotlock.staff_require), so the console and the database cannot
  * disagree.
  */
 export const SLOTLOCK_STAFF_CAPABILITIES = Object.freeze({
-  owner: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'billing.read', 'billing.act', 'plans.approve', 'staff.read', 'staff.log'],
+  owner: [
+    'home', 'accounts.read', 'accounts.act', 'safety.act', 'billing.read', 'billing.act', 'plans.approve',
+    'content.write', 'content.publish', 'staff.read', 'staff.log',
+  ],
   support: ['home', 'accounts.read', 'accounts.act', 'safety.act'],
   billing: ['home', 'accounts.read', 'billing.read', 'billing.act'],
-  editor: ['home'],
+  editor: ['home', 'content.write'],
   viewer: ['home', 'billing.read'],
 } as const satisfies Record<SlotlockStaffRole, readonly string[]>);
 export type SlotlockStaffCapability = (typeof SLOTLOCK_STAFF_CAPABILITIES)[SlotlockStaffRole][number];
@@ -67,6 +72,17 @@ export const SLOTLOCK_OVERRIDE_SOLO_DAYS = 90;
 export const SLOTLOCK_MAINTENANCE_JOBS = Object.freeze(['billing_daily', 'overage_report'] as const);
 /** How long a cached provider read (Stripe) is kept, in seconds (RFC 0006, 4.6). */
 export const SLOTLOCK_ADMIN_CACHE_SECONDS = 3600;
+/** A blog post's slug, as site/src/lib/post-format.ts reads it (POST_SLUG). */
+export const SLOTLOCK_POST_SLUG_PATTERN = '^[a-z0-9]+(?:-[a-z0-9]+){0,15}$';
+/**
+ * The CMS's steps, as the staff log names them (RFC 0006, 4.5). Writing needs content.write;
+ * publishing, scheduling and unscheduling need content.publish.
+ */
+export const SLOTLOCK_CONTENT_STEPS = Object.freeze({
+  write: ['content.saved', 'content.submitted', 'content.image_added', 'content.image_removed', 'content.renamed', 'content.discarded'],
+  publish: ['content.published', 'content.scheduled', 'content.unscheduled', 'content.updated'],
+} as const);
+export type SlotlockContentStep = (typeof SLOTLOCK_CONTENT_STEPS)[keyof typeof SLOTLOCK_CONTENT_STEPS][number];
 
 export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'staff_members',
@@ -117,6 +133,7 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_partners(text)',
   'slotlock.admin_cache_read(text, text)',
   'slotlock.admin_cache_write(text, text, jsonb)',
+  'slotlock.admin_content_record(text, text, text, jsonb)',
 ] as const);
 
 /** Functions only the deployment role runs (`slotlock staff …`): granted to no role. */
@@ -1088,6 +1105,38 @@ END
 $slotlock_record_maintenance_run$;
 `;
 
+const contentSteps = (steps: readonly string[]) => steps.map((step) => `'${step}'`).join(', ');
+
+/**
+ * Phase 4 (RFC 0006, 4.5): the CMS. Posts live in the repository, not here, so the database only
+ * checks the role for each step and records it, before the console calls GitHub.
+ */
+const STAFF_CONTENT_DDL = `
+-- A step in the CMS, recorded before the console asks GitHub for it: content.write for writing a
+-- post (saving, submitting, its images, renaming, discarding a draft), content.publish for
+-- publishing, scheduling and unscheduling one. The post is named by its slug.
+CREATE OR REPLACE FUNCTION slotlock.admin_content_record(actor text, happened text, post text, extra jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_content_record$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'content.write');
+  IF happened IN (${contentSteps(SLOTLOCK_CONTENT_STEPS.publish)}) THEN
+    PERFORM slotlock.staff_require(actor, 'content.publish');
+  ELSIF happened IS NULL OR happened NOT IN (${contentSteps(SLOTLOCK_CONTENT_STEPS.write)}) THEN
+    RAISE EXCEPTION 'admin_content_action' USING ERRCODE = '22023';
+  END IF;
+  IF post IS NULL OR post !~ '${SLOTLOCK_POST_SLUG_PATTERN}'
+     OR (extra IS NOT NULL AND (jsonb_typeof(extra) <> 'object' OR pg_column_size(extra) > 4096)) THEN
+    RAISE EXCEPTION 'admin_content_post' USING ERRCODE = '22023';
+  END IF;
+  PERFORM slotlock.staff_log(actor, happened, NULL, 'post:' || post, NULL, extra);
+END
+$slotlock_admin_content_record$;
+`;
+
 export const SLOTLOCK_STAFF_DDL = `
 -- Staff (RFC 0006): who may use the admin console, as which role. Added, changed and removed only
 -- by the deployment role (slotlock.staff_add and the others below), never by the console.
@@ -1840,6 +1889,7 @@ $slotlock_staff_remove$;
 
 ${STAFF_SUPPORT_DDL}
 ${STAFF_BILLING_DDL}
+${STAFF_CONTENT_DDL}
 ${[...STAFF_HELPER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS]
   .map((signature) => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`)
   .join('\n')}

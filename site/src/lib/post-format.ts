@@ -435,6 +435,8 @@ export function checkPost(
     sitePaths?: ReadonlySet<string>;
     /** Other posts' descriptions, by slug. */
     otherDescriptions?: Readonly<Record<string, string>>;
+    /** The file names in the post's image folder; leave out to skip checking each image is there. */
+    imageFiles?: ReadonlySet<string>;
   },
 ): PostCheck[] {
   const { front } = post;
@@ -451,13 +453,25 @@ export function checkPost(
     : [];
   const same = Object.entries(context.otherDescriptions ?? {}).find(([slug, description]) => slug !== post.slug && description.trim() === front.description.trim());
   const related = front.related;
+  const absent = context.imageFiles
+    ? rendered.images.map((image) => image.src.slice(postImagePath(post.slug).length)).filter((file) => !(context.imageFiles as ReadonlySet<string>).has(file))
+    : [];
+  const altless = rendered.images.filter((image) => image.alt.length === 0 || image.alt.length > 200).length;
   return [
     { name: 'Markdown', ok: rendered.problems.length === 0, detail: rendered.problems.join('; ') || 'Every line renders as written.' },
     { name: 'Copy rules', ok: copy.length === 0, detail: copy.join('; ') || 'No em dashes, filler words or empty phrases.' },
     { name: 'Search title', ok: title.length >= 20 && title.length <= 65, detail: `${title.length} characters (20 to 65)${front.seoTitle ? ', the search title' : ''}.` },
     { name: 'Description', ok: front.description.length >= 70 && front.description.length <= 160, detail: `${front.description.length} characters (70 to 160).` },
     { name: 'Unique description', ok: !same, detail: same ? `The same as the post ${same[0]}.` : 'No other post has it.' },
-    { name: 'Images', ok: rendered.images.every((image) => image.alt.length > 0 && image.alt.length <= 200), detail: rendered.images.length ? `${rendered.images.length} with alt text of 1 to 200 characters.` : 'No images.' },
+    {
+      name: 'Images',
+      ok: altless === 0 && absent.length === 0,
+      detail: absent.length
+        ? `Not uploaded: ${absent.join(', ')}.`
+        : altless
+          ? `${altless} without alt text of 1 to 200 characters.`
+          : rendered.images.length ? `${rendered.images.length} with alt text of 1 to 200 characters.` : 'No images.',
+    },
     { name: 'Links', ok: missing.length === 0, detail: context.sitePaths ? (missing.length ? `No page at ${missing.join(', ')}.` : `${rendered.links.length} links, each to a page that exists.`) : 'Not checked: the site\'s pages could not be read.' },
     { name: 'Related pages', ok: related.length >= 1 && related.length <= 4 && related.every((link) => LINK.test(link.href) && link.label.length > 0), detail: `${related.length} (1 to 4, each "Label | /path").` },
     { name: 'Author', ok: Object.hasOwn(context.authors, front.author), detail: Object.hasOwn(context.authors, front.author) ? (context.authors[front.author] as PostAuthor).name : `"${front.author}" is not in site/src/data/authors.json.` },

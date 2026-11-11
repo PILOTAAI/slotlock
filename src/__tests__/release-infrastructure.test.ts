@@ -759,9 +759,17 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     for (const name of ['npm', 'ghcr', 'mcp-registry']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
     }
-    for (const name of ['release-tag', 'release-app', 'site']) {
+    for (const name of ['release-tag', 'release-app', 'site', 'cms', 'site-preview']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([]);
     }
+    // The CMS's environments (RFC 0006, 4.5): the App's key on main only, previews on cms/ branches.
+    const policy = (name: string) =>
+      requests.find(
+        (request) =>
+          request.method === 'POST' && request.path === `repos/PILOTAAI/slotlock/environments/${name}/deployment-branch-policies`,
+      )?.body;
+    expect(policy('cms')).toEqual({ name: 'main', type: 'branch' });
+    expect(policy('site-preview')).toEqual({ name: 'cms/*', type: 'branch' });
   });
 
   // A stand-in for gh that answers configure-github.sh, logs each request, and keeps the deploy

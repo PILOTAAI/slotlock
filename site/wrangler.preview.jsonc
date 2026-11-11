@@ -1,0 +1,20 @@
+// The site's preview Worker (RFC 0006, 4.5): each CMS pull request's build is uploaded to it as a
+// version with the preview alias pr-<number> (site.yml, the preview job), so the whole site with the
+// draft post is at https://pr-<number>-slotlock-site-preview.<your-subdomain>.workers.dev. It has no
+// route and no workers.dev address of its own, and every preview page says noindex.
+//
+// Before the first preview: a workers.dev subdomain on the Cloudflare account, and one deploy of
+// this Worker after a build (`npm run build && npx wrangler deploy -c wrangler.preview.jsonc`), so
+// the versions have a Worker to belong to. Cloudflare Access can protect the preview URLs too.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-site-preview",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  },
+  "workers_dev": false,
+  "preview_urls": true
+}

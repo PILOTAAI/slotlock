@@ -13,7 +13,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres, { type Sql } from 'postgres';
 import { createSlotlockAccessVerifier } from '../../src/admin/access.js';
-import { type SlotlockAdmin, createSlotlockAdmin } from '../../src/admin/app.js';
+import { type SlotlockAdmin, type SlotlockAdminOptions, createSlotlockAdmin } from '../../src/admin/app.js';
 import { slotlockClientKey } from '../../src/rate-limit.js';
 
 /** A Workers rate limiting binding: counts per Cloudflare location, eventually consistent. */
@@ -35,6 +35,13 @@ export interface SlotlockAdminWorkerEnv {
   SLOTLOCK_ADMIN_GITHUB_TOKEN?: string;
   /** A restricted Stripe key that reads subscriptions and invoices: revenue and customers. */
   SLOTLOCK_ADMIN_STRIPE_KEY?: string;
+  /** The CMS (RFC 0006, 4.5): the Slotlock CMS GitHub App's id, installation and private key. */
+  SLOTLOCK_ADMIN_CMS_APP_ID?: string;
+  SLOTLOCK_ADMIN_CMS_INSTALLATION?: string;
+  SLOTLOCK_ADMIN_CMS_APP_KEY?: string;
+  SLOTLOCK_ADMIN_CMS_REPOSITORY?: string;
+  SLOTLOCK_ADMIN_SITE_URL?: string;
+  SLOTLOCK_ADMIN_PREVIEW_HOST?: string;
   [name: string]: unknown;
 }
 
@@ -78,7 +85,7 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
     if (!isRateLimit(env.SLOTLOCK_ADMIN_RATE_LIMIT)) return 'The admin console is not configured: bind SLOTLOCK_ADMIN_RATE_LIMIT.';
     if (typeof env.HYPERDRIVE?.connectionString !== 'string') return 'The admin console is not configured: bind HYPERDRIVE.';
     // Built once per isolate, again only if its configuration changed.
-    const key = [...REQUIRED.map((name) => env[name]), env.SLOTLOCK_ADMIN_GITHUB_TOKEN ?? '', env.SLOTLOCK_ADMIN_STRIPE_KEY ?? ''].join('\n');
+    const key = [...REQUIRED.map((name) => env[name]), env.SLOTLOCK_ADMIN_GITHUB_TOKEN ?? '', env.SLOTLOCK_ADMIN_STRIPE_KEY ?? '', ...CMS.map((name) => env[name] ?? '')].join('\n');
     if (admin && built === key) return admin;
     const publicUrl = (env.SLOTLOCK_ADMIN_PUBLIC_URL as string).trim();
     if (new URL(publicUrl).protocol !== 'https:') return 'SLOTLOCK_ADMIN_PUBLIC_URL must be https.';
@@ -106,6 +113,7 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
       ...(typeof env.SLOTLOCK_ADMIN_STRIPE_KEY === 'string' && env.SLOTLOCK_ADMIN_STRIPE_KEY.trim()
         ? { stripeKey: env.SLOTLOCK_ADMIN_STRIPE_KEY.trim() }
         : {}),
+      ...cmsOf(env),
       ...(workerOptions.fetch ? { fetch: workerOptions.fetch } : {}),
     });
     built = key;
@@ -136,6 +144,44 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
       }
     },
   };
+}
+
+const CMS = [
+  'SLOTLOCK_ADMIN_CMS_APP_ID',
+  'SLOTLOCK_ADMIN_CMS_INSTALLATION',
+  'SLOTLOCK_ADMIN_CMS_APP_KEY',
+  'SLOTLOCK_ADMIN_CMS_REPOSITORY',
+  'SLOTLOCK_ADMIN_SITE_URL',
+  'SLOTLOCK_ADMIN_PREVIEW_HOST',
+] as const;
+
+/**
+ * The CMS's settings, when all of them are there and well formed. Without them, or with one that is
+ * not, the console runs without the CMS and its Content page says what to set: a CMS setting never
+ * takes the rest of the console down.
+ */
+function cmsOf(env: SlotlockAdminWorkerEnv): { cms: NonNullable<SlotlockAdminOptions['cms']> } | Record<string, never> {
+  const text = (name: (typeof CMS)[number]) => (typeof env[name] === 'string' ? (env[name] as string).trim() : '');
+  const appId = text('SLOTLOCK_ADMIN_CMS_APP_ID');
+  const installationId = text('SLOTLOCK_ADMIN_CMS_INSTALLATION');
+  const privateKey = text('SLOTLOCK_ADMIN_CMS_APP_KEY');
+  const repository = text('SLOTLOCK_ADMIN_CMS_REPOSITORY') || 'PILOTAAI/slotlock';
+  const siteUrl = text('SLOTLOCK_ADMIN_SITE_URL') || 'https://slotlock.pylota.io';
+  const previewHost = text('SLOTLOCK_ADMIN_PREVIEW_HOST');
+  if (!appId && !installationId && !privateKey) return {};
+  const problems = [
+    /^[1-9][0-9]{0,15}$/.test(appId) ? null : 'SLOTLOCK_ADMIN_CMS_APP_ID is a number',
+    /^[1-9][0-9]{0,15}$/.test(installationId) ? null : 'SLOTLOCK_ADMIN_CMS_INSTALLATION is a number',
+    privateKey.includes('PRIVATE KEY-----') ? null : 'SLOTLOCK_ADMIN_CMS_APP_KEY is the App\'s .pem private key',
+    /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(repository) ? null : 'SLOTLOCK_ADMIN_CMS_REPOSITORY is owner/name',
+    /^https:\/\/[a-z0-9.-]+(?::\d+)?\/?$/i.test(siteUrl) ? null : 'SLOTLOCK_ADMIN_SITE_URL is an https origin',
+    previewHost === '' || /^[a-z0-9.-]{1,200}$/i.test(previewHost) ? null : 'SLOTLOCK_ADMIN_PREVIEW_HOST is a host name',
+  ].filter((problem): problem is string => problem !== null);
+  if (problems.length > 0) {
+    console.error(JSON.stringify({ message: 'slotlock admin CMS not configured', detail: problems }));
+    return {};
+  }
+  return { cms: { appId, installationId, privateKey, repository, siteUrl, ...(previewHost ? { previewHost } : {}) } };
 }
 
 function isRateLimit(value: unknown): value is SlotlockAdminRateLimit {

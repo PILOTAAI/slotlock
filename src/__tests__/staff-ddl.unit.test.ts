@@ -2,6 +2,7 @@
 // records, and what none of them may return. The integration suite runs the same rules against
 // PostgreSQL (staff.integration.test.ts).
 import { describe, expect, it } from 'vitest';
+import { POST_SLUG } from '../../site/src/lib/post-format.js';
 import {
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_DEFINER_FUNCTIONS,
@@ -12,6 +13,8 @@ import {
 } from '../ddl.js';
 import {
   SLOTLOCK_ADMIN_FUNCTIONS,
+  SLOTLOCK_CONTENT_STEPS,
+  SLOTLOCK_POST_SLUG_PATTERN,
   SLOTLOCK_STAFF_CAPABILITIES,
   SLOTLOCK_STAFF_DDL,
   SLOTLOCK_STAFF_OPERATOR_FUNCTIONS,
@@ -119,6 +122,16 @@ describe('the admin console schema', () => {
       expect(slotlockStaffMay('editor', capability)).toBe(false);
       expect(slotlockStaffMay('viewer', capability)).toBe(false);
     }
+    // The CMS (Phase 4): the Owner and an Editor write posts; only the Owner publishes them (E5).
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'content.write'))).toEqual(['owner', 'editor']);
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'content.publish'))).toEqual(['owner']);
+  });
+
+  it('records a CMS step only for its role, and names the post by a slug the site reads', () => {
+    const body = functions.find((f) => f.name === 'slotlock.admin_content_record')?.body ?? '';
+    expect(body).toContain(`IF happened IN (${SLOTLOCK_CONTENT_STEPS.publish.map((s) => `'${s}'`).join(', ')}) THEN\n    PERFORM slotlock.staff_require(actor, 'content.publish');`);
+    expect(body).toContain(`NOT IN (${SLOTLOCK_CONTENT_STEPS.write.map((s) => `'${s}'`).join(', ')})`);
+    expect(String(POST_SLUG.source)).toBe(SLOTLOCK_POST_SLUG_PATTERN);
   });
 
   it('gives every action on an account a reason, and records it in the account\'s own audit log too', () => {

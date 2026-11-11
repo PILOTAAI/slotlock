@@ -15,6 +15,15 @@
 # Secrets, on the `site` environment:
 #   CLOUDFLARE_API_TOKEN   Account: Workers Scripts: Edit; Zone (pylota.io only): Workers Routes: Edit, DNS: Edit
 #   CLOUDFLARE_ACCOUNT_ID  the Cloudflare account that holds the pylota.io zone
+#
+# Preview deploys (RFC 0006, 4.5): a pull request from a cms/ branch of this repository, which the
+# admin console's CMS opens, also uploads its build to the preview Worker (site/wrangler.preview.
+# jsonc) as https://pr-<number>-<SITE_PREVIEW_HOST>/. Set up, on the `site-preview` environment:
+#   variable   SITE_PREVIEW_HOST      slotlock-site-preview.<subdomain>.workers.dev; no previews until set
+#   secrets    CLOUDFLARE_API_TOKEN   Account: Workers Scripts: Edit
+#              CLOUDFLARE_ACCOUNT_ID
+# The preview job never runs the pull request's code: it checks out main for Wrangler and uploads
+# the static files the build job made.
 name: Site
 
 on:
@@ -176,3 +185,51 @@ jobs:
       - name: Check the live site for search engines
         working-directory: .
         run: bash scripts/check-live-seo.sh
+
+  preview:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'cms/') &&
+      vars.SITE_PREVIEW_HOST != ''
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: site-preview
+      url: https://pr-${{ github.event.pull_request.number }}-${{ vars.SITE_PREVIEW_HOST }}/
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      # Main's Wrangler and configuration, never the pull request's: this job holds a Cloudflare token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install Wrangler from main's lockfile
+        run: npm ci --no-audit --no-fund
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: site/dist
+      # A preview is never indexed: every page says noindex, and robots.txt turns crawlers away.
+      - name: Keep the preview out of search engines
+        run: |
+          printf '\n/*\n  X-Robots-Tag: noindex, nofollow\n' >> dist/_headers
+          printf 'User-agent: *\nDisallow: /\n' > dist/robots.txt
+      - name: Check the Cloudflare credentials
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/check-cloudflare-credentials.sh
+      - name: Upload the preview
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ALIAS: pr-${{ github.event.pull_request.number }}
+        run: npx wrangler versions upload -c wrangler.preview.jsonc --preview-alias "$ALIAS" --message "A CMS pull request's preview"

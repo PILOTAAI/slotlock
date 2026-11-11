@@ -17,11 +17,14 @@ import {
   SLOTLOCK_OVERRIDE_SOLO_DAYS,
   SLOTLOCK_STAFF_NOTE_MAX,
   SLOTLOCK_STAFF_ROLES,
+  type SlotlockContentStep,
   type SlotlockStaffCapability,
   type SlotlockStaffRole,
   slotlockStaffMay,
 } from '../staff-ddl.js';
 import type { SlotlockAccessIdentity } from './access.js';
+import { SLOTLOCK_ADMIN_EDITOR_JS, type SlotlockCmsRequest, createSlotlockAdminCms } from './cms.js';
+import { createSlotlockCmsGitHub } from './github-app.js';
 import {
   base64urlDecode,
   base64urlEncode,
@@ -74,6 +77,22 @@ export interface SlotlockAdminOptions {
    * Billing page and a customer's subscriptions on the account page. Without it those parts say so.
    */
   stripeKey?: string;
+  /**
+   * The CMS (RFC 0006, 4.5): the "Slotlock CMS" GitHub App, installed on the site's repository
+   * only. Without it the Content pages say what to set.
+   */
+  cms?: {
+    appId: string;
+    /** The App's private key, PEM (PKCS#1 as GitHub gives it, or PKCS#8). */
+    privateKey: string;
+    installationId: string;
+    /** owner/name, e.g. PILOTAAI/slotlock. */
+    repository: string;
+    /** The live site, for the editor's link check and facts. Default https://slotlock.pylota.io. */
+    siteUrl?: string;
+    /** The preview Worker's workers.dev host: each CMS pull request is at https://pr-<n>-<host>/. */
+    previewHost?: string;
+  };
   fetch?: typeof fetch;
   now?: () => number;
 }
@@ -212,6 +231,22 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const now = options.now ?? (() => Date.now());
   const fetcher = options.fetch ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
   const githubCache = new Map<string, { value: { id: string; login: string; type: string } | null; until: number }>();
+  const cms = createSlotlockAdminCms({
+    github: options.cms
+      ? createSlotlockCmsGitHub({
+          appId: options.cms.appId,
+          privateKey: options.cms.privateKey,
+          installationId: options.cms.installationId,
+          repository: options.cms.repository,
+          fetch: fetcher,
+          now,
+        })
+      : null,
+    siteUrl: options.cms?.siteUrl ?? 'https://slotlock.pylota.io',
+    ...(options.cms?.previewHost ? { previewHost: options.cms.previewHost } : {}),
+    fetch: fetcher,
+    now,
+  });
 
   // ---------- Sealed cookies ----------
   const mac = (context: string, body: string) =>
@@ -320,6 +355,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     ...(slotlockStaffMay(session.r, 'billing.read') ? [{ href: '/billing', label: 'Billing' }] : []),
     ...(slotlockStaffMay(session.r, 'accounts.read') ? [{ href: '/usage', label: 'Usage' }] : []),
     ...(slotlockStaffMay(session.r, 'safety.act') ? [{ href: '/cases', label: 'Cases' }] : []),
+    ...(slotlockStaffMay(session.r, 'content.write') ? [{ href: '/content', label: 'Content' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.read') ? [{ href: '/staff', label: 'Staff' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.log') ? [{ href: '/staff/log', label: 'Staff log' }] : []),
   ];
@@ -1436,6 +1472,31 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return redirect(`${to}?${new URLSearchParams({ [outcome.ok ? 'done' : 'error']: outcome.code }).toString()}`, [sessionCookie(session)]);
   }
 
+  // ---------- The CMS ----------
+  /** What the CMS gets for one request: who, their token, and the shell's pages. */
+  function cmsRequest(session: Session): SlotlockCmsRequest {
+    const expected = Buffer.from(csrfOf(session));
+    return {
+      staff: session.s,
+      login: session.l,
+      role: session.r,
+      fresh: Boolean(session.pv && now() - session.pv <= FRESH_MS),
+      csrf: csrfOf(session),
+      csrfOk(token) {
+        const given = Buffer.from(token);
+        return given.length === expected.length && timingSafeEqual(given, expected);
+      },
+      page: (title, path, body, notice, status = 200) =>
+        respond(layout({ ...shellOf(session, title, path, undefined, notice), script: '/editor.js' }, body), status, { 'Set-Cookie': sessionCookie(session) }),
+      redirect: (location) => redirect(location, [sessionCookie(session)]),
+      json: (value, status = 200) => json(value, status, [sessionCookie(session)]),
+      async record(step: SlotlockContentStep, slug: string, extra: Record<string, string | number> = {}) {
+        const sql = options.sql();
+        await sql`SELECT slotlock.admin_content_record(${session.s}, ${step}, ${slug}, ${sql.json(extra)})`;
+      },
+    };
+  }
+
   // ---------- Routing ----------
   const needs: Record<string, SlotlockStaffCapability> = {
     '/': 'home',
@@ -1455,6 +1516,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       if (path === '/admin.css') return respond(SLOTLOCK_ADMIN_CSS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/css; charset=utf-8');
       if (path === '/admin.js') return respond(SLOTLOCK_ADMIN_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
       if (path === '/passkey.js') return respond(SLOTLOCK_ADMIN_PASSKEY_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
+      if (path === '/editor.js') return respond(SLOTLOCK_ADMIN_EDITOR_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
       if (path === '/healthz') return respond('ok', 200, {}, 'text/plain; charset=utf-8');
     }
 
@@ -1513,6 +1575,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
     // Lock 3: a passkey, before any page with data.
     if (session.st !== 'full') return redirect(`/passkey?${new URLSearchParams({ next: path }).toString()}`);
+    if (cms.owns(path)) {
+      if (!slotlockStaffMay(session.r, 'content.write')) {
+        await record(session.s, 'page.refused', null, path.slice(0, 200));
+        return respond(layout(shellOf(session, 'Not allowed', path), pageHead('Slotlock admin', 'Not allowed', `Your role (${session.r}) does not open this page.`)), 403, { 'Set-Cookie': sessionCookie(session) });
+      }
+      return cms.handle(request, url, cmsRequest(session));
+    }
     if (request.method === 'POST') return act(request, session, path);
 
     const accountMatch = /^\/accounts\/([^/]+)$/.exec(path);

@@ -55,6 +55,8 @@ export interface Shell {
   csrf: string;
   query?: string;
   notice?: { kind: 'done' | 'warn'; text: string } | null;
+  /** A page's own script, beside admin.js (the CMS editor's). */
+  script?: string;
 }
 
 const isCurrent = (path: string, href: string) =>
@@ -71,6 +73,7 @@ export function layout(shell: Shell, body: Html): Html {
 <title>${shell.title} · Slotlock admin</title>
 <link rel="stylesheet" href="/admin.css">
 <script src="/admin.js" defer></script>
+${shell.script ? html`<script src="${shell.script}" defer></script>` : ''}
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -366,7 +369,32 @@ pre.pop{max-height:320px;overflow:auto;font-size:12px}
 .tabs{display:flex;gap:4px;margin:0 0 12px}.tab{padding:6px 12px;border-radius:8px;color:var(--ink-2);text-decoration:none;font-weight:500}
 .tab[aria-current]{background:var(--paper);color:var(--ink);border:1px solid var(--line)}
 .sub-inline{color:var(--ink-3);font-size:13px}
-@media (max-width:860px){.app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}.nav{display:flex;flex-wrap:wrap}.side-foot{margin:0;border:0;padding:0}.grid-2{grid-template-columns:1fr}.content{padding:18px 16px}.top{padding:10px 16px}
+.cms{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}
+.form.cms-main{max-width:none}
+.cms-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.cms-row>div{display:grid;gap:8px;align-content:start}
+.form .cms-body{min-height:420px;font-size:13px;line-height:1.6}
+.cms-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.cms-rail{display:grid;gap:14px}
+.cms-rail dl{margin:0 0 10px;display:grid;gap:8px}.cms-rail dt{color:var(--ink-3);font-size:12px}.cms-rail dd{margin:0;overflow-wrap:anywhere}
+.rail-title{margin:0 0 10px;font-size:13px;font-weight:600}
+.counter{float:right;font:400 12px var(--mono);color:var(--ink-3)}.counter.off{color:var(--bad)}
+.checks{list-style:none;margin:0 0 8px;padding:0;display:grid;gap:8px}.checks li{display:flex;gap:8px;align-items:flex-start}
+.checks .mark{font-weight:700;width:1em;flex:none}.checks li.ok .mark{color:var(--good)}.checks li.bad .mark{color:var(--bad)}
+.serp{display:grid;gap:2px}.serp-url{font-size:12px;color:var(--ink-3)}.serp-title{font-size:17px;line-height:1.3;color:var(--accent-ink)}.serp-text{font-size:13px;color:var(--ink-2)}
+.og{display:grid;align-content:space-between;gap:8px;aspect-ratio:1200/630;padding:16px;border-radius:10px;background:#0a0b0d;color:#f4f3ee}
+.og-eyebrow{font:500 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:#d9ff43}.og-title{font-size:18px;font-weight:600;line-height:1.2}.og-site{font:400 11px var(--mono);color:#b9b8b2}
+.images li{display:grid;gap:4px}.images code{font-size:11.5px;overflow-wrap:anywhere}
+.publish{margin-top:10px}
+.cms-preview{margin-top:32px;padding:24px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius)}.cms-preview>h2{margin:0 0 14px}
+.article{max-width:44em;font-size:16px;line-height:1.7;color:var(--ink-2)}
+.article h2{margin:1.8em 0 .5em;font-size:22px;font-weight:600;letter-spacing:-.01em;color:var(--ink)}.article h3{margin:1.4em 0 .4em;font-size:17px;color:var(--ink)}
+.article p,.article ul,.article ol{margin:0 0 1em}.article a{color:var(--accent-ink)}.article strong{color:var(--ink)}
+.article code{font-family:var(--mono);font-size:.86em;padding:1px 5px;border-radius:5px;background:var(--canvas-2);color:var(--ink)}
+.article pre{margin:0 0 1.2em;padding:14px 16px;overflow-x:auto;border-radius:10px;background:var(--canvas-2);color:var(--ink);font-size:13px;line-height:1.6}.article pre code{padding:0;background:none}
+.article table{margin:0 0 1.2em;font-size:14px}.article th,.article td{padding:8px 10px;border-top:1px solid var(--line)}
+.article blockquote{margin:0 0 1em;padding-left:14px;border-left:3px solid var(--line)}
+.article figure{margin:0 0 1.2em}.article img{max-width:100%;height:auto;border-radius:10px}.article .post-meta{margin:0 0 6px;font:12px var(--mono);color:var(--ink-3)}
+@media (max-width:860px){.cms,.cms-row{grid-template-columns:1fr}.app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}.nav{display:flex;flex-wrap:wrap}.side-foot{margin:0;border:0;padding:0}.grid-2{grid-template-columns:1fr}.content{padding:18px 16px}.top{padding:10px 16px}
 thead{display:none}tr{display:block;border-top:1px solid var(--line-2)}td{display:flex;justify-content:space-between;gap:12px;border:0;padding:6px 14px}td::before{content:attr(data-label);color:var(--ink-3);font-size:12px}}
 `;
 

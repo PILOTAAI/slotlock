@@ -1,0 +1,49 @@
+# Publishes the blog posts an Owner scheduled in the admin console (RFC 0006, 4.5): each hour, as the
+# "Slotlock CMS" GitHub App, it merges every CMS pull request labelled cms:scheduled whose time has
+# come, if the App's own schedule comment names its head commit, it changes only blog files, the
+# post is submitted and every check passed (scripts/cms-scheduled-merge.mjs). A merge by the App,
+# unlike one by this workflow's GITHUB_TOKEN, starts the site's deploy on main.
+#
+# Every action is pinned to a full commit SHA, the same as site.yml's.
+#
+# On the `cms` environment, with no required reviewers (a reviewer would hold every hourly run) and
+# limited to main:
+#   variables  CMS_APP_ID            the Slotlock CMS App's App ID
+#              CMS_APP_INSTALLATION  its installation id on this repository
+#   secret     CMS_APP_KEY           the App's private key (.pem)
+# Until CMS_APP_ID is set the job is skipped.
+name: CMS schedule
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: cms-schedule
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Publish scheduled posts
+    if: vars.CMS_APP_ID != '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: cms
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Merge the scheduled posts whose time has come
+        run: node scripts/cms-scheduled-merge.mjs
+        env:
+          CMS_APP_ID: ${{ vars.CMS_APP_ID }}
+          CMS_APP_INSTALLATION: ${{ vars.CMS_APP_INSTALLATION }}
+          CMS_APP_KEY: ${{ secrets.CMS_APP_KEY }}
+          CMS_REPOSITORY: ${{ github.repository }}

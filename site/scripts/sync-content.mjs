@@ -10,6 +10,8 @@
 // Writes (all git-ignored, rebuilt on every `npm run dev` / `npm run build`):
 //   src/content/docs/docs/*.md        the Starlight pages
 //   src/generated/facts.json          numbers and names the landing page prints
+//   public/facts.json                 the short ones, which a blog post names as {{facts.name}}:
+//                                     the admin console's preview reads them from the live site
 //   public/schema/manifest.schema.json
 //   public/openapi.json               the REST API, which client generators read
 //   src/generated/lastmod.json        when each page's sources last changed in git: the sitemap's
@@ -755,6 +757,12 @@ async function main() {
   );
 
   await writeFile(join(GENERATED, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`);
+  // The short facts a blog post can name ({{facts.name}}), for the admin console's live preview
+  // (RFC 0006, 4.5): numbers and names the site already prints, nothing longer.
+  const postFacts = Object.fromEntries(
+    Object.entries(facts).filter(([, value]) => typeof value === 'number' || (typeof value === 'string' && value.length <= 200)),
+  );
+  await writeFile(join(SITE, 'public/facts.json'), `${JSON.stringify(postFacts, null, 2)}\n`);
   const dates = await lastModified(api.pages.map((apiPage) => apiPage.slug));
   await writeFile(join(GENERATED, 'lastmod.json'), `${JSON.stringify(dates, null, 2)}\n`);
   const { tokensCss } = await import('../src/styles/tokens.mjs');
