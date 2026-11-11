@@ -98,8 +98,10 @@ room-3?", "book it for Ana") with a model you bring:
   A booking, hold, change or cancellation appears as a card to **Approve** or **Dismiss**, and runs
   once, when approved, under the same booking rules and limits as an agent, recorded as "Assistant
   for @login". It cannot touch API keys, webhooks, booking rules, pools or erasure.
-- **Bounds:** 10 messages a minute per person; a conversation is kept for 2 hours after its last
-  message.
+- **Bounds:** 10 messages a minute per person.
+- **Chats:** each conversation is kept as a chat, titled by its first message, until you delete it
+  (or your account is erased), up to 100 per person; past that, the least recently used goes.
+  Rename or delete one from its menu in the Chats list.
 - **The model must be reachable from the internet.** Slotlock Cloud refuses model addresses on
   loopback, private and metadata networks, so a model on your own machine (Ollama, LM Studio) needs
   a public HTTPS address, or a hosted provider.

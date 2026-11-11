@@ -2545,7 +2545,8 @@ describe('the dashboard design', () => {
     expect(js.match(/fetch\(/g)).toHaveLength(1);
     expect(js).toContain("fetch(page.getAttribute('data-stream'), {");
     expect(js.replaceAll('https?:\\/\\/', '')).not.toMatch(/https?:/);
-    // Markup it writes is the server's: its own Markdown renderer's, or the turn the server rendered.
+    // Markup it writes is the server's: its own Markdown renderer's, the turn the server rendered, or
+    // the Chats list the server rendered.
     // Steps are found by the provider's call id: a map with no prototype, so `__proto__` names none.
     expect(js).toContain('var stepNodes = Object.create(null);');
     expect(js).not.toMatch(/stepNodes = \{\}/);
@@ -2553,6 +2554,7 @@ describe('the dashboard design', () => {
     expect(writes.map((line) => line.trim())).toEqual([
       'if (prose) prose.innerHTML = renderMarkdown(proseText);',
       "thread.insertAdjacentHTML('beforeend', e.html || '');",
+      'panel.outerHTML = e.chats;',
     ]);
   });
 

@@ -123,6 +123,12 @@ let backend: ReturnType<typeof fakeBackend>;
 let assistantStore: SlotlockAssistantStore;
 let reported: unknown[];
 
+/** A member's most recent conversation, as the store keeps it. */
+async function latestChat(tenantRef: string, memberRef: string) {
+  const [latest] = await assistantStore.listChats(tenantRef, memberRef);
+  return latest ? assistantStore.getChat(tenantRef, memberRef, latest.id) : null;
+}
+
 function dashboard(
   overrides: Partial<SlotlockDashboardOptions['assistant']> = {},
   resourceOverrides: Partial<SlotlockDashboardResources> = {},
@@ -654,6 +660,102 @@ describe.each(['anthropic', 'openai'] as const)('the chat over %s', (format) => 
     expect(sent).toHaveLength(1);
     expect(dom.window.document.querySelector('textarea')?.value).toBe(writes.getAttribute('data-fill'));
     dom.window.close();
+  });
+
+  it('keeps each conversation as a chat: opened by its address, listed most recent first, and New chat starts another', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Van 1 is free.' });
+    const first = await chat(target, alice, 'Which vans are free tomorrow morning for the airport run?');
+    const firstUrl = first.headers.get('location') as string;
+    expect(firstUrl).toMatch(/^\/dashboard\/assistant\?c=[A-Za-z0-9_-]{16}#latest$/);
+    const firstId = /c=([A-Za-z0-9_-]{16})/.exec(firstUrl)?.[1] as string;
+    // A form with no chat continues the one the page opens; an empty one starts a new chat.
+    model.script({ text: 'Still free.' });
+    expect((await chat(target, alice, 'And after lunch?')).headers.get('location')).toBe(firstUrl);
+    model.script({ text: 'Room 2.' });
+    const second = await post(target, '/dashboard/assistant', { message: 'Book the boardroom', chat: '' }, alice);
+    const secondId = /c=([A-Za-z0-9_-]{16})/.exec(second.headers.get('location') as string)?.[1] as string;
+    expect(secondId).not.toBe(firstId);
+    const listed = await assistantStore.listChats('github-org:91', 'github:11');
+    expect(listed.map((chat) => [chat.id, chat.title])).toEqual([
+      [secondId, 'Book the boardroom'],
+      [firstId, 'Which vans are free tomorrow morning for the airport run?'],
+    ]);
+    // Each opens at its own address, with the others beside it; the page opens on the latest.
+    const opened = await (await get(target, `/dashboard/assistant?c=${firstId}`, alice)).text();
+    expect(opened).toContain('<h1>Which vans are free tomorrow morning for the airport run?</h1>');
+    expect(opened).toContain('And after lunch?');
+    expect(opened).not.toContain('Book the boardroom</div>');
+    expect(opened).toMatch(new RegExp(`<li class="chat-row current"><a class="chat-link" href="/dashboard/assistant\\?c=${firstId}" aria-current="page">`));
+    expect(opened).toContain('<h3 class="chat-group">Today</h3>');
+    expect(opened).toContain(`<input type="hidden" name="chat" value="${firstId}">`);
+    expect(await page(target, alice)).toContain('<h1>Book the boardroom</h1>');
+    const fresh = await (await get(target, '/dashboard/assistant?c=new', alice)).text();
+    expect(fresh).toContain('data-empty');
+    expect(fresh).toContain('<input type="hidden" name="chat" value="">');
+    // A chat that is not there (deleted, or another member's) opens a new one, saying so.
+    const missing = await get(target, '/dashboard/assistant?c=AAAAAAAAAAAAAAAA', alice);
+    expect(missing.status).toBe(404);
+    expect(await missing.text()).toContain('That chat is not here');
+    // On a narrow screen the list is a page of its own.
+    const list = await (await get(target, '/dashboard/assistant/chats', alice)).text();
+    expect(list).toContain('Which vans are free tomorrow morning for the airport run?');
+    expect(list).toContain('Book the boardroom');
+  });
+
+  it('renames and deletes a member\u2019s own chats, never another member\u2019s', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const bob = await signIn(target, 'bob');
+    model.script({ text: 'Fine.' });
+    const id = /c=([A-Za-z0-9_-]{16})/.exec((await chat(target, alice, 'Plan the week')).headers.get('location') as string)?.[1] as string;
+    // Another member of the same organization renames and deletes nothing of it.
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: 'Mine' }, bob)).status).toBe(404);
+    expect((await post(target, '/dashboard/assistant/delete', { chat: id }, bob)).status).toBe(303);
+    expect(await (await get(target, `/dashboard/assistant?c=${id}`, bob)).text()).not.toContain('Plan the week');
+    expect((await assistantStore.getChat('github-org:91', 'github:11', id))?.title).toBe('Plan the week');
+    // Its member does.
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: ' ' }, alice)).status).toBe(400);
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: '  Weekly   vans  ' }, alice)).headers.get('location')).toBe(
+      `/dashboard/assistant?c=${id}`,
+    );
+    expect((await assistantStore.getChat('github-org:91', 'github:11', id))?.title).toBe('Weekly vans');
+    expect((await post(target, '/dashboard/assistant/delete', { chat: id }, alice)).headers.get('location')).toBe('/dashboard/assistant?c=new');
+    expect(await assistantStore.getChat('github-org:91', 'github:11', id)).toBeNull();
+    expect(await (await get(target, '/dashboard/assistant?c=new', alice)).text()).toContain('No chats yet.');
+    // New conversation from a page of an earlier release starts a new chat, deleting nothing.
+    model.script({ text: 'Kept.' });
+    const kept = /c=([A-Za-z0-9_-]{16})/.exec((await chat(target, alice, 'Keep me')).headers.get('location') as string)?.[1] as string;
+    expect((await post(target, '/dashboard/assistant/reset', {}, alice)).headers.get('location')).toBe('/dashboard/assistant?c=new');
+    expect(await assistantStore.getChat('github-org:91', 'github:11', kept)).not.toBeNull();
+  });
+
+  it('tells a streaming page which chat its message went to, with its address and the list', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Done.' });
+    const shown = await (await get(target, '/dashboard/assistant?c=new', alice)).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ csrf, once, chat: '', message: 'Start a new plan' }).toString(),
+      }),
+    );
+    const events = (await response.text()).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+    const done = events.at(-1) as Record<string, string>;
+    expect(done.t).toBe('done');
+    expect(done.chat).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(done.title).toBe('Start a new plan');
+    expect(done.url).toBe(`/dashboard/assistant?c=${done.chat}`);
+    expect(done.chats).toContain('<aside class="chats" aria-label="Chats">');
+    expect(done.chats).toContain(`<li class="chat-row current"><a class="chat-link" href="/dashboard/assistant?c=${done.chat}" aria-current="page"><span class="chat-title">Start a new plan</span>`);
   });
 
   it('answers a refused stream with one error line and a fresh form value', async () => {
@@ -1472,7 +1574,7 @@ describe('security review fixes', () => {
     for (let turn = 0; turn < 25; turn += 1) {
       expect((await chat(target, bob, cjk.slice(0, 2_000))).status, `turn ${turn}`).toBe(303);
     }
-    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
+    const stored = await latestChat('github-org:91', 'github:12');
     expect(Buffer.byteLength(JSON.stringify(stored?.messages), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
   });
 
@@ -1539,7 +1641,7 @@ describe('re-review fixes', () => {
   });
   afterAll(() => model.close());
 
-  it('never puts back as pending a change approved, then reset, while a turn ran', async () => {
+  it('never puts back as pending a change approved while a turn ran, a New chat between them', async () => {
     const target = dashboard();
     await connect(target, await signIn(target, 'alice'), model, 'openai');
     const bob = await signIn(target, 'bob');
@@ -1550,15 +1652,16 @@ describe('re-review fixes', () => {
     await chat(target, bob, 'Cancel it');
     const actionId = /name="action" value="([^"]+)"/.exec(await page(target, bob))?.[1] as string;
     model.script(async () => {
-      // While this turn runs: the member approves the change, then starts a new conversation.
+      // While this turn runs: the member approves the change, then opens a new chat.
       expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(303);
       expect((await post(target, '/dashboard/assistant/reset', {}, bob)).status).toBe(303);
       return { text: 'Anything else?' };
     });
     expect((await chat(target, bob, 'And now?')).status).toBe(303);
     expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
-    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
-    expect(stored?.actions[actionId]).toBeUndefined();
+    // The turn kept its chat, and the change in it as it ran: done, never pending again.
+    const stored = await latestChat('github-org:91', 'github:12');
+    expect(stored?.actions[actionId]?.status).toBe('done');
     expect(await page(target, bob)).not.toContain('name="action"');
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(409);
     expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
@@ -1579,6 +1682,6 @@ describe('re-review fixes', () => {
       return { text: 'Anything else?' };
     });
     await chat(target, bob, 'And now?');
-    expect((await assistantStore.getConversation('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
+    expect((await latestChat('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
   });
 });

@@ -374,7 +374,6 @@ async function readFacts() {
       readdir(join(ROOT, 'clients'), { withFileTypes: true }),
     ]);
   const assistantSource = await read('src/assistant.ts');
-  const conversationTtl = /conversationTtlMs \?\? ([0-9]+) \* 3_600_000/.exec(dashboard);
   const messageRate = /rate \?\? \{ perSecond: ([0-9]+) \/ 60,/.exec(dashboard);
   // The two API formats a Custom provider chooses between (Settings, Assistant).
   const assistantProviders = [
@@ -479,10 +478,8 @@ async function readFacts() {
       numberConst(assistantSource, 'SLOTLOCK_ASSISTANT_MAX_PENDING'),
       'SLOTLOCK_ASSISTANT_MAX_PENDING',
     ),
-    assistantConversationHours: must(
-      conversationTtl && Number(conversationTtl[1]),
-      'the conversationTtlMs default in src/dashboard.ts',
-    ),
+    // How many chats a member keeps with the assistant; kept until deleted.
+    assistantMaxChats: must(numberConst(ddl, 'SLOTLOCK_ASSISTANT_MAX_CHATS'), 'SLOTLOCK_ASSISTANT_MAX_CHATS in src/ddl.ts'),
     assistantMessagesPerMinute: must(
       messageRate && Number(messageRate[1]),
       'the assistant rate default in src/dashboard.ts',

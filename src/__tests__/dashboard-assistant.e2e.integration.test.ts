@@ -31,7 +31,7 @@ const screenshots = process.env.SLOTLOCK_E2E_SCREENSHOTS?.trim();
 interface Playwright {
   chromium: {
     launch(): Promise<{
-      newContext(options: { javaScriptEnabled: boolean }): Promise<BrowserContext>;
+      newContext(options: { javaScriptEnabled: boolean; reducedMotion?: 'reduce' | 'no-preference' }): Promise<BrowserContext>;
       close(): Promise<void>;
     }>;
   };
@@ -44,8 +44,9 @@ interface Page {
   goto(url: string): Promise<unknown>;
   content(): Promise<string>;
   fill(selector: string, value: string): Promise<void>;
-  selectOption(selector: string, value: string): Promise<unknown>;
+  check(selector: string, options?: { force?: boolean }): Promise<void>;
   click(selector: string): Promise<void>;
+  waitForSelector(selector: string, options?: { state?: 'attached' | 'detached' | 'visible' | 'hidden' }): Promise<unknown>;
   textContent(selector: string): Promise<string | null>;
   screenshot(options: { path: string; fullPage: boolean }): Promise<unknown>;
   url(): string;
@@ -189,7 +190,9 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
       if (screenshots) await page.screenshot({ path: join(screenshots, `${format}-${name}.png`), fullPage: true });
     };
     const session = async (who: string) => {
-      const context = await browser.newContext({ javaScriptEnabled: javaScript });
+      // Reduced motion, as the dashboard honours it: headless Chromium without page script does not
+      // finish a CSS animation, so a menu's button would never settle to be clicked.
+      const context = await browser.newContext({ javaScriptEnabled: javaScript, reducedMotion: 'reduce' });
       const page = await context.newPage();
       signingIn = who;
       await page.goto(`${origin}/dashboard/sign-in`);
@@ -198,22 +201,24 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
     };
 
     try {
-      // 1. The owner connects the model in Settings and tests the connection.
+      // 1. The owner connects the model in Settings (Custom: its URL and API format) and tests it.
       const owner = await session('owner');
       await owner.page.goto(`${origin}/dashboard/settings`);
-      await owner.page.selectOption('select[name="provider"]', format);
+      await owner.page.check('input[name="preset"][value="custom"]', { force: true });
+      await owner.page.check(`input[name="provider"][value="${format}"]`, { force: true });
       await owner.page.fill('input[name="base_url"]', model.baseUrl);
       await owner.page.fill('input[name="model"]', 'your-model');
       await owner.page.fill('input[name="api_key"]', API_KEY);
-      await owner.page.click('#assistant button.primary');
-      expect(await owner.page.content()).toContain('set, ending in <code>tail</code>');
+      await owner.page.click('.provider-form button.primary');
+      expect(await owner.page.content()).toContain('<code>•••• tail</code>');
       model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] });
-      await owner.page.click('text=Test connection');
+      await owner.page.click('form[action$="/settings/assistant/test"] button');
       expect(await owner.page.content()).toContain('called a tool correctly');
       expect(model.requests.at(-1)?.headers[format === 'anthropic' ? 'x-api-key' : 'authorization']).toContain(API_KEY);
       await shot(owner.page, '1-settings');
 
-      // 2. A member, not an owner, asks what is free tomorrow: a read, answered from real data.
+      // 2. A member, not an owner, asks what is free tomorrow: a read, answered from real data, in a
+      // new chat that then has its own address and a place in Chats.
       const member = await session('member');
       await member.page.goto(`${origin}/dashboard/settings`);
       expect(await member.page.content()).not.toContain('name="api_key"');
@@ -232,11 +237,15 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
           return { text: `Tomorrow van-${format} is first free at ${found.start ?? 'no time'}.` };
         },
       );
-      await member.page.fill('textarea[name="message"]', `What's free tomorrow on van-${format}?`);
-      await member.page.click('.composer button');
+      const question = `What's free tomorrow on van-${format}?`;
+      await member.page.fill('textarea[name="message"]', question);
+      await member.page.click('.composer button.send');
+      await member.page.waitForSelector('.thread details.steps');
       const answered = await member.page.content();
       expect(answered).toContain(`Tomorrow van-${format} is first free at ${at(8).replace('.000Z', '')}`);
-      expect(answered).toContain('Read: Find next available interval');
+      expect(answered).toContain('Found the next free time');
+      expect(member.page.url()).toMatch(/\/dashboard\/assistant\?c=[A-Za-z0-9_-]{16}(#latest)?$/);
+      expect(await member.page.textContent('aside.chats .chat-row.current .chat-title')).toBe(question);
       await shot(member.page, '2-read');
 
       // 3. The member asks for a booking: a proposed change, approved, then on the overview.
@@ -252,19 +261,21 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
         { text: 'I proposed booking 10:00 to 11:00 for Ana. Approve it to book.' },
       );
       await member.page.fill('textarea[name="message"]', 'Book 10 to 11 for Ana pickup');
-      await member.page.click('.composer button');
+      await member.page.click('.composer button.send');
+      await member.page.waitForSelector('.change-buttons button.primary');
       const proposed = await member.page.content();
-      expect(proposed).toContain('Create resource event');
-      expect(proposed).toContain('Waiting for you');
       expect(proposed).toContain(`van-${format}`);
+      expect(await member.page.textContent('.change-buttons button.primary')).toBe('Book');
       await shot(member.page, '3-proposed');
       const before = await store.withTenant(fleetTenant, (tenant) =>
         tenant.listAgenda({ tenantRef: fleetTenant, window: { start: tomorrow, end: new Date(tomorrow.getTime() + DAY) }, limit: 10 }),
       );
       expect(before).toEqual([]);
       model.script({ text: 'Booked.' });
-      await member.page.click('.action-card button.primary');
-      expect(await member.page.textContent('.action-card .pill')).toBe('Done');
+      await member.page.click('.change-buttons button.primary');
+      await member.page.waitForSelector('.receipt.ok');
+      // Both messages went to the one chat.
+      expect(await member.page.content()).toContain(question);
       await shot(member.page, '3-approved');
       await member.page.goto(`${origin}/dashboard`);
       const overview = await member.page.content();
@@ -277,11 +288,25 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
         [`dashboard-assistant:github:${people.member?.id}`, 'dashboard-assistant'],
       ]);
 
-      // 4. A member of another organization sees nothing of the first one's.
+      // 4. Chats: a new one starts empty; the first is there to open, rename and delete.
+      await member.page.goto(`${origin}/dashboard/assistant?c=new`);
+      expect(await member.page.content()).toContain('data-empty');
+      await member.page.click('aside.chats .chat-link');
+      expect(await member.page.content()).toContain('Ana pickup');
+      await member.page.click('aside.chats .chat-row.current .chat-menu summary');
+      await member.page.fill('aside.chats .chat-row.current input[name="title"]', 'Vans for Ana');
+      await member.page.click('aside.chats .chat-row.current .chat-rename button');
+      expect(await member.page.textContent('aside.chats .chat-row.current .chat-title')).toBe('Vans for Ana');
+      await shot(member.page, '4-chats');
+      await member.page.click('aside.chats .chat-row.current .chat-menu summary');
+      await member.page.click('aside.chats .chat-row.current button.danger');
+      expect(await member.page.content()).toContain('No chats yet.');
+
+      // 5. A member of another organization sees nothing of the first one's.
       const outsider = await session('outsider');
       await outsider.page.goto(`${origin}/dashboard/assistant`);
       const theirs = await outsider.page.content();
-      expect(theirs).toContain('No model is connected');
+      expect(theirs).toMatch(/connects? a model/);
       expect(theirs).not.toContain('Ana');
       await outsider.page.goto(`${origin}/dashboard`);
       const theirOverview = await outsider.page.content();
@@ -289,9 +314,9 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
       expect(theirOverview).not.toContain(`van-${format}`);
       await outsider.page.goto(`${origin}/dashboard/resources`);
       expect(await outsider.page.content()).toContain(`rival-truck-${format}`);
-      await shot(outsider.page, '4-other-org');
+      await shot(outsider.page, '5-other-org');
 
-      // 5. The key is in no page anyone saw.
+      // 6. The key is in no page anyone saw.
       for (const html of seen) expect(html).not.toContain(API_KEY);
       for (const { context } of [owner, member, outsider]) await context.close();
     } finally {

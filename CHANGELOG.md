@@ -5,7 +5,54 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- **Chats in the dashboard assistant.** Each conversation is a chat a member keeps:
+  - it is titled by its first message, at its own address (`<root>/assistant?c=<id>`);
+  - chats are listed beside the one shown, most recent first, grouped by day (Today, Yesterday,
+    Previous 7 days, Previous 30 days, Older), with a search box, and **Rename** and **Delete**
+    behind each one's menu;
+  - **New chat** starts another, and on a narrow screen the list is a page of its own
+    (`<root>/assistant/chats`);
+  - the page opens on the chat used in the past two hours, else on a new one;
+  - a streamed reply tells the page which chat it went to, so a new one gets its address and its
+    place in the list without a reload.
+
+  Chats are kept until the member deletes one, at most 100 per member (`SLOTLOCK_ASSISTANT_MAX_CHATS`;
+  past it, the least recently used goes). They live in the new table `slotlock.assistant_chats`,
+  under forced RLS, erased with the tenant. `slotlock migrate` makes each member's 0.8 conversation
+  their first chat, once. Run `slotlock migrate`.
+- **Finding a resource by name.** `slotlock_list_resources` takes `query` and ranks the resources
+  that match what a person calls one, best first:
+  - each word is looked for in the name, reference, labels, kind, location and description;
+  - case and accents are ignored, and a typo, a word cut short or words run together are forgiven
+    (`mercedez`, `merc 2025` and `mercedesbenz` all find "Mercedes-Benz 2025");
+  - numbers match exactly.
+
+  `resource_not_found` for a name or reference given where an id belongs names the likeliest
+  resources in `details.candidate_1` to `candidate_3`.
+
+### Changed
+
+- **The dashboard assistant's store** (`SlotlockAssistantStore`) keeps chats. `listChats`,
+  `getChat`, `putChat`, `renameChat` and `deleteChat` replace `getConversation`,
+  `putConversation` and `deleteConversation`, and `settleAction` takes the chat's id. The tenant
+  store has `listAssistantChats`, `getAssistantChat`, `putAssistantChat`, `renameAssistantChat`
+  and `deleteAssistantChat`, and `settleAssistantAction` takes `chatId`.
+- **Conversation lifetime.** `conversationTtlMs` no longer defaults to 2 hours: without it, chats
+  are kept until deleted. Given, it may be up to 3,650 days.
+- **New conversation is New chat.** It starts another chat and deletes nothing. A form of 0.8 that
+  posts `<root>/assistant/reset` does the same.
+- **The assistant's system prompt** lists the workspace's resources (up to 50, with the ids tools
+  take) and says how to find others. The tool descriptions and the MCP instructions say that
+  `resource_id` takes an id and how to find one, and that a filter leaves out resources that state
+  nothing.
+
 ### Fixed
+
+- **The assistant's chips stream.** "What's on today" and "Find free time" were forms that waited
+  for the whole turn and then reloaded the page; they now send through the box, so their reply
+  streams.
 
 - The dashboard assistant's Stop stops the turn on any runtime. Cancelling the streamed reply now
   aborts the turn itself, which keeps what it had. Before, only `request.signal` stopped it, and a
