@@ -6,8 +6,9 @@ versioning.
 ## Unreleased
 
 This release gives a workspace its people and an audit trail. It brings six roles read from the
-database on every request, team workspaces with invitations, sign-out everywhere and a hash-chained
-audit log, and lets a member be limited to locations or groups (RFC 0004 D1). The change history
+database on every request, team workspaces with invitations, verified domains that let colleagues
+find and ask to join their team, sign-out everywhere and a hash-chained audit log, and lets a
+member be limited to locations or groups (RFC 0004 D1). The change history
 becomes append-only and is kept by plan (D2). A person's data can be exported or erased, and a whole
 tenant exported (D3), from the API, the command line and the dashboard's new Privacy page. It closes
 the four questions the security review left open, and fixes what a review of RFC 0004's T2 changes
@@ -23,6 +24,8 @@ notes first.
     `workspace_memberships`, `workspace_invitations`, `tenant_exports`, `tenant_export_parts`), new
     columns (among them `cutoff_anchor` on bookings and events, and the audit log's chain) and 39
     functions.
+  - Verified domains add three more tables (`workspace_domains`, `workspace_join_requests`,
+    `workspace_join_blocks`), with their functions, unused until turned on.
   - It grants the serving role what this release needs; a library user runs
     `grantApplicationRole` again.
 - **The change history can no longer be edited by the serving role.** It may only add to
@@ -48,7 +51,9 @@ notes first.
 - **New and off until set:**
   - team workspaces (`SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on`);
   - invitations by email (`SLOTLOCK_INVITATION_EMAIL`, `SLOTLOCK_INVITATION_EMAIL_KEY`,
-    `SLOTLOCK_INVITATION_EMAIL_FROM`).
+    `SLOTLOCK_INVITATION_EMAIL_FROM`);
+  - verified domains, with team workspaces (`SLOTLOCK_VERIFIED_DOMAINS=on`; the server's maintenance
+    checks each domain daily, so set it on the server too).
 
 ### Added
 
