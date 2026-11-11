@@ -15,7 +15,7 @@ public sealed partial class SlotlockClient
     /// <summary>Every operation, by name: its method, path, path parameters and query parameters.</summary>
     internal static readonly IReadOnlyDictionary<string, Operation> Operations = new Dictionary<string, Operation>
     {
-        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "limit", "pool", "kind", "labels", "location", "group"]),
+        ["slotlock_list_resources"] = new("GET", "/v1/resources", [], ["cursor", "query", "limit", "pool", "kind", "labels", "location", "group"]),
         ["slotlock_create_resource"] = new("POST", "/v1/resources", [], []),
         ["slotlock_get_free_busy"] = new("GET", "/v1/free-busy", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"]),
         ["slotlock_find_next_available"] = new("GET", "/v1/next-available", [], ["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"]),
@@ -125,9 +125,18 @@ public sealed partial class SlotlockClient
     /// it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with
     /// labels, only those with every label given; with location, only those there or at a
     /// location in it; with group, only that group's. With pool, only that pool's members, in the
-    /// order slotlock_book_pool tries them.
+    /// order slotlock_book_pool tries them. With query, the resources that best match what a
+    /// person calls one, best first, at most limit and with no next_cursor: each word is looked
+    /// for in the name, reference, labels, kind, location and description, ignoring case and
+    /// accents, and forgiving a typo, a word cut short or words run together ("mercedez", "merc
+    /// 2025" and "mercedesbenz" find "Mercedes-Benz 2025"); numbers match exactly. It is the way
+    /// to find the id of a resource a person names, since other tools take ids only. When several
+    /// match about equally, ask which one is meant. A resource that states no kind, labels or
+    /// location is left out by those filters, so search without them before saying a resource
+    /// does not exist.
     /// </remarks>
     /// <param name="cursor">cursor</param>
+    /// <param name="query">query</param>
     /// <param name="limit">limit</param>
     /// <param name="pool">pool</param>
     /// <param name="kind">kind</param>
@@ -139,6 +148,7 @@ public sealed partial class SlotlockClient
     /// <exception cref="SlotlockException">The server refused the call.</exception>
     public Task<JsonObject> ListResourcesAsync(
         Optional<string> cursor = default,
+        Optional<string> query = default,
         Optional<long> limit = default,
         Optional<string> pool = default,
         Optional<string> kind = default,
@@ -149,6 +159,7 @@ public sealed partial class SlotlockClient
     {
         var values = new JsonObject();
         if (cursor.HasValue) values["cursor"] = Json.ToNode(cursor.Value);
+        if (query.HasValue) values["query"] = Json.ToNode(query.Value);
         if (limit.HasValue) values["limit"] = Json.ToNode(limit.Value);
         if (pool.HasValue) values["pool"] = Json.ToNode(pool.Value);
         if (kind.HasValue) values["kind"] = Json.ToNode(kind.Value);
@@ -169,6 +180,7 @@ public sealed partial class SlotlockClient
             cursor: cursor,
             limit: limit,
             cancellationToken: cancellationToken,
+            query: default,
             pool: default,
             kind: default,
             labels: default,

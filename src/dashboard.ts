@@ -4364,6 +4364,8 @@ ${
         messages,
         added: Object.fromEntries(Object.entries(proposed).filter(([id]) => id in kept)),
         keep: Object.keys(kept),
+        // A chat it continued, only while it is still there: deleted during the turn, it stays so.
+        create: stored === null,
       },
       conversationTtl,
     );
@@ -4544,6 +4546,7 @@ ${
           messages,
           added: {},
           keep: Object.keys(pruneSlotlockAssistantActions(messages, stored.actions)),
+          create: false,
         },
         conversationTtl,
       );

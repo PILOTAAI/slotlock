@@ -62,7 +62,30 @@ describe('finding a resource by what a person calls it', () => {
     expect(slotlockResourceSearchWords('the')).toEqual(['the']);
     expect(() => slotlockResourceSearchWords('   ')).toThrow(expect.objectContaining({ code: 'invalid_query' }));
     expect(() => slotlockResourceSearchWords('a b c d e f g h i j k l m')).toThrow(expect.objectContaining({ code: 'invalid_query' }));
+    // Counted as written: repeating one word does not get past the bound.
+    expect(() => slotlockResourceSearchWords('van '.repeat(13))).toThrow(expect.objectContaining({ code: 'invalid_query' }));
+    expect(slotlockResourceSearchWords('van '.repeat(12))).toEqual(['van']);
     expect(() => slotlockResourceSearchWords('é'.repeat(201))).toThrow(expect.objectContaining({ code: 'invalid_query' }));
+  });
+
+  it('bounds the work one search does, and still finds what is named exactly', () => {
+    // 5,000 resources (a tenant's most), each with a long description of near misses: every word
+    // of the search is typo-checked against every word until the budget ends.
+    const filler = Array.from({ length: 400 }, (_, index) => `wordy${String(index)}x`).join(' ');
+    const many = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `m${String(index)}`,
+      externalRef: `unit-${String(index)}`,
+      name: `Abcdefghij ${String(index)} Klmnopqrst`,
+      description: filler,
+      labels: ['qwertyuiop', 'asdfghjkl'],
+    }));
+    many.push({ id: 'target', externalRef: 'unit-target', name: 'Mercedes Sprinter', description: filler, labels: [] });
+    const words = slotlockResourceSearchWords('mercedes sprinter abcdefghik klmnopqrsu');
+    const started = performance.now();
+    const found = slotlockSearchResources(many, words);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // Named exactly, it ranks first even after the typo budget is spent on the others.
+    expect(found[0]?.resource.id).toBe('target');
   });
 
   it('bounds a search as the agent tool does', () => {
