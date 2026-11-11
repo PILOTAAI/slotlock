@@ -67,6 +67,20 @@ describe('the published policies', () => {
     expect(privacy).toContain(
       `each conversation until the person who had it deletes it or the account is erased, at most ${String(maxChats)} per person`,
     );
+    // Contacts, busy time from other calendars and payments for holds are listed, as long as the
+    // code keeps them, and erasure takes each.
+    const busyDays = declared('src/store.ts', /const SOURCE_BUSY_RETENTION_DAYS = ([0-9_]+);/);
+    expect(privacy).toContain(
+      `| ${busyDays} days after the period ends, then deleted; at once when you retire the source or your account is erased |`,
+    );
+    expect(privacy).toContain(`busy time that ended ${busyDays} days ago`);
+    expect(privacy).toContain('Until you delete the contact, which also takes it off every booking, or your account is erased');
+    expect(privacy).toContain('Changes and webhooks name a contact only by its reference, never its details');
+    for (const table of ['contacts', 'source_busy', 'hold_payments', 'reminder_dispatches', 'reservation_reminder_dispatches']) {
+      expect(read('src/ddl.ts'), `erase_tenant erases ${table}`).toContain(`erased_table := '${table}';`);
+    }
+    expect(privacy).toContain('event, hold, payment record, waitlist entry, contact, busy period, webhook');
+    expect(privacy).toContain('Hosted Slotlock sends no email, SMS or WhatsApp message to your contacts');
     const maintenanceMinutes =
       declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
     expect(maintenanceMinutes).toBe(60);
