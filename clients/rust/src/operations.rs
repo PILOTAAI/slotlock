@@ -44,9 +44,23 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"],
     },
     Operation {
+        name: "slotlock_find_available_ranges",
+        method: "GET",
+        path: "/v1/available-ranges",
+        path_params: &[],
+        query: &["resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"],
+    },
+    Operation {
         name: "slotlock_hold_slots",
         method: "POST",
         path: "/v1/slot-holds",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_hold_together",
+        method: "POST",
+        path: "/v1/slot-holds/together",
         path_params: &[],
         query: &[],
     },
@@ -338,11 +352,67 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["limit", "before"],
     },
     Operation {
+        name: "slotlock_get_availability_defaults",
+        method: "GET",
+        path: "/v1/availability",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_set_tenant_availability",
         method: "PUT",
         path: "/v1/availability",
         path_params: &[],
         query: &[],
+    },
+    Operation {
+        name: "slotlock_set_location_availability",
+        method: "PUT",
+        path: "/v1/locations/{location}/availability",
+        path_params: &["location"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_availability_exceptions",
+        method: "GET",
+        path: "/v1/availability/exceptions",
+        path_params: &[],
+        query: &["resource_id", "location", "from", "to", "limit", "after"],
+    },
+    Operation {
+        name: "slotlock_create_availability_exception",
+        method: "POST",
+        path: "/v1/availability/exceptions",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_availability_exception",
+        method: "DELETE",
+        path: "/v1/availability/exceptions/{exception_id}",
+        path_params: &["exception_id"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_import_holidays",
+        method: "POST",
+        path: "/v1/availability/holidays",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_list_holiday_calendars",
+        method: "GET",
+        path: "/v1/availability/holiday-calendars",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_holiday_calendar",
+        method: "DELETE",
+        path: "/v1/availability/holiday-calendars/{calendar_id}",
+        path_params: &["calendar_id"],
+        query: &["dry_run"],
     },
     Operation {
         name: "slotlock_acquire_hold",
@@ -380,6 +450,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_mark_hold_paid",
+        method: "POST",
+        path: "/v1/holds/{hold_id}/paid",
+        path_params: &["hold_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_get_reservation",
         method: "GET",
         path: "/v1/reservations/{reservation_ref}",
@@ -398,7 +475,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/reservations/{reservation_ref}",
         path_params: &["reservation_ref"],
-        query: &["revision", "dry_run"],
+        query: &["revision", "override_reason", "dry_run"],
     },
     Operation {
         name: "slotlock_list_reservations",
@@ -413,6 +490,34 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path: "/v1/reservations/{reservation_ref}/check-in",
         path_params: &["reservation_ref"],
         query: &[],
+    },
+    Operation {
+        name: "slotlock_get_contact",
+        method: "GET",
+        path: "/v1/contacts/{contact_ref}",
+        path_params: &["contact_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_put_contact",
+        method: "PUT",
+        path: "/v1/contacts/{contact_ref}",
+        path_params: &["contact_ref"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_delete_contact",
+        method: "DELETE",
+        path: "/v1/contacts/{contact_ref}",
+        path_params: &["contact_ref"],
+        query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_list_contacts",
+        method: "GET",
+        path: "/v1/contacts",
+        path_params: &[],
+        query: &["limit", "cursor"],
     },
     Operation {
         name: "slotlock_list_waitlist",
@@ -436,6 +541,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &["dry_run"],
     },
     Operation {
+        name: "slotlock_decline_waitlist_offer",
+        method: "POST",
+        path: "/v1/waitlist/{entry_id}/decline",
+        path_params: &["entry_id"],
+        query: &[],
+    },
+    Operation {
         name: "slotlock_record_coverage",
         method: "PUT",
         path: "/v1/resources/{resource_id}/coverage/{source}",
@@ -448,6 +560,20 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         path: "/v1/resources/{resource_id}/coverage/{source}",
         path_params: &["resource_id", "source"],
         query: &["dry_run"],
+    },
+    Operation {
+        name: "slotlock_put_source_busy",
+        method: "PUT",
+        path: "/v1/resources/{resource_id}/coverage/{source}/busy",
+        path_params: &["resource_id", "source"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_report_coverage_conflict",
+        method: "POST",
+        path: "/v1/resources/{resource_id}/coverage/{source}/conflicts",
+        path_params: &["resource_id", "source"],
+        query: &[],
     },
     Operation {
         name: "slotlock_get_coverage",
@@ -482,13 +608,27 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "DELETE",
         path: "/v1/tenant/events/{event_id}",
         path_params: &["event_id"],
-        query: &["expected_revision", "expected_resource_id", "idempotency_key", "dry_run"],
+        query: &["expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"],
     },
     Operation {
         name: "slotlock_export_tenant_event",
         method: "GET",
         path: "/v1/tenant/events/{event_id}/jscalendar",
         path_params: &["event_id"],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_tenant_book_together",
+        method: "POST",
+        path: "/v1/tenant/bundles",
+        path_params: &[],
+        query: &[],
+    },
+    Operation {
+        name: "slotlock_tenant_book_pool",
+        method: "POST",
+        path: "/v1/tenant/pool-bookings",
+        path_params: &[],
         query: &[],
     },
     Operation {
@@ -789,7 +929,6 @@ pub struct GetFreeBusyInput {
 pub struct FindNextAvailableInput {
     pub start: String,
     pub end: String,
-    pub duration_minutes: i64,
     /// Left out when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resource_ids: Vec<String>,
@@ -803,6 +942,8 @@ pub struct FindNextAvailableInput {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
 }
 
 /// The arguments of [`Client::find_available_slots`].
@@ -810,7 +951,6 @@ pub struct FindNextAvailableInput {
 pub struct FindAvailableSlotsInput {
     pub start: String,
     pub end: String,
-    pub duration_minutes: i64,
     /// Left out when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resource_ids: Vec<String>,
@@ -825,15 +965,57 @@ pub struct FindAvailableSlotsInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub require_free: Option<i64>,
+}
+
+/// The arguments of [`Client::find_available_ranges`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FindAvailableRangesInput {
+    pub pickup_start: String,
+    pub pickup_end: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 /// The arguments of [`Client::hold_slots`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HoldSlotsInput {
     pub slots: Vec<Value>,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::hold_together`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HoldTogetherInput {
+    pub resource_ids: Vec<String>,
+    pub start: String,
+    pub end: String,
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
@@ -855,6 +1037,8 @@ pub struct BookTogetherInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_group_id: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -965,6 +1149,8 @@ pub struct CreateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1420,10 +1606,125 @@ pub struct GetTenantEventHistoryInput {
     pub before: Option<String>,
 }
 
+/// The arguments of [`Client::get_availability_defaults`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetAvailabilityDefaultsInput {
+}
+
 /// The arguments of [`Client::set_tenant_availability`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SetTenantAvailabilityInput {
     pub rules: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_resources: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::set_location_availability`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SetLocationAvailabilityInput {
+    pub location: String,
+    pub rules: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_availability_exceptions`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListAvailabilityExceptionsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// The arguments of [`Client::create_availability_exception`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateAvailabilityExceptionInput {
+    pub starts_on: String,
+    pub outcome: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ends_on: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hours: Option<Vec<Value>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_availability_exception`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteAvailabilityExceptionInput {
+    pub exception_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::import_holidays`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImportHolidaysInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icalendar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscribe: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_holiday_calendars`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListHolidayCalendarsInput {
+}
+
+/// The arguments of [`Client::delete_holiday_calendar`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteHolidayCalendarInput {
+    pub calendar_id: String,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1447,6 +1748,10 @@ pub struct AcquireHoldInput {
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_after_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<Value>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1495,6 +1800,21 @@ pub struct ConfirmHoldInput {
     pub dry_run: Option<bool>,
 }
 
+/// The arguments of [`Client::mark_hold_paid`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MarkHoldPaidInput {
+    pub hold_id: String,
+    pub payment_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received: Option<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
 /// The arguments of [`Client::get_reservation`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GetReservationInput {
@@ -1513,6 +1833,16 @@ pub struct PutReservationInput {
     pub buffer_after_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reminder_minutes: Option<Vec<i64>>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1526,6 +1856,8 @@ pub struct PutReservationInput {
 pub struct CancelReservationInput {
     pub reservation_ref: String,
     pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1558,6 +1890,62 @@ pub struct CheckInReservationInput {
     pub dry_run: Option<bool>,
 }
 
+/// The arguments of [`Client::get_contact`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetContactInput {
+    pub contact_ref: String,
+}
+
+/// The arguments of [`Client::put_contact`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PutContactInput {
+    pub contact_ref: String,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<Option<String>>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whatsapp: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent: Option<Value>,
+    /// `None` leaves it out; `Some(None)` sends null, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<Option<String>>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::delete_contact`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteContactInput {
+    pub contact_ref: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::list_contacts`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ListContactsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// The arguments of [`Client::list_waitlist`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListWaitlistInput {
@@ -1583,6 +1971,8 @@ pub struct JoinWaitlistInput {
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_ttl_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
     /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
     /// request answers what the first did; with another request, 422 idempotency_conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1598,6 +1988,18 @@ pub struct JoinWaitlistInput {
 /// The arguments of [`Client::leave_waitlist`].
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LeaveWaitlistInput {
+    pub entry_id: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::decline_waitlist_offer`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeclineWaitlistOfferInput {
     pub entry_id: String,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
@@ -1628,6 +2030,45 @@ pub struct RecordCoverageInput {
 pub struct DeleteCoverageInput {
     pub resource_id: String,
     pub source: String,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::put_source_busy`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PutSourceBusyInput {
+    pub resource_id: String,
+    pub source: String,
+    pub start: String,
+    pub end: String,
+    pub revision: i64,
+    pub busy: Vec<Value>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::report_coverage_conflict`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReportCoverageConflictInput {
+    pub resource_id: String,
+    pub source: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_end: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1684,6 +2125,8 @@ pub struct CancelTenantEventInput {
     pub idempotency_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1696,6 +2139,46 @@ pub struct CancelTenantEventInput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExportTenantEventInput {
     pub event_id: String,
+}
+
+/// The arguments of [`Client::tenant_book_together`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TenantBookTogetherInput {
+    pub resource_ids: Vec<String>,
+    pub starts_at: String,
+    pub ends_at: String,
+    pub timezone: String,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::tenant_book_pool`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TenantBookPoolInput {
+    pub pool: String,
+    pub starts_at: String,
+    pub ends_at: String,
+    pub timezone: String,
+    /// A retry identity, also accepted as the Idempotency-Key header: the same key with the same
+    /// request answers what the first did; with another request, 422 idempotency_conflict.
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Check the write without making it: it runs with every check, the database's included, and
+    /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
+    /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
+    /// alternatives included. Charged as a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// The arguments of [`Client::get_tenant`].
@@ -1806,6 +2289,8 @@ pub struct PutApprovalPolicyInput {
     pub approval_ttl_minutes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lead_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_application: Option<bool>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2052,23 +2537,52 @@ impl Client {
         self.call("slotlock_find_available_slots", serde_json::to_value(input)?)
     }
 
+    /// Find available ranges.
+    ///
+    /// Find hires across days, such as a car from Friday to Monday: for each resource named, or
+    /// each member of a pool, the earliest range that starts between pickup_start and pickup_end
+    /// and either lasts `days` days (ending at the same local time) or ends between return_start
+    /// and return_end. Each range is free throughout with its buffers, allowed by the resource's
+    /// booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside
+    /// its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless
+    /// every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+    /// with slotlock_book_pool, at its start and end.
+    pub fn find_available_ranges(&self, input: &FindAvailableRangesInput) -> Result<Value, Error> {
+        self.call("slotlock_find_available_ranges", serde_json::to_value(input)?)
+    }
+
     /// Hold candidate slots.
     ///
     /// Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
     /// as alternatives in one group: each free one is held, the others are listed with why not.
     /// Book one by passing its hold_id to slotlock_create_event, which releases the rest;
-    /// unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-    /// once. A candidate refused for its time comes with alternatives (the earliest free times of
-    /// its length). slotlock_confirm_slot books a held time.
+    /// unbooked holds expire on their own. With payment_required, a hold is booked only once the
+    /// system you book for records its payment (the person pays there): booking it before then
+    /// answers payment_required, so send the person to pay and try again. A hold is yours alone,
+    /// and you may have 20 live at once. A candidate refused for its time comes with alternatives
+    /// (the earliest free times of its length). slotlock_confirm_slot books a held time.
     pub fn hold_slots(&self, input: &HoldSlotsInput) -> Result<Value, Error> {
         self.call("slotlock_hold_slots", serde_json::to_value(input)?)
+    }
+
+    /// Hold resources together.
+    ///
+    /// Hold one time on 2-20 resources at once, all or none, such as a car with its driver while
+    /// a person decides: if any is taken, nothing is held and the refusal names that resource_id.
+    /// The holds are one group with one time to live (ttl_seconds, the earliest of them). Book
+    /// the set with slotlock_book_together and its hold_group_id; release them with
+    /// slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the
+    /// same holds.
+    pub fn hold_together(&self, input: &HoldTogetherInput) -> Result<Value, Error> {
+        self.call("slotlock_hold_together", serde_json::to_value(input)?)
     }
 
     /// Book resources together.
     ///
     /// Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
     /// with its projector. If any of them is taken, nothing is booked, and the refusal names that
-    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+    /// resource_id. Find such a time with slotlock_find_available_slots and require_free. With
+    /// hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry
     /// with the same idempotency_key answers the same events.
     pub fn book_together(&self, input: &BookTogetherInput) -> Result<Value, Error> {
         self.call("slotlock_book_together", serde_json::to_value(input)?)
@@ -2315,18 +2829,21 @@ impl Client {
 
     /// Set a resource's bookable hours.
     ///
-    /// Give one resource its own weekly bookable hours. `null` makes it use the server's default;
-    /// `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone:
-    /// start_minutes after midnight, lasting duration_minutes.
+    /// Give one resource its own weekly bookable hours. `null` makes it inherit: its location's
+    /// hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it
+    /// never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes
+    /// after midnight, lasting duration_minutes.
     pub fn set_resource_availability(&self, input: &SetResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_availability", serde_json::to_value(input)?)
     }
 
     /// Export a resource's bookable hours as iCalendar.
     ///
-    /// One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
-    /// calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
-    /// time zone. `null` when the resource uses the server's default.
+    /// The weekly bookable hours that apply to one resource (its own, or those it inherits) as an
+    /// iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
+    /// rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of
+    /// the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE
+    /// with RDATEs gives a day its own hours. `null` when the resource uses the server's default.
     pub fn export_resource_availability(&self, input: &ExportResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_export_resource_availability", serde_json::to_value(input)?)
     }
@@ -2335,9 +2852,11 @@ impl Client {
     ///
     /// Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
     /// as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
-    /// a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
-    /// or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
-    /// VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+    /// a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the
+    /// resource's exceptions, replacing those an earlier import made: each day they name keeps
+    /// the windows left on it, or is closed with none. Times must be in the resource's time zone
+    /// (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded
+    /// VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.
     pub fn import_resource_availability(&self, input: &ImportResourceAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_import_resource_availability", serde_json::to_value(input)?)
     }
@@ -2346,11 +2865,15 @@ impl Client {
     ///
     /// Set what a booking on one resource must satisfy from now on: minimum notice, how far
     /// ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
-    /// step_offset_minutes), the time kept free before and after each booking, and whether
-    /// bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
-    /// its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-    /// slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
-    /// refused with the rule they break; searches offer only what they allow.
+    /// step_offset_minutes), the time kept free before and after each booking (turnaround up to a
+    /// week), whether bookings must lie inside its hours, how long a booking may be
+    /// (min_duration_minutes, max_duration_minutes, allowed_durations, and
+    /// default_duration_minutes for a search that names no length), and for a booking from one
+    /// local day to another, the pickup_times it starts in and the return_times it ends in.
+    /// `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults
+    /// (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+    /// moves and agents' events are refused with the rule they break; searches offer only what
+    /// they allow.
     pub fn set_resource_booking_rules(&self, input: &SetResourceBookingRulesInput) -> Result<Value, Error> {
         self.call("slotlock_set_resource_booking_rules", serde_json::to_value(input)?)
     }
@@ -2450,13 +2973,105 @@ impl Client {
         self.call("slotlock_get_tenant_event_history", serde_json::to_value(input)?)
     }
 
-    /// Set every resource's bookable hours.
+    /// Read stored bookable hours.
     ///
-    /// Set the weekly bookable hours of every resource the tenant has, as
-    /// slotlock_set_resource_availability does for one. `null` makes them all use the server's
-    /// default. Returns how many resources changed.
+    /// The tenant's stored weekly hours (`null` when it uses the server's default) and each
+    /// location's that has its own. A resource without its own uses its location's, the nearest
+    /// up the chain, then the tenant's, then the server's.
+    pub fn get_availability_defaults(&self, input: &GetAvailabilityDefaultsInput) -> Result<Value, Error> {
+        self.call("slotlock_get_availability_defaults", serde_json::to_value(input)?)
+    }
+
+    /// Set the tenant's bookable hours.
+    ///
+    /// Store the tenant's weekly bookable hours: every resource without hours of its own, and
+    /// with no location hours above it, uses them, resources added later too. `null` hands them
+    /// back to the server's default. Nothing is copied: a resource with its own hours keeps them
+    /// (override_resources none, the default), unless override_resources is all, which clears
+    /// them so every resource inherits, or matching, which clears only those whose hours are the
+    /// same as the tenant's were before or as these: the copies versions up to 0.8.0 made when
+    /// setting the tenant's hours, while hours set apart on purpose stay. resources_updated
+    /// counts the resources in use these hours now apply to; resources_with_own_hours, those that
+    /// keep their own.
     pub fn set_tenant_availability(&self, input: &SetTenantAvailabilityInput) -> Result<Value, Error> {
         self.call("slotlock_set_tenant_availability", serde_json::to_value(input)?)
+    }
+
+    /// Set a location's bookable hours.
+    ///
+    /// Store a location's weekly bookable hours, each read in a resource's own time zone:
+    /// resources at it, or at a location inside it, without hours of their own use them, unless a
+    /// location nearer them has its own. `null` clears them, so they inherit from further up. 404
+    /// location_not_found for a location the tenant does not have.
+    pub fn set_location_availability(&self, input: &SetLocationAvailabilityInput) -> Result<Value, Error> {
+        self.call("slotlock_set_location_availability", serde_json::to_value(input)?)
+    }
+
+    /// List closures and special hours.
+    ///
+    /// The tenant's exceptions to its weekly hours, by first day: with resource_id, those that
+    /// apply to that resource (the tenant's, its locations' and its own); with location, that
+    /// location's own; else all of them. from and to keep those that reach the days between. At
+    /// most limit (1-1,000, default 100); next is the cursor for after.
+    pub fn list_availability_exceptions(&self, input: &ListAvailabilityExceptionsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_availability_exceptions", serde_json::to_value(input)?)
+    }
+
+    /// Add a closure or special hours.
+    ///
+    /// Close whole days, or give them hours of their own, for the whole tenant, one location (and
+    /// every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367
+    /// days) are local days, read in each resource's time zone. outcome closed empties those
+    /// days; open replaces their weekly hours with hours (1-4 windows of start_minutes and
+    /// duration_minutes). Where several apply to a day, the nearest wins: the resource's own,
+    /// then its location's from the innermost out, then the tenant's. Search leaves the days as
+    /// they say; a write is refused outside_hours only under the enforce_hours booking rule. 409
+    /// availability_exceptions_limit_reached past 5,000 a tenant.
+    pub fn create_availability_exception(&self, input: &CreateAvailabilityExceptionInput) -> Result<Value, Error> {
+        self.call("slotlock_create_availability_exception", serde_json::to_value(input)?)
+    }
+
+    /// Delete a closure or special hours.
+    ///
+    /// Remove an exception: its days read as the weekly hours again. 404
+    /// availability_exception_not_found.
+    pub fn delete_availability_exception(&self, input: &DeleteAvailabilityExceptionInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_availability_exception", serde_json::to_value(input)?)
+    }
+
+    /// Import a holiday calendar.
+    ///
+    /// Close the days an iCalendar holiday calendar names, for the whole tenant, one location or
+    /// one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
+    /// seconds; private addresses refused). Each all-day event closes the days it covers, and
+    /// each occurrence of a recurring one within from to to (default today to two years on, at
+    /// most three years); timed and cancelled events are skipped. The calendar is kept by name at
+    /// its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
+    /// Holidays): importing it again updates its closures instead of adding more, and deletes the
+    /// ones it made that it no longer names within the span (removed), so a holiday it dropped
+    /// goes too. With subscribe (and a url), the server keeps the url and imports it again every
+    /// 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+    /// invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
+    /// the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
+    pub fn import_holidays(&self, input: &ImportHolidaysInput) -> Result<Value, Error> {
+        self.call("slotlock_import_holidays", serde_json::to_value(input)?)
+    }
+
+    /// List holiday calendars.
+    ///
+    /// The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each
+    /// with its scope, how many closures it made, and for a subscription its url, when it was
+    /// last imported, when it will be again, and why the last import failed if it did.
+    pub fn list_holiday_calendars(&self, input: &ListHolidayCalendarsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_holiday_calendars", serde_json::to_value(input)?)
+    }
+
+    /// Delete a holiday calendar.
+    ///
+    /// Delete a holiday calendar and every closure it made, and stop importing it again. deleted
+    /// is false when the tenant has no such calendar; closures counts those deleted with it.
+    pub fn delete_holiday_calendar(&self, input: &DeleteHolidayCalendarInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_holiday_calendar", serde_json::to_value(input)?)
     }
 
     /// Hold time.
@@ -2464,10 +3079,13 @@ impl Client {
     /// Occupy a window without booking it, for example while a customer pays. The hold blocks
     /// every other booking until it expires (the database clock, ttl_seconds from now), is
     /// confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
-    /// a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
-    /// (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
-    /// request made, until that hold would have expired, is released or is confirmed; the same
-    /// key with another request is 422 idempotency_conflict.
+    /// a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
+    /// confirmed until slotlock_mark_hold_paid records the payment, which must be at least
+    /// payment (amount_minor in the minor unit of its currency, and the currency) when given:
+    /// Slotlock records payment state and never moves money. A taken window answers 409 overlap.
+    /// With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers
+    /// the hold the first request made, until that hold would have expired, is released or is
+    /// confirmed; the same key with another request is 422 idempotency_conflict.
     pub fn acquire_hold(&self, input: &AcquireHoldInput) -> Result<Value, Error> {
         self.call("slotlock_acquire_hold", serde_json::to_value(input)?)
     }
@@ -2502,9 +3120,26 @@ impl Client {
     /// revision 1: move or cancel it with the reservation routes by that reference (DELETE
     /// /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same
     /// reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-    /// unknown one, 404 hold_not_found.
+    /// unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409
+    /// payment_required.
     pub fn confirm_hold(&self, input: &ConfirmHoldInput) -> Result<Value, Error> {
         self.call("slotlock_confirm_hold", serde_json::to_value(input)?)
+    }
+
+    /// Record a hold as paid.
+    ///
+    /// Record that a hold made with payment_required is paid, by the payment's reference at your
+    /// processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then
+    /// be confirmed. Slotlock records payment state and never moves money. The same reference
+    /// again answers the same hold (replayed: true), whatever became of it since (confirmed,
+    /// booked as an event, expired): the payment is kept apart from the hold. Another reference
+    /// answers 409 payment_conflict. When the hold names its payment, received must be at least
+    /// that amount in that currency (409 payment_amount_mismatch). The feed says so (hold.paid).
+    /// A hold that does not wait for payment answers 409 payment_not_required; one that expired
+    /// before it was paid, 409 hold_expired (refund the payment: its time may be someone else's);
+    /// one released before it was paid, or unknown, 404 hold_not_found.
+    pub fn mark_hold_paid(&self, input: &MarkHoldPaidInput) -> Result<Value, Error> {
+        self.call("slotlock_mark_hold_paid", serde_json::to_value(input)?)
     }
 
     /// Get a reservation.
@@ -2521,7 +3156,16 @@ impl Client {
     /// Book the reservation with this reference (revision 1), or move it (the next revision: the
     /// current one plus 1). Sending the same reservation at its current revision again changes
     /// nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
-    /// reservation where it was. buffer_after_minutes keeps the time after it busy as well.
+    /// reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
+    /// move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+    /// unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in
+    /// the resource's zone) records the wall time it is booked for: it must name start, and if
+    /// time zone rules later move that wall time to another instant, maintenance says so
+    /// (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
+    /// contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to
+    /// tell no one; both are on the feed with each change, as sent with each revision.
+    /// reminder_minutes (up to five, distinct) puts reminder.due on the feed that long before its
+    /// start, once each, and again if it moves.
     pub fn put_reservation(&self, input: &PutReservationInput) -> Result<Value, Error> {
         self.call("slotlock_put_reservation", serde_json::to_value(input)?)
     }
@@ -2530,7 +3174,11 @@ impl Client {
     ///
     /// Cancel the reservation with this reference at the next revision (the current one plus 1).
     /// Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the
-    /// cancel answers cancelled: false. Use a new reference for a new reservation.
+    /// cancel answers cancelled: false. Use a new reference for a new reservation. Past the
+    /// resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason
+    /// says why, which the tombstone and the feed keep. A late cancellation's fee (the resource's
+    /// cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge:
+    /// Slotlock moves no money.
     pub fn cancel_reservation(&self, input: &CancelReservationInput) -> Result<Value, Error> {
         self.call("slotlock_cancel_reservation", serde_json::to_value(input)?)
     }
@@ -2557,6 +3205,44 @@ impl Client {
         self.call("slotlock_check_in_reservation", serde_json::to_value(input)?)
     }
 
+    /// Get a contact.
+    ///
+    /// The person kept under this reference, for a sender to reach. An unknown one answers 404
+    /// contact_not_found.
+    pub fn get_contact(&self, input: &GetContactInput) -> Result<Value, Error> {
+        self.call("slotlock_get_contact", serde_json::to_value(input)?)
+    }
+
+    /// Keep a contact.
+    ///
+    /// Keep a person a booking may name to be told about it (contact_ref on
+    /// slotlock_put_reservation), under your own reference: how to reach them (email, phone for
+    /// SMS and whatsapp, both E.164) and which channels they agreed to (consent: false is an
+    /// opt-out a sender must honour). Replaces what was kept under the reference. A sender reads
+    /// it to send; Slotlock itself sends nothing. created says whether it is new. A tenant keeps
+    /// at most 100,000 (409 contact_limit_reached).
+    pub fn put_contact(&self, input: &PutContactInput) -> Result<Value, Error> {
+        self.call("slotlock_put_contact", serde_json::to_value(input)?)
+    }
+
+    /// Forget a contact.
+    ///
+    /// Forget a person: their contact, and their reference on every booking that named it, at
+    /// once (for an erasure request). deleted is false when no contact was kept; bookings counts
+    /// the bookings that no longer name them. Changes already on the feed keep the reference,
+    /// never the person.
+    pub fn delete_contact(&self, input: &DeleteContactInput) -> Result<Value, Error> {
+        self.call("slotlock_delete_contact", serde_json::to_value(input)?)
+    }
+
+    /// List contacts.
+    ///
+    /// The people the tenant keeps to tell about bookings, by reference, a page at a time: pass
+    /// next_cursor as cursor for the next page, until it is null.
+    pub fn list_contacts(&self, input: &ListContactsInput) -> Result<Value, Error> {
+        self.call("slotlock_list_contacts", serde_json::to_value(input)?)
+    }
+
     /// List the waitlist.
     ///
     /// The tenant's waitlist entries in the order they are offered (oldest first), with what each
@@ -2568,15 +3254,19 @@ impl Client {
     /// Join the waitlist.
     ///
     /// Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
-    /// taken now. When it comes free (a booking cancelled, a hold released or expired, a
-    /// no-show), the entries waiting for it are offered in the order they joined: the first gets
-    /// a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
-    /// (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
-    /// starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-    /// waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
-    /// Idempotency-Key header or idempotency_key), a retry answers the entry the first request
-    /// made (replayed: true) for as long as it is kept; the same key with another request is 422
-    /// idempotency_conflict.
+    /// taken now, or with duration_minutes for any slot of that length within it. When time comes
+    /// free (a booking cancelled, a hold released or expired, a no-show), the entries waiting are
+    /// offered in the order they joined: the first that fits gets a hold of it (the window, or
+    /// the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default 900), and
+    /// the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it
+    /// (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined),
+    /// or let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot
+    /// can be offered to before its window closes expires (waitlist.expired). Joining and leaving
+    /// are on the feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at
+    /// once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key
+    /// (the Idempotency-Key header or idempotency_key), a retry answers the entry the first
+    /// request made (replayed: true) for as long as it is kept; the same key with another request
+    /// is 422 idempotency_conflict.
     pub fn join_waitlist(&self, input: &JoinWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_join_waitlist", serde_json::to_value(input)?)
     }
@@ -2588,6 +3278,15 @@ impl Client {
     /// when there was no such entry.
     pub fn leave_waitlist(&self, input: &LeaveWaitlistInput) -> Result<Value, Error> {
         self.call("slotlock_leave_waitlist", serde_json::to_value(input)?)
+    }
+
+    /// Decline a waitlist offer.
+    ///
+    /// Turn down the hold a waitlist entry was offered: the hold is let go, the entry is declined
+    /// (waitlist.declined), and the time is offered to the next who waits. 404
+    /// waitlist_offer_not_found when the entry has no open offer.
+    pub fn decline_waitlist_offer(&self, input: &DeclineWaitlistOfferInput) -> Result<Value, Error> {
+        self.call("slotlock_decline_waitlist_offer", serde_json::to_value(input)?)
     }
 
     /// Record calendar coverage.
@@ -2607,6 +3306,35 @@ impl Client {
     /// it. 404 coverage_not_found for a source with no coverage of the resource.
     pub fn delete_coverage(&self, input: &DeleteCoverageInput) -> Result<Value, Error> {
         self.call("slotlock_delete_coverage", serde_json::to_value(input)?)
+    }
+
+    /// Record a calendar's busy time.
+    ///
+    /// For a calendar that gives busy time but not its events (Google freeBusy, Microsoft
+    /// getSchedule): record its coverage of a window at the source's revision, as
+    /// slotlock_record_coverage does, and the busy time in it, which replaces what the source
+    /// said of that window before (what it said outside the window stays). Busy time counts in
+    /// free/busy and every booking Slotlock makes on the resource is refused over it (409
+    /// overlap), as over an event. A confirmed booking the source newly reports busy time over is
+    /// left as it is and put on the feed once as coverage.conflict, naming the booking and the
+    /// source by its source_id: someone decides. At most 5000 intervals; they are clipped to the
+    /// window and merged. Revisions only go forward; repeating one changes nothing (replayed:
+    /// true).
+    pub fn put_source_busy(&self, input: &PutSourceBusyInput) -> Result<Value, Error> {
+        self.call("slotlock_put_source_busy", serde_json::to_value(input)?)
+    }
+
+    /// Report a booking changed in a calendar.
+    ///
+    /// For a calendar sync that writes bookings to a calendar: report that one (by
+    /// reservation_ref or event_id) was changed (changed_in_calendar, with where the calendar now
+    /// has it) or removed (removed_from_calendar) there. It is put on the change feed as
+    /// coverage.conflict, named by the source's source_id, with the booking and the calendar's
+    /// times; the booking is left as it is, for someone to decide. 404 coverage_not_found for a
+    /// source that has not recorded coverage of the resource; reservation_not_found or
+    /// event_not_found for a booking not on it.
+    pub fn report_coverage_conflict(&self, input: &ReportCoverageConflictInput) -> Result<Value, Error> {
+        self.call("slotlock_report_coverage_conflict", serde_json::to_value(input)?)
     }
 
     /// A resource's coverage and its health.
@@ -2668,6 +3396,30 @@ impl Client {
     /// or unknown one answers 404 event_not_found.
     pub fn export_tenant_event(&self, input: &ExportTenantEventInput) -> Result<Value, Error> {
         self.call("slotlock_export_tenant_event", serde_json::to_value(input)?)
+    }
+
+    /// Book resources together, as the tenant.
+    ///
+    /// Book the same time on 2-20 resources at once, all or none, as agents'
+    /// slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the
+    /// tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it),
+    /// held to the resources' booking rules; approval policies hold it only when they include the
+    /// application (include_application). If any is taken, nothing is booked and the refusal
+    /// names that resource_id. A retry with the same idempotency_key answers the same events. 409
+    /// bundles_unavailable where the server books no bundles.
+    pub fn tenant_book_together(&self, input: &TenantBookTogetherInput) -> Result<Value, Error> {
+        self.call("slotlock_tenant_book_together", serde_json::to_value(input)?)
+    }
+
+    /// Book any member of a pool, as the tenant.
+    ///
+    /// Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
+    /// the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member,
+    /// and is the tenant's, not the key's; approval policies hold it only when they include the
+    /// application (include_application). 409 pool_full when none is free; 404 pool_not_found. A
+    /// retry with the same idempotency_key answers the member it booked.
+    pub fn tenant_book_pool(&self, input: &TenantBookPoolInput) -> Result<Value, Error> {
+        self.call("slotlock_tenant_book_pool", serde_json::to_value(input)?)
     }
 
     /// Get the tenant.
@@ -2799,7 +3551,10 @@ impl Client {
     /// person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
     /// ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
     /// of the two. Where several apply, refuse wins, then the one that must be decided soonest.
-    /// At most 50 policies: one more is 409 approval_policy_limit_reached.
+    /// The tenant's own bookings through this API (slotlock_tenant_book_together,
+    /// slotlock_tenant_book_pool) are held only by policies with include_application true, and
+    /// are the tenant's again when granted. At most 50 policies: one more is 409
+    /// approval_policy_limit_reached.
     pub fn put_approval_policy(&self, input: &PutApprovalPolicyInput) -> Result<Value, Error> {
         self.call("slotlock_put_approval_policy", serde_json::to_value(input)?)
     }

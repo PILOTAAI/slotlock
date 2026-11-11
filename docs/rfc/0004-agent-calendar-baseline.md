@@ -71,8 +71,8 @@ Evidence names the function or table. Line numbers move, so they are given only 
 
 | Item | Verdict | Evidence | What is missing |
 | --- | --- | --- | --- |
-| Working hours | Partial | `resources.availability_rules`, `expandRules` (rules.ts), tests in resource-hours | Tenant hours are only copied onto existing resources (`setTenantAvailability`), so a new resource does not inherit them. Hours block writes only with the `enforceHours` rule |
-| Exceptions and holidays | **Absent** | — | Closed dates, extra openings and holiday calendars, per tenant, location or resource. The VAVAILABILITY import refuses RDATE and EXDATE (interop.ts) |
+| Working hours | Partial (B2 built since) | `resources.availability_rules`, `expandRules` (rules.ts), tests in resource-hours | Tenant hours are only copied onto existing resources (`setTenantAvailability`), so a new resource does not inherit them. Hours block writes only with the `enforceHours` rule |
+| Exceptions and holidays | **Absent** (B1 built since) | — | Closed dates, extra openings and holiday calendars, per tenant, location or resource. The VAVAILABILITY import refuses RDATE and EXDATE (interop.ts) |
 | Buffers before and after | Present | The occupied range under the constraint (ddl.ts), `bookingJudge` | — |
 | Minimum notice, booking horizon | Present | `bookingRuleBroken` on the database clock | The agent search uses the server clock (`new Date()`) where writes use the database's |
 | Slot duration rules | Partial | Step and offset (booking-rules.ts) | A default duration, allowed durations, and a minimum or maximum length |
@@ -329,7 +329,7 @@ As proposed:
 
 ### P2: booking model completion (0.8.0)
 
-**B1. Availability exceptions and holidays (T2).** A table `availability_exceptions`:
+**B1. Availability exceptions and holidays (T2).** Status: built. A table `availability_exceptions`:
 - scope: tenant, location (inherited by its resources) or resource;
 - a date range in the scope's zone;
 - an outcome: `closed`, or `open` with its own hours for those dates;
@@ -339,11 +339,37 @@ One evaluator applies them to search and, with `enforceHours`, to writes. Holida
 imported from an ICS URL or file as `closed` exceptions. VAVAILABILITY import and export carry
 RDATE and EXDATE.
 
-**B2. Hours that inherit (T1).** Stored hours per tenant and per location. A resource without
+As built:
+- Each exception covers whole local days, read in each resource's own time zone. A tenant has no
+  zone, and a location's is optional, so the day a holiday names is the day where the resource is.
+- Where several fall on one day, they apply widest first: the tenant's, then each location's from
+  the outermost in, then the resource's own. The nearest wins.
+- At most 5,000 a tenant, each at most 367 days and 4 windows.
+- A holiday calendar's all-day events become closures. Recurring ones are expanded over a span of
+  at most three years. Timed and cancelled events are skipped. An import keys each closure by the
+  event's UID and day, so importing again updates instead of adding.
+- `serve` fetches a URL through the guarded fetch. A library backend fetches none unless given one.
+- The export writes the coming year's closures as EXDATEs on the weekly AVAILABLEs. Special hours
+  are AVAILABLEs repeated by RDATE. The import turns EXDATE, RDATE and single AVAILABLEs into the
+  resource's own exceptions, replacing those its last import made.
+- Exceptions are tenant data under row-level security. A key limited to some resources reads the
+  tenant's and locations' exceptions, which shape its resources' hours, and only its own
+  resources' exceptions.
+
+**B2. Hours that inherit (T1).** Status: built. Stored hours per tenant and per location. A resource without
 its own uses its location's, then its tenant's, then the server's. A new resource inherits.
 `setTenantAvailability` stops copying.
 
-**B3. Durations and multi-day (T1).**
+As built: `availability_defaults` holds the tenant's and each location's rules. The database
+function `slotlock.inherited_availability` finds the nearest, and every resource read carries it.
+`storeTenantAvailability` answers `{ inheriting, ownHours }`, and `setTenantAvailability` keeps its
+0.8.0 contract (every resource uses the hours, and a count), deprecated. Hours an earlier version
+copied stay a resource's own until `overrideResources` clears them: `all` clears every resource's,
+`matching` only those the same as the tenant's were or as the new ones. Clearing them silently
+would have changed hours an owner may have set on purpose; the dashboard names the resources that
+keep their own.
+
+**B3. Durations and multi-day (T1).** Status: built.
 - Booking rules gain:
   - `minDurationMinutes`, `maxDurationMinutes`, `allowedDurations` and `defaultDuration`;
   - `pickupTimes` and `returnTimes`: daily windows a multi-day booking must start and end in;
@@ -351,7 +377,24 @@ its own uses its location's, then its tenant's, then the server's. A new resourc
 - `find_available_ranges` finds N-day ranges for a resource or a pool, from a pick-up window to
   a return window. This is the car-rental search.
 
-**B4. A written lifecycle (T2).**
+As built:
+- The default is `defaultDurationMinutes`. A search that names no length takes it when its
+  resources agree on one, else answers `400 duration_required`.
+- A hire is a booking whose last moment falls on a later local day than its start. One ending at
+  midnight stays on its day. Pick-up times are half-open, and a return may end exactly at its
+  window's end.
+- Under `enforceHours`, a hire needs only its start and end inside the hours. The resource is out
+  between them.
+- Turnaround goes to a week. The calendar event's buffer check was widened to match, added
+  `NOT VALID` first.
+- `slotlock_find_available_ranges` answers one range per resource, the earliest. It takes a
+  number of days (the same local time N days on, across clock changes) or a return window (the
+  earliest return it allows). The search judges each candidate with the write's own rules, so an
+  offered range is one the write accepts. Searches always honour hours, as slot searches do.
+- Building B3 found a bug: a tenant's store judged enforced hours against no hours for resources
+  on the server's default, and refused every such write. Fixed.
+
+**B4. A written lifecycle (T2).** Status: built.
 - Each status and transition is documented, with a table test of every allowed move and a
   refusal for each other.
 - The tombstone keeps why the booking ended: `cancelled`, `no_show`, `released`, `expired` or
@@ -360,29 +403,69 @@ its own uses its location's, then its tenant's, then the server's. A new resourc
   maintenance when a confirmed booking ends; it holds no row.
 - `reservation.updated` stays for compatibility.
 
-**B5. Cancellation and reschedule policies (T2).**
+As built: `src/lifecycle.ts` holds the table. It was written from what the store does, not from
+what it might do. A booking that has ended may still be moved (a system of record's correction) or
+cancelled (a void), and only check-in and no-show refuse it (`reservation_ended`). Holds leave no
+tombstone, so `released` and `expired` live on the feed. Erasure removes the tombstones with
+everything else. `reservation.completed` covers bookings that ended in the last week, so the first
+pass after an upgrade does not flood the feed with old ones.
+
+**B5. Cancellation and reschedule policies (T2).** Status: built.
 - Rules `cancelCutoffMinutes` and `rescheduleCutoffMinutes`, enforced on writes
   (`booking_rule_cancel_cutoff`). An admin key may override with a reason, which goes into
   history.
 - `cancellationFee` is recorded on the cancellation for the integrator to charge. Slotlock never
   moves money for it.
 
-**B6. Waitlists that match (T1).**
+As built:
+- The application API is admin-only, so its cancel and move take `override_reason`. Agents' cancels
+  and moves of their own events are held to the cutoffs with no override.
+- The fee is `{ amountMinor, currency, withinMinutes? }`. A late cancellation answers it, and its
+  tombstone and feed change keep it.
+- A recurring series is not held to the cutoffs: cancelling it cancels what is still to come.
+
+**B6. Waitlists that match (T1).** Status: built.
 - An entry matches any slot of its length within its window, on a resource or a pool.
 - Entries can be `accepted`, `declined` and `lapsed`, with feed events for join, offer, accept,
   decline and leave.
 - Join is idempotent (P0-5).
 
-**B7. Holds across resources (T2).** `hold_together` holds a set (driver and car) all or
+As built: a trigger on the offer's hold decides how the offer ends, whatever path took the hold.
+Confirmed, or consumed by a booking that names it, is accepted. Expired is lapsed. Let go before
+then is declined. An entry for a length expires when no slot of it can still fit before its
+window's end. Maintenance makes offers whose hold ran out lapse, so their time is offered on.
+
+**B7. Holds across resources (T2).** Status: built. `hold_together` holds a set (driver and car) all or
 nothing, under one group with one TTL. Confirming it books the set. The application API gains
 `book_together` and `book_pool`.
 
-**B8. Seats (T2).** `capacity: N` on create makes N seat resources in a pool behind one
+As built: confirming is `slotlock_book_together` with the set's `hold_group_id`. It books every
+member from its hold in one transaction, so one refused rolls back all. Booking one member leaves
+the rest of a set held together, unlike a group of alternatives. The application API's operations
+are named `slotlock_tenant_book_together` and `slotlock_tenant_book_pool`, because the agent tools
+already use the plain names. They run the agents' own bundle and pool bookings, approval policies
+included.
+
+**B8. Seats (T2).** Status: not built, waiting on decision D4 (seat spans under one constraint, or N
+seat resources as written here). `capacity: N` on create makes N seat resources in a pool behind one
 resource. A booking of `seats: k` takes k free seats in one transaction. The guarantee stays the
 exclusion constraint; the API shows one resource with capacity.
 
-**B9. Zone rule changes reach everything (T1).** `followZoneRules` also re-checks stored series
+**B9. Zone rule changes reach everything (T1).** Status: built. `followZoneRules` also re-checks stored series
 occurrences, and reservations that carry a wall time (a new optional `local_start`).
+
+As built: an occurrence keeps its wall time when it is written, by a trigger, and occurrences to
+come from before were given theirs as the rules read at upgrade. Shifted occurrences are reported
+once, each. With `move`, a series moves whole at its next revision, in one transaction: every
+shifted occurrence and its booking, each keeping its `recurrence_id`, so exceptions keyed by it
+still apply. It moves only where the server's zone rules (ICU) put each wall time where
+PostgreSQL's do, otherwise each is reported with `reason: "rules_disagree"`; a conflict keeps the
+series' times and is said once. Keying occurrences by wall time instead of instant (so a later
+re-expansion keeps exceptions however the rules change) is left for the next change to recurrence
+storage. A
+reservation's `local_start` must name its start when written (`invalid_local_start`). With `move`,
+a shifted reservation is moved at the next revision, on the feed as any move, or reported as a
+conflict when the constraint refuses.
 
 ### P3: integrations (0.9.0, the owner's decision)
 
@@ -391,7 +474,20 @@ baseline, and buyers do too. The proposal keeps core as it is (it never sends a 
 holds a provider token). It adds three packages on the event feed and the coverage API, and runs
 them on Cloud:
 
-**C1. Free/busy adapters (T2).**
+Status: built, following D1's recommendation (each package its own process, schema and secrets;
+D1 itself is still the owner's to confirm). Core gained the primitives D1 lists: `reminder.due` on
+the feed (maintenance, once per reminder, again when the occurrence moves), the change's `id` as
+the send key, contacts with per-channel consent that a booking names by `contact_ref` (deleting one
+takes the reference off every booking), and `notify: false` on bookings and events. It also gained
+busy time without events (`source_busy`, `PUT .../coverage/{source}/busy`), and holds that wait for
+payment. The packages are in `packages/`: `@slotlock/sync` (C1, C4), `@slotlock/notify` (C2) and
+`@slotlock/payments-stripe` (C3). Not yet: Cloud running them, and its per-message price (D5). Each
+T2 part needs its independent security review first.
+
+**C1. Free/busy adapters (T2).** Status: built as one package, `@slotlock/sync`, with Google,
+Microsoft and iCalendar readers. A source that gives busy time without events records it with
+`slotlock_put_source_busy`; a confirmed booking it newly reports busy time over is reported as
+`coverage.conflict`, never moved.
 - `@slotlock/sync-google` (the Calendar freeBusy API), `@slotlock/sync-microsoft` (Graph
   `getSchedule`) and an ICS URL poller.
 - Each tenant connects with OAuth, and tokens are kept encrypted in the adapter's store.
@@ -399,14 +495,17 @@ them on Cloud:
   apply as now.
 - Read-only.
 
-**C2. Notifications (T1 for the package, T2 for Cloud's sending).**
+**C2. Notifications (T1 for the package, T2 for Cloud's sending).** Status: package built (Postmark,
+Resend or SES; Twilio SMS and WhatsApp); Cloud sending waits on D5.
 - `@slotlock/notify` subscribes to the feed and sends confirmations and reminders by email
   (SES or Postmark), SMS and WhatsApp (Twilio).
 - Reminders come from `calendar_event_reminders`.
 - Per-tenant templates and sender, with an opt-out per recipient.
 - On Cloud it is a paid add-on with per-message pricing.
 
-**C3. Payments for bookings (T2).**
+**C3. Payments for bookings (T2).** Status: built: `payment_required` holds,
+`slotlock_mark_hold_paid`, and `@slotlock/payments-stripe`, which reads the PaymentIntent back from
+Stripe before marking a hold paid and refunds one whose hold expired first, when asked.
 - A hold may require a payment (`payment_required: true`, TTL up to 30 minutes, a
   `payment_ref`). Confirming it needs the integrator's payment confirmation, through
   `POST /v1/holds/{id}/paid` or a Stripe adapter verifying a PaymentIntent on the tenant's own
@@ -414,7 +513,9 @@ them on Cloud:
 - Slotlock records payment state and never processes money. Managed Payments cannot carry
   marketplace flows, so this is the tenant's own account, not Slotlock's.
 
-**C4. Two-way sync (T2, last).** Confirmed bookings are written to the connected Google or
+**C4. Two-way sync (T2, last).** Status: built in `@slotlock/sync`: times only, under a neutral
+title; its own bookings are subtracted from what it reads back, and one changed in the calendar is
+reported as the source's failure. Confirmed bookings are written to the connected Google or
 Microsoft calendar by the C1 adapters. Slotlock stays the source of truth. A change made in the
 provider comes back as coverage and is reported as a conflict, never applied silently.
 

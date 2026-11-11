@@ -77,9 +77,17 @@ any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they
 (`invalid_transaction_isolation`). Uncapped creates take no lock.
 
 `setResourceAvailability({ tenantRef, id, rules })` gives a resource its own bookable hours (`null`
-uses the default, `[]` closes it); `setTenantAvailability({ tenantRef, rules })` sets every resource
-of a tenant. `createSlotlockStoreAgentBackend` answers from a resource's own hours and calls
-`availabilityRules` only for resources without them. [Booking rules](/docs/booking-rules/) say what
+inherits, `[]` closes it). `storeTenantAvailability({ tenantRef, rules, overrideResources? })` and
+`setLocationAvailability({ tenantRef, location, rules })` store hours a resource without its own
+inherits: its location's, the nearest up the chain, then the tenant's (RFC 0004 B2). Each answers
+`{ inheriting, ownHours }`. `overrideResources` is `none` (resources keep their own hours, the
+default), `all` (they lose them) or `matching` (only those the same as the tenant's were, or as
+these). `setTenantAvailability({ tenantRef, rules })` is kept as 0.8.0 had it, deprecated: every
+resource uses the hours afterwards, and it answers how many. A resource read carries `inheritedAvailability` when it has no hours of
+its own. `createAvailabilityException`, `listAvailabilityExceptions` and
+`deleteAvailabilityException` keep closures and special days (B1). `openWindows` (exported) is the
+one evaluator search and enforced writes share. `createSlotlockStoreAgentBackend` answers from
+those hours and calls `availabilityRules` only for resources that inherit nothing. [Booking rules](/docs/booking-rules/) say what
 a booking on a resource must satisfy.
 
 ### Writing rules
@@ -113,6 +121,38 @@ maintenance releases a booking made since the rule was set that nobody checked i
 its start, or after it was made for a walk-in (`reservation.no_show`), and the waitlist is offered
 its time. Check-in opens an hour before the start; moving a booking to another start clears it.
 Leaving the waitlist lets an offer not yet confirmed go with it.
+
+An entry may wait for any slot of a length within its window (`duration_minutes`, RFC 0004 B6),
+on a resource or a pool: it is offered the earliest free one. An offer ends `accepted` (its hold
+confirmed, by the application API or an agent's `slotlock_confirm_slot`), `declined`
+(`POST /v1/waitlist/{entry_id}/decline`, or the hold released) or `lapsed` (the hold expired), each
+on the feed, and the time goes to the next who waits.
+
+## The booking lifecycle
+
+The booking lifecycle (RFC 0004 B4) is written down in `src/lifecycle.ts`
+(`SLOTLOCK_BOOKING_TRANSITIONS`, `slotlockBookingNext`), and a test holds the store to it:
+
+| From | Moves | Refused |
+| --- | --- | --- |
+| `held` | confirm → `confirmed`, release → `released`, expire → `expired`, reschedule → `held` | booking operations: `reservation_not_found` |
+| `confirmed` | reschedule, check in → `checked_in`, cancel → `cancelled`, no-show → `no_show`, its end → `completed` | hold operations: `hold_not_found` |
+| `checked_in` | reschedule, check in again, cancel, its end → `completed` | no-show: `reservation_checked_in` |
+| `completed` | reschedule (a correction), cancel (a void) | check in, no-show: `reservation_ended` |
+| `cancelled`, `no_show` | nothing | writing the reference again: `reservation_cancelled` |
+| `released`, `expired` | nothing | confirming: `hold_not_found`, `hold_expired` |
+
+A cancelled or no-show booking's tombstone keeps why it ended (`end_reason`). Erasure takes
+everything and tells no one.
+
+Cancellation and reschedule policies (RFC 0004 B5): `cancelCutoffMinutes` and
+`rescheduleCutoffMinutes` refuse a cancel or move that late before the start
+(`booking_rule_cancel_cutoff`, `booking_rule_reschedule_cutoff`). An agent cannot go past them. An
+admin can, with `override_reason` (or `overrideReason`), which the tombstone and the feed keep.
+`cancellationFee` (`{ amountMinor, currency, withinMinutes? }`) is recorded on a late cancellation
+(its tombstone, `reservation.cancelled` or `event.cancelled`, and the API's answer) for you to
+charge: Slotlock moves no money. A series is not held to the cutoffs: cancelling one cancels what
+is still to come.
 
 ## Calendar standards
 

@@ -937,6 +937,8 @@ describe('bookable hours in the dashboard', () => {
     expect(html).toContain('Mon, Wed 23:00–00:20 next day; Fri from 09:00 for 2 d 2 h 30 min');
     const settings = await (await get(target, '/base/dashboard/settings/hours', session)).text();
     expect(settings).toContain('Mon–Fri: 09:00–17:00');
+    // The server's hours come last: after a resource's own, its location's and the tenant's.
+    expect(settings).toContain(`for resources with no hours of their own, their location's or <a href="/base/dashboard/hours">yours</a>`);
     expect(html).not.toMatch(/\d\.\d+ h/);
   });
 
@@ -1025,8 +1027,10 @@ describe('bookable hours in the dashboard', () => {
     const target = dashboard();
     const { session } = await signIn(target);
     const page = await (await get(target, '/base/dashboard/hours', session)).text();
-    expect(page).toContain('every resource');
+    expect(page).toContain('Every resource without hours of its own uses these');
     expect(page).toMatch(/name="resource" value="all"/);
+    // No resource keeps hours of its own, so there is nothing to keep or clear.
+    expect(page).not.toContain('name="override"');
     const token = await csrf(target, session);
     const saved = await post(
       target,
@@ -1040,9 +1044,35 @@ describe('bookable hours in the dashboard', () => {
       session,
     );
     expect(saved.status).toBe(303);
+    // Stored as the tenant's, which every resource without its own inherits (RFC 0004 B2).
     expect(resources.store.setHours).toHaveBeenCalledWith('github:4242', 'all', [
       { rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 600, durationMinutes: 240 },
-    ], 'github:4242');
+    ], 'github:4242', 'none');
+  });
+
+  it("names the resources that keep hours of their own, and clears copies of the tenant's with 'matching'", async () => {
+    own('car-plain');
+    own('car-copy', [weekdays]);
+    own('car-late', [{ rrule: 'FREQ=WEEKLY;BYDAY=SA', startMinutes: 1_200, durationMinutes: 120 }]);
+    const target = dashboard();
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/hours', session)).text();
+    expect(page).toContain('<legend>2 resources keep hours of their own</legend>');
+    expect(page).toMatch(/>car-copy<\/a>, <a [^>]*>car-late<\/a>/);
+    expect(page).toContain('<input type="radio" name="override" value="none" checked> Keep them');
+    expect(page).toContain('href="/base/dashboard/resources?hours=own"');
+    const listed = await (await get(target, '/base/dashboard/resources?hours=own', session)).text();
+    expect(listed).toContain('2 resources keep hours of their own');
+    expect(listed).toContain('car-copy');
+    expect(listed).not.toContain('car-plain');
+    const saved = await post(
+      target,
+      '/base/dashboard/hours',
+      { csrf: await csrf(target, session), resource: 'all', mode: 'custom', override: 'matching', ...weekFields({ mo_from_1: '09:00', mo_to_1: '17:00' }) },
+      session,
+    );
+    expect(saved.status).toBe(303);
+    expect(resources.store.setHours).toHaveBeenLastCalledWith('github:4242', 'all', expect.any(Array), 'github:4242', 'matching');
   });
 
   it.each([
@@ -2117,6 +2147,8 @@ describe('resource detail, webhooks and the waitlist', () => {
         offeredResourceId: null,
         offeredAt: null,
         createdAt: new Date(now - 600_000),
+        durationMs: null,
+        decidedAt: null,
       },
     ];
     const store = {
@@ -2439,6 +2471,41 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(303);
     expect(endpoints).toHaveLength(0);
     expect((await post(target, '/base/dashboard/webhooks/delete', { csrf: token, id: endpoint.id }, session)).status).toBe(404);
+  });
+
+  it('lists contacts with their consent, and forgets one', async () => {
+    const people = [
+      {
+        ref: 'cust-1',
+        name: 'Ada <A>',
+        email: 'ada@example.com',
+        phone: '+447700900123',
+        whatsapp: null,
+        consent: { email: true, sms: false },
+        consentAt: { email: new Date('2026-11-01T09:00:00Z'), sms: new Date('2026-11-02T09:00:00Z') },
+        locale: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+    const contacts = {
+      list: vi.fn(async () => people),
+      forget: vi.fn(async (_tenant: string, ref: string) => ({ deleted: ref === 'cust-1', bookings: ref === 'cust-1' ? 2 : 0 })),
+    };
+    const target = dashboard({ resources: { ...resources.store, contacts } });
+    const { session } = await signIn(target);
+    const page = await (await get(target, '/base/dashboard/contacts', session)).text();
+    expect(page).toContain('Ada &lt;A&gt;');
+    expect(page).toContain('SMS: no (2026-11-02)');
+    expect(page).toContain('/base/dashboard/contacts/forget');
+    const forgotten = await post(target, '/base/dashboard/contacts/forget', { csrf: await csrf(target, session), ref: 'cust-1' }, session);
+    expect(await forgotten.text()).toContain('2 bookings no longer name them');
+    expect(contacts.forget).toHaveBeenCalledWith('github:4242', 'cust-1', 'github:4242');
+    expect((await post(target, '/base/dashboard/contacts/forget', { csrf: await csrf(target, session), ref: 'nobody' }, session)).status).toBe(404);
+    expect((await post(target, '/base/dashboard/contacts/forget', { csrf: 'wrong', ref: 'cust-1' }, session)).status).toBe(403);
+    // Without a contacts adapter there is no page.
+    const plain = dashboard();
+    expect((await get(plain, '/base/dashboard/contacts', (await signIn(plain)).session)).status).toBe(404);
   });
 
   it('lists the waitlist and removes an entry', async () => {

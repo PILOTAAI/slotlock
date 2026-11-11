@@ -1105,7 +1105,7 @@ describe('consumer-neutral Slotlock agent server', () => {
   describe('portable operation names', () => {
     it('advertises only names every tool-calling API accepts', () => {
       const names = slotlockAgentTools().map((tool) => tool.name);
-      expect(names).toHaveLength(17);
+      expect(names).toHaveLength(19);
       for (const name of names) {
         // Claude: ^[a-zA-Z0-9_-]{1,128}$. OpenAI function names: the same characters, at most 64.
         expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
@@ -2152,7 +2152,9 @@ describe('principal scopes', () => {
       slotlock_get_free_busy: 'read',
       slotlock_find_next_available: 'read',
       slotlock_find_available_slots: 'read',
+      slotlock_find_available_ranges: 'read',
       slotlock_hold_slots: 'write',
+      slotlock_hold_together: 'write',
       slotlock_release_slots: 'write',
       slotlock_book_together: 'write',
       slotlock_book_pool: 'write',

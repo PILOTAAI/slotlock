@@ -965,6 +965,7 @@ describe('assistant settings', () => {
   it('offers reads to run and writes to propose, and nothing else', () => {
     const tools = slotlockAssistantTools();
     expect(tools.filter((tool) => tool.use === 'read').map((tool) => tool.name).sort()).toEqual([
+      'slotlock_find_available_ranges',
       'slotlock_find_available_slots',
       'slotlock_find_next_available',
       'slotlock_get_event',

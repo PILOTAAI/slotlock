@@ -7,6 +7,157 @@ versioning.
 
 ### Added
 
+- Each hold's payment is kept apart from the hold (new table `hold_payments`, under RLS, erased with
+  the tenant), so `slotlock_mark_hold_paid` with the same payment answers `replayed: true` however
+  the hold ended: confirmed in place or booked as an event. Before, a confirmed hold answered
+  `404 hold_not_found`, which `@slotlock/payments-stripe` with `refundRefused` refunded: a customer
+  reloading the return page, or Stripe redelivering a webhook, got a booked time refunded (found by
+  the security audit). The adapter now refunds only `hold_expired`, `payment_conflict` and
+  `payment_amount_mismatch`.
+- Three integration packages in `packages/` (RFC 0004 P3), each its own process with its own
+  schema and secrets, talking to Slotlock over its API:
+  - `@slotlock/sync` (C1, C4, T2): busy time from Google freeBusy, Microsoft getSchedule and
+    iCalendar URLs, recorded as each source's busy time; confirmed bookings written back to Google
+    and Microsoft calendars, times only. OAuth with PKCE, then a signed page where the tenant's person
+    chooses which calendar blocks which resource; tokens, URLs and keys sealed with AES-256-GCM. A
+    booking changed in the calendar is reported on the feed (`coverage.conflict`), never applied. A
+    provider's 429 or 503 is retried when it says, else with backoff; a feed cursor that expired
+    while the sync was down is recovered by reconciling each calendar with the bookings as they are.
+  - `@slotlock/notify` (C2): confirmations, moves, cancellations and reminders by Postmark,
+    Resend or SES, and Twilio SMS and WhatsApp, each send recorded under its key (change id,
+    channel, recipient) before it is made. Consent per channel; test tenants go to a capture inbox.
+    Recipients are kept only as digests, except an event's attendees, kept sealed until a day after
+    it ends so a cancellation reaches them.
+  - `@slotlock/payments-stripe` (C3, T2): a PaymentIntent read back from the tenant's own Stripe
+    account marks its hold paid, with the amount received; a payment for an expired hold is refused
+    and, if asked, refunded.
+  - Each runs as its own process (`slotlock-sync`, `slotlock-notify`, `slotlock-payments-stripe`,
+    each with `migrate` and `serve`), and `packages/integrations.Dockerfile` builds one image with
+    all three.
+- What integrations build on (RFC 0004 P3, D1's recommendation: core keeps primitives, packages
+  outside it send and sync). Feed type `reminder.due`: maintenance puts each event reminder on the
+  feed once, when it comes due (within the last day, before the event starts), and again if the
+  occurrence moves; `reminders_due` in its answer. A change's `id` is the key a sender sends it
+  once by. Events take `notify` (`slotlock_create_event`'s `notify: false`): no reminders, and a
+  sender tells no one. Reservations take `reminder_minutes` (up to five, minutes before the start),
+  each said once as `reminder.due` for the contact the reservation names, and again if it moves.
+- Contacts (P3, T2): new table `contacts`, the people a booking may name to be told about it, by
+  the tenant's own reference, with email, phone and WhatsApp numbers (E.164), locale and consent
+  per channel. `slotlock_put_contact`, `slotlock_get_contact`, `slotlock_delete_contact`
+  (`/v1/contacts/{contact_ref}`); deleting one also takes its reference off every booking. At most
+  100,000 a tenant. `slotlock_list_contacts` (`GET /v1/contacts`) lists them a page at a time, and
+  each answers `consent_at`: when each channel's answer was given, kept while it stands. The
+  dashboard's Contacts page lists them and forgets one, for an erasure request. Reservations take
+  `contact_ref` and `notify`, both on the feed with each change; neither is ever the person.
+- Holds that wait for payment (RFC 0004 C3, T2): `payment_required` on `slotlock_acquire_hold`
+  (time to live at most 30 minutes). Confirming one answers `409 payment_required` until
+  `slotlock_mark_hold_paid` (`POST /v1/holds/{hold_id}/paid`) records the payment's reference at
+  the integrator's processor: the same reference again answers the same hold, another
+  `payment_conflict`, an expired hold `hold_expired`. New feed type `hold.paid`. Slotlock records
+  payment state and never moves money. A hold may name what the payment must be (`payment`:
+  `amount_minor` and `currency`); `slotlock_mark_hold_paid` then takes what was `received`, and
+  less, or another currency, is `409 payment_amount_mismatch`. Holds answer `payment_amount` and
+  `paid_amount`. Agents' `slotlock_hold_slots` takes `payment_required` and `payment` too.
+- Busy time from calendars that give no events (RFC 0004 C1, T2): `slotlock_put_source_busy`
+  (`PUT /v1/resources/{resource_id}/coverage/{source}/busy`) records a source's coverage of a
+  window and the busy time in it (at most 5,000 intervals, merged), replacing what it said of that
+  window. New table `source_busy`. Every read counts it (free/busy, a resource's busy time,
+  searches and waitlist offers), and every booking Slotlock makes is refused
+  over it (`overlap`). A confirmed booking the source newly reports busy time over is left alone
+  and reported once as `coverage.conflict` (named by `source_id`, never the source). Retiring the
+  source forgets its busy time. `slotlock_report_coverage_conflict`
+  (`POST /v1/resources/{resource_id}/coverage/{source}/conflicts`) lets a calendar sync report a
+  booking it wrote that was moved (`changed_in_calendar`) or removed (`removed_from_calendar`) in
+  the calendar, as `coverage.conflict` with the booking left as it is.
+- Hours that inherit (RFC 0004 B2). The tenant and each location store weekly hours
+  (`setTenantAvailability`, the new `setLocationAvailability`; `PUT /v1/availability`,
+  `PUT /v1/locations/{location}/availability`, `GET /v1/availability`). A resource without its own
+  uses its location's (the nearest up the chain), then the tenant's, then the server's, and a
+  resource added later inherits too. Resources carry `inherited_availability`. The dashboard has
+  "Your hours" and an Hours page for each location; the CLI has `hours set --location`.
+- Closures and special days (RFC 0004 B1, T2): new table `availability_exceptions`, for the tenant,
+  a location (and everything inside it) or one resource. Each replaces whole local days, read in
+  each resource's time zone: `closed` empties them, `open` gives them 1-4 windows of their own.
+  The nearest scope wins on a day. One evaluator (`openWindows`) serves search, pool availability,
+  approval policies' `outside_hours`, and writes under `enforceHours`. At most 5,000 a tenant
+  (`availability_exceptions_limit_reached`). API: list, create and delete under
+  `/v1/availability/exceptions`. Dashboard: a Closures page. CLI: `slotlock closures
+  list|add|delete|import`.
+- Holiday calendars (B1): `slotlock_import_holidays` (`POST /v1/availability/holidays`) and
+  `closures import` close the days an iCalendar file's all-day events cover, recurring ones
+  expanded over a bounded span. `serve` fetches an `https` URL through the guarded fetch (no
+  private addresses, 1 MB, 10 seconds); the store-backed application backend fetches none unless
+  given `holidayFetch`. Each import is a calendar (new table `holiday_calendars`, under RLS, erased
+  with the tenant), kept by name where it applies: its `name`, else its own `X-WR-CALNAME`, else
+  the URL. Importing it again updates its closures and removes those it no longer names in the
+  span (`removed`), so a holiday a calendar dropped goes too; a closure imported before calendars
+  were kept becomes the calendar's that names it. With `subscribe`, the URL is kept and maintenance
+  imports it again every 30 days (`holidayFetch` on `maintainSlotlockTenant` and the scheduler;
+  `serve` and `slotlock maintain` pass the guarded fetch), a failed import keeping its closures,
+  noting why (`last_error`) and trying again a day later. `slotlock_list_holiday_calendars`
+  (`GET /v1/availability/holiday-calendars`) and `slotlock_delete_holiday_calendar`
+  (`DELETE …/{calendar_id}`, its closures with it); closures answer `calendar_id`; at most 50
+  calendars a tenant. The dashboard's Closures page takes a file upload (the form was limited to
+  8 KB, too small for most calendars, and now takes 1 MB), a paste or, where the server fetches
+  them (`serve`, Cloud), an address with "Import it again every 30 days", and lists the calendars
+  with their next import, a failed one's error, and Delete. `closures import` names the calendar
+  with `--label`.
+- Durations and hires (RFC 0004 B3). Booking rules gain `minDurationMinutes`, `maxDurationMinutes`,
+  `allowedDurations` and `defaultDurationMinutes`, and for a booking from one local day to another
+  `pickupTimes` and `returnTimes` (it starts and ends in them, and under `enforceHours` needs only
+  its start and end inside the hours). `turnaroundMinutes` goes up to a week. Refusals:
+  `booking_rule_min_duration`, `booking_rule_max_duration`, `booking_rule_duration_not_allowed`,
+  `booking_rule_pickup_time`, `booking_rule_return_time`. Searches offer only allowed lengths, and
+  take `defaultDurationMinutes` when they name none (`400 duration_required` otherwise).
+  `hoursApply` (`hours_apply`) says how the hours hold a hire: `whole` (all of it) or `ends` (its
+  start and end only), by default `ends` with pick-up or return times, else `whole`. Writes follow
+  it under `enforceHours`; `slotlock_find_available_slots` and `slotlock_find_next_available`
+  follow it always, so with `ends` they offer slots from one day to another, judged as the write
+  would be, and `slotlock_find_available_ranges` judges ranges as the write would where hours are
+  enforced. A pick-up or return refusal comes with alternatives, as other refusals of a time do.
+- Zone rule changes reach everything (RFC 0004 B9): `followZoneRules` also re-checks a recurring
+  series' occurrences to come (each kept with its wall time, reported once as
+  `event.timezone_shifted` with its `recurrence_id`; with `move`, the whole series moves at its
+  next revision in one transaction, each occurrence and its booking keeping its `recurrence_id`,
+  but only where the server's zone rules agree with the database's, else each is reported with
+  `reason: "rules_disagree"`; something in the way keeps its times, said once as
+  `event.timezone_conflict`), and reservations written with the new
+  optional `local_start` (`localStart`), reported as `reservation.timezone_shifted` or, with
+  `move`, moved at the next revision (`reservation.timezone_conflict` when something is in the
+  way). A `local_start` that does not name the reservation's start is `400 invalid_local_start`.
+- Holds across resources (RFC 0004 B7, T2): `slotlock_hold_together` (`POST /v1/slot-holds/together`),
+  the 19th agent tool, holds one time on 2-20 resources all or nothing, as one group whose holds
+  expire together. `slotlock_book_together` takes its `hold_group_id` and books the set from those
+  holds in one transaction. The application API gains `slotlock_tenant_book_together`
+  (`POST /v1/tenant/bundles`) and `slotlock_tenant_book_pool` (`POST /v1/tenant/pool-bookings`), the
+  agents' bundle and pool bookings for the tenant's own systems. Their events are the tenant's
+  (owner `internal`), not the key's: no agent's event quota counts them, and revoking the key
+  leaves them. Approval policies hold them only when they say `include_application: true` (new,
+  false by default), and a grant books them as the tenant's again; a key that `requires_approval`
+  still waits for a person whatever it books.
+- Waitlists that match (RFC 0004 B6): an entry may wait for any slot of a length within its
+  window (`duration_minutes`, `durationMs`), on a resource or a pool, and is offered the earliest
+  free one. Offers end `accepted`, `declined` (new `slotlock_decline_waitlist_offer`,
+  `POST /v1/waitlist/{entry_id}/decline`) or `lapsed`, decided by what becomes of their hold, by a
+  database trigger whatever path takes it. New feed types `waitlist.joined`, `.accepted`,
+  `.declined`, `.lapsed` and `.left`. Entries answer `duration_minutes` and `decided_at`.
+- A written booking lifecycle (RFC 0004 B4, T2): `src/lifecycle.ts` names each status, the move
+  each action makes and the refusal every other gets, and a test holds the store to it. A
+  tombstone keeps why the booking ended (`end_reason`: `cancelled` or `no_show`). New feed types:
+  `reservation.rescheduled` (a move, as well as `reservation.updated`) and `reservation.completed`,
+  which maintenance writes once for each booking whose end passed in the last week
+  (`bookings_completed` in its answer).
+- Cancellation and reschedule policies (RFC 0004 B5, T2): rules `cancelCutoffMinutes` and
+  `rescheduleCutoffMinutes` (`booking_rule_cancel_cutoff`, `booking_rule_reschedule_cutoff`), which
+  an admin may go past with `override_reason`, kept on the tombstone and the feed; and
+  `cancellationFee`, recorded on a late cancellation for the integrator to charge.
+- `slotlock_find_available_ranges` (`GET /v1/available-ranges`), the 18th agent tool: hires across
+  days for named resources or a pool's members, the earliest range on each from a pick-up window,
+  lasting N days or ending in a return window.
+- VAVAILABILITY carries RDATE and EXDATE (B1): the export adds the next year's closures as EXDATEs
+  and special hours as AVAILABLEs with RDATEs. The import reads them, and single AVAILABLEs, as
+  the resource's own exceptions, replacing those an earlier import made.
+
 - **Chats in the dashboard assistant.** Each conversation is a chat a member keeps:
   - it is titled by its first message, at its own address (`<root>/assistant?c=<id>`);
   - chats are listed beside the one shown, most recent first, grouped by day (Today, Yesterday,
@@ -37,6 +188,23 @@ versioning.
 
 ### Changed
 
+- The tenant's hours are stored, not copied onto every resource (RFC 0004 B2), and resources
+  without their own inherit them, those added later too. `storeTenantAvailability` stores them and
+  answers `{ inheriting, ownHours }`. `setTenantAvailability` keeps its 0.8.0 contract, deprecated:
+  every resource uses the hours afterwards, and it answers how many. `PUT /v1/availability` keeps
+  the hours resources have of their own by default; its `override_resources` is `none`, `all`
+  (clear them) or `matching` (clear those the same as the tenant's were or as the new ones: the
+  copies earlier versions made, while hours set apart on purpose stay), as are
+  `hours set --all --override` and `--matching`. It answers `resources_updated` (resources the
+  hours now apply to) and `resources_with_own_hours`. The dashboard's "Your hours" names the
+  resources that keep their own, with the same three choices, and `/resources?hours=own` lists
+  them.
+- `slotlock_run_maintenance` answers `bookings_completed`; the five clients' checks of its keys
+  include it. `slotlock_cancel_reservation` and `slotlock_cancel_tenant_event` answer
+  `cancellation_fee` (null when none).
+- `parseVAvailability` answers `days` as well as `rules`, and no longer refuses RDATE, EXDATE or an
+  AVAILABLE without RRULE.
+
 - **The dashboard assistant's store** (`SlotlockAssistantStore`) keeps chats. `listChats`,
   `getChat`, `putChat`, `renameChat` and `deleteChat` replace `getConversation`,
   `putConversation` and `deleteConversation`, and `settleAction` takes the chat's id. The tenant
@@ -52,6 +220,11 @@ versioning.
   nothing.
 
 ### Fixed
+
+- Enforced hours (`enforceHours`) judged a write inside `withTenant` against no hours when its
+  resource used the server's default (`defaultAvailabilityRules`, `SLOTLOCK_AVAILABILITY` under
+  `serve`): every such booking was refused `booking_rule_outside_hours`. The tenant's store now
+  carries the server's hours.
 
 - **The assistant's chips stream.** "What's on today" and "Find free time" were forms that waited
   for the whole turn and then reloaded the page; they now send through the box, so their reply

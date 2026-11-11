@@ -52,9 +52,16 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
 - A person may add 500 resources, or as many as their plan allows on a hosted server. The
   database holds the cap, so adds racing on any number of servers stop at it; a resource they
   already have can still change time zone.
-- Each resource uses the server's bookable hours (`SLOTLOCK_AVAILABILITY`) until its owner sets its
-  own on the hours page: two windows a day, overnight or all day, or closed. One form sets them for
-  every resource at once.
+- Bookable hours: the person's own ("Your hours"), each location's (from the Locations page) and
+  each resource's, two windows a day, overnight or all day, or closed. A resource without its own
+  inherits its location's, then the person's, then the server's (`SLOTLOCK_AVAILABILITY`). The
+  Closures page lists closures and special days and adds them. It imports a holiday calendar
+  uploaded, pasted or (where the server fetches them) by its address, imported again every 30
+  days if asked, and lists the calendars, each deleted with its closures; importing a calendar
+  again removes the holidays it dropped.
+- The Contacts page lists the people their bookings name to be told about them (kept by their own
+  systems through the API), with the channels each agreed to, and forgets one for an erasure
+  request.
 
 ## Organizations
 

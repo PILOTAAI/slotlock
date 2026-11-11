@@ -467,6 +467,22 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           expiresAt: new Date(Date.now() + HOUR),
         });
         if (!approval.ok) throw new Error(approval.code);
+        // Stored hours and a closure (RFC 0004 B1, B2).
+        await tenant.setLocationAvailability({
+          tenantRef,
+          location: 'depot',
+          rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 540, durationMinutes: 60 }],
+        });
+        await tenant.createAvailabilityException({ tenantRef, location: 'depot', startsOn: '2027-12-25', outcome: 'closed', label: 'Christmas' });
+        // A holiday calendar and the closure it made (RFC 0004 B1).
+        await tenant.importHolidayCalendar({
+          tenantRef,
+          location: 'depot',
+          name: 'Depot holidays',
+          url: 'https://example.com/holidays.ics',
+          holidays: [{ uid: 'boxing-day', startsOn: '2027-12-26', endsOn: '2027-12-26', label: 'Boxing Day' }],
+          span: { from: '2027-01-01', to: '2027-12-31' },
+        });
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',
@@ -494,6 +510,61 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
               revision: 1,
             })
           ).ok,
+        ).toBe(true);
+        // What integrations build on (RFC 0004 P3): a contact, a calendar's busy time, and a
+        // reminder said on the feed.
+        expect((await tenant.putContact({ tenantRef, ref: 'driver-1', email: 'driver@example.com' })).ok).toBe(true);
+        expect(
+          (
+            await tenant.replaceSourceBusy({
+              tenantRef,
+              resourceId,
+              source: 'google:fleet',
+              window: { start: slot(30).start, end: slot(40).end },
+              revision: 1,
+              busy: [slot(31)],
+            })
+          ).ok,
+        ).toBe(true);
+        const soon = Math.floor(Date.now() / 1_000) * 1_000 + 10 * 60_000;
+        const reminded = await tenant.putCalendarEvent({
+          tenantRef,
+          externalRef: 'soon-1',
+          idempotencyKey: 'soon-create',
+          expectedRevision: 0,
+          resourceId,
+          start: new Date(soon),
+          end: new Date(soon + HOUR),
+          timezone: 'UTC',
+          summary: 'Soon',
+          reminders: [{ action: 'display', minutesBeforeStart: 30 }],
+        });
+        if (!reminded.ok) throw new Error(reminded.code);
+        const remindedBooking = await tenant.createExternalReservation({
+          tenantRef,
+          externalRef: 'soon-booking',
+          resourceId,
+          start: new Date(soon + 2 * HOUR),
+          end: new Date(soon + 3 * HOUR),
+          bufferAfterMs: 0,
+          revision: 1,
+          reminderMinutes: [180],
+        });
+        if (!remindedBooking.ok) throw new Error(remindedBooking.code);
+        expect(await tenant.dueReminders({ tenantRef })).toBe(2);
+        // A hold's payment, kept apart from the hold (RFC 0004 C3).
+        const paying = await tenant.acquireHold({
+          tenantRef,
+          resourceId,
+          ...slot(40),
+          ttlMs: 600_000,
+          paymentRequired: true,
+          payment: { amountMinor: 1000, currency: 'GBP' },
+        });
+        if (!paying.ok) throw new Error(paying.code);
+        expect(
+          (await tenant.markHoldPaid({ tenantRef, holdId: paying.hold.id, paymentRef: 'pi_seed', received: { amountMinor: 1000, currency: 'GBP' } }))
+            .ok,
         ).toBe(true);
         return resourceId;
       });

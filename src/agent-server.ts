@@ -195,6 +195,26 @@ function bookPool(
   return backend.bookPool(context, input);
 }
 
+/** `slotlock_hold_together`, from a backend that holds sets (RFC 0004 B7). */
+function holdTogether(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.holdTogether) throw new SlotlockAgentOperationError('holds_unavailable', 409);
+  return backend.holdTogether(context, input);
+}
+
+/** `slotlock_find_available_ranges`, from a backend that searches hires (RFC 0004 B3). */
+function findAvailableRanges(
+  backend: SlotlockAgentCalendarBackend,
+  context: SlotlockAgentInvocationContext,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!backend.findAvailableRanges) throw new SlotlockAgentOperationError('ranges_unavailable', 409);
+  return backend.findAvailableRanges(context, input);
+}
+
 /** `slotlock_get_pool_availability`, from a backend that knows pools, as `holdSlots`. */
 function getPoolAvailability(
   backend: SlotlockAgentCalendarBackend,
@@ -356,6 +376,8 @@ const ALTERNATIVE_REFUSALS: ReadonlySet<string> = new Set([
   'booking_rule_max_advance',
   'booking_rule_slot_step',
   'booking_rule_outside_hours',
+  'booking_rule_pickup_time',
+  'booking_rule_return_time',
 ]);
 /** At most this many alternatives, the earliest first. */
 export const SLOTLOCK_MAX_ALTERNATIVES = 3;
@@ -404,7 +426,8 @@ async function alternativesFor(
       {
         resource_ids: resourceIds,
         start: new Date(from).toISOString(),
-        end: new Date(from + ALTERNATIVES_WINDOW_MS).toISOString(),
+        // Starts over the next seven days, however long the booking runs.
+        end: new Date(from + ALTERNATIVES_WINDOW_MS + durationMs).toISOString(),
         duration_minutes: durationMs / 60_000,
         limit: SLOTLOCK_MAX_ALTERNATIVES,
         ...(want.needed !== undefined ? { require_free: Math.min(want.needed, resourceIds.length) } : {}),
@@ -669,7 +692,9 @@ export type SlotlockAgentOperation =
   | 'slotlock_get_free_busy'
   | 'slotlock_find_next_available'
   | 'slotlock_find_available_slots'
+  | 'slotlock_find_available_ranges'
   | 'slotlock_hold_slots'
+  | 'slotlock_hold_together'
   | 'slotlock_release_slots'
   | 'slotlock_confirm_slot'
   | 'slotlock_reschedule'
@@ -721,7 +746,9 @@ const OPERATION_SCOPES: Readonly<Record<SlotlockAgentOperation, SlotlockAgentSco
   slotlock_get_free_busy: 'read',
   slotlock_find_next_available: 'read',
   slotlock_find_available_slots: 'read',
+  slotlock_find_available_ranges: 'read',
   slotlock_hold_slots: 'write',
+  slotlock_hold_together: 'write',
   slotlock_book_together: 'write',
   slotlock_book_pool: 'write',
   slotlock_get_pool_availability: 'read',
@@ -909,6 +936,15 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. Hold one time on 2-20 resources all or nothing, as one group with one time to live
+   * (`slotlock_hold_together`, RFC 0004 B7), else `holds_unavailable`. `slotlock_book_together`
+   * with its `hold_group_id` books the set.
+   */
+  holdTogether?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   /** Optional. Book any one free member of a pool (`slotlock_book_pool`), else `pools_unavailable`. */
   bookPool?(
     context: SlotlockAgentInvocationContext,
@@ -954,6 +990,21 @@ export interface SlotlockAgentCalendarBackend {
     context: SlotlockAgentInvocationContext,
     input: { resource_id: string; start: string; end: string; duration_minutes: number; limit: number },
   ): Promise<{ slots: { start: string; end: string }[]; certain: boolean }>;
+  /**
+   * Optional. Hires across days (`slotlock_find_available_ranges`, RFC 0004 B3): each resource's, or
+   * each pool member's, earliest range from a pick-up window to a return window, else
+   * `ranges_unavailable`.
+   */
+  findAvailableRanges?(
+    context: SlotlockAgentInvocationContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /**
+   * Optional. The length a search for these resources offers when it is asked for none: their
+   * booking rules' `defaultDurationMinutes` when they all give the same one, else null. Without it,
+   * a search names its length.
+   */
+  defaultDuration?(context: SlotlockAgentInvocationContext, resourceIds: readonly string[]): Promise<number | null>;
 }
 
 /**
@@ -1274,6 +1325,14 @@ const SELECTING_OPERATIONS: ReadonlyMap<SlotlockAgentOperation, number> = new Ma
   ['slotlock_find_available_slots', 20],
 ]);
 const SELECTION_FIELDS = ['location', 'group', 'labels', 'kind', 'pool'] as const;
+/** Searches that take the resources' usual length when they name none. */
+const DEFAULT_LENGTH_OPERATIONS: ReadonlySet<SlotlockAgentOperation> = new Set([
+  'slotlock_find_next_available',
+  'slotlock_find_available_slots',
+]);
+/** The most ranges one search answers. */
+const MAX_LISTED_RANGES = 50;
+const MAX_RANGE_RESOURCES = 100;
 
 /** Whether a search's input names its resources, or selects them, and not both or neither. */
 function selectsOrNames(input: { resource_ids?: unknown }): boolean {
@@ -1373,6 +1432,8 @@ const EVENT_CREATE_INPUT = z
     recurrence_exceptions: z.array(RECURRENCE_EXCEPTION_INPUT).max(500).optional(),
     /** Book the time one of your holds keeps (slotlock_hold_slots); its alternatives are released. */
     hold_id: HOLD_ID.optional(),
+    /** False: no one should be notified about it, nor reminded (RFC 0004 P3). Default true. */
+    notify: z.boolean().optional(),
   })
   .strict()
   .refine((value) => boundedEventSpan(value.starts_at, value.ends_at));
@@ -1484,7 +1545,8 @@ const OPERATION_DEFINITIONS = [
         pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
-        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
+        /** Left out: the resources' usual length (their booking rules' default_duration_minutes). */
+        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES).optional(),
       })
       .strict()
       .refine(selectsOrNames, 'Give resource_ids, or select resources by location, group, labels, kind or pool: one or the other')
@@ -1518,7 +1580,8 @@ const OPERATION_DEFINITIONS = [
         pool: POOL.optional(),
         start: DATE_TIME,
         end: DATE_TIME,
-        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES),
+        /** Left out: the resources' usual length (their booking rules' default_duration_minutes). */
+        duration_minutes: z.number().int().min(1).max(MAX_SLOT_MINUTES).optional(),
         limit: z.number().int().min(1).max(MAX_LISTED_SLOTS).default(10),
         require_free: z.number().int().min(1).max(MAX_SLOT_RESOURCES).optional(),
       })
@@ -1547,6 +1610,60 @@ const OPERATION_DEFINITIONS = [
     risk: { readOnly: true, destructive: false, idempotent: true },
     invoke: findAvailableSlots,
     example: { resource_ids: [EXAMPLE_RESOURCE_ID], ...EXAMPLE_WINDOW, duration_minutes: 60, limit: 10 },
+  },
+  {
+    name: 'slotlock_find_available_ranges',
+    title: 'Find available ranges',
+    description:
+      'Find hires across days, such as a car from Friday to Monday: for each resource named, or each member of a pool, the earliest range that starts between pickup_start and pickup_end and either lasts `days` days (ending at the same local time) or ends between return_start and return_end. Each range is free throughout with its buffers, allowed by the resource\'s booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless every resource\'s coverage is certain. Book one with slotlock_create_event, or a pool\'s with slotlock_book_pool, at its start and end.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(1).max(MAX_SLOT_RESOURCES).optional(),
+        pool: POOL.optional(),
+        pickup_start: DATE_TIME,
+        pickup_end: DATE_TIME,
+        days: z.number().int().min(1).max(366).optional(),
+        return_start: DATE_TIME.optional(),
+        return_end: DATE_TIME.optional(),
+        limit: z.number().int().min(1).max(MAX_LISTED_RANGES).default(10),
+      })
+      .strict()
+      .refine((value) => (value.resource_ids !== undefined) !== (value.pool !== undefined), 'Give resource_ids or pool, one of them')
+      .refine(
+        (value) =>
+          value.days !== undefined
+            ? value.return_start === undefined && value.return_end === undefined
+            : value.return_start !== undefined && value.return_end !== undefined,
+        'Give days, or return_start and return_end',
+      )
+      .refine((value) => {
+        const pickupStart = Date.parse(value.pickup_start);
+        const pickupEnd = Date.parse(value.pickup_end);
+        const last =
+          value.days !== undefined ? pickupEnd + (value.days + 1) * 86_400_000 : Date.parse(value.return_end ?? '');
+        const returnStart = value.return_start === undefined ? pickupStart : Date.parse(value.return_start);
+        return pickupEnd >= pickupStart && last >= returnStart && last - pickupStart <= MAX_AGENT_WINDOW_MS;
+      }, 'The windows must run forward, within the longest window a search reads'),
+    output: z
+      .object({
+        ranges: z
+          .array(z.object({ resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME }).strict())
+          .max(MAX_LISTED_RANGES),
+        coverage: COVERAGE,
+        /** The pool's members searched, when the call named a pool. */
+        selected_resource_ids: z.array(RESOURCE_ID).max(MAX_RANGE_RESOURCES).optional(),
+      })
+      .strict(),
+    risk: { readOnly: true, destructive: false, idempotent: true },
+    invoke: findAvailableRanges,
+    example: {
+      pool: 'compact-car',
+      pickup_start: '2027-03-05T09:00:00Z',
+      pickup_end: '2027-03-05T12:00:00Z',
+      return_start: '2027-03-08T09:00:00Z',
+      return_end: '2027-03-08T12:00:00Z',
+      limit: 5,
+    },
   },
   {
     name: 'slotlock_create_event',
@@ -1625,7 +1742,7 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_book_together',
     title: 'Book resources together',
     description:
-      'Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.',
+      'Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. With hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry with the same idempotency_key answers the same events.',
     input: z
       .object({
         resource_ids: z.array(RESOURCE_ID).min(2).max(MAX_SLOT_RESOURCES),
@@ -1633,6 +1750,8 @@ const OPERATION_DEFINITIONS = [
         ends_at: DATE_TIME,
         timezone: z.string().min(1).max(100),
         title: z.string().trim().min(1).max(500).optional(),
+        /** The set slotlock_hold_together held, booked from its holds (RFC 0004 B7). */
+        hold_group_id: z.string().uuid().optional(),
         idempotency_key: IDEMPOTENCY_KEY,
       })
       .strict()
@@ -1775,7 +1894,7 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_hold_slots',
     title: 'Hold candidate slots',
     description:
-      'Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.',
+      'Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. With payment_required, a hold is booked only once the system you book for records its payment (the person pays there): booking it before then answers payment_required, so send the person to pay and try again. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.',
     input: z
       .object({
         slots: z
@@ -1789,8 +1908,19 @@ const OPERATION_DEFINITIONS = [
           .max(5),
         ttl_seconds: z.number().int().min(30).max(900).default(300),
         idempotency_key: IDEMPOTENCY_KEY,
+        /** Booked only once the integrator records its payment (RFC 0004 C3). */
+        payment_required: z.boolean().optional(),
+        /** What that payment must be, in the currency's minor unit. */
+        payment: z
+          .object({ amount_minor: z.number().int().min(0).max(1_000_000_000_000), currency: z.string().regex(/^[A-Z]{3}$/) })
+          .strict()
+          .optional(),
       })
-      .strict(),
+      .strict()
+      .refine((value) => value.payment === undefined || value.payment_required === true, {
+        message: 'payment needs payment_required',
+        path: ['payment'],
+      }),
     output: z
       .object({
         group_id: HOLD_ID,
@@ -1803,6 +1933,12 @@ const OPERATION_DEFINITIONS = [
                 start: DATE_TIME,
                 end: DATE_TIME,
                 expires_at: DATE_TIME,
+                payment_required: z.literal(true).optional(),
+                payment_amount: z
+                  .object({ amount_minor: z.number().int().min(0), currency: z.string().regex(/^[A-Z]{3}$/) })
+                  .strict()
+                  .nullable()
+                  .optional(),
               })
               .strict(),
           )
@@ -1830,6 +1966,45 @@ const OPERATION_DEFINITIONS = [
       ],
       ttl_seconds: 300,
       idempotency_key: 'hold-handover-2027-03-02',
+    },
+  },
+  {
+    name: 'slotlock_hold_together',
+    title: 'Hold resources together',
+    description:
+      'Hold one time on 2-20 resources at once, all or none, such as a car with its driver while a person decides: if any is taken, nothing is held and the refusal names that resource_id. The holds are one group with one time to live (ttl_seconds, the earliest of them). Book the set with slotlock_book_together and its hold_group_id; release them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the same holds.',
+    input: z
+      .object({
+        resource_ids: z.array(RESOURCE_ID).min(2).max(MAX_SLOT_RESOURCES),
+        start: DATE_TIME,
+        end: DATE_TIME,
+        ttl_seconds: z.number().int().min(30).max(900).default(300),
+        idempotency_key: IDEMPOTENCY_KEY,
+      })
+      .strict()
+      .refine(boundedAgentWindow),
+    output: z
+      .object({
+        group_id: z.string().uuid(),
+        holds: z
+          .array(
+            z
+              .object({ hold_id: z.string().uuid(), resource_id: RESOURCE_ID, start: DATE_TIME, end: DATE_TIME, expires_at: DATE_TIME })
+              .strict(),
+          )
+          .min(2)
+          .max(MAX_SLOT_RESOURCES),
+        expires_at: DATE_TIME,
+      })
+      .strict(),
+    risk: { readOnly: false, destructive: false, idempotent: true },
+    invoke: holdTogether,
+    example: {
+      resource_ids: [EXAMPLE_RESOURCE_ID, '3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f'],
+      start: '2027-03-02T09:00:00Z',
+      end: '2027-03-02T17:00:00Z',
+      ttl_seconds: 300,
+      idempotency_key: 'hold-van-and-driver-1',
     },
   },
   {
@@ -2483,6 +2658,14 @@ export async function invokeSlotlockAgentOperation(args: {
         Object.entries(input).filter(([key]) => !(SELECTION_FIELDS as readonly string[]).includes(key)),
       );
       input.resource_ids = selected;
+    }
+    // A search that names no length takes the resources' usual one (RFC 0004 B3).
+    if (DEFAULT_LENGTH_OPERATIONS.has(operation.name) && input.duration_minutes === undefined) {
+      const usual = backend.defaultDuration
+        ? await backend.defaultDuration(context, (input.resource_ids ?? []) as string[])
+        : null;
+      if (usual === null) return { ok: false, status: 400, code: 'duration_required' };
+      input = { ...input, duration_minutes: usual };
     }
     const asked = input;
     recover = (code) => alternativesForRefusal(backend, context, operation.name, asked, code);

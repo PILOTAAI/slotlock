@@ -70,7 +70,7 @@ describe('Slotlock with the official A2A JavaScript SDK', () => {
     const card = AgentCard.fromJSON(raw);
 
     expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
-    expect(card.skills).toHaveLength(18);
+    expect(card.skills).toHaveLength(20);
     expect(card.capabilities).toMatchObject({ streaming: true, pushNotifications: false });
     expect(card.skills.at(-1)?.id).toBe(WATCH_SKILL);
     for (const skill of card.skills) {

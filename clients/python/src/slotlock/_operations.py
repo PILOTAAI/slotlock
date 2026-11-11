@@ -43,10 +43,24 @@ OPERATIONS: dict[str, Operation] = {
         (),
         ("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes", "limit", "require_free"),
     ),
+    "slotlock_find_available_ranges": Operation(
+        "slotlock_find_available_ranges",
+        "GET",
+        "/v1/available-ranges",
+        (),
+        ("resource_ids", "pool", "pickup_start", "pickup_end", "days", "return_start", "return_end", "limit"),
+    ),
     "slotlock_hold_slots": Operation(
         "slotlock_hold_slots",
         "POST",
         "/v1/slot-holds",
+        (),
+        (),
+    ),
+    "slotlock_hold_together": Operation(
+        "slotlock_hold_together",
+        "POST",
+        "/v1/slot-holds/together",
         (),
         (),
     ),
@@ -337,12 +351,68 @@ OPERATIONS: dict[str, Operation] = {
         ("event_id",),
         ("limit", "before"),
     ),
+    "slotlock_get_availability_defaults": Operation(
+        "slotlock_get_availability_defaults",
+        "GET",
+        "/v1/availability",
+        (),
+        (),
+    ),
     "slotlock_set_tenant_availability": Operation(
         "slotlock_set_tenant_availability",
         "PUT",
         "/v1/availability",
         (),
         (),
+    ),
+    "slotlock_set_location_availability": Operation(
+        "slotlock_set_location_availability",
+        "PUT",
+        "/v1/locations/{location}/availability",
+        ("location",),
+        (),
+    ),
+    "slotlock_list_availability_exceptions": Operation(
+        "slotlock_list_availability_exceptions",
+        "GET",
+        "/v1/availability/exceptions",
+        (),
+        ("resource_id", "location", "from", "to", "limit", "after"),
+    ),
+    "slotlock_create_availability_exception": Operation(
+        "slotlock_create_availability_exception",
+        "POST",
+        "/v1/availability/exceptions",
+        (),
+        (),
+    ),
+    "slotlock_delete_availability_exception": Operation(
+        "slotlock_delete_availability_exception",
+        "DELETE",
+        "/v1/availability/exceptions/{exception_id}",
+        ("exception_id",),
+        ("dry_run",),
+    ),
+    "slotlock_import_holidays": Operation(
+        "slotlock_import_holidays",
+        "POST",
+        "/v1/availability/holidays",
+        (),
+        (),
+    ),
+    "slotlock_list_holiday_calendars": Operation(
+        "slotlock_list_holiday_calendars",
+        "GET",
+        "/v1/availability/holiday-calendars",
+        (),
+        (),
+    ),
+    "slotlock_delete_holiday_calendar": Operation(
+        "slotlock_delete_holiday_calendar",
+        "DELETE",
+        "/v1/availability/holiday-calendars/{calendar_id}",
+        ("calendar_id",),
+        ("dry_run",),
     ),
     "slotlock_acquire_hold": Operation(
         "slotlock_acquire_hold",
@@ -379,6 +449,13 @@ OPERATIONS: dict[str, Operation] = {
         ("hold_id",),
         (),
     ),
+    "slotlock_mark_hold_paid": Operation(
+        "slotlock_mark_hold_paid",
+        "POST",
+        "/v1/holds/{hold_id}/paid",
+        ("hold_id",),
+        (),
+    ),
     "slotlock_get_reservation": Operation(
         "slotlock_get_reservation",
         "GET",
@@ -398,7 +475,7 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/reservations/{reservation_ref}",
         ("reservation_ref",),
-        ("revision", "dry_run"),
+        ("revision", "override_reason", "dry_run"),
     ),
     "slotlock_list_reservations": Operation(
         "slotlock_list_reservations",
@@ -413,6 +490,34 @@ OPERATIONS: dict[str, Operation] = {
         "/v1/reservations/{reservation_ref}/check-in",
         ("reservation_ref",),
         (),
+    ),
+    "slotlock_get_contact": Operation(
+        "slotlock_get_contact",
+        "GET",
+        "/v1/contacts/{contact_ref}",
+        ("contact_ref",),
+        (),
+    ),
+    "slotlock_put_contact": Operation(
+        "slotlock_put_contact",
+        "PUT",
+        "/v1/contacts/{contact_ref}",
+        ("contact_ref",),
+        (),
+    ),
+    "slotlock_delete_contact": Operation(
+        "slotlock_delete_contact",
+        "DELETE",
+        "/v1/contacts/{contact_ref}",
+        ("contact_ref",),
+        ("dry_run",),
+    ),
+    "slotlock_list_contacts": Operation(
+        "slotlock_list_contacts",
+        "GET",
+        "/v1/contacts",
+        (),
+        ("limit", "cursor"),
     ),
     "slotlock_list_waitlist": Operation(
         "slotlock_list_waitlist",
@@ -435,6 +540,13 @@ OPERATIONS: dict[str, Operation] = {
         ("entry_id",),
         ("dry_run",),
     ),
+    "slotlock_decline_waitlist_offer": Operation(
+        "slotlock_decline_waitlist_offer",
+        "POST",
+        "/v1/waitlist/{entry_id}/decline",
+        ("entry_id",),
+        (),
+    ),
     "slotlock_record_coverage": Operation(
         "slotlock_record_coverage",
         "PUT",
@@ -448,6 +560,20 @@ OPERATIONS: dict[str, Operation] = {
         "/v1/resources/{resource_id}/coverage/{source}",
         ("resource_id", "source"),
         ("dry_run",),
+    ),
+    "slotlock_put_source_busy": Operation(
+        "slotlock_put_source_busy",
+        "PUT",
+        "/v1/resources/{resource_id}/coverage/{source}/busy",
+        ("resource_id", "source"),
+        (),
+    ),
+    "slotlock_report_coverage_conflict": Operation(
+        "slotlock_report_coverage_conflict",
+        "POST",
+        "/v1/resources/{resource_id}/coverage/{source}/conflicts",
+        ("resource_id", "source"),
+        (),
     ),
     "slotlock_get_coverage": Operation(
         "slotlock_get_coverage",
@@ -482,13 +608,27 @@ OPERATIONS: dict[str, Operation] = {
         "DELETE",
         "/v1/tenant/events/{event_id}",
         ("event_id",),
-        ("expected_revision", "expected_resource_id", "idempotency_key", "dry_run"),
+        ("expected_revision", "expected_resource_id", "idempotency_key", "override_reason", "dry_run"),
     ),
     "slotlock_export_tenant_event": Operation(
         "slotlock_export_tenant_event",
         "GET",
         "/v1/tenant/events/{event_id}/jscalendar",
         ("event_id",),
+        (),
+    ),
+    "slotlock_tenant_book_together": Operation(
+        "slotlock_tenant_book_together",
+        "POST",
+        "/v1/tenant/bundles",
+        (),
+        (),
+    ),
+    "slotlock_tenant_book_pool": Operation(
+        "slotlock_tenant_book_pool",
+        "POST",
+        "/v1/tenant/pool-bookings",
+        (),
         (),
     ),
     "slotlock_get_tenant": Operation(
@@ -860,13 +1000,13 @@ class Operations(Transport):
         *,
         start: str,
         end: str,
-        duration_minutes: int,
         resource_ids: list[str] | None = None,
         location: str | None = None,
         group: str | None = None,
         labels: list[str] | None = None,
         kind: str | None = None,
         pool: str | None = None,
+        duration_minutes: int | None = None,
     ) -> dict[str, Any]:
         """Find next available interval.
 
@@ -874,7 +1014,7 @@ class Operations(Transport):
         367-day search window, so a multi-month rental slot can be found). Name the resources with
         resource_ids, or select them as slotlock_get_free_busy does: at most 100.
         """
-        values: dict[str, Any] = {"start": start, "end": end, "duration_minutes": duration_minutes}
+        values: dict[str, Any] = {"start": start, "end": end}
         if resource_ids is not None:
             values["resource_ids"] = resource_ids
         if location is not None:
@@ -887,6 +1027,8 @@ class Operations(Transport):
             values["kind"] = kind
         if pool is not None:
             values["pool"] = pool
+        if duration_minutes is not None:
+            values["duration_minutes"] = duration_minutes
         return self.call("slotlock_find_next_available", values)
 
     def find_available_slots(
@@ -894,13 +1036,13 @@ class Operations(Transport):
         *,
         start: str,
         end: str,
-        duration_minutes: int,
         resource_ids: list[str] | None = None,
         location: str | None = None,
         group: str | None = None,
         labels: list[str] | None = None,
         kind: str | None = None,
         pool: str | None = None,
+        duration_minutes: int | None = None,
         limit: int | None = None,
         require_free: int | None = None,
     ) -> dict[str, Any]:
@@ -914,7 +1056,7 @@ class Operations(Transport):
         every resource's coverage is certain. Name the resources with resource_ids, or select them
         as slotlock_get_free_busy does: at most 20.
         """
-        values: dict[str, Any] = {"start": start, "end": end, "duration_minutes": duration_minutes}
+        values: dict[str, Any] = {"start": start, "end": end}
         if resource_ids is not None:
             values["resource_ids"] = resource_ids
         if location is not None:
@@ -927,11 +1069,51 @@ class Operations(Transport):
             values["kind"] = kind
         if pool is not None:
             values["pool"] = pool
+        if duration_minutes is not None:
+            values["duration_minutes"] = duration_minutes
         if limit is not None:
             values["limit"] = limit
         if require_free is not None:
             values["require_free"] = require_free
         return self.call("slotlock_find_available_slots", values)
+
+    def find_available_ranges(
+        self,
+        *,
+        pickup_start: str,
+        pickup_end: str,
+        resource_ids: list[str] | None = None,
+        pool: str | None = None,
+        days: int | None = None,
+        return_start: str | None = None,
+        return_end: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Find available ranges.
+
+        Find hires across days, such as a car from Friday to Monday: for each resource named, or
+        each member of a pool, the earliest range that starts between pickup_start and pickup_end
+        and either lasts `days` days (ending at the same local time) or ends between return_start
+        and return_end. Each range is free throughout with its buffers, allowed by the resource's
+        booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside
+        its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless
+        every resource's coverage is certain. Book one with slotlock_create_event, or a pool's
+        with slotlock_book_pool, at its start and end.
+        """
+        values: dict[str, Any] = {"pickup_start": pickup_start, "pickup_end": pickup_end}
+        if resource_ids is not None:
+            values["resource_ids"] = resource_ids
+        if pool is not None:
+            values["pool"] = pool
+        if days is not None:
+            values["days"] = days
+        if return_start is not None:
+            values["return_start"] = return_start
+        if return_end is not None:
+            values["return_end"] = return_end
+        if limit is not None:
+            values["limit"] = limit
+        return self.call("slotlock_find_available_ranges", values)
 
     def hold_slots(
         self,
@@ -939,6 +1121,8 @@ class Operations(Transport):
         slots: list[dict[str, Any]],
         idempotency_key: str,
         ttl_seconds: int | None = None,
+        payment_required: bool | None = None,
+        payment: dict[str, Any] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Hold candidate slots.
@@ -946,9 +1130,11 @@ class Operations(Transport):
         Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses,
         as alternatives in one group: each free one is held, the others are listed with why not.
         Book one by passing its hold_id to slotlock_create_event, which releases the rest;
-        unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at
-        once. A candidate refused for its time comes with alternatives (the earliest free times of
-        its length). slotlock_confirm_slot books a held time.
+        unbooked holds expire on their own. With payment_required, a hold is booked only once the
+        system you book for records its payment (the person pays there): booking it before then
+        answers payment_required, so send the person to pay and try again. A hold is yours alone,
+        and you may have 20 live at once. A candidate refused for its time comes with alternatives
+        (the earliest free times of its length). slotlock_confirm_slot books a held time.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -959,9 +1145,50 @@ class Operations(Transport):
         values: dict[str, Any] = {"slots": slots, "idempotency_key": idempotency_key}
         if ttl_seconds is not None:
             values["ttl_seconds"] = ttl_seconds
+        if payment_required is not None:
+            values["payment_required"] = payment_required
+        if payment is not None:
+            values["payment"] = payment
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_hold_slots", values)
+
+    def hold_together(
+        self,
+        *,
+        resource_ids: list[str],
+        start: str,
+        end: str,
+        idempotency_key: str,
+        ttl_seconds: int | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Hold resources together.
+
+        Hold one time on 2-20 resources at once, all or none, such as a car with its driver while
+        a person decides: if any is taken, nothing is held and the refusal names that resource_id.
+        The holds are one group with one time to live (ttl_seconds, the earliest of them). Book
+        the set with slotlock_book_together and its hold_group_id; release them with
+        slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the
+        same holds.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "start": start,
+            "end": end,
+            "idempotency_key": idempotency_key,
+        }
+        if ttl_seconds is not None:
+            values["ttl_seconds"] = ttl_seconds
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_hold_together", values)
 
     def book_together(
         self,
@@ -972,13 +1199,15 @@ class Operations(Transport):
         timezone: str,
         idempotency_key: str,
         title: str | None = None,
+        hold_group_id: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book resources together.
 
         Book the same time on 2-20 resources at once, all or none: a van with its driver, a room
         with its projector. If any of them is taken, nothing is booked, and the refusal names that
-        resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry
+        resource_id. Find such a time with slotlock_find_available_slots and require_free. With
+        hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry
         with the same idempotency_key answers the same events.
 
         Args:
@@ -996,6 +1225,8 @@ class Operations(Transport):
         }
         if title is not None:
             values["title"] = title
+        if hold_group_id is not None:
+            values["hold_group_id"] = hold_group_id
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_book_together", values)
@@ -1145,6 +1376,7 @@ class Operations(Transport):
         reminders: list[dict[str, Any]] | None = None,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
         hold_id: str | None = None,
+        notify: bool | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create resource event.
@@ -1191,6 +1423,8 @@ class Operations(Transport):
             values["recurrence_exceptions"] = recurrence_exceptions
         if hold_id is not None:
             values["hold_id"] = hold_id
+        if notify is not None:
+            values["notify"] = notify
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_create_event", values)
@@ -1692,9 +1926,10 @@ class Operations(Transport):
     ) -> dict[str, Any]:
         """Set a resource's bookable hours.
 
-        Give one resource its own weekly bookable hours. `null` makes it use the server's default;
-        `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone:
-        start_minutes after midnight, lasting duration_minutes.
+        Give one resource its own weekly bookable hours. `null` makes it inherit: its location's
+        hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it
+        never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes
+        after midnight, lasting duration_minutes.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1710,9 +1945,11 @@ class Operations(Transport):
     def export_resource_availability(self, resource_id: str) -> dict[str, Any]:
         """Export a resource's bookable hours as iCalendar.
 
-        One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a
-        calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA
-        time zone. `null` when the resource uses the server's default.
+        The weekly bookable hours that apply to one resource (its own, or those it inherits) as an
+        iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per
+        rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of
+        the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE
+        with RDATEs gives a day its own hours. `null` when the resource uses the server's default.
         """
         values: dict[str, Any] = {"resource_id": resource_id}
         return self.call("slotlock_export_resource_availability", values)
@@ -1728,9 +1965,11 @@ class Operations(Transport):
 
         Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953),
         as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with
-        a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID)
-        or floating. 400 invalid_availability names what weekly hours cannot say: a bounded
-        VAVAILABILITY, RDATE, EXDATE, a single window, another zone.
+        a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the
+        resource's exceptions, replacing those an earlier import made: each day they name keeps
+        the windows left on it, or is closed with none. Times must be in the resource's time zone
+        (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded
+        VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1754,11 +1993,15 @@ class Operations(Transport):
 
         Set what a booking on one resource must satisfy from now on: minimum notice, how far
         ahead, the step starts fall on (from local midnight in the resource's time zone, offset by
-        step_offset_minutes), the time kept free before and after each booking, and whether
-        bookings must lie inside its hours. `null` clears them. A rule it does not set comes from
-        its pool's or the tenant's defaults (slotlock_set_pool_booking_rules,
-        slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are
-        refused with the rule they break; searches offer only what they allow.
+        step_offset_minutes), the time kept free before and after each booking (turnaround up to a
+        week), whether bookings must lie inside its hours, how long a booking may be
+        (min_duration_minutes, max_duration_minutes, allowed_durations, and
+        default_duration_minutes for a search that names no length), and for a booking from one
+        local day to another, the pickup_times it starts in and the return_times it ends in.
+        `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults
+        (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations,
+        moves and agents' events are refused with the rule they break; searches offer only what
+        they allow.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1975,17 +2218,34 @@ class Operations(Transport):
             values["before"] = before
         return self.call("slotlock_get_tenant_event_history", values)
 
+    def get_availability_defaults(self) -> dict[str, Any]:
+        """Read stored bookable hours.
+
+        The tenant's stored weekly hours (`null` when it uses the server's default) and each
+        location's that has its own. A resource without its own uses its location's, the nearest
+        up the chain, then the tenant's, then the server's.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_get_availability_defaults", values)
+
     def set_tenant_availability(
         self,
         *,
         rules: list[dict[str, Any]] | None,
+        override_resources: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
-        """Set every resource's bookable hours.
+        """Set the tenant's bookable hours.
 
-        Set the weekly bookable hours of every resource the tenant has, as
-        slotlock_set_resource_availability does for one. `null` makes them all use the server's
-        default. Returns how many resources changed.
+        Store the tenant's weekly bookable hours: every resource without hours of its own, and
+        with no location hours above it, uses them, resources added later too. `null` hands them
+        back to the server's default. Nothing is copied: a resource with its own hours keeps them
+        (override_resources none, the default), unless override_resources is all, which clears
+        them so every resource inherits, or matching, which clears only those whose hours are the
+        same as the tenant's were before or as these: the copies versions up to 0.8.0 made when
+        setting the tenant's hours, while hours set apart on purpose stay. resources_updated
+        counts the resources in use these hours now apply to; resources_with_own_hours, those that
+        keep their own.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1994,9 +2254,219 @@ class Operations(Transport):
             refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"rules": rules}
+        if override_resources is not None:
+            values["override_resources"] = override_resources
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_set_tenant_availability", values)
+
+    def set_location_availability(
+        self,
+        location: str,
+        *,
+        rules: list[dict[str, Any]] | None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Set a location's bookable hours.
+
+        Store a location's weekly bookable hours, each read in a resource's own time zone:
+        resources at it, or at a location inside it, without hours of their own use them, unless a
+        location nearer them has its own. `null` clears them, so they inherit from further up. 404
+        location_not_found for a location the tenant does not have.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"location": location, "rules": rules}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_set_location_availability", values)
+
+    def list_availability_exceptions(
+        self,
+        *,
+        resource_id: str | None = None,
+        location: str | None = None,
+        from_: str | None = None,
+        to: str | None = None,
+        limit: int | None = None,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """List closures and special hours.
+
+        The tenant's exceptions to its weekly hours, by first day: with resource_id, those that
+        apply to that resource (the tenant's, its locations' and its own); with location, that
+        location's own; else all of them. from and to keep those that reach the days between. At
+        most limit (1-1,000, default 100); next is the cursor for after.
+        """
+        values: dict[str, Any] = {}
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if location is not None:
+            values["location"] = location
+        if from_ is not None:
+            values["from"] = from_
+        if to is not None:
+            values["to"] = to
+        if limit is not None:
+            values["limit"] = limit
+        if after is not None:
+            values["after"] = after
+        return self.call("slotlock_list_availability_exceptions", values)
+
+    def create_availability_exception(
+        self,
+        *,
+        starts_on: str,
+        outcome: str,
+        label: str,
+        location: str | None = None,
+        resource_id: str | None = None,
+        ends_on: str | None = None,
+        hours: list[dict[str, Any]] | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Add a closure or special hours.
+
+        Close whole days, or give them hours of their own, for the whole tenant, one location (and
+        every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367
+        days) are local days, read in each resource's time zone. outcome closed empties those
+        days; open replaces their weekly hours with hours (1-4 windows of start_minutes and
+        duration_minutes). Where several apply to a day, the nearest wins: the resource's own,
+        then its location's from the innermost out, then the tenant's. Search leaves the days as
+        they say; a write is refused outside_hours only under the enforce_hours booking rule. 409
+        availability_exceptions_limit_reached past 5,000 a tenant.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"starts_on": starts_on, "outcome": outcome, "label": label}
+        if location is not None:
+            values["location"] = location
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if ends_on is not None:
+            values["ends_on"] = ends_on
+        if hours is not None:
+            values["hours"] = hours
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_create_availability_exception", values)
+
+    def delete_availability_exception(
+        self,
+        exception_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Delete a closure or special hours.
+
+        Remove an exception: its days read as the weekly hours again. 404
+        availability_exception_not_found.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"exception_id": exception_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_availability_exception", values)
+
+    def import_holidays(
+        self,
+        *,
+        icalendar: str | None = None,
+        url: str | None = None,
+        name: str | None = None,
+        subscribe: bool | None = None,
+        location: str | None = None,
+        resource_id: str | None = None,
+        from_: str | None = None,
+        to: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Import a holiday calendar.
+
+        Close the days an iCalendar holiday calendar names, for the whole tenant, one location or
+        one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10
+        seconds; private addresses refused). Each all-day event closes the days it covers, and
+        each occurrence of a recurring one within from to to (default today to two years on, at
+        most three years); timed and cancelled events are skipped. The calendar is kept by name at
+        its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
+        Holidays): importing it again updates its closures instead of adding more, and deletes the
+        ones it made that it no longer names within the span (removed), so a holiday it dropped
+        goes too. With subscribe (and a url), the server keeps the url and imports it again every
+        30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+        invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
+        the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {}
+        if icalendar is not None:
+            values["icalendar"] = icalendar
+        if url is not None:
+            values["url"] = url
+        if name is not None:
+            values["name"] = name
+        if subscribe is not None:
+            values["subscribe"] = subscribe
+        if location is not None:
+            values["location"] = location
+        if resource_id is not None:
+            values["resource_id"] = resource_id
+        if from_ is not None:
+            values["from"] = from_
+        if to is not None:
+            values["to"] = to
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_import_holidays", values)
+
+    def list_holiday_calendars(self) -> dict[str, Any]:
+        """List holiday calendars.
+
+        The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each
+        with its scope, how many closures it made, and for a subscription its url, when it was
+        last imported, when it will be again, and why the last import failed if it did.
+        """
+        values: dict[str, Any] = {}
+        return self.call("slotlock_list_holiday_calendars", values)
+
+    def delete_holiday_calendar(
+        self,
+        calendar_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Delete a holiday calendar.
+
+        Delete a holiday calendar and every closure it made, and stop importing it again. deleted
+        is false when the tenant has no such calendar; closures counts those deleted with it.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"calendar_id": calendar_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_holiday_calendar", values)
 
     def acquire_hold(
         self,
@@ -2008,6 +2478,8 @@ class Operations(Transport):
         source: str | None = None,
         idempotency_key: str | None = None,
         buffer_after_minutes: int | None = None,
+        payment_required: bool | None = None,
+        payment: dict[str, Any] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Hold time.
@@ -2015,10 +2487,13 @@ class Operations(Transport):
         Occupy a window without booking it, for example while a customer pays. The hold blocks
         every other booking until it expires (the database clock, ttl_seconds from now), is
         confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and
-        a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key
-        (the Idempotency-Key header or idempotency_key), a retry answers the hold the first
-        request made, until that hold would have expired, is released or is confirmed; the same
-        key with another request is 422 idempotency_conflict.
+        a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be
+        confirmed until slotlock_mark_hold_paid records the payment, which must be at least
+        payment (amount_minor in the minor unit of its currency, and the currency) when given:
+        Slotlock records payment state and never moves money. A taken window answers 409 overlap.
+        With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers
+        the hold the first request made, until that hold would have expired, is released or is
+        confirmed; the same key with another request is 422 idempotency_conflict.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
@@ -2041,6 +2516,10 @@ class Operations(Transport):
             values["idempotency_key"] = idempotency_key
         if buffer_after_minutes is not None:
             values["buffer_after_minutes"] = buffer_after_minutes
+        if payment_required is not None:
+            values["payment_required"] = payment_required
+        if payment is not None:
+            values["payment"] = payment
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_acquire_hold", values)
@@ -2097,7 +2576,8 @@ class Operations(Transport):
         revision 1: move or cancel it with the reservation routes by that reference (DELETE
         /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same
         reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or
-        unknown one, 404 hold_not_found.
+        unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409
+        payment_required.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2109,6 +2589,40 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_confirm_hold", values)
+
+    def mark_hold_paid(
+        self,
+        hold_id: str,
+        *,
+        payment_ref: str,
+        received: dict[str, Any] | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Record a hold as paid.
+
+        Record that a hold made with payment_required is paid, by the payment's reference at your
+        processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then
+        be confirmed. Slotlock records payment state and never moves money. The same reference
+        again answers the same hold (replayed: true), whatever became of it since (confirmed,
+        booked as an event, expired): the payment is kept apart from the hold. Another reference
+        answers 409 payment_conflict. When the hold names its payment, received must be at least
+        that amount in that currency (409 payment_amount_mismatch). The feed says so (hold.paid).
+        A hold that does not wait for payment answers 409 payment_not_required; one that expired
+        before it was paid, 409 hold_expired (refund the payment: its time may be someone else's);
+        one released before it was paid, or unknown, 404 hold_not_found.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"hold_id": hold_id, "payment_ref": payment_ref}
+        if received is not None:
+            values["received"] = received
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_mark_hold_paid", values)
 
     def get_reservation(self, reservation_ref: str) -> dict[str, Any]:
         """Get a reservation.
@@ -2130,6 +2644,11 @@ class Operations(Transport):
         revision: int,
         buffer_after_minutes: int | None = None,
         source: str | None = None,
+        override_reason: str | None = None,
+        local_start: str | None = None,
+        contact_ref: str | None = None,
+        notify: bool | None = None,
+        reminder_minutes: list[int] | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book or move a reservation.
@@ -2137,7 +2656,16 @@ class Operations(Transport):
         Book the reservation with this reference (revision 1), or move it (the next revision: the
         current one plus 1). Sending the same reservation at its current revision again changes
         nothing (replayed: true). A taken window answers 409 overlap and leaves a moved
-        reservation where it was. buffer_after_minutes keeps the time after it busy as well.
+        reservation where it was. buffer_after_minutes keeps the time after it busy as well. A
+        move past the resource's reschedule cutoff answers 409 booking_rule_reschedule_cutoff
+        unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in
+        the resource's zone) records the wall time it is booked for: it must name start, and if
+        time zone rules later move that wall time to another instant, maintenance says so
+        (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise.
+        contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to
+        tell no one; both are on the feed with each change, as sent with each revision.
+        reminder_minutes (up to five, distinct) puts reminder.due on the feed that long before its
+        start, once each, and again if it moves.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2156,6 +2684,16 @@ class Operations(Transport):
             values["buffer_after_minutes"] = buffer_after_minutes
         if source is not None:
             values["source"] = source
+        if override_reason is not None:
+            values["override_reason"] = override_reason
+        if local_start is not None:
+            values["local_start"] = local_start
+        if contact_ref is not None:
+            values["contact_ref"] = contact_ref
+        if notify is not None:
+            values["notify"] = notify
+        if reminder_minutes is not None:
+            values["reminder_minutes"] = reminder_minutes
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_reservation", values)
@@ -2165,13 +2703,18 @@ class Operations(Transport):
         reservation_ref: str,
         *,
         revision: int,
+        override_reason: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Cancel a reservation.
 
         Cancel the reservation with this reference at the next revision (the current one plus 1).
         Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the
-        cancel answers cancelled: false. Use a new reference for a new reservation.
+        cancel answers cancelled: false. Use a new reference for a new reservation. Past the
+        resource's cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason
+        says why, which the tombstone and the feed keep. A late cancellation's fee (the resource's
+        cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge:
+        Slotlock moves no money.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2180,6 +2723,8 @@ class Operations(Transport):
             refusal it would have met, alternatives included. Charged as a read.
         """
         values: dict[str, Any] = {"reservation_ref": reservation_ref, "revision": revision}
+        if override_reason is not None:
+            values["override_reason"] = override_reason
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_cancel_reservation", values)
@@ -2233,6 +2778,96 @@ class Operations(Transport):
             values["dry_run"] = dry_run
         return self.call("slotlock_check_in_reservation", values)
 
+    def get_contact(self, contact_ref: str) -> dict[str, Any]:
+        """Get a contact.
+
+        The person kept under this reference, for a sender to reach. An unknown one answers 404
+        contact_not_found.
+        """
+        values: dict[str, Any] = {"contact_ref": contact_ref}
+        return self.call("slotlock_get_contact", values)
+
+    def put_contact(
+        self,
+        contact_ref: str,
+        *,
+        name: str | None | Unset = UNSET,
+        email: str | None | Unset = UNSET,
+        phone: str | None | Unset = UNSET,
+        whatsapp: str | None | Unset = UNSET,
+        consent: dict[str, Any] | None = None,
+        locale: str | None | Unset = UNSET,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Keep a contact.
+
+        Keep a person a booking may name to be told about it (contact_ref on
+        slotlock_put_reservation), under your own reference: how to reach them (email, phone for
+        SMS and whatsapp, both E.164) and which channels they agreed to (consent: false is an
+        opt-out a sender must honour). Replaces what was kept under the reference. A sender reads
+        it to send; Slotlock itself sends nothing. created says whether it is new. A tenant keeps
+        at most 100,000 (409 contact_limit_reached).
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"contact_ref": contact_ref}
+        if not isinstance(name, Unset):
+            values["name"] = name
+        if not isinstance(email, Unset):
+            values["email"] = email
+        if not isinstance(phone, Unset):
+            values["phone"] = phone
+        if not isinstance(whatsapp, Unset):
+            values["whatsapp"] = whatsapp
+        if consent is not None:
+            values["consent"] = consent
+        if not isinstance(locale, Unset):
+            values["locale"] = locale
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_put_contact", values)
+
+    def delete_contact(self, contact_ref: str, *, dry_run: bool | None = None) -> dict[str, Any]:
+        """Forget a contact.
+
+        Forget a person: their contact, and their reference on every booking that named it, at
+        once (for an erasure request). deleted is false when no contact was kept; bookings counts
+        the bookings that no longer name them. Changes already on the feed keep the reference,
+        never the person.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"contact_ref": contact_ref}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_delete_contact", values)
+
+    def list_contacts(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List contacts.
+
+        The people the tenant keeps to tell about bookings, by reference, a page at a time: pass
+        next_cursor as cursor for the next page, until it is null.
+        """
+        values: dict[str, Any] = {}
+        if limit is not None:
+            values["limit"] = limit
+        if cursor is not None:
+            values["cursor"] = cursor
+        return self.call("slotlock_list_contacts", values)
+
     def list_waitlist(
         self,
         *,
@@ -2266,21 +2901,26 @@ class Operations(Transport):
         resource_id: str | None = None,
         pool: str | None = None,
         offer_ttl_seconds: int | None = None,
+        duration_minutes: int | None = None,
         idempotency_key: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Join the waitlist.
 
         Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is
-        taken now. When it comes free (a booking cancelled, a hold released or expired, a
-        no-show), the entries waiting for it are offered in the order they joined: the first gets
-        a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so
-        (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window
-        starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409
-        waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the
-        Idempotency-Key header or idempotency_key), a retry answers the entry the first request
-        made (replayed: true) for as long as it is kept; the same key with another request is 422
-        idempotency_conflict.
+        taken now, or with duration_minutes for any slot of that length within it. When time comes
+        free (a booking cancelled, a hold released or expired, a no-show), the entries waiting are
+        offered in the order they joined: the first that fits gets a hold of it (the window, or
+        the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default 900), and
+        the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it
+        (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined),
+        or let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot
+        can be offered to before its window closes expires (waitlist.expired). Joining and leaving
+        are on the feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at
+        once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key
+        (the Idempotency-Key header or idempotency_key), a retry answers the entry the first
+        request made (replayed: true) for as long as it is kept; the same key with another request
+        is 422 idempotency_conflict.
 
         Args:
             idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
@@ -2298,6 +2938,8 @@ class Operations(Transport):
             values["pool"] = pool
         if offer_ttl_seconds is not None:
             values["offer_ttl_seconds"] = offer_ttl_seconds
+        if duration_minutes is not None:
+            values["duration_minutes"] = duration_minutes
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
         if dry_run is not None:
@@ -2321,6 +2963,29 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_leave_waitlist", values)
+
+    def decline_waitlist_offer(
+        self,
+        entry_id: str,
+        *,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Decline a waitlist offer.
+
+        Turn down the hold a waitlist entry was offered: the hold is let go, the entry is declined
+        (waitlist.declined), and the time is offered to the next who waits. 404
+        waitlist_offer_not_found when the entry has no open offer.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"entry_id": entry_id}
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_decline_waitlist_offer", values)
 
     def record_coverage(
         self,
@@ -2379,6 +3044,89 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_delete_coverage", values)
+
+    def put_source_busy(
+        self,
+        resource_id: str,
+        source: str,
+        *,
+        start: str,
+        end: str,
+        revision: int,
+        busy: list[dict[str, Any]],
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Record a calendar's busy time.
+
+        For a calendar that gives busy time but not its events (Google freeBusy, Microsoft
+        getSchedule): record its coverage of a window at the source's revision, as
+        slotlock_record_coverage does, and the busy time in it, which replaces what the source
+        said of that window before (what it said outside the window stays). Busy time counts in
+        free/busy and every booking Slotlock makes on the resource is refused over it (409
+        overlap), as over an event. A confirmed booking the source newly reports busy time over is
+        left as it is and put on the feed once as coverage.conflict, naming the booking and the
+        source by its source_id: someone decides. At most 5000 intervals; they are clipped to the
+        window and merged. Revisions only go forward; repeating one changes nothing (replayed:
+        true).
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "resource_id": resource_id,
+            "source": source,
+            "start": start,
+            "end": end,
+            "revision": revision,
+            "busy": busy,
+        }
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_put_source_busy", values)
+
+    def report_coverage_conflict(
+        self,
+        resource_id: str,
+        source: str,
+        *,
+        reason: str,
+        reservation_ref: str | None = None,
+        event_id: str | None = None,
+        calendar_start: str | None = None,
+        calendar_end: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Report a booking changed in a calendar.
+
+        For a calendar sync that writes bookings to a calendar: report that one (by
+        reservation_ref or event_id) was changed (changed_in_calendar, with where the calendar now
+        has it) or removed (removed_from_calendar) there. It is put on the change feed as
+        coverage.conflict, named by the source's source_id, with the booking and the calendar's
+        times; the booking is left as it is, for someone to decide. 404 coverage_not_found for a
+        source that has not recorded coverage of the resource; reservation_not_found or
+        event_not_found for a booking not on it.
+
+        Args:
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {"resource_id": resource_id, "source": source, "reason": reason}
+        if reservation_ref is not None:
+            values["reservation_ref"] = reservation_ref
+        if event_id is not None:
+            values["event_id"] = event_id
+        if calendar_start is not None:
+            values["calendar_start"] = calendar_start
+        if calendar_end is not None:
+            values["calendar_end"] = calendar_end
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_report_coverage_conflict", values)
 
     def get_coverage(self, resource_id: str) -> dict[str, Any]:
         """A resource's coverage and its health.
@@ -2456,6 +3204,7 @@ class Operations(Transport):
         expected_revision: int,
         idempotency_key: str,
         expected_resource_id: str | None = None,
+        override_reason: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Cancel any event of the tenant.
@@ -2483,6 +3232,8 @@ class Operations(Transport):
         }
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
+        if override_reason is not None:
+            values["override_reason"] = override_reason
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_cancel_tenant_event", values)
@@ -2498,6 +3249,90 @@ class Operations(Transport):
         """
         values: dict[str, Any] = {"event_id": event_id}
         return self.call("slotlock_export_tenant_event", values)
+
+    def tenant_book_together(
+        self,
+        *,
+        resource_ids: list[str],
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Book resources together, as the tenant.
+
+        Book the same time on 2-20 resources at once, all or none, as agents'
+        slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the
+        tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it),
+        held to the resources' booking rules; approval policies hold it only when they include the
+        application (include_application). If any is taken, nothing is booked and the refusal
+        names that resource_id. A retry with the same idempotency_key answers the same events. 409
+        bundles_unavailable where the server books no bundles.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 422
+            idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "resource_ids": resource_ids,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_tenant_book_together", values)
+
+    def tenant_book_pool(
+        self,
+        *,
+        pool: str,
+        starts_at: str,
+        ends_at: str,
+        timezone: str,
+        idempotency_key: str,
+        title: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """Book any member of a pool, as the tenant.
+
+        Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for
+        the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member,
+        and is the tenant's, not the key's; approval policies hold it only when they include the
+        application (include_application). 409 pool_full when none is free; 404 pool_not_found. A
+        retry with the same idempotency_key answers the member it booked.
+
+        Args:
+            idempotency_key: A retry identity, also accepted as the Idempotency-Key header: the
+            same key with the same request answers what the first did; with another request, 422
+            idempotency_conflict.
+            dry_run: Check the write without making it: it runs with every check, the database's
+            included, and is then undone, so nothing is stored, recorded or sent. The answer is
+            what it would have been, with dry_run: true (ids in it are never stored), or the
+            refusal it would have met, alternatives included. Charged as a read.
+        """
+        values: dict[str, Any] = {
+            "pool": pool,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone,
+            "idempotency_key": idempotency_key,
+        }
+        if title is not None:
+            values["title"] = title
+        if dry_run is not None:
+            values["dry_run"] = dry_run
+        return self.call("slotlock_tenant_book_pool", values)
 
     def get_tenant(self) -> dict[str, Any]:
         """Get the tenant.
@@ -2698,6 +3533,7 @@ class Operations(Transport):
         conditions: dict[str, Any] | None = None,
         approval_ttl_minutes: int | None = None,
         lead_minutes: int | None = None,
+        include_application: bool | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create or replace an approval policy.
@@ -2713,7 +3549,10 @@ class Operations(Transport):
         person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's
         ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier
         of the two. Where several apply, refuse wins, then the one that must be decided soonest.
-        At most 50 policies: one more is 409 approval_policy_limit_reached.
+        The tenant's own bookings through this API (slotlock_tenant_book_together,
+        slotlock_tenant_book_pool) are held only by policies with include_application true, and
+        are the tenant's again when granted. At most 50 policies: one more is 409
+        approval_policy_limit_reached.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -2730,6 +3569,8 @@ class Operations(Transport):
             values["approval_ttl_minutes"] = approval_ttl_minutes
         if lead_minutes is not None:
             values["lead_minutes"] = lead_minutes
+        if include_application is not None:
+            values["include_application"] = include_application
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_put_approval_policy", values)

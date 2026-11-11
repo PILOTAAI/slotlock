@@ -9,6 +9,14 @@ export interface Interval {
   end: Date;
 }
 
+/** Hours a resource without its own inherits, as the database resolves them (RFC 0004 B2). */
+export interface SlotlockInheritedAvailability {
+  source: 'location' | 'tenant';
+  /** The location whose hours apply, when `source` is `location`. */
+  location?: string;
+  rules: WeeklyAvailabilityRule[];
+}
+
 /** A schedulable resource (vehicle, room, worker, machine, or any other reservable asset). */
 export interface SlotlockResource {
   id: string;
@@ -26,6 +34,11 @@ export interface SlotlockResource {
    * uses the default (`SLOTLOCK_AVAILABILITY`, or the backend's `availabilityRules`).
    */
   availabilityRules?: WeeklyAvailabilityRule[];
+  /**
+   * The hours it inherits when it has none of its own (RFC 0004 B2): its location's, the nearest
+   * up the chain, else its tenant's. Absent when it has its own, or inherits the server's.
+   */
+  inheritedAvailability?: SlotlockInheritedAvailability;
   /**
    * `shared` resources are listed to and booked by agents; `private` ones are invisible to agents.
    * Fixed at creation; absent means shared.
@@ -86,6 +99,11 @@ export interface SlotlockApprovalPolicy {
   /** How long a person has to decide, before the booking's start less `leadMinutes`. */
   approvalTtlMinutes: number;
   leadMinutes: number;
+  /**
+   * It also holds the tenant's own bookings through the application API (bundles and pool
+   * bookings); without it, it holds only agents' (RFC 0004 B7).
+   */
+  includeApplication: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -148,6 +166,12 @@ export interface SlotlockReservation {
   /** Monotonic command revision; legacy, hold, and shadow rows start at 1. */
   revision: number;
   source: string | null;
+  /** Whom to tell about it (RFC 0004 P3), when it names someone. */
+  contactRef?: string;
+  /** Present, and false, when no one should be notified about it. */
+  notify?: false;
+  /** Minutes before its start it is reminded, latest first, when it is. */
+  reminderMinutes?: number[];
 }
 
 export interface ExternalReservationCommand {
@@ -159,11 +183,43 @@ export interface ExternalReservationCommand {
   bufferAfterMs: number;
   revision: number;
   source?: string;
+  /**
+   * An admin's reason for moving the booking past its reschedule cutoff (RFC 0004 B5), kept on the
+   * feed. Without it, a move past the cutoff is refused.
+   */
+  overrideReason?: string;
+  /**
+   * The wall time the booking starts at in its resource's zone, `YYYY-MM-DDTHH:MM[:SS]` (RFC 0004
+   * B9): it must name `start` now, and if zone rules later move it, maintenance says so or follows
+   * it (`followZoneRules`). Left out, the booking keeps its instant only.
+   */
+  localStart?: string;
+  /**
+   * Whom to tell about it (RFC 0004 P3): a contact's reference (`putContact`), never the person.
+   * Put on the feed with each of its changes; a sender looks the person up by it.
+   */
+  contactRef?: string;
+  /** False: no sender should notify anyone about it (default true). On the feed only when false. */
+  notify?: boolean;
+  /**
+   * Minutes before its start to remind whom it names (RFC 0004 P3): up to five, each 0 to a year,
+   * said on the feed once each as `reminder.due` by maintenance, and again if the booking moves.
+   */
+  reminderMinutes?: number[];
+}
+
+/** What a cancellation records for the integrator to charge (RFC 0004 B5). Slotlock moves no money. */
+export interface SlotlockRecordedFee {
+  amountMinor: number;
+  currency: string;
 }
 
 export type ExternalReservationResult =
   | { ok: true; reservation: SlotlockReservation; idempotent: boolean }
   | { ok: false; code: 'invalid_window' }
+  /** `localStart` is not a wall time, or does not name `start` in the resource's zone. */
+  | { ok: false; code: 'invalid_local_start' }
+  | { ok: false; code: 'invalid_contact_ref' | 'invalid_notify' | 'invalid_reminders' }
   | { ok: false; code: 'invalid_buffer' }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
@@ -187,7 +243,9 @@ export type ExternalReservationResult =
   | { ok: false; code: 'overlap'; conflictingReservationId: string | null };
 
 export type CancelExternalReservationResult =
-  | { ok: true; cancelled: boolean; revision: number }
+  | { ok: true; cancelled: boolean; revision: number; cancellationFee?: SlotlockRecordedFee }
+  /** The booking's cancel cutoff has passed (RFC 0004 B5): an admin may override with a reason. */
+  | { ok: false; code: 'booking_rule_violated'; rule: 'cancel_cutoff' }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
   | { ok: false; code: 'reservation_cancelled' }
@@ -242,6 +300,15 @@ export interface SlotlockHold {
   source: string | null;
   /** The alternatives it was held with (`groupId` when acquired); absent when held alone. */
   groupId?: string;
+  /** Present when it waits for payment (RFC 0004 C3): it is confirmed only once paid. */
+  paymentRequired?: true;
+  /** The payment's reference at the integrator's processor, once paid. */
+  paymentRef?: string | null;
+  paidAt?: Date | null;
+  /** What the payment must be, when the hold names it. */
+  paymentAmount?: { amountMinor: number; currency: string } | null;
+  /** What was received, once paid and when the payer said. */
+  paidAmount?: { amountMinor: number; currency: string } | null;
 }
 
 /** One entry of a tenant's agenda (`listAgenda`): what occupies a resource, and from when. */
@@ -265,6 +332,8 @@ export type AcquireHoldResult =
   | { ok: true; hold: SlotlockHold; idempotent: boolean }
   | { ok: false; code: 'invalid_window' }
   | { ok: false; code: 'invalid_ttl' }
+  /** `payment` without `paymentRequired`, or not an amount and an ISO 4217 currency. */
+  | { ok: false; code: 'invalid_payment' }
   | { ok: false; code: 'invalid_buffer' }
   /** A tenant, principal or idempotency key that is malformed, or a key without both of the others. */
   | { ok: false; code: 'invalid_identity' }
@@ -294,6 +363,8 @@ export type ConfirmHoldResult =
   | { ok: true; reservation: SlotlockReservation }
   | { ok: false; code: 'hold_not_found' }
   | { ok: false; code: 'hold_expired' }
+  /** The hold waits for payment (RFC 0004 C3) and none is recorded yet (markHoldPaid). */
+  | { ok: false; code: 'payment_required' }
   /** A cancellation of the hold's reference (its id) arrived first and retired it. */
   | { ok: false; code: 'reservation_cancelled' }
   /** Another booking of the tenant already uses the hold's id as its reference. */
@@ -304,6 +375,51 @@ export type ConfirmHoldResult =
   | { ok: false; code: 'reservation_limit_reached'; limit: number };
 
 export type ReleaseHoldResult = { ok: true; released: boolean };
+
+/**
+ * A person a booking may name to be told about it (RFC 0004 P3), by the tenant's own reference: how
+ * to reach them, and which channels they agreed to. A sender reads it; Slotlock sends nothing.
+ */
+export interface SlotlockContact {
+  ref: string;
+  name: string | null;
+  email: string | null;
+  /** E.164, for SMS. */
+  phone: string | null;
+  /** E.164, for WhatsApp. */
+  whatsapp: string | null;
+  /** Each channel the person said yes or no to; a channel left out has no answer recorded. */
+  consent: SlotlockContactConsent;
+  /** When each answer in `consent` was given (kept while it stands): the proof of it. */
+  consentAt: Partial<Record<keyof SlotlockContactConsent, Date>>;
+  /** BCP 47, for the language of what is sent. */
+  locale: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface SlotlockContactConsent {
+  email?: boolean;
+  sms?: boolean;
+  whatsapp?: boolean;
+}
+
+export type PutContactResult =
+  | { ok: true; contact: SlotlockContact; created: boolean }
+  | { ok: false; code: 'invalid_contact_ref' | 'invalid_contact' }
+  | { ok: false; code: 'contact_limit_reached'; limit: number };
+
+/** Recording a hold's payment (RFC 0004 C3); `idempotent` when it was recorded already. */
+export type MarkHoldPaidResult =
+  | { ok: true; hold: SlotlockHold; idempotent: boolean }
+  | { ok: false; code: 'invalid_identity' | 'invalid_payment_ref' | 'invalid_payment' }
+  /** Less than the hold's payment, in another currency, or not said when the hold names one. */
+  | { ok: false; code: 'payment_amount_mismatch' }
+  | { ok: false; code: 'hold_not_found' | 'hold_expired' }
+  /** The hold does not wait for payment. */
+  | { ok: false; code: 'payment_not_required' }
+  /** It was already paid by another payment. */
+  | { ok: false; code: 'payment_conflict' };
 
 /** RFC 5545 TRANSP projection. Transparent events remain visible but never occupy a resource. */
 export type CalendarTransparency = 'opaque' | 'transparent';
@@ -423,6 +539,11 @@ export interface PutCalendarEventCommand extends CalendarEventContent {
    * step and hours are judged again.
    */
   fromHold?: { holdId: string; holderRef: string };
+  /**
+   * False: no sender should notify anyone about it (RFC 0004 P3), and its reminders are not put on
+   * the feed. Default true; as sent with each revision.
+   */
+  notify?: boolean;
 }
 
 export type PutCalendarEventResult =
@@ -451,6 +572,8 @@ export type PutCalendarEventResult =
   | { ok: false; code: 'hold_not_found' }
   /** `fromHold`'s hold is the holder's, but it lapsed before it was booked. */
   | { ok: false; code: 'hold_expired' }
+  /** `fromHold`'s hold waits for payment (RFC 0004 C3) and none is recorded yet. */
+  | { ok: false; code: 'payment_required' }
   /** `fromHold`'s hold is on another resource, or does not cover the event. */
   | { ok: false; code: 'hold_mismatch' }
   /**
@@ -475,13 +598,17 @@ export type CancelCalendarEventResult =
       externalRef: string;
       revision: number;
       idempotent: boolean;
+      /** What a late cancellation costs, recorded for the integrator to charge (RFC 0004 B5). */
+      cancellationFee?: SlotlockRecordedFee;
     }
   | { ok: false; code: 'invalid_identity' }
   | { ok: false; code: 'invalid_revision' }
   | { ok: false; code: 'idempotency_conflict' }
   | { ok: false; code: 'event_not_found' }
   | { ok: false; code: 'owner_command_quota_exceeded'; limit: number }
-  | { ok: false; code: 'revision_conflict'; currentRevision: number };
+  | { ok: false; code: 'revision_conflict'; currentRevision: number }
+  /** The event's cancel cutoff has passed (RFC 0004 B5). */
+  | { ok: false; code: 'booking_rule_violated'; rule: 'cancel_cutoff' };
 
 /** A place in the roll's order of due masters: the last one a batch examined. */
 export interface CalendarHorizonRollCursor {
@@ -575,6 +702,30 @@ export type CalendarCoverageResult =
   | { ok: false; code: 'stale_revision' | 'revision_conflict' | 'idempotency_conflict' }
   /** A new source would pass the tenant's `coverage` limit (advancing one it has never does). */
   | { ok: false; code: 'coverage_limit_reached'; limit: number };
+
+/**
+ * What a calendar that gives busy time but not its events says (Google freeBusy, Microsoft
+ * getSchedule; RFC 0004 C1): its coverage of the window, and the busy time in it, which replaces
+ * what the source said of that window before.
+ */
+export interface SourceBusyCommand extends CalendarCoverageCommand {
+  /** At most SLOTLOCK_SOURCE_BUSY_MAX intervals; clipped to the window and merged. */
+  busy: Interval[];
+}
+
+export type SourceBusyResult =
+  | {
+      ok: true;
+      revision: number;
+      /** A revision already recorded: nothing changed. */
+      idempotent: boolean;
+      /** How many intervals are kept, merged and clipped. */
+      busy: number;
+      /** Bookings the source newly reports in the way of, each put on the feed as coverage.conflict. */
+      conflicts: number;
+    }
+  | Exclude<CalendarCoverageResult, { ok: true }>
+  | { ok: false; code: 'invalid_busy' };
 
 export interface CalendarCoverageAssessment {
   state: 'complete' | 'partial' | 'unknown';

@@ -15,9 +15,13 @@ export const SUMMARIES = {
     'The earliest slot of a given length across resources, offered only when the answer is certain.',
   slotlock_find_available_slots:
     'Up to 50 slots of a given length, earliest first, to offer a person a choice.',
+  slotlock_find_available_ranges:
+    'Hires across days, such as a car from Friday to Monday: the earliest range on each resource or pool member.',
   slotlock_hold_slots:
     'Hold up to five candidate slots for a few minutes while a person chooses, as one group.',
   slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
+  slotlock_hold_together:
+    'Hold one time on 2-20 resources at once, all or none, as one group with one time to live.',
   slotlock_book_together: 'Book the same time on 2-20 resources at once, all or none.',
   slotlock_book_pool: 'Book any one member of a pool, such as a vehicle class, for a time.',
   slotlock_get_pool_availability:
@@ -41,6 +45,8 @@ export const DETAILS = {
     'A slot is offered only inside the resource’s bookable hours, and only when the coverage of every resource asked about is `certain`. Otherwise `resource_id`, `start` and `end` are `null`: treat that as unknown, not as free.',
   slotlock_find_available_slots:
     'Each slot is free of busy time and inside the resource’s bookable hours, found the way `slotlock_find_next_available` finds one, and they never overlap on one resource. The list is empty unless the coverage of every resource asked about is `certain`. In an MCP Apps host the calendar view lets the person pick one, and sends the agent a message naming it.',
+  slotlock_find_available_ranges:
+    'A range starts in the pick-up window and lasts `days` local days, or ends in the return window, whichever you give. It is free throughout with the resource’s buffers, starts and ends inside its bookable hours, and meets its booking rules, pick-up and return times and lengths included. One range per resource, the earliest; none unless every resource’s coverage is `certain`. Book one with `slotlock_create_event`, or `slotlock_book_pool` for a pool, at exactly its start and end.',
   slotlock_hold_slots:
     'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once (`hold_limit_reached`), holding a bounded number of hours together (`held_time_limit_reached`).',
   slotlock_book_pool:
@@ -49,6 +55,8 @@ export const DETAILS = {
     'The window is split where the number of free members changes; each part says how many are free, counting only the members you may book, and each only where its booking rules let a booking start (after its notice, within how far ahead it books, inside its hours when it enforces them). A member’s slot step is not counted. The count is certain only when `coverage.certainty` is `certain`. Book one of them with `slotlock_book_pool`.',
   slotlock_book_together:
     'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
+  slotlock_hold_together:
+    'Every resource is held, or none is: a taken one rolls the others back, and the refusal names its `resource_id`. The holds share one group and expire together, when the earliest would. `slotlock_book_together` with `hold_group_id` books the set from them, in one transaction; `slotlock_release_slots` with any `hold_id` lets the whole set go.',
   slotlock_release_slots:
     'Holds expire on their own; release them when the person walks away, so the time is free sooner.',
   slotlock_create_event:
@@ -182,10 +190,12 @@ export const OBJECTS = {
 export const TOOL_ERRORS = {
   slotlock_list_resources: [],
   slotlock_get_free_busy: ['resource_not_found'],
-  slotlock_find_next_available: ['resource_not_found'],
-  slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments'],
+  slotlock_find_next_available: ['resource_not_found', 'duration_required'],
+  slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments', 'duration_required'],
+  slotlock_find_available_ranges: ['resource_not_found', 'pool_not_found', 'ranges_unavailable'],
   slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
   slotlock_release_slots: ['holds_unavailable'],
+  slotlock_hold_together: ['overlap', 'resource_not_found', 'holds_unavailable', 'hold_limit_reached', 'idempotency_conflict'],
   slotlock_get_pool_availability: ['pool_not_found', 'pools_unavailable'],
   slotlock_book_pool: [
     'pool_full',
@@ -203,6 +213,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'bundles_unavailable',
     'owner_event_quota_exceeded',
   ],
@@ -213,6 +228,7 @@ export const TOOL_ERRORS = {
     'hold_not_found',
     'hold_expired',
     'hold_mismatch',
+    'payment_required',
     'invalid_event',
     'owner_event_quota_exceeded',
     'owner_command_quota_exceeded',
@@ -223,6 +239,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'store_inconsistent',
   ],
   slotlock_get_event: ['event_not_found'],
@@ -240,6 +261,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'store_inconsistent',
   ],
   slotlock_delete_event: [
@@ -251,6 +277,7 @@ export const TOOL_ERRORS = {
   slotlock_confirm_slot: [
     'hold_not_found',
     'hold_expired',
+    'payment_required',
     'holds_unavailable',
     'idempotency_conflict',
     'resource_not_found',
@@ -259,6 +286,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'store_inconsistent',
   ],
   slotlock_reschedule: [
@@ -274,6 +306,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'store_inconsistent',
   ],
   slotlock_cancel: [
@@ -322,6 +359,10 @@ export const CONFIRMATION_ERRORS = [
  */
 export const REFINEMENTS = [
   {
+    matches: (text) => text.includes('value.payment === undefined || value.payment_required === true'),
+    note: () => '`payment` is given only with `payment_required: true`.',
+  },
+  {
     matches: (text) => text.startsWith('selectsOrNames'),
     note: () =>
       'Name the resources with `resource_ids`, or select them with any of `location`, `group`, `labels`, `kind` and `pool`: one or the other, not both.',
@@ -357,5 +398,18 @@ export const REFINEMENTS = [
   {
     matches: (text) => /Date\.parse\(value\.end\) > Date\.parse\(value\.start\)/.test(text),
     note: () => '`end` is after `start`.',
+  },
+  {
+    matches: (text) => text.includes('(value.resource_ids !== undefined) !== (value.pool !== undefined)'),
+    note: () => 'Give `resource_ids` or `pool`, one of them.',
+  },
+  {
+    matches: (text) => text.includes('value.days !== undefined') && text.includes('value.return_start'),
+    note: () => 'Give `days`, or `return_start` and `return_end`: one or the other.',
+  },
+  {
+    matches: (text) => text.includes('value.pickup_end') && text.includes('MAX_AGENT_WINDOW_MS'),
+    note: (facts) =>
+      `\`pickup_end\` is at or after \`pickup_start\`, the return window runs forward, and the whole search spans at most ${facts.horizonDays} days.`,
   },
 ];

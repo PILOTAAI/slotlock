@@ -39,16 +39,34 @@ import {
   type SlotlockBookingRule,
   type SlotlockBookingRules,
   bookingSearch,
+  hoursApplyOf,
   bookingSearchBlocked,
   bookingSearchReach,
 } from './booking-rules.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
-import { expandRules } from './rules.js';
+import {
+  type SlotlockAvailabilityException,
+  applicableHours,
+  coveredByOpenWindows,
+  dayToDate,
+  epochDay,
+  exceptionDays,
+  exceptionRanges,
+  openWindows,
+} from './hours.js';
+import { readSlotlockHolidayCalendar } from './holiday-import.js';
+import {
+  SLOTLOCK_OVERRIDE_RESOURCES,
+  type SlotlockHolidayCalendar,
+  type SlotlockOverrideResources,
+} from './availability-store.js';
+import { findEarliestRange } from './ranges.js';
 import { emitVAvailability, parseVAvailability, toJSCalendarEvent } from './interop.js';
 import {
   type SlotlockStore,
   type SlotlockTenantStore,
   type SlotlockWaitlistEntry,
+  SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
   calendarEventRollingHorizon,
 } from './store.js';
 import { slotlockResourceSearchWords, slotlockSearchResources } from './resource-search.js';
@@ -63,6 +81,8 @@ import type {
   SlotlockApprovalKind,
   SlotlockApprovalPolicy,
   SlotlockCalendarEvent,
+  SlotlockContact,
+  SlotlockContactConsent,
   SlotlockHold,
   SlotlockReservation,
   SlotlockResource,
@@ -156,6 +176,7 @@ interface AgentEventInput {
   status?: CalendarEventContent['status'];
   recurrence_rule?: string | null;
   hold_id?: string;
+  notify?: boolean;
   recurrence_exceptions?: AgentRecurrenceExceptionInput[];
   idempotency_key: string;
 }
@@ -172,6 +193,12 @@ const WRITE = { isolation: 'read committed' } as const;
  */
 const APPROVAL_GRANT = Symbol('slotlock.approvalGrant');
 const OCCUPANCY_PROBE = Symbol('slotlock.occupancyProbe');
+/**
+ * A booking the tenant's own systems make through the application API (RFC 0004 B7), not an
+ * agent's: its events are the tenant's (owner `internal`), outside any key's quota and kept when the
+ * key is revoked, and only approval policies that include the application hold it.
+ */
+const TENANT_ACTOR = Symbol('slotlock.tenantActor');
 
 /** The approval a granted write runs for: its holds give way, and it is marked, in the write's transaction. */
 interface ApprovalGrant {
@@ -197,6 +224,18 @@ interface TenantCallContext {
   [APPROVAL_GRANT]?: ApprovalGrant;
   /** Read what a dry run's write would occupy, in its transaction, before it is undone. */
   [OCCUPANCY_PROBE]?: (tenantStore: SlotlockTenantStore) => Promise<void>;
+  /** Made for the tenant's own systems, not an agent; internal, never from a request. */
+  [TENANT_ACTOR]?: true;
+}
+
+/** Whether the call books for the tenant's own systems (TENANT_ACTOR), not an agent. */
+function forTenant(context: SlotlockAgentInvocationContext): boolean {
+  return (context as unknown as TenantCallContext)[TENANT_ACTOR] === true;
+}
+
+/** The tenant's own identity for a retry key: per tenant, so any of its keys replays it. */
+function tenantDigest(context: SlotlockAgentInvocationContext, idempotencyKey: string): string {
+  return createHash('sha256').update(`${context.principal.tenantRef}\0tenant\0${idempotencyKey}`).digest('hex');
 }
 
 /** Thrown out of a dry run's transaction, with its answer, so the transaction rolls back. */
@@ -416,12 +455,14 @@ function uuidFromDigest(value: string): string {
 }
 
 function agentOwnerRef(context: SlotlockAgentInvocationContext): string {
+  if (forTenant(context)) return SLOTLOCK_INTERNAL_EVENT_OWNER_REF;
   return `agent:${createHash('sha256')
     .update(`${context.principal.tenantRef}\0${context.principal.subject}`)
     .digest('hex')}`;
 }
 
 function agentExternalRef(context: SlotlockAgentInvocationContext, idempotencyKey: string): string {
+  if (forTenant(context)) return `tenant:${tenantDigest(context, idempotencyKey)}`;
   // Already a stable client-visible identity; keep it unchanged.
   return `agent:${agentPrincipalDigest(context, idempotencyKey)}`;
 }
@@ -430,6 +471,7 @@ function agentCommandIdempotencyKey(
   context: SlotlockAgentInvocationContext,
   idempotencyKey: string,
 ): string {
+  if (forTenant(context)) return `tenant-command:${tenantDigest(context, idempotencyKey)}`;
   // The principal stays in the digest so this remains safe with older tenant-only stores; hashing
   // keeps the subject and raw retry key out of durable rows.
   return `agent-command:${agentPrincipalDigest(context, idempotencyKey)}`;
@@ -491,7 +533,7 @@ export function projectSlotlockCalendarEvent(event: SlotlockCalendarEvent): Reco
  */
 export function slotlockAgentErrorStatus(code: string): 400 | 404 | 409 | 429 {
   if (code === 'resource_tenant_mismatch' || code.endsWith('_not_found')) return 404;
-  if (code.startsWith('invalid_')) return 400;
+  if (code.startsWith('invalid_') || code === 'duration_required') return 400;
   if (code === 'owner_event_quota_exceeded' || code === 'owner_command_quota_exceeded') return 429;
   return 409;
 }
@@ -503,6 +545,13 @@ const BOOKING_RULE_CODES: Readonly<Record<SlotlockBookingRule, string>> = Object
   slot_step: 'booking_rule_slot_step',
   outside_hours: 'booking_rule_outside_hours',
   uncertain: 'booking_rule_uncertain',
+  min_duration: 'booking_rule_min_duration',
+  max_duration: 'booking_rule_max_duration',
+  duration_not_allowed: 'booking_rule_duration_not_allowed',
+  pickup_time: 'booking_rule_pickup_time',
+  return_time: 'booking_rule_return_time',
+  cancel_cutoff: 'booking_rule_cancel_cutoff',
+  reschedule_cutoff: 'booking_rule_reschedule_cutoff',
 });
 
 function operationError(
@@ -548,6 +597,57 @@ async function overlapDetails(
     ...(booking.status === 'held' && booking.holderRef === owner ? { conflicting_hold_id: booking.id } : {}),
     ...(booking.eventRef !== null && booking.eventOwnerRef === owner ? { conflicting_event_id: booking.eventRef } : {}),
   };
+}
+
+/**
+ * Slots on a resource whose hours hold a hire only at its ends (`hoursApply`): up to `limit` of
+ * `durationMs` from `from` to the window's end, each the range search's earliest after the last,
+ * so a slot may run from one local day to another and is judged as a write of it is.
+ */
+async function rangedSlots(
+  tenantStore: SlotlockTenantStore,
+  context: SlotlockAgentInvocationContext,
+  resource: SlotlockResource,
+  window: Interval,
+  from: number,
+  durationMs: number,
+  busy: readonly Interval[],
+  limit: number,
+  availabilityRules: (context: SlotlockAgentInvocationContext, resource: SlotlockResource) => Promise<WeeklyAvailabilityRule[]>,
+): Promise<Interval[]> {
+  const fallback =
+    resource.availabilityRules === undefined && resource.inheritedAvailability === undefined
+      ? await availabilityRules(context, resource)
+      : [];
+  const exceptions =
+    (
+      await tenantStore.availabilityExceptionsFor({
+        tenantRef: context.principal.tenantRef,
+        resourceIds: [resource.id],
+        window: { start: new Date(window.start.getTime() - 86_400_000), end: new Date(window.end.getTime() + 86_400_000) },
+      })
+    ).get(resource.id) ?? [];
+  const rules = { ...resource.effectiveBookingRules, allowedDurations: [Math.round(durationMs / 60_000)] };
+  const hours = applicableHours(resource, fallback).rules;
+  const now = new Date();
+  const lastStart = window.end.getTime() - durationMs;
+  const slots: Interval[] = [];
+  for (let start = from; slots.length < limit && start <= lastStart; ) {
+    const range = findEarliestRange({
+      busy,
+      rules,
+      timezone: resource.timezone,
+      hours,
+      exceptions,
+      now,
+      pickup: { start: new Date(start), end: new Date(lastStart) },
+      return: { start: new Date(start + durationMs), end: window.end },
+    });
+    if (!range) break;
+    slots.push(range);
+    start = range.end.getTime();
+  }
+  return slots;
 }
 
 /** Resource and event ids: the UUIDs the store issues and validates. */
@@ -712,6 +812,42 @@ export function createSlotlockStoreChangeSource(
 }
 
 /** Bind the protocol server to the production store without giving a request control of tenancy. */
+/**
+ * Each resource's open hours within `window` (RFC 0004 B1, B2): its own weekly hours, else what it
+ * inherits from its location or tenant, else the server's, with the exceptions that reach it applied.
+ * One query reads every resource's exceptions.
+ */
+async function hoursWithin(
+  tenantStore: SlotlockTenantStore,
+  context: SlotlockAgentInvocationContext,
+  resources: readonly SlotlockResource[],
+  window: Interval,
+  options: Pick<SlotlockStoreAgentBackendOptions, 'availabilityRules'>,
+): Promise<Map<string, Interval[]>> {
+  const exceptions = await tenantStore.availabilityExceptionsFor({
+    tenantRef: context.principal.tenantRef,
+    resourceIds: resources.map((resource) => resource.id),
+    window,
+  });
+  const open = new Map<string, Interval[]>();
+  for (const resource of resources) {
+    const fallback =
+      resource.availabilityRules === undefined && resource.inheritedAvailability === undefined
+        ? await options.availabilityRules(context, resource)
+        : [];
+    open.set(
+      resource.id,
+      openWindows({
+        hours: applicableHours(resource, fallback).rules,
+        exceptions: exceptions.get(resource.id) ?? [],
+        timezone: resource.timezone,
+        window,
+      }),
+    );
+  }
+  return open;
+}
+
 export function createSlotlockStoreAgentBackend(
   store: SlotlockStore,
   options: SlotlockStoreAgentBackendOptions,
@@ -759,6 +895,9 @@ export function createSlotlockStoreAgentBackend(
             source: 'agent-server',
             // The key's own caps, below the server's (RFC 0004 A5).
             ...(holderCaps ? { holderCaps } : {}),
+            // Booked only once your system records its payment (RFC 0004 C3).
+            ...(input.payment_required === true ? { paymentRequired: true } : {}),
+            ...(input.payment !== undefined ? { payment: amountInput(input.payment) as { amountMinor: number; currency: string } } : {}),
           });
           if (result.ok) {
             holds.push({
@@ -767,12 +906,83 @@ export function createSlotlockStoreAgentBackend(
               start: result.hold.start.toISOString(),
               end: result.hold.end.toISOString(),
               expires_at: result.hold.expiresAt.toISOString(),
+              ...(result.hold.paymentRequired ? { payment_required: true, payment_amount: amountOutput(result.hold.paymentAmount) } : {}),
             });
           } else {
             refused.push({ index, code: operationError(result).code });
           }
         }
         return { group_id: groupId, holds, refused };
+      });
+    },
+
+    async holdTogether(context, rawInput) {
+      const input = rawInput as {
+        resource_ids: string[];
+        start: string;
+        end: string;
+        ttl_seconds: number;
+        idempotency_key: string;
+      };
+      const holderRef = agentOwnerRef(context);
+      const limits = context.principal.limits;
+      const holderCaps =
+        limits?.maxHolds !== undefined || limits?.maxHeldHours !== undefined
+          ? {
+              ...(limits.maxHolds !== undefined ? { maxHolds: limits.maxHolds } : {}),
+              ...(limits.maxHeldHours !== undefined ? { maxHeldHours: limits.maxHeldHours } : {}),
+            }
+          : undefined;
+      // Sorted, so sets over the same resources lock in one order; one group per agent and key.
+      const resourceIds = [...new Set(input.resource_ids)].sort();
+      if (resourceIds.length < 2) throw new SlotlockAgentOperationError('invalid_arguments', 400);
+      const groupId = uuidFromDigest(`slotlock-hold-together\0${holderRef}\0${input.idempotency_key}`);
+      return withTenant(store, context, async (tenantStore) => {
+        for (const resourceId of resourceIds) {
+          try {
+            await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+          } catch (error) {
+            if (!(error instanceof SlotlockAgentOperationError)) throw error;
+            throw new SlotlockAgentOperationError(error.code, error.status, { resource_id: resourceId });
+          }
+          const result = await tenantStore.acquireHold({
+            tenantRef: context.principal.tenantRef,
+            principalRef: holderRef,
+            holderRef,
+            idempotencyKey: agentCommandIdempotencyKey(context, `${input.idempotency_key}\0together\0${resourceId}`),
+            groupId,
+            resourceId,
+            start: new Date(input.start),
+            end: new Date(input.end),
+            ttlMs: input.ttl_seconds * 1_000,
+            source: 'slotlock:together',
+            ...(holderCaps ? { holderCaps } : {}),
+          });
+          // All or nothing: thrown, so the holds already made roll back with it.
+          if (!result.ok) {
+            const refusal = operationError(result);
+            throw new SlotlockAgentOperationError(refusal.code, refusal.status, { resource_id: resourceId });
+          }
+        }
+        // One time to live for the set: each expires when the earliest does.
+        const holds = await tenantStore.holdGroup({
+          tenantRef: context.principal.tenantRef,
+          holderRef,
+          groupId,
+          alignExpiry: true,
+        });
+        if (holds.length !== resourceIds.length) throw new SlotlockAgentOperationError('store_inconsistent', 503);
+        return {
+          group_id: groupId,
+          holds: holds.map((hold) => ({
+            hold_id: hold.holdId,
+            resource_id: hold.resourceId,
+            start: hold.start.toISOString(),
+            end: hold.end.toISOString(),
+            expires_at: hold.expiresAt.toISOString(),
+          })),
+          expires_at: (holds[0] as { expiresAt: Date }).expiresAt.toISOString(),
+        };
       });
     },
 
@@ -865,6 +1075,9 @@ export function createSlotlockStoreAgentBackend(
           [window.end.getTime(), 0],
         ]);
         let complete = true;
+        const enforced = members.filter((member) => member.effectiveBookingRules?.enforceHours === true);
+        const memberHours =
+          enforced.length > 0 ? await hoursWithin(tenantStore, context, enforced, window, options) : new Map();
         for (const member of members) {
           const sources = await requiredSources(options, context, member);
           const freeBusy = await readFreeBusy(tenantStore, {
@@ -891,8 +1104,7 @@ export function createSlotlockStoreAgentBackend(
             ? [{ start: search.window.start, end: new Date(Math.min(search.window.end.getTime(), latestStart)) }]
             : [];
           if (rules?.enforceHours === true && open.length > 0) {
-            const hours = member.availabilityRules ?? (await options.availabilityRules(context, member));
-            const windows = expandRules(hours, window, member.timezone);
+            const windows: Interval[] = memberHours.get(member.id) ?? [];
             windowsLeft -= windows.length;
             if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
             open = windows.flatMap((hoursWindow) => {
@@ -942,6 +1154,7 @@ export function createSlotlockStoreAgentBackend(
         timezone: string;
         title?: string;
         idempotency_key: string;
+        hold_group_id?: string;
       };
       // Sorted, so bundles over the same resources lock in one order and never deadlock.
       const resourceIds = [...new Set(input.resource_ids)].sort();
@@ -965,11 +1178,24 @@ export function createSlotlockStoreAgentBackend(
             throw new SlotlockAgentOperationError(error.code, error.status, { resource_id: resourceId });
           }
         }
+        // A set held together (RFC 0004 B7) is booked from its holds: each must be the agent's, live,
+        // and for exactly this time.
+        const held = new Map<string, string>();
+        if (input.hold_group_id !== undefined) {
+          const holds = await tenantStore.holdGroup({
+            tenantRef: context.principal.tenantRef,
+            holderRef: agentOwnerRef(context),
+            groupId: input.hold_group_id,
+          });
+          for (const hold of holds) held.set(hold.resourceId, hold.holdId);
+        }
         const events: Record<string, unknown>[] = [];
         let replayed = true;
         for (const resourceId of resourceIds) {
           const key = `${input.idempotency_key}\0${resourceId}`;
+          const holdId = held.get(resourceId);
           const result = await tenantStore.putCalendarEvent({
+            ...(holdId !== undefined ? { fromHold: { holdId, holderRef: agentOwnerRef(context) } } : {}),
             tenantRef: context.principal.tenantRef,
             ownerRef: agentOwnerRef(context),
             externalRef: agentExternalRef(context, key),
@@ -1270,6 +1496,7 @@ export function createSlotlockStoreAgentBackend(
           timezone: resource.timezone,
           window,
           now: new Date(),
+          durationMs,
         });
         const sources = await requiredSources(options, context, resource);
         const freeBusy = await readFreeBusy(tenantStore, {
@@ -1282,8 +1509,14 @@ export function createSlotlockStoreAgentBackend(
         charge(freeBusy.busy.length);
         if (freeBusy.coverage.state !== 'complete') return { slots: [], certain: false };
         if (!search) return { slots: [], certain: true };
-        const rules = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-        const windows = expandRules(rules, search.window, resource.timezone);
+        // Where the hours hold a hire only at its ends (hoursApply), a slot may run from one local
+        // day to another: each from the range search, judged as a write of it is.
+        if (hoursApplyOf(resource.effectiveBookingRules) === 'ends') {
+          const ranged = await rangedSlots(tenantStore, context, resource, window, search.window.start.getTime(), durationMs, freeBusy.busy, input.limit, options.availabilityRules);
+          return { slots: ranged.map((slot) => ({ start: slot.start.toISOString(), end: slot.end.toISOString() })), certain: true };
+        }
+        const windows =
+          (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
         if (windows.length > MAX_REQUEST_RULE_WINDOWS) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
         const busy = bookingSearchBlocked(freeBusy.busy, search);
         // Each next slot as a search from where the last one ended would find it: the same busy
@@ -1300,6 +1533,97 @@ export function createSlotlockStoreAgentBackend(
           from = found.end.getTime();
         }
         return { slots, certain: true };
+      });
+    },
+
+    async defaultDuration(context, resourceIds) {
+      return withTenant(store, context, async (tenantStore) => {
+        const lengths = new Set<number | undefined>();
+        for (const resourceId of resourceIds) {
+          const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
+          lengths.add(resource.effectiveBookingRules?.defaultDurationMinutes);
+        }
+        const [only] = [...lengths];
+        return lengths.size === 1 && only !== undefined ? only : null;
+      });
+    },
+
+    async findAvailableRanges(context, input) {
+      const tenantRef = context.principal.tenantRef;
+      const pickup = { start: new Date(input.pickup_start as string), end: new Date(input.pickup_end as string) };
+      const days = input.days as number | undefined;
+      const back =
+        input.return_start !== undefined
+          ? { start: new Date(input.return_start as string), end: new Date(input.return_end as string) }
+          : undefined;
+      const limit = input.limit as number;
+      const charge = busyBudget();
+      const now = new Date();
+      return withTenant(store, context, async (tenantStore) => {
+        let resources: SlotlockResource[];
+        if (typeof input.pool === 'string') {
+          resources = await tenantStore.listPoolMembers({ tenantRef, pool: input.pool, visibility: 'shared', ordered: true });
+          if (resources.length === 0) throw new SlotlockAgentOperationError('pool_not_found', 404);
+          resources = resources.slice(0, 100);
+        } else {
+          resources = [];
+          for (const resourceId of distinctResourceIds(input)) {
+            resources.push(await requireAgentResource(tenantStore, tenantRef, resourceId));
+          }
+        }
+        // What a range may reach: the pick-up window, the longest it may run, and its buffers.
+        const lastEnd = back ? back.end.getTime() : pickup.end.getTime() + ((days ?? 1) + 1) * 86_400_000;
+        const reach = { start: new Date(pickup.start.getTime() - 86_400_000), end: new Date(lastEnd + 8 * 86_400_000) };
+        const exceptions = await tenantStore.availabilityExceptionsFor({
+          tenantRef,
+          resourceIds: resources.map((resource) => resource.id),
+          window: reach,
+        });
+        const ranges: { resource_id: string; start: string; end: string }[] = [];
+        let complete = true;
+        for (const resource of resources) {
+          const sources = await requiredSources(options, context, resource);
+          const freeBusy = await readFreeBusy(tenantStore, {
+            tenantRef,
+            resourceId: resource.id,
+            window: reach,
+            requiredSources: [...sources],
+            ...(options.coverageMaxAgeMs !== undefined ? { coverageMaxAgeMs: options.coverageMaxAgeMs } : {}),
+          });
+          charge(freeBusy.busy.length);
+          if (freeBusy.coverage.state !== 'complete') {
+            complete = false;
+            continue;
+          }
+          const fallback =
+            resource.availabilityRules === undefined && resource.inheritedAvailability === undefined
+              ? await options.availabilityRules(context, resource)
+              : [];
+          const found = findEarliestRange({
+            busy: freeBusy.busy,
+            rules: resource.effectiveBookingRules,
+            timezone: resource.timezone,
+            hours: applicableHours(resource, fallback).rules,
+            exceptions: exceptions.get(resource.id) ?? [],
+            now,
+            pickup,
+            ...(back ? { return: back } : {}),
+            ...(days !== undefined ? { days } : {}),
+          });
+          if (found) ranges.push({ resource_id: resource.id, start: found.start.toISOString(), end: found.end.toISOString() });
+        }
+        const window = { start: pickup.start, end: new Date(lastEnd) };
+        const answer = {
+          ranges: complete
+            ? ranges
+                .sort((a, b) => Date.parse(a.start) - Date.parse(b.start) || a.resource_id.localeCompare(b.resource_id))
+                .slice(0, limit)
+            : [],
+          coverage: coverageProjection(window, complete),
+        };
+        return typeof input.pool === 'string'
+          ? { ...answer, selected_resource_ids: resources.map((resource) => resource.id) }
+          : answer;
       });
     },
 
@@ -1324,6 +1648,7 @@ export function createSlotlockStoreAgentBackend(
             timezone: resource.timezone,
             window,
             now: new Date(),
+            durationMs,
           });
           const sources = await requiredSources(options, context, resource);
           const freeBusy = await readFreeBusy(tenantStore, {
@@ -1342,17 +1667,22 @@ export function createSlotlockStoreAgentBackend(
             continue;
           }
           if (!search) continue;
-          const rules =
-            resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-          const windows = expandRules(rules, search.window, resource.timezone);
-          windowsLeft -= windows.length;
-          if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
-          const candidate = findNextAvailable({
-            busy: bookingSearchBlocked(freeBusy.busy, search),
-            windows,
-            durationMs,
-            ...(search.align ? { align: search.align } : {}),
-          });
+          let candidate: Interval | null;
+          if (hoursApplyOf(resource.effectiveBookingRules) === 'ends') {
+            // A slot may run from one local day to another: the range search's earliest.
+            [candidate = null] = await rangedSlots(tenantStore, context, resource, window, search.window.start.getTime(), durationMs, freeBusy.busy, 1, options.availabilityRules);
+          } else {
+            const windows =
+              (await hoursWithin(tenantStore, context, [resource], search.window, options)).get(resource.id) ?? [];
+            windowsLeft -= windows.length;
+            if (windowsLeft < 0) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+            candidate = findNextAvailable({
+              busy: bookingSearchBlocked(freeBusy.busy, search),
+              windows,
+              durationMs,
+              ...(search.align ? { align: search.align } : {}),
+            });
+          }
           if (
             candidate &&
             (!best ||
@@ -1418,6 +1748,8 @@ export function createSlotlockStoreAgentBackend(
           ...(typeof input.hold_id === 'string'
             ? { fromHold: { holdId: input.hold_id, holderRef: agentOwnerRef(context) } }
             : {}),
+          // Tell no one about it (RFC 0004 P3).
+          ...(input.notify === false ? { notify: false } : {}),
         });
         if (!result.ok) throw operationError(result, await overlapDetails(tenantStore, context, result));
         const created = await tenantStore.getCalendarEvent({
@@ -1600,6 +1932,8 @@ export function createSlotlockStoreAgentBackend(
           ...(current ? { expectedResourceId: current.resourceId } : {}),
           idempotencyKey: agentCommandIdempotencyKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
+          // An agent is held to the resource's cancel cutoff (RFC 0004 B5).
+          enforceBookingRules: true,
         });
         if (!result.ok) throw operationError(result);
         return {
@@ -1641,6 +1975,52 @@ export interface SlotlockStoreApplicationBackendOptions {
    * approvals_unavailable; declining still works.
    */
   agentBackend?: SlotlockAgentCalendarBackend;
+  /**
+   * How `slotlock_import_holidays` fetches a calendar's url (RFC 0004 B1): give it a fetch that
+   * refuses private addresses (`createSlotlockGuardedFetch`). Unset: a url answers 400
+   * holiday_url_not_served and only the calendar's text is read.
+   */
+  holidayFetch?: typeof fetch;
+}
+
+/** An exception as the API answers it. */
+function exceptionOutput(exception: SlotlockAvailabilityException) {
+  return {
+    id: exception.id,
+    location: exception.location ?? null,
+    resource_id: exception.resourceId ?? null,
+    starts_on: exception.startsOn,
+    ends_on: exception.endsOn,
+    outcome: exception.outcome,
+    hours:
+      exception.hours?.map((window) => ({ start_minutes: window.startMinutes, duration_minutes: window.durationMinutes })) ??
+      null,
+    label: exception.label,
+    source: exception.source,
+    calendar_id: exception.calendarId ?? null,
+    created_at: exception.createdAt.toISOString(),
+  };
+}
+
+function holidayCalendarOutput(calendar: SlotlockHolidayCalendar) {
+  return {
+    calendar_id: calendar.id,
+    name: calendar.name,
+    location: calendar.location ?? null,
+    resource_id: calendar.resourceId ?? null,
+    url: calendar.url ?? null,
+    imported_at: calendar.importedAt?.toISOString() ?? null,
+    next_import_at: calendar.nextImportAt?.toISOString() ?? null,
+    last_error: calendar.lastError ?? null,
+    closures: calendar.closures,
+    created_at: calendar.createdAt.toISOString(),
+  };
+}
+
+/** Days the exports and imports of hours reach: a year on from yesterday. */
+function exportDays(): { from: string; to: string } {
+  const today = Math.floor(Date.now() / 86_400_000);
+  return { from: dayToDate(today - 1), to: dayToDate(today + 366) };
 }
 
 function storeRefusal(error: unknown): unknown {
@@ -1671,10 +2051,12 @@ function storeRefusal(error: unknown): unknown {
     code === 'pool_order_limit_reached' ||
     code === 'composite_too_deep' ||
     code === 'composite_parts_limit' ||
-    code === 'composite_busy'
+    code === 'composite_busy' ||
+    code === 'availability_exceptions_limit_reached'
   ) {
     return new SlotlockAgentOperationError(code, 409);
   }
+  if (code === 'holiday_calendar_unreachable') return new SlotlockAgentOperationError(code, 400);
   if (code.startsWith('invalid_') && code !== 'invalid_transaction_isolation') {
     return new SlotlockAgentOperationError(code, 400);
   }
@@ -1725,6 +2107,7 @@ function approvalPolicyOutput(policy: SlotlockApprovalPolicy) {
     outcome: policy.outcome,
     approval_ttl_minutes: policy.approvalTtlMinutes,
     lead_minutes: policy.leadMinutes,
+    include_application: policy.includeApplication,
     created_at: policy.createdAt.toISOString(),
     updated_at: policy.updatedAt.toISOString(),
   };
@@ -1768,6 +2151,18 @@ function approvalOutput(approval: SlotlockApproval) {
   };
 }
 
+/** A store refusal as the application API answers it, a broken booking rule by its own code. */
+function applicationRuleRefusal(result: { code: string; rule?: string }): SlotlockAgentOperationError {
+  return result.code === 'booking_rule_violated' && result.rule
+    ? new SlotlockAgentOperationError(`booking_rule_${result.rule}`, 409)
+    : applicationRefusal(result.code);
+}
+
+/** A recorded cancellation fee as the API answers it (RFC 0004 B5). */
+function feeOutput(fee: { amountMinor: number; currency: string } | undefined) {
+  return fee ? { amount_minor: fee.amountMinor, currency: fee.currency } : null;
+}
+
 function applicationRefusal(code: string): SlotlockAgentOperationError {
   if (code === 'resource_tenant_mismatch') {
     return new SlotlockAgentOperationError('resource_not_found', 404);
@@ -1790,6 +2185,8 @@ function waitlistOutput(entry: SlotlockWaitlistEntry) {
     hold_id: entry.holdId,
     offered_resource_id: entry.offeredResourceId,
     offered_at: entry.offeredAt?.toISOString() ?? null,
+    duration_minutes: entry.durationMs === null ? null : Math.round(entry.durationMs / 60_000),
+    decided_at: entry.decidedAt?.toISOString() ?? null,
     created_at: entry.createdAt.toISOString(),
   };
 }
@@ -1838,6 +2235,8 @@ function keyApprovalPolicy(): SlotlockApprovalPolicy {
     outcome: 'require_approval',
     approvalTtlMinutes: SLOTLOCK_DEFAULT_APPROVAL_MINUTES,
     leadMinutes: 0,
+    // The key's own approval holds whatever it books, for the tenant too.
+    includeApplication: true,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   };
@@ -1928,11 +2327,9 @@ function withApprovalPolicies(
     end: Date,
   ): Promise<boolean> {
     const resource = await requireAgentResource(tenantStore, context.principal.tenantRef, resourceId);
-    const hours = resource.availabilityRules ?? (await options.availabilityRules(context, resource));
-    const windows = mergeIntervals(
-      expandRules(hours, { start: new Date(start.getTime() - 86_400_000), end: new Date(end.getTime() + 86_400_000) }, resource.timezone),
-    );
-    return !windows.some((window) => window.start <= start && window.end >= end);
+    const reach = { start: new Date(start.getTime() - 86_400_000), end: new Date(end.getTime() + 86_400_000) };
+    const windows = (await hoursWithin(tenantStore, context, [resource], reach, options)).get(resource.id) ?? [];
+    return !coveredByOpenWindows(windows, { start, end });
   }
 
   /** The write's ask and the policies that may cover it, or null when none can. */
@@ -2014,6 +2411,8 @@ function withApprovalPolicies(
     // What the ask alone decides; hours wait for the resource the write takes.
     const policies = (await tenantStore.approvalPoliciesFor({ tenantRef, resourceIds: asked.resourceIds })).filter(
       (policy) =>
+        // The tenant's own bookings are held only by policies that include the application.
+        (!forTenant(context) || policy.includeApplication === true) &&
         (policy.conditions.kinds === undefined || policy.conditions.kinds.includes(asked.kind)) &&
         (policy.conditions.longerThanMinutes === undefined || minutes > policy.conditions.longerThanMinutes),
     );
@@ -2140,6 +2539,8 @@ function withApprovalPolicies(
               : {}),
             ...(context.origin !== undefined ? { origin: context.origin } : {}),
             ...(ask.pool !== undefined ? { pool: ask.pool } : {}),
+            // Granted, it is made as the tenant's again, never as the key's agent.
+            ...(forTenant(context) ? { for: 'tenant' } : {}),
           },
           requesterRef: principal.subject,
           requestKey,
@@ -2205,6 +2606,7 @@ export async function runSlotlockApprovalGrant(
     key_id?: unknown;
     resource_scope?: { locations?: unknown; groups?: unknown };
     pool?: unknown;
+    for?: unknown;
   };
   if (typeof requester.subject !== 'string') throw new SlotlockAgentOperationError('store_inconsistent', 503);
   const scope = requester.resource_scope;
@@ -2227,6 +2629,7 @@ export async function runSlotlockApprovalGrant(
       decidedBy: grant.decidedBy,
       ...(typeof requester.pool === 'string' ? { pool: requester.pool } : {}),
     },
+    ...(requester.for === 'tenant' ? { [TENANT_ACTOR]: true } : {}),
   } as SlotlockAgentInvocationContext;
   const method =
     approval.operation === 'slotlock_book_together'
@@ -2315,8 +2718,34 @@ function bookingRulesOutput(rules: SlotlockBookingRules | undefined) {
     ...(rules.enforceHours !== undefined ? { enforce_hours: rules.enforceHours } : {}),
     ...(rules.checkInMinutes !== undefined ? { check_in_minutes: rules.checkInMinutes } : {}),
     ...(rules.requireCertain !== undefined ? { require_certain: rules.requireCertain } : {}),
+    ...(rules.minDurationMinutes !== undefined ? { min_duration_minutes: rules.minDurationMinutes } : {}),
+    ...(rules.maxDurationMinutes !== undefined ? { max_duration_minutes: rules.maxDurationMinutes } : {}),
+    ...(rules.allowedDurations !== undefined ? { allowed_durations: [...rules.allowedDurations] } : {}),
+    ...(rules.defaultDurationMinutes !== undefined ? { default_duration_minutes: rules.defaultDurationMinutes } : {}),
+    ...(rules.pickupTimes !== undefined ? { pickup_times: dayWindowsOutput(rules.pickupTimes) } : {}),
+    ...(rules.returnTimes !== undefined ? { return_times: dayWindowsOutput(rules.returnTimes) } : {}),
+    ...(rules.hoursApply !== undefined ? { hours_apply: rules.hoursApply } : {}),
+    ...(rules.cancelCutoffMinutes !== undefined ? { cancel_cutoff_minutes: rules.cancelCutoffMinutes } : {}),
+    ...(rules.rescheduleCutoffMinutes !== undefined ? { reschedule_cutoff_minutes: rules.rescheduleCutoffMinutes } : {}),
+    ...(rules.cancellationFee !== undefined
+      ? {
+          cancellation_fee: {
+            amount_minor: rules.cancellationFee.amountMinor,
+            currency: rules.cancellationFee.currency,
+            ...(rules.cancellationFee.withinMinutes !== undefined ? { within_minutes: rules.cancellationFee.withinMinutes } : {}),
+          },
+        }
+      : {}),
   };
 }
+
+const dayWindowsOutput = (windows: readonly { startMinutes: number; durationMinutes: number }[]) =>
+  windows.map((window) => ({ start_minutes: window.startMinutes, duration_minutes: window.durationMinutes }));
+const dayWindowsInput = (value: unknown) =>
+  (value as { start_minutes: number; duration_minutes: number }[]).map((window) => ({
+    startMinutes: window.start_minutes,
+    durationMinutes: window.duration_minutes,
+  }));
 
 function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (value === null || value === undefined) return null;
@@ -2333,6 +2762,27 @@ function bookingRulesInput(value: unknown): SlotlockBookingRules | null {
   if (input.enforce_hours !== undefined) rules.enforceHours = input.enforce_hours as boolean;
   if (input.check_in_minutes !== undefined) rules.checkInMinutes = input.check_in_minutes as number;
   if (input.require_certain !== undefined) rules.requireCertain = input.require_certain as boolean;
+  if (input.min_duration_minutes !== undefined) rules.minDurationMinutes = input.min_duration_minutes as number;
+  if (input.max_duration_minutes !== undefined) rules.maxDurationMinutes = input.max_duration_minutes as number;
+  if (input.allowed_durations !== undefined) rules.allowedDurations = [...(input.allowed_durations as number[])];
+  if (input.default_duration_minutes !== undefined) {
+    rules.defaultDurationMinutes = input.default_duration_minutes as number;
+  }
+  if (input.pickup_times !== undefined) rules.pickupTimes = dayWindowsInput(input.pickup_times);
+  if (input.return_times !== undefined) rules.returnTimes = dayWindowsInput(input.return_times);
+  if (input.hours_apply === 'whole' || input.hours_apply === 'ends') rules.hoursApply = input.hours_apply;
+  if (input.cancel_cutoff_minutes !== undefined) rules.cancelCutoffMinutes = input.cancel_cutoff_minutes as number;
+  if (input.reschedule_cutoff_minutes !== undefined) {
+    rules.rescheduleCutoffMinutes = input.reschedule_cutoff_minutes as number;
+  }
+  if (input.cancellation_fee !== undefined) {
+    const fee = input.cancellation_fee as { amount_minor: number; currency: string; within_minutes?: number };
+    rules.cancellationFee = {
+      amountMinor: fee.amount_minor,
+      currency: fee.currency,
+      ...(fee.within_minutes !== undefined ? { withinMinutes: fee.within_minutes } : {}),
+    };
+  }
   return rules;
 }
 
@@ -2356,6 +2806,13 @@ function resourceOutput(resource: SlotlockResource) {
     location: resource.location ?? null,
     groups: resource.groups ?? [],
     parent_id: resource.parentId ?? null,
+    inherited_availability: resource.inheritedAvailability
+      ? {
+          source: resource.inheritedAvailability.source,
+          location: resource.inheritedAvailability.location ?? null,
+          rules: rulesOutput(resource.inheritedAvailability.rules) ?? [],
+        }
+      : null,
     part_index: resource.partIndex ?? null,
   };
 }
@@ -2416,6 +2873,39 @@ function holdOutput(hold: SlotlockHold) {
     end: hold.end.toISOString(),
     expires_at: hold.expiresAt.toISOString(),
     source: hold.source,
+    ...(hold.paymentRequired
+      ? {
+          payment_required: true as const,
+          payment_ref: hold.paymentRef ?? null,
+          paid_at: hold.paidAt?.toISOString() ?? null,
+          payment_amount: amountOutput(hold.paymentAmount),
+          paid_amount: amountOutput(hold.paidAmount),
+        }
+      : {}),
+  };
+}
+
+function amountOutput(amount: { amountMinor: number; currency: string } | null | undefined) {
+  return amount ? { amount_minor: amount.amountMinor, currency: amount.currency } : null;
+}
+
+function amountInput(value: unknown): { amountMinor: number; currency: string } | undefined {
+  const amount = value as { amount_minor: number; currency: string } | undefined;
+  return amount ? { amountMinor: amount.amount_minor, currency: amount.currency } : undefined;
+}
+
+function contactOutput(contact: SlotlockContact) {
+  return {
+    contact_ref: contact.ref,
+    name: contact.name,
+    email: contact.email,
+    phone: contact.phone,
+    whatsapp: contact.whatsapp,
+    consent: contact.consent,
+    consent_at: Object.fromEntries(Object.entries(contact.consentAt).map(([channel, at]) => [channel, (at as Date).toISOString()])),
+    locale: contact.locale,
+    created_at: contact.createdAt.toISOString(),
+    updated_at: contact.updatedAt.toISOString(),
   };
 }
 
@@ -2430,6 +2920,9 @@ function reservationOutput(reservation: SlotlockReservation) {
     buffer_after_minutes: Math.ceil(reservation.bufferAfterMs / 60_000),
     revision: reservation.revision,
     source: reservation.source,
+    ...(reservation.contactRef ? { contact_ref: reservation.contactRef } : {}),
+    ...(reservation.notify === false ? { notify: false as const } : {}),
+    ...(reservation.reminderMinutes ? { reminder_minutes: reservation.reminderMinutes } : {}),
   };
 }
 
@@ -2776,14 +3269,27 @@ export function createSlotlockStoreApplicationBackend(
     async exportResourceAvailability(context, input) {
       return withTenant(store, context, async (tenant) => {
         const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
-        if (resource.availabilityRules === undefined) return { icalendar: null };
-        return {
-          icalendar: emitVAvailability({
-            rules: resource.availabilityRules,
-            timezone: resource.timezone,
-            uid: `${resource.id}-hours`,
-          }),
+        const rules = resource.availabilityRules ?? resource.inheritedAvailability?.rules;
+        if (rules === undefined) return { icalendar: null };
+        // The year ahead's closures and special hours, as EXDATE and RDATE (RFC 0004 B1).
+        const span = exportDays();
+        const window = {
+          start: new Date((epochDay(span.from) as number) * 86_400_000),
+          end: new Date(((epochDay(span.to) as number) + 1) * 86_400_000),
         };
+        const exceptions = await tenant.availabilityExceptionsFor({
+          tenantRef: tenantOf(context),
+          resourceIds: [resource.id],
+          window,
+        });
+        const icalendar = emitVAvailability({
+          rules,
+          timezone: resource.timezone,
+          uid: `${resource.id}-hours`,
+          days: exceptionDays(exceptions.get(resource.id) ?? [], span.from, span.to),
+        });
+        if (icalendar.length > 200_000) throw new SlotlockAgentOperationError('calendar_work_limit', 400);
+        return { icalendar };
       });
     },
 
@@ -2812,6 +3318,14 @@ export function createSlotlockStoreApplicationBackend(
             id,
             rules: parsed.rules,
           });
+          if (resource) {
+            // The days it names replace those an earlier import of its hours made.
+            await tenant.replaceImportedExceptions({
+              tenantRef: tenantOf(context),
+              resourceId: id,
+              ranges: exceptionRanges(parsed.days),
+            });
+          }
         } catch (error) {
           throw storeRefusal(error);
         }
@@ -2943,15 +3457,161 @@ export function createSlotlockStoreApplicationBackend(
       const rules = rulesInput(input.rules);
       return withTenant(store, context, async (tenant) => {
         try {
+          const result = await tenant.storeTenantAvailability({
+            tenantRef: tenantOf(context),
+            rules,
+            overrideResources: SLOTLOCK_OVERRIDE_RESOURCES.includes(input.override_resources as SlotlockOverrideResources)
+              ? (input.override_resources as SlotlockOverrideResources)
+              : 'none',
+          });
+          return { resources_updated: result.inheriting, resources_with_own_hours: result.ownHours };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      });
+    },
+
+    async getAvailabilityDefaults(context) {
+      return withTenant(store, context, async (tenant) => {
+        const defaults = await tenant.getAvailabilityDefaults({ tenantRef: tenantOf(context) });
+        return {
+          tenant: rulesOutput(defaults.tenant),
+          locations: defaults.locations.map((entry) => ({
+            location: entry.location,
+            rules: rulesOutput(entry.rules) ?? [],
+          })),
+        };
+      });
+    },
+
+    async setLocationAvailability(context, input) {
+      const rules = rulesInput(input.rules);
+      const location = input.location as string;
+      return withTenant(store, context, async (tenant) => {
+        let result: Awaited<ReturnType<typeof tenant.setLocationAvailability>>;
+        try {
+          result = await tenant.setLocationAvailability({ tenantRef: tenantOf(context), location, rules });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        if (!result) throw new SlotlockAgentOperationError('location_not_found', 404);
+        return { location, resources_updated: result.inheriting, resources_with_own_hours: result.ownHours };
+      });
+    },
+
+    async listAvailabilityExceptions(context, input) {
+      const limit = (input.limit as number | undefined) ?? 100;
+      return withTenant(store, context, async (tenant) => {
+        let exceptions: SlotlockAvailabilityException[];
+        try {
+          exceptions = await tenant.listAvailabilityExceptions({
+            tenantRef: tenantOf(context),
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            ...(input.location !== undefined ? { location: input.location as string } : {}),
+            ...(input.from !== undefined ? { from: input.from as string } : {}),
+            ...(input.to !== undefined ? { to: input.to as string } : {}),
+            ...(input.after !== undefined ? { after: input.after as string } : {}),
+            limit: limit + 1,
+          });
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+        const page = exceptions.slice(0, limit);
+        return {
+          exceptions: page.map(exceptionOutput),
+          next: exceptions.length > limit ? (page.at(-1)?.id ?? null) : null,
+        };
+      });
+    },
+
+    async createAvailabilityException(context, input) {
+      const hours = input.hours as { start_minutes: number; duration_minutes: number }[] | undefined;
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const exception = await tenant.createAvailabilityException({
+            tenantRef: tenantOf(context),
+            ...(input.location !== undefined ? { location: input.location as string } : {}),
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            startsOn: input.starts_on as string,
+            ...(input.ends_on !== undefined ? { endsOn: input.ends_on as string } : {}),
+            outcome: input.outcome as 'closed' | 'open',
+            ...(hours
+              ? { hours: hours.map((window) => ({ startMinutes: window.start_minutes, durationMinutes: window.duration_minutes })) }
+              : {}),
+            label: input.label as string,
+          });
+          return { exception: exceptionOutput(exception) };
+        } catch (error) {
+          throw storeRefusal(error);
+        }
+      });
+    },
+
+    async deleteAvailabilityException(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const deleted = await tenant.deleteAvailabilityException({
+          tenantRef: tenantOf(context),
+          id: input.exception_id as string,
+        });
+        if (!deleted) throw new SlotlockAgentOperationError('availability_exception_not_found', 404);
+        return { deleted: true };
+      });
+    },
+
+    async importHolidays(context, input) {
+      if (input.location !== undefined && input.resource_id !== undefined) {
+        throw new SlotlockAgentOperationError('invalid_holiday_calendar', 400, { reason: 'a location or a resource, not both' });
+      }
+      // Read (a URL fetched) before the transaction opens.
+      let read: Awaited<ReturnType<typeof readSlotlockHolidayCalendar>>;
+      try {
+        read = await readSlotlockHolidayCalendar(
+          {
+            ...(input.icalendar !== undefined ? { icalendar: input.icalendar as string } : {}),
+            ...(input.url !== undefined ? { url: input.url as string } : {}),
+            ...(input.name !== undefined ? { name: input.name as string } : {}),
+            ...(input.subscribe !== undefined ? { subscribe: input.subscribe as boolean } : {}),
+            ...(input.from !== undefined ? { from: input.from as string } : {}),
+            ...(input.to !== undefined ? { to: input.to as string } : {}),
+          },
+          options.holidayFetch,
+        );
+      } catch (error) {
+        throw storeRefusal(error);
+      }
+      return withTenant(store, context, async (tenant) => {
+        try {
+          const result = await tenant.importHolidayCalendar({
+            tenantRef: tenantOf(context),
+            ...(input.location !== undefined ? { location: input.location as string } : {}),
+            ...(input.resource_id !== undefined ? { resourceId: input.resource_id as string } : {}),
+            name: read.name,
+            ...(read.url !== undefined ? { url: read.url } : {}),
+            holidays: read.holidays,
+            span: read.span,
+          });
           return {
-            resources_updated: await tenant.setTenantAvailability({
-              tenantRef: tenantOf(context),
-              rules,
-            }),
+            imported: result.imported,
+            skipped: read.skipped,
+            removed: result.removed,
+            calendar: holidayCalendarOutput(result.calendar),
           };
         } catch (error) {
           throw storeRefusal(error);
         }
+      });
+    },
+
+    async listHolidayCalendars(context) {
+      return withTenant(store, context, async (tenant) => ({
+        calendars: (await tenant.listHolidayCalendars({ tenantRef: tenantOf(context) })).map(holidayCalendarOutput),
+      }));
+    },
+
+    async deleteHolidayCalendar(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const deleted = await tenant.deleteHolidayCalendar({ tenantRef: tenantOf(context), id: input.calendar_id as string });
+        return { deleted: deleted !== null, closures: deleted?.closures ?? 0 };
       });
     },
 
@@ -2968,6 +3628,8 @@ export function createSlotlockStoreApplicationBackend(
           ...(input.buffer_after_minutes !== undefined
             ? { bufferAfterMs: (input.buffer_after_minutes as number) * 60_000 }
             : {}),
+          ...(input.payment_required === true ? { paymentRequired: true } : {}),
+          ...(input.payment !== undefined ? { payment: amountInput(input.payment) as { amountMinor: number; currency: string } } : {}),
           // A retried request with the caller's key answers the hold the first one made.
           ...(input.idempotency_key !== undefined
             ? {
@@ -3017,6 +3679,68 @@ export function createSlotlockStoreApplicationBackend(
         if (!result.ok) throw applicationRefusal(result.code);
         return { reservation: reservationOutput(result.reservation) };
       }, WRITE);
+    },
+
+    async markHoldPaid(context, input) {
+      const id = input.hold_id as string;
+      if (!STORE_ID_PATTERN.test(id)) throw new SlotlockAgentOperationError('hold_not_found', 404);
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.markHoldPaid({
+          tenantRef: tenantOf(context),
+          holdId: id,
+          paymentRef: input.payment_ref as string,
+          ...(input.received !== undefined ? { received: amountInput(input.received) as { amountMinor: number; currency: string } } : {}),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { hold: holdOutput(result.hold), replayed: result.idempotent };
+      }, WRITE);
+    },
+
+    async putContact(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const result = await tenant.putContact({
+          tenantRef: tenantOf(context),
+          ref: input.contact_ref as string,
+          name: (input.name as string | null | undefined) ?? null,
+          email: (input.email as string | null | undefined) ?? null,
+          phone: (input.phone as string | null | undefined) ?? null,
+          whatsapp: (input.whatsapp as string | null | undefined) ?? null,
+          consent: (input.consent as SlotlockContactConsent | undefined) ?? {},
+          locale: (input.locale as string | null | undefined) ?? null,
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { contact: contactOutput(result.contact), created: result.created };
+      }, WRITE);
+    },
+
+    async getContact(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const contact = await tenant.getContact({ tenantRef: tenantOf(context), ref: input.contact_ref as string });
+        if (!contact) throw new SlotlockAgentOperationError('contact_not_found', 404);
+        return { contact: contactOutput(contact) };
+      });
+    },
+
+    async listContacts(context, input) {
+      const limit = input.limit as number;
+      return withTenant(store, context, async (tenant) => {
+        const contacts = await tenant.listContacts({
+          tenantRef: tenantOf(context),
+          limit: limit + 1,
+          ...(input.cursor !== undefined ? { after: input.cursor as string } : {}),
+        });
+        const shown = contacts.slice(0, limit);
+        return {
+          contacts: shown.map(contactOutput),
+          next_cursor: contacts.length > limit ? (shown.at(-1)?.ref ?? null) : null,
+        };
+      });
+    },
+
+    async deleteContact(context, input) {
+      return withTenant(store, context, async (tenant) =>
+        tenant.deleteContact({ tenantRef: tenantOf(context), ref: input.contact_ref as string }),
+      WRITE);
     },
 
     async releaseHold(context, input) {
@@ -3071,12 +3795,17 @@ export function createSlotlockStoreApplicationBackend(
           bufferAfterMs: (input.buffer_after_minutes as number) * 60_000,
           revision: input.revision as number,
           ...(input.source !== undefined ? { source: input.source as string } : {}),
+          ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
+          ...(input.local_start !== undefined ? { localStart: input.local_start as string } : {}),
+          ...(input.contact_ref !== undefined ? { contactRef: input.contact_ref as string } : {}),
+          ...(input.notify !== undefined ? { notify: input.notify as boolean } : {}),
+          ...(input.reminder_minutes !== undefined ? { reminderMinutes: input.reminder_minutes as number[] } : {}),
         };
         const result =
           command.revision === 1
             ? await tenant.createExternalReservation(command)
             : await tenant.rescheduleExternalReservation(command);
-        if (!result.ok) throw applicationRefusal(result.code);
+        if (!result.ok) throw applicationRuleRefusal(result);
         return { reservation: reservationOutput(result.reservation), replayed: result.idempotent };
       }, WRITE);
       if ((input.revision as number) > 1 && !put.replayed) {
@@ -3091,9 +3820,10 @@ export function createSlotlockStoreApplicationBackend(
           tenantRef: tenantOf(context),
           externalRef: input.reservation_ref as string,
           revision: input.revision as number,
+          ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
         });
-        if (!result.ok) throw applicationRefusal(result.code);
-        return { cancelled: result.cancelled, revision: result.revision };
+        if (!result.ok) throw applicationRuleRefusal(result);
+        return { cancelled: result.cancelled, revision: result.revision, cancellation_fee: feeOutput(result.cancellationFee) };
       }, WRITE);
       if (cancelled.cancelled) await offerFreedTime(store, context);
       return cancelled;
@@ -3121,6 +3851,7 @@ export function createSlotlockStoreApplicationBackend(
           end: new Date(input.end as string),
           holderRef: input.holder_ref as string,
           ...(ttl !== undefined ? { offerTtlMs: ttl * 1000 } : {}),
+          ...(input.duration_minutes !== undefined ? { durationMs: (input.duration_minutes as number) * 60_000 } : {}),
           ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key as string } : {}),
         });
         if (!result.ok) throw applicationRefusal(result.code);
@@ -3148,6 +3879,34 @@ export function createSlotlockStoreApplicationBackend(
       }));
       if (left.left) await offerFreedTime(store, context);
       return left;
+    },
+
+    async tenantBookTogether(context, input) {
+      if (!options.agentBackend?.bookTogether) throw new SlotlockAgentOperationError('bundles_unavailable', 409);
+      // Through the agents' bundle (one transaction, the booking rules applied), as the tenant's:
+      // owned by the tenant, not the key, and held only by policies that include the application.
+      return options.agentBackend.bookTogether(
+        { ...context, operation: 'slotlock_book_together', [TENANT_ACTOR]: true } as unknown as SlotlockAgentInvocationContext,
+        input,
+      );
+    },
+
+    async tenantBookPool(context, input) {
+      if (!options.agentBackend?.bookPool) throw new SlotlockAgentOperationError('pools_unavailable', 409);
+      return options.agentBackend.bookPool(
+        { ...context, operation: 'slotlock_book_pool', [TENANT_ACTOR]: true } as unknown as SlotlockAgentInvocationContext,
+        input,
+      );
+    },
+
+    async declineWaitlistOffer(context, input) {
+      const declined = await withTenant(store, context, (tenant) =>
+        tenant.declineWaitlistOffer({ tenantRef: tenantOf(context), id: input.entry_id as string }),
+      );
+      if (!declined) throw new SlotlockAgentOperationError('waitlist_offer_not_found', 404);
+      // The time it let go goes to the next who waits.
+      await offerFreedTime(store, context);
+      return { entry: waitlistOutput(declined) };
     },
 
     async getCoverage(context, input) {
@@ -3212,7 +3971,47 @@ export function createSlotlockStoreApplicationBackend(
       }, WRITE);
     },
 
-    async listTenantEvents(context, input) {
+    async putSourceBusy(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const result = await tenant.replaceSourceBusy({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+          window: interval(input as { start: string; end: string }),
+          revision: input.revision as number,
+          busy: (input.busy as { start: string; end: string }[]).map((busy) => ({
+            start: new Date(busy.start),
+            end: new Date(busy.end),
+          })),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { revision: result.revision, replayed: result.idempotent, busy: result.busy, conflicts: result.conflicts };
+      }, WRITE);
+    },
+
+    async reportCoverageConflict(context, input) {
+      return withTenant(store, context, async (tenant) => {
+        const resource = await requireResource(tenant, tenantOf(context), input.resource_id as string);
+        const result = await tenant.reportCoverageConflict({
+          tenantRef: tenantOf(context),
+          resourceId: resource.id,
+          source: input.source as string,
+          booking:
+            input.event_id !== undefined
+              ? { eventId: input.event_id as string }
+              : { reservationRef: input.reservation_ref as string },
+          reason: input.reason as 'changed_in_calendar' | 'removed_from_calendar',
+          ...(input.calendar_start !== undefined
+            ? { calendar: interval({ start: input.calendar_start as string, end: input.calendar_end as string }) }
+            : {}),
+        });
+        if (!result.ok) throw applicationRefusal(result.code);
+        return { reported: true };
+      }, WRITE);
+    },
+
+        async listTenantEvents(context, input) {
       const limit = input.limit as number;
       const after = parseEventCursor(input.cursor);
       return withTenant(store, context, async (tenant) => {
@@ -3268,13 +4067,15 @@ export function createSlotlockStoreApplicationBackend(
           idempotencyKey: applicationCommandKey(context, input.idempotency_key as string),
           expectedRevision: input.expected_revision as number,
           ...(expectedResourceId !== undefined ? { expectedResourceId } : {}),
+          ...(input.override_reason !== undefined ? { overrideReason: input.override_reason as string } : {}),
         });
-        if (!result.ok) throw applicationRefusal(result.code);
+        if (!result.ok) throw applicationRuleRefusal(result);
         return {
           event_id: result.eventId,
           revision: result.revision,
           cancelled: true,
           replayed: result.idempotent,
+          cancellation_fee: feeOutput(result.cancellationFee),
         };
       }, WRITE);
       if (!cancelled.replayed) await offerFreedTime(store, context);
@@ -3593,6 +4394,7 @@ export function createSlotlockStoreApplicationBackend(
             ...(input.conditions !== undefined ? { conditions: approvalConditions(input.conditions) } : {}),
             ...(input.approval_ttl_minutes !== undefined ? { approvalTtlMinutes: input.approval_ttl_minutes as number } : {}),
             ...(input.lead_minutes !== undefined ? { leadMinutes: input.lead_minutes as number } : {}),
+            ...(input.include_application !== undefined ? { includeApplication: input.include_application as boolean } : {}),
           });
         } catch (error) {
           if (error instanceof SlotlockApprovalPolicyError) {
@@ -3722,9 +4524,10 @@ export function createSlotlockStoreApplicationBackend(
     async runMaintenance(context) {
       assertActive(context);
       try {
-        const { rollPending: _, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
+        const { rollPending: _, holidayCalendarsImported: _holidays, zoneShifts, staleSources, noShows, waitlistOffers, approvalsExpired, bookingsCompleted, remindersDue, ...result } = await maintainSlotlockTenant(store, tenantOf(context), {
           batches,
           signal: context.signal,
+          ...(options.holidayFetch ? { holidayFetch: options.holidayFetch } : {}),
         });
         return {
           ...result,
@@ -3733,6 +4536,8 @@ export function createSlotlockStoreApplicationBackend(
           no_shows: noShows,
           waitlist_offers: waitlistOffers,
           approvals_expired: approvalsExpired,
+          bookings_completed: bookingsCompleted,
+          reminders_due: remindersDue,
         };
       } catch (error) {
         if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);

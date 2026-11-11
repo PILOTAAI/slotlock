@@ -26,7 +26,7 @@ import { SLOTLOCK_PARTNER_ACCOUNT, SLOTLOCK_PARTNER_PLAN } from './partner-names
 import type { SlotlockAgentPrincipal } from './agent-server.js';
 import { SLOTLOCK_EVENT_OUTPUT } from './event-schema.js';
 import type { SlotlockTraceContext } from './mcp-modern.js';
-import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from './rules.js';
+import { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_SOURCE_BUSY_MAX } from './rules.js';
 import {
   SLOTLOCK_GROUPING_REF,
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
@@ -58,6 +58,14 @@ export type SlotlockApplicationOperation =
   | 'slotlock_list_busy'
   | 'slotlock_set_resource_availability'
   | 'slotlock_set_tenant_availability'
+  | 'slotlock_get_availability_defaults'
+  | 'slotlock_set_location_availability'
+  | 'slotlock_list_availability_exceptions'
+  | 'slotlock_create_availability_exception'
+  | 'slotlock_delete_availability_exception'
+  | 'slotlock_import_holidays'
+  | 'slotlock_list_holiday_calendars'
+  | 'slotlock_delete_holiday_calendar'
   | 'slotlock_export_resource_availability'
   | 'slotlock_import_resource_availability'
   | 'slotlock_set_resource_booking_rules'
@@ -72,21 +80,31 @@ export type SlotlockApplicationOperation =
   | 'slotlock_get_coverage'
   | 'slotlock_record_coverage_failure'
   | 'slotlock_delete_coverage'
+  | 'slotlock_put_source_busy'
+  | 'slotlock_report_coverage_conflict'
   | 'slotlock_get_reservation_history'
   | 'slotlock_get_tenant_event_history'
   | 'slotlock_acquire_hold'
   | 'slotlock_get_hold'
   | 'slotlock_list_holds'
   | 'slotlock_confirm_hold'
+  | 'slotlock_mark_hold_paid'
   | 'slotlock_release_hold'
   | 'slotlock_get_reservation'
   | 'slotlock_list_reservations'
   | 'slotlock_put_reservation'
   | 'slotlock_cancel_reservation'
   | 'slotlock_check_in_reservation'
+  | 'slotlock_put_contact'
+  | 'slotlock_get_contact'
+  | 'slotlock_list_contacts'
+  | 'slotlock_delete_contact'
   | 'slotlock_join_waitlist'
   | 'slotlock_list_waitlist'
   | 'slotlock_leave_waitlist'
+  | 'slotlock_decline_waitlist_offer'
+  | 'slotlock_tenant_book_together'
+  | 'slotlock_tenant_book_pool'
   | 'slotlock_record_coverage'
   | 'slotlock_list_tenant_events'
   | 'slotlock_get_tenant_event'
@@ -199,6 +217,14 @@ export interface SlotlockApplicationBackend {
   listBusy: Handler;
   setResourceAvailability: Handler;
   setTenantAvailability: Handler;
+  getAvailabilityDefaults: Handler;
+  setLocationAvailability: Handler;
+  listAvailabilityExceptions: Handler;
+  createAvailabilityException: Handler;
+  deleteAvailabilityException: Handler;
+  importHolidays: Handler;
+  listHolidayCalendars: Handler;
+  deleteHolidayCalendar: Handler;
   exportResourceAvailability: Handler;
   importResourceAvailability: Handler;
   setResourceBookingRules: Handler;
@@ -213,6 +239,13 @@ export interface SlotlockApplicationBackend {
   getCoverage: Handler;
   recordCoverageFailure: Handler;
   deleteCoverage: Handler;
+  putSourceBusy: Handler;
+  reportCoverageConflict: Handler;
+  markHoldPaid: Handler;
+  putContact: Handler;
+  getContact: Handler;
+  listContacts: Handler;
+  deleteContact: Handler;
   getReservationHistory: Handler;
   getTenantEventHistory: Handler;
   acquireHold: Handler;
@@ -228,6 +261,9 @@ export interface SlotlockApplicationBackend {
   joinWaitlist: Handler;
   listWaitlist: Handler;
   leaveWaitlist: Handler;
+  declineWaitlistOffer: Handler;
+  tenantBookTogether: Handler;
+  tenantBookPool: Handler;
   recordCoverage: Handler;
   listTenantEvents: Handler;
   getTenantEvent: Handler;
@@ -414,6 +450,11 @@ const AVAILABILITY_RULE = z
   .strict();
 const AVAILABILITY_RULES = z.array(AVAILABILITY_RULE).max(50);
 
+/** A window of a day: minutes after local midnight and how long (it may run past midnight). */
+const DAY_WINDOW = z
+  .object({ start_minutes: z.number().int().min(0).max(1_439), duration_minutes: z.number().int().min(1).max(1_440) })
+  .strict();
+
 /** What a booking on a resource must satisfy; each rule optional (`SlotlockBookingRules`). */
 const BOOKING_RULES = z
   .object({
@@ -422,10 +463,39 @@ const BOOKING_RULES = z
     slot_step_minutes: z.number().int().min(1).max(1_440).optional(),
     step_offset_minutes: z.number().int().min(0).max(1_439).optional(),
     buffer_before_minutes: z.number().int().min(0).max(1_440).optional(),
-    turnaround_minutes: z.number().int().min(0).max(1_440).optional(),
+    turnaround_minutes: z.number().int().min(0).max(10_080).optional(),
     enforce_hours: z.boolean().optional(),
     check_in_minutes: z.number().int().min(1).max(1_440).optional(),
     require_certain: z.boolean().optional(),
+    /** A booking lasts at least, and at most, this many minutes (RFC 0004 B3). */
+    min_duration_minutes: z.number().int().min(1).max(525_600).optional(),
+    max_duration_minutes: z.number().int().min(1).max(525_600).optional(),
+    /** A booking lasts exactly one of these many minutes. */
+    allowed_durations: z.array(z.number().int().min(1).max(525_600)).min(1).max(20).optional(),
+    /** The length a search offers when it names none. */
+    default_duration_minutes: z.number().int().min(1).max(525_600).optional(),
+    /** A booking from one local day to another starts in one of these windows of the day. */
+    pickup_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
+    /** And ends in one of these. */
+    return_times: z.array(DAY_WINDOW).min(1).max(4).optional(),
+    /**
+     * How the hours hold a booking from one local day to another: whole (all of it inside them) or
+     * ends (only its start and end); by default ends with pickup_times or return_times, else whole.
+     * Writes under enforce_hours, and every search, follow it.
+     */
+    hours_apply: z.enum(['whole', 'ends']).optional(),
+    /** Cancelling, or moving, is refused this many minutes before the start (RFC 0004 B5). */
+    cancel_cutoff_minutes: z.number().int().min(0).max(525_600).optional(),
+    reschedule_cutoff_minutes: z.number().int().min(0).max(525_600).optional(),
+    /** What a cancellation costs (within within_minutes of the start, when given), for you to charge. */
+    cancellation_fee: z
+      .object({
+        amount_minor: z.number().int().min(0).max(1_000_000_000_000),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        within_minutes: z.number().int().min(0).max(525_600).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -491,6 +561,7 @@ const APPROVAL_POLICY = z
     outcome: z.enum(['require_approval', 'refuse']),
     approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
     lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES),
+    include_application: z.boolean(),
     created_at: DATE_TIME,
     updated_at: DATE_TIME,
   })
@@ -578,8 +649,75 @@ const RESOURCE = z
     parent_id: z.string().uuid().nullable(),
     /** Its place among its parent's parts, from 0; `null` when it is no part. */
     part_index: z.number().int().min(0).nullable(),
+    /**
+     * The hours it inherits when it has none of its own (RFC 0004 B2): its location's (the nearest
+     * up the chain), else the tenant's; `null` when it has its own or uses the server's default.
+     */
+    inherited_availability: z
+      .object({ source: z.enum(['location', 'tenant']), location: GROUPING_REF.nullable(), rules: AVAILABILITY_RULES })
+      .strict()
+      .nullable(),
   })
   .strict();
+
+/** An admin's reason for going past a cancel or reschedule cutoff (RFC 0004 B5), kept on the feed. */
+const OVERRIDE_REASON = z.string().trim().min(1).max(500);
+/** A cancellation's fee as recorded: an amount in the currency's minor unit, ISO 4217 currency. */
+const RECORDED_FEE = z.object({ amount_minor: z.number().int().min(0), currency: z.string().regex(/^[A-Z]{3}$/) }).strict();
+
+/** A day in the scope's calendar, YYYY-MM-DD. */
+const LOCAL_DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** One window of an exception's day: minutes after local midnight and how long. */
+const EXCEPTION_WINDOW = z
+  .object({ start_minutes: z.number().int().min(0).max(1_439), duration_minutes: z.number().int().min(1).max(1_440) })
+  .strict();
+/** A closure or a day of special hours (RFC 0004 B1). */
+const AVAILABILITY_EXCEPTION = z
+  .object({
+    id: z.string().uuid(),
+    /** The location it applies to (and every location inside it); `null` when not one location's. */
+    location: GROUPING_REF.nullable(),
+    /** The resource it applies to; `null` when not one resource's. Both null: the whole tenant. */
+    resource_id: z.string().uuid().nullable(),
+    starts_on: LOCAL_DATE,
+    /** The last day, inclusive. */
+    ends_on: LOCAL_DATE,
+    outcome: z.enum(['closed', 'open']),
+    /** For open: the windows each of its days has instead of its weekly hours; `null` when closed. */
+    hours: z.array(EXCEPTION_WINDOW).min(1).max(4).nullable(),
+    label: z.string().max(200),
+    /** manual, ics (a holiday calendar) or vavailability (a resource's imported hours). */
+    source: z.enum(['manual', 'ics', 'vavailability']),
+    /** The holiday calendar it was imported from (slotlock_list_holiday_calendars); `null` when none. */
+    calendar_id: z.string().uuid().nullable(),
+    created_at: DATE_TIME,
+  })
+  .strict();
+/** A holiday calendar imported into closures (RFC 0004 B1). */
+const HOLIDAY_CALENDAR = z
+  .object({
+    calendar_id: z.string().uuid(),
+    /** Unique at its scope: importing under the same name replaces what that calendar said. */
+    name: z.string().min(1).max(200),
+    location: GROUPING_REF.nullable(),
+    resource_id: z.string().uuid().nullable(),
+    /** A subscription's URL, imported again every 30 days; `null` for one pasted or uploaded. */
+    url: z.string().max(2_048).nullable(),
+    imported_at: DATE_TIME.nullable(),
+    next_import_at: DATE_TIME.nullable(),
+    /** Why a subscription's last import failed; it is tried again a day later. */
+    last_error: z.string().max(500).nullable(),
+    /** Its closures. */
+    closures: z.number().int().min(0),
+    created_at: DATE_TIME,
+  })
+  .strict();
+const AVAILABILITY_DEFAULTS_RESULT = {
+  /** Resources in use the hours now apply to. */
+  resources_updated: z.number().int().min(0),
+  /** Resources in use the hours reach that keep hours of their own. */
+  resources_with_own_hours: z.number().int().min(0),
+};
 
 const HISTORY_ENTRY = z
   .object({
@@ -658,12 +796,30 @@ const WAITLIST_ENTRY = z
     end: DATE_TIME,
     holder_ref: z.string().min(1).max(500),
     offer_ttl_seconds: z.number().int().min(60).max(86_400),
-    /** waiting; offered (hold_id holds the window on offered_resource_id); expired (it started first). */
-    status: z.enum(['waiting', 'offered', 'expired']),
+    /**
+     * waiting; offered (hold_id holds the time on offered_resource_id); then accepted (the hold was
+     * confirmed), declined (let go) or lapsed (it expired); or expired (no slot could be offered in
+     * the window).
+     */
+    status: z.enum(['waiting', 'offered', 'accepted', 'declined', 'lapsed', 'expired']),
     hold_id: z.string().uuid().nullable(),
     offered_resource_id: RESOURCE_ID.nullable(),
     offered_at: DATE_TIME.nullable(),
     created_at: DATE_TIME,
+    /** The length it waits for, any slot of it within the window; null: the whole window. */
+    duration_minutes: z.number().int().min(1).nullable(),
+    /** When its offer was accepted, declined or lapsed. */
+    decided_at: DATE_TIME.nullable(),
+  })
+  .strict();
+
+/** A payment's reference at the integrator's processor (RFC 0004 C3): a PaymentIntent id, say. */
+const PAYMENT_REF = z.string().regex(/^[\x21-\x7e]{1,255}$/, 'must be 1-255 printable ASCII characters');
+/** An amount in its currency's minor unit (cents), and the ISO 4217 code, upper case. */
+const PAYMENT_AMOUNT = z
+  .object({
+    amount_minor: z.number().int().min(0).max(1_000_000_000_000),
+    currency: z.string().regex(/^[A-Z]{3}$/, 'must be an ISO 4217 code in capitals, like GBP'),
   })
   .strict();
 
@@ -675,6 +831,37 @@ const HOLD = z
     end: DATE_TIME,
     expires_at: DATE_TIME,
     source: z.string().max(200).nullable(),
+    /** Present when it waits for payment (RFC 0004 C3), with the payment once recorded. */
+    payment_required: z.literal(true).optional(),
+    payment_ref: PAYMENT_REF.nullable().optional(),
+    paid_at: DATE_TIME.nullable().optional(),
+    /** What the payment must be, when the hold names it; and what was received, once paid. */
+    payment_amount: PAYMENT_AMOUNT.nullable().optional(),
+    paid_amount: PAYMENT_AMOUNT.nullable().optional(),
+  })
+  .strict();
+
+/** A person a booking may name to be told about it (RFC 0004 P3), by the tenant's reference. */
+const CONTACT_REF = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/, 'must be 1-200 letters, digits, . _ : or -, starting with a letter or digit');
+const E164_NUMBER = z.string().regex(/^\+[1-9][0-9]{6,14}$/, 'must be an E.164 number, like +447700900123');
+const CONSENT = z
+  .object({ email: z.boolean().optional(), sms: z.boolean().optional(), whatsapp: z.boolean().optional() })
+  .strict();
+const CONTACT = z
+  .object({
+    contact_ref: CONTACT_REF,
+    name: z.string().max(200).nullable(),
+    email: z.string().max(320).nullable(),
+    phone: E164_NUMBER.nullable(),
+    whatsapp: E164_NUMBER.nullable(),
+    consent: CONSENT,
+    /** When each answer in consent was given, kept while it stands. */
+    consent_at: z.object({ email: DATE_TIME.optional(), sms: DATE_TIME.optional(), whatsapp: DATE_TIME.optional() }).strict(),
+    locale: z.string().max(35).nullable(),
+    created_at: DATE_TIME,
+    updated_at: DATE_TIME,
   })
   .strict();
 
@@ -688,6 +875,12 @@ const RESERVATION = z
     buffer_after_minutes: z.number().int().min(0),
     revision: REVISION,
     source: z.string().max(200).nullable(),
+    /** Whom to tell about it (RFC 0004 P3), when it names someone. */
+    contact_ref: CONTACT_REF.optional(),
+    /** Present, and false, when no one should be notified about it. */
+    notify: z.literal(false).optional(),
+    /** Minutes before its start it is reminded (reminder.due), latest first, when it is. */
+    reminder_minutes: z.array(z.number().int().min(0).max(527_040)).max(5).optional(),
   })
   .strict();
 
@@ -976,7 +1169,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_resource_availability',
       title: "Set a resource's bookable hours",
       description:
-        "Give one resource its own weekly bookable hours. `null` makes it use the server's default; `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.",
+        "Give one resource its own weekly bookable hours. `null` makes it inherit: its location's hours (the nearest up the chain), else the tenant's, else the server's; `[]` makes it never bookable. Each rule is weekly with BYDAY, in the resource's time zone: start_minutes after midnight, lasting duration_minutes.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/availability',
       input: z.object({ resource_id: RESOURCE_ID, rules: AVAILABILITY_RULES.nullable() }).strict(),
@@ -989,7 +1182,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_export_resource_availability',
       title: "Export a resource's bookable hours as iCalendar",
       description:
-        "One resource's own weekly bookable hours as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. `null` when the resource uses the server's default.",
+        "The weekly bookable hours that apply to one resource (its own, or those it inherits) as an iCalendar VAVAILABILITY (RFC 7953) for a calendar or scheduling tool: an AVAILABLE per rule, its DTSTART's TZID the resource's IANA time zone. The closures and special hours of the next year are there too: an EXDATE takes a weekly window off a day, and an AVAILABLE with RDATEs gives a day its own hours. `null` when the resource uses the server's default.",
       method: 'GET',
       path: '/v1/resources/{resource_id}/availability/ical',
       input: z.object({ resource_id: RESOURCE_ID }).strict(),
@@ -1002,7 +1195,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_import_resource_availability',
       title: "Import a resource's bookable hours from iCalendar",
       description:
-        "Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. Times must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what weekly hours cannot say: a bounded VAVAILABILITY, RDATE, EXDATE, a single window, another zone.",
+        "Set one resource's own weekly bookable hours from an iCalendar VAVAILABILITY (RFC 7953), as slotlock_set_resource_availability does from rules: each AVAILABLE a weekly RRULE with a start time and DTEND or DURATION. EXDATE, RDATE and single AVAILABLEs become the resource's exceptions, replacing those an earlier import made: each day they name keeps the windows left on it, or is closed with none. Times must be in the resource's time zone (its TZID) or floating. 400 invalid_availability names what cannot be said: a bounded VAVAILABILITY, RECURRENCE-ID, another zone, more than four windows on a day.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/availability/ical',
       input: z
@@ -1021,7 +1214,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_set_resource_booking_rules',
       title: "Set a resource's booking rules",
       description:
-        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking, and whether bookings must lie inside its hours. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
+        "Set what a booking on one resource must satisfy from now on: minimum notice, how far ahead, the step starts fall on (from local midnight in the resource's time zone, offset by step_offset_minutes), the time kept free before and after each booking (turnaround up to a week), whether bookings must lie inside its hours, how long a booking may be (min_duration_minutes, max_duration_minutes, allowed_durations, and default_duration_minutes for a search that names no length), and for a booking from one local day to another, the pickup_times it starts in and the return_times it ends in. `null` clears them. A rule it does not set comes from its pool's or the tenant's defaults (slotlock_set_pool_booking_rules, slotlock_set_tenant_booking_rules). Holds, reservations, moves and agents' events are refused with the rule they break; searches offer only what they allow.",
       method: 'PUT',
       path: '/v1/resources/{resource_id}/booking-rules',
       input: z.object({ resource_id: RESOURCE_ID, rules: BOOKING_RULES.nullable() }).strict(),
@@ -1176,22 +1369,172 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
     },
     {
       name: 'slotlock_set_tenant_availability',
-      title: "Set every resource's bookable hours",
+      title: "Set the tenant's bookable hours",
       description:
-        "Set the weekly bookable hours of every resource the tenant has, as slotlock_set_resource_availability does for one. `null` makes them all use the server's default. Returns how many resources changed.",
+        "Store the tenant's weekly bookable hours: every resource without hours of its own, and with no location hours above it, uses them, resources added later too. `null` hands them back to the server's default. Nothing is copied: a resource with its own hours keeps them (override_resources none, the default), unless override_resources is all, which clears them so every resource inherits, or matching, which clears only those whose hours are the same as the tenant's were before or as these: the copies versions up to 0.8.0 made when setting the tenant's hours, while hours set apart on purpose stay. resources_updated counts the resources in use these hours now apply to; resources_with_own_hours, those that keep their own.",
       method: 'PUT',
       path: '/v1/availability',
-      input: z.object({ rules: AVAILABILITY_RULES.nullable() }).strict(),
-      output: z.object({ resources_updated: z.number().int().min(0) }).strict(),
+      input: z
+        .object({ rules: AVAILABILITY_RULES.nullable(), override_resources: z.enum(['none', 'matching', 'all']).optional() })
+        .strict(),
+      output: z.object(AVAILABILITY_DEFAULTS_RESULT).strict(),
       risk: { readOnly: false, destructive: false, idempotent: true },
       invoke: 'setTenantAvailability',
       example: { rules: EXAMPLE_RULES },
     },
     {
+      name: 'slotlock_get_availability_defaults',
+      title: 'Read stored bookable hours',
+      description:
+        "The tenant's stored weekly hours (`null` when it uses the server's default) and each location's that has its own. A resource without its own uses its location's, the nearest up the chain, then the tenant's, then the server's.",
+      method: 'GET',
+      path: '/v1/availability',
+      input: z.object({}).strict(),
+      output: z
+        .object({
+          tenant: AVAILABILITY_RULES.nullable(),
+          locations: z.array(z.object({ location: GROUPING_REF, rules: AVAILABILITY_RULES }).strict()),
+        })
+        .strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getAvailabilityDefaults',
+      example: {},
+    },
+    {
+      name: 'slotlock_set_location_availability',
+      title: "Set a location's bookable hours",
+      description:
+        "Store a location's weekly bookable hours, each read in a resource's own time zone: resources at it, or at a location inside it, without hours of their own use them, unless a location nearer them has its own. `null` clears them, so they inherit from further up. 404 location_not_found for a location the tenant does not have.",
+      method: 'PUT',
+      path: '/v1/locations/{location}/availability',
+      input: z.object({ location: GROUPING_REF, rules: AVAILABILITY_RULES.nullable() }).strict(),
+      output: z.object({ location: GROUPING_REF, ...AVAILABILITY_DEFAULTS_RESULT }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'setLocationAvailability',
+      example: { location: 'london-depot', rules: EXAMPLE_RULES },
+    },
+    {
+      name: 'slotlock_list_availability_exceptions',
+      title: 'List closures and special hours',
+      description:
+        "The tenant's exceptions to its weekly hours, by first day: with resource_id, those that apply to that resource (the tenant's, its locations' and its own); with location, that location's own; else all of them. from and to keep those that reach the days between. At most limit (1-1,000, default 100); next is the cursor for after.",
+      method: 'GET',
+      path: '/v1/availability/exceptions',
+      input: z
+        .object({
+          resource_id: z.string().uuid().optional(),
+          location: GROUPING_REF.optional(),
+          from: LOCAL_DATE.optional(),
+          to: LOCAL_DATE.optional(),
+          limit: z.coerce.number().int().min(1).max(1_000).optional(),
+          after: z.string().uuid().optional(),
+        })
+        .strict(),
+      output: z.object({ exceptions: z.array(AVAILABILITY_EXCEPTION), next: z.string().uuid().nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listAvailabilityExceptions',
+      example: { from: '2026-12-01', to: '2027-01-31' },
+    },
+    {
+      name: 'slotlock_create_availability_exception',
+      title: 'Add a closure or special hours',
+      description:
+        "Close whole days, or give them hours of their own, for the whole tenant, one location (and every location inside it) or one resource. starts_on to ends_on (inclusive, at most 367 days) are local days, read in each resource's time zone. outcome closed empties those days; open replaces their weekly hours with hours (1-4 windows of start_minutes and duration_minutes). Where several apply to a day, the nearest wins: the resource's own, then its location's from the innermost out, then the tenant's. Search leaves the days as they say; a write is refused outside_hours only under the enforce_hours booking rule. 409 availability_exceptions_limit_reached past 5,000 a tenant.",
+      method: 'POST',
+      path: '/v1/availability/exceptions',
+      input: z
+        .object({
+          location: GROUPING_REF.optional(),
+          resource_id: z.string().uuid().optional(),
+          starts_on: LOCAL_DATE,
+          ends_on: LOCAL_DATE.optional(),
+          outcome: z.enum(['closed', 'open']),
+          hours: z.array(EXCEPTION_WINDOW).min(1).max(4).optional(),
+          label: z.string().trim().min(1).max(200),
+        })
+        .strict(),
+      output: z.object({ exception: AVAILABILITY_EXCEPTION }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'createAvailabilityException',
+      example: { starts_on: '2026-12-25', ends_on: '2026-12-26', outcome: 'closed', label: 'Christmas' },
+    },
+    {
+      name: 'slotlock_delete_availability_exception',
+      title: 'Delete a closure or special hours',
+      description: 'Remove an exception: its days read as the weekly hours again. 404 availability_exception_not_found.',
+      method: 'DELETE',
+      path: '/v1/availability/exceptions/{exception_id}',
+      input: z.object({ exception_id: z.string().uuid() }).strict(),
+      output: z.object({ deleted: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteAvailabilityException',
+      example: { exception_id: '7b3c1d9e-4f2a-4e8b-9c6d-1a2b3c4d5e6f' },
+    },
+    {
+      name: 'slotlock_import_holidays',
+      title: 'Import a holiday calendar',
+      description:
+        "Close the days an iCalendar holiday calendar names, for the whole tenant, one location or one resource: the text in icalendar, or an https url the server fetches (at most 1 MB, 10 seconds; private addresses refused). Each all-day event closes the days it covers, and each occurrence of a recurring one within from to to (default today to two years on, at most three years); timed and cancelled events are skipped. The calendar is kept by name at its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else Holidays): importing it again updates its closures instead of adding more, and deletes the ones it made that it no longer names within the span (removed), so a holiday it dropped goes too. With subscribe (and a url), the server keeps the url and imports it again every 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400 invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.",
+      method: 'POST',
+      path: '/v1/availability/holidays',
+      input: z
+        .object({
+          icalendar: z.string().min(1).max(1_048_576).optional(),
+          url: z.string().url().max(2_000).optional(),
+          name: z.string().trim().min(1).max(200).optional(),
+          subscribe: z.boolean().optional(),
+          location: GROUPING_REF.optional(),
+          resource_id: z.string().uuid().optional(),
+          from: LOCAL_DATE.optional(),
+          to: LOCAL_DATE.optional(),
+        })
+        .strict(),
+      output: z
+        .object({
+          /** Closures added or updated. */
+          imported: z.number().int().min(0),
+          /** Events that were not all-day, were cancelled, or fell outside the span. */
+          skipped: z.number().int().min(0),
+          /** Closures this calendar made before that it no longer names in the span, deleted. */
+          removed: z.number().int().min(0),
+          calendar: HOLIDAY_CALENDAR,
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'importHolidays',
+      example: { url: 'https://example.com/holidays/gb.ics', location: 'london-depot', subscribe: true },
+    },
+    {
+      name: 'slotlock_list_holiday_calendars',
+      title: 'List holiday calendars',
+      description:
+        "The holiday calendars imported into the tenant's closures (slotlock_import_holidays), each with its scope, how many closures it made, and for a subscription its url, when it was last imported, when it will be again, and why the last import failed if it did.",
+      method: 'GET',
+      path: '/v1/availability/holiday-calendars',
+      input: z.object({}).strict(),
+      output: z.object({ calendars: z.array(HOLIDAY_CALENDAR).max(50) }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listHolidayCalendars',
+      example: {},
+    },
+    {
+      name: 'slotlock_delete_holiday_calendar',
+      title: 'Delete a holiday calendar',
+      description:
+        'Delete a holiday calendar and every closure it made, and stop importing it again. deleted is false when the tenant has no such calendar; closures counts those deleted with it.',
+      method: 'DELETE',
+      path: '/v1/availability/holiday-calendars/{calendar_id}',
+      input: z.object({ calendar_id: z.string().uuid() }).strict(),
+      output: z.object({ deleted: z.boolean(), closures: z.number().int().min(0) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteHolidayCalendar',
+      example: { calendar_id: '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d' },
+    },
+    {
       name: 'slotlock_acquire_hold',
       title: 'Hold time',
       description:
-        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.',
+        'Occupy a window without booking it, for example while a customer pays. The hold blocks every other booking until it expires (the database clock, ttl_seconds from now), is confirmed, or is released. buffer_after_minutes keeps the time after it busy as well, and a confirmed hold keeps it. With payment_required (ttl_seconds at most 1800), it cannot be confirmed until slotlock_mark_hold_paid records the payment, which must be at least payment (amount_minor in the minor unit of its currency, and the currency) when given: Slotlock records payment state and never moves money. A taken window answers 409 overlap. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the hold the first request made, until that hold would have expired, is released or is confirmed; the same key with another request is 422 idempotency_conflict.',
       method: 'POST',
       path: '/v1/holds',
       input: z
@@ -1208,9 +1551,21 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           idempotency_key: IDEMPOTENCY_KEY.optional(),
           // Last, so a generated 0.2.0 client's positional arguments keep their places.
           buffer_after_minutes: BUFFER_AFTER_MINUTES.optional(),
+          /** It waits for payment (RFC 0004 C3): confirmed only once slotlock_mark_hold_paid records it. */
+          payment_required: z.boolean().optional(),
+          /** What the payment must be: a smaller one, or in another currency, is refused. */
+          payment: PAYMENT_AMOUNT.optional(),
         })
         .strict()
-        .refine(boundedSpan, SPAN_MESSAGE),
+        .refine(boundedSpan, SPAN_MESSAGE)
+        .refine((input) => input.payment_required !== true || input.ttl_seconds <= 1_800, {
+          message: 'A hold that waits for payment lives at most 1800 seconds',
+          path: ['ttl_seconds'],
+        })
+        .refine((input) => input.payment === undefined || input.payment_required === true, {
+          message: 'payment needs payment_required',
+          path: ['payment'],
+        }),
       output: z.object({ hold: HOLD }).strict(),
       risk: { readOnly: false, destructive: false, idempotent: false },
       invoke: 'acquireHold',
@@ -1255,7 +1610,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_confirm_hold',
       title: 'Confirm a hold',
       description:
-        "Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at revision 1: move or cancel it with the reservation routes by that reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or unknown one, 404 hold_not_found.",
+        "Turn an unexpired hold into a confirmed reservation, whose reference is the hold's id at revision 1: move or cancel it with the reservation routes by that reference (DELETE /v1/reservations/{hold_id}?revision=2 cancels it). Confirming it again answers the same reservation, so a retry is safe. An expired hold answers 409 hold_expired; a released or unknown one, 404 hold_not_found; one that waits for payment not yet recorded, 409 payment_required.",
       method: 'POST',
       path: '/v1/holds/{hold_id}/confirm',
       input: z.object({ hold_id: HOLD_ID }).strict(),
@@ -1263,6 +1618,30 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       risk: { readOnly: false, destructive: false, idempotent: false },
       invoke: 'confirmHold',
       example: { hold_id: EXAMPLE_HOLD_ID },
+    },
+    {
+      name: 'slotlock_mark_hold_paid',
+      title: 'Record a hold as paid',
+      description:
+        "Record that a hold made with payment_required is paid, by the payment's reference at your processor (a Stripe PaymentIntent id, say), once you have verified it: the hold may then be confirmed. Slotlock records payment state and never moves money. The same reference again answers the same hold (replayed: true), whatever became of it since (confirmed, booked as an event, expired): the payment is kept apart from the hold. Another reference answers 409 payment_conflict. When the hold names its payment, received must be at least that amount in that currency (409 payment_amount_mismatch). The feed says so (hold.paid). A hold that does not wait for payment answers 409 payment_not_required; one that expired before it was paid, 409 hold_expired (refund the payment: its time may be someone else's); one released before it was paid, or unknown, 404 hold_not_found.",
+      method: 'POST',
+      path: '/v1/holds/{hold_id}/paid',
+      input: z
+        .object({
+          hold_id: HOLD_ID,
+          payment_ref: PAYMENT_REF,
+          /** What was received, as your processor says: required when the hold names its payment. */
+          received: PAYMENT_AMOUNT.optional(),
+        })
+        .strict(),
+      output: z.object({ hold: HOLD, replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'markHoldPaid',
+      example: {
+        hold_id: EXAMPLE_HOLD_ID,
+        payment_ref: 'pi_3PqX9a2eZvKYlo2C1d7Hk0Lm',
+        received: { amount_minor: 4500, currency: 'GBP' },
+      },
     },
     {
       name: 'slotlock_release_hold',
@@ -1317,7 +1696,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_put_reservation',
       title: 'Book or move a reservation',
       description:
-        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well.',
+        'Book the reservation with this reference (revision 1), or move it (the next revision: the current one plus 1). Sending the same reservation at its current revision again changes nothing (replayed: true). A taken window answers 409 overlap and leaves a moved reservation where it was. buffer_after_minutes keeps the time after it busy as well. A move past the resource\'s reschedule cutoff answers 409 booking_rule_reschedule_cutoff unless override_reason says why, which the feed keeps. local_start (YYYY-MM-DDTHH:MM in the resource\'s zone) records the wall time it is booked for: it must name start, and if time zone rules later move that wall time to another instant, maintenance says so (reservation.timezone_shifted) or follows it. 400 invalid_local_start otherwise. contact_ref names whom to tell about it (slotlock_put_contact) and notify: false says to tell no one; both are on the feed with each change, as sent with each revision. reminder_minutes (up to five, distinct) puts reminder.due on the feed that long before its start, once each, and again if it moves.',
       method: 'PUT',
       path: '/v1/reservations/{reservation_ref}',
       input: z
@@ -1329,6 +1708,16 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           buffer_after_minutes: BUFFER_AFTER_MINUTES.default(0),
           revision: REVISION,
           source: SOURCE.optional(),
+          /** An admin's reason for moving it past its reschedule cutoff (RFC 0004 B5). */
+          override_reason: OVERRIDE_REASON.optional(),
+          /** The wall time it starts at in the resource's zone, kept across zone rule changes (RFC 0004 B9). */
+          local_start: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/).optional(),
+          /** Whom to tell about it (RFC 0004 P3): a contact's reference, never the person. */
+          contact_ref: CONTACT_REF.optional(),
+          /** False: no one should be notified about it (default true). */
+          notify: z.boolean().optional(),
+          /** Minutes before its start to remind whom it names: up to five, each said once as reminder.due. */
+          reminder_minutes: z.array(z.number().int().min(0).max(527_040)).max(5).optional(),
         })
         .strict()
         .refine(boundedSpan, SPAN_MESSAGE),
@@ -1348,11 +1737,13 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_cancel_reservation',
       title: 'Cancel a reservation',
       description:
-        'Cancel the reservation with this reference at the next revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new reservation.',
+        'Cancel the reservation with this reference at the next revision (the current one plus 1). Cancelling leaves a tombstone, so a delayed booking cannot bring it back; repeating the cancel answers cancelled: false. Use a new reference for a new reservation. Past the resource\'s cancel cutoff it answers 409 booking_rule_cancel_cutoff unless override_reason says why, which the tombstone and the feed keep. A late cancellation\'s fee (the resource\'s cancellation_fee) is answered in cancellation_fee and kept on the feed, for you to charge: Slotlock moves no money.',
       method: 'DELETE',
       path: '/v1/reservations/{reservation_ref}',
-      input: z.object({ reservation_ref: IDENTITY, revision: REVISION }).strict(),
-      output: z.object({ cancelled: z.boolean(), revision: REVISION }).strict(),
+      input: z
+        .object({ reservation_ref: IDENTITY, revision: REVISION, override_reason: OVERRIDE_REASON.optional() })
+        .strict(),
+      output: z.object({ cancelled: z.boolean(), revision: REVISION, cancellation_fee: RECORDED_FEE.nullable() }).strict(),
       risk: { readOnly: false, destructive: true, idempotent: true },
       invoke: 'cancelReservation',
       example: { reservation_ref: 'booking-BK-42', revision: 2 },
@@ -1371,10 +1762,77 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { reservation_ref: 'booking-BK-42' },
     },
     {
+      name: 'slotlock_put_contact',
+      title: 'Keep a contact',
+      description:
+        "Keep a person a booking may name to be told about it (contact_ref on slotlock_put_reservation), under your own reference: how to reach them (email, phone for SMS and whatsapp, both E.164) and which channels they agreed to (consent: false is an opt-out a sender must honour). Replaces what was kept under the reference. A sender reads it to send; Slotlock itself sends nothing. created says whether it is new. A tenant keeps at most 100,000 (409 contact_limit_reached).",
+      method: 'PUT',
+      path: '/v1/contacts/{contact_ref}',
+      input: z
+        .object({
+          contact_ref: CONTACT_REF,
+          name: z.string().min(1).max(200).nullable().optional(),
+          email: z.string().min(3).max(320).regex(/^[^\s@]+@[^\s@]+$/, 'must be an email address').nullable().optional(),
+          phone: E164_NUMBER.nullable().optional(),
+          whatsapp: E164_NUMBER.nullable().optional(),
+          consent: CONSENT.optional(),
+          locale: z.string().max(35).regex(/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'must be a BCP 47 tag, like en-GB').nullable().optional(),
+        })
+        .strict(),
+      output: z.object({ contact: CONTACT, created: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'putContact',
+      example: {
+        contact_ref: 'customer-42',
+        name: 'Ada Lovelace',
+        email: 'ada@example.com',
+        phone: '+447700900123',
+        consent: { email: true, sms: false },
+        locale: 'en-GB',
+      },
+    },
+    {
+      name: 'slotlock_get_contact',
+      title: 'Get a contact',
+      description: "The person kept under this reference, for a sender to reach. An unknown one answers 404 contact_not_found.",
+      method: 'GET',
+      path: '/v1/contacts/{contact_ref}',
+      input: z.object({ contact_ref: CONTACT_REF }).strict(),
+      output: z.object({ contact: CONTACT }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'getContact',
+      example: { contact_ref: 'customer-42' },
+    },
+    {
+      name: 'slotlock_list_contacts',
+      title: 'List contacts',
+      description: 'The people the tenant keeps to tell about bookings, by reference, a page at a time: pass next_cursor as cursor for the next page, until it is null.',
+      method: 'GET',
+      path: '/v1/contacts',
+      input: z.object({ limit: PAGE_LIMIT, cursor: CONTACT_REF.optional() }).strict(),
+      output: z.object({ contacts: z.array(CONTACT).max(100), next_cursor: CONTACT_REF.nullable() }).strict(),
+      risk: { readOnly: true, destructive: false, idempotent: true },
+      invoke: 'listContacts',
+      example: { limit: 50 },
+    },
+    {
+      name: 'slotlock_delete_contact',
+      title: 'Forget a contact',
+      description:
+        "Forget a person: their contact, and their reference on every booking that named it, at once (for an erasure request). deleted is false when no contact was kept; bookings counts the bookings that no longer name them. Changes already on the feed keep the reference, never the person.",
+      method: 'DELETE',
+      path: '/v1/contacts/{contact_ref}',
+      input: z.object({ contact_ref: CONTACT_REF }).strict(),
+      output: z.object({ deleted: z.boolean(), bookings: z.number().int().min(0) }).strict(),
+      risk: { readOnly: false, destructive: true, idempotent: true },
+      invoke: 'deleteContact',
+      example: { contact_ref: 'customer-42' },
+    },
+    {
       name: 'slotlock_join_waitlist',
       title: 'Join the waitlist',
       description:
-        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now. When it comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting for it are offered in the order they joined: the first gets a hold of it for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id): confirm the hold to book it. An entry whose window starts first expires (waitlist.expired). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
+        "Wait for a window on one resource (resource_id) or on any member of a pool (pool) that is taken now, or with duration_minutes for any slot of that length within it. When time comes free (a booking cancelled, a hold released or expired, a no-show), the entries waiting are offered in the order they joined: the first that fits gets a hold of it (the window, or the earliest slot of its length) for holder_ref, for offer_ttl_seconds (default 900), and the feed says so (waitlist.offered, with hold_id). Confirm the hold to book it (waitlist.accepted), decline it with slotlock_decline_waitlist_offer (waitlist.declined), or let it lapse (waitlist.lapsed); either way the time goes to the next. An entry no slot can be offered to before its window closes expires (waitlist.expired). Joining and leaving are on the feed too (waitlist.joined, waitlist.left). A holder may wait for 20 windows at once (409 waitlist_limit_reached); a window is at most 31 days. With an idempotency key (the Idempotency-Key header or idempotency_key), a retry answers the entry the first request made (replayed: true) for as long as it is kept; the same key with another request is 422 idempotency_conflict.",
       method: 'POST',
       path: '/v1/waitlist',
       input: z
@@ -1385,6 +1843,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           end: DATE_TIME,
           holder_ref: z.string().trim().min(1).max(500),
           offer_ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+          /** Any slot of this length within the window (RFC 0004 B6); left out, the whole window. */
+          duration_minutes: z.number().int().min(1).max(44_640).optional(),
           idempotency_key: IDEMPOTENCY_KEY.optional(),
         })
         .strict()
@@ -1435,6 +1895,19 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { entry_id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427' },
     },
     {
+      name: 'slotlock_decline_waitlist_offer',
+      title: 'Decline a waitlist offer',
+      description:
+        'Turn down the hold a waitlist entry was offered: the hold is let go, the entry is declined (waitlist.declined), and the time is offered to the next who waits. 404 waitlist_offer_not_found when the entry has no open offer.',
+      method: 'POST',
+      path: '/v1/waitlist/{entry_id}/decline',
+      input: z.object({ entry_id: z.string().uuid() }).strict(),
+      output: z.object({ entry: WAITLIST_ENTRY }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'declineWaitlistOffer',
+      example: { entry_id: '1b4e28ba-2fa1-41d2-883f-0016d3cca427' },
+    },
+    {
       name: 'slotlock_record_coverage',
       title: 'Record calendar coverage',
       description:
@@ -1460,6 +1933,88 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
         start: '2027-03-01T00:00:00Z',
         end: '2027-06-01T00:00:00Z',
         revision: 7,
+      },
+    },
+    {
+      name: 'slotlock_put_source_busy',
+      title: "Record a calendar's busy time",
+      description: `For a calendar that gives busy time but not its events (Google freeBusy, Microsoft getSchedule): record its coverage of a window at the source's revision, as slotlock_record_coverage does, and the busy time in it, which replaces what the source said of that window before (what it said outside the window stays). Busy time counts in free/busy and every booking Slotlock makes on the resource is refused over it (409 overlap), as over an event. A confirmed booking the source newly reports busy time over is left as it is and put on the feed once as coverage.conflict, naming the booking and the source by its source_id: someone decides. At most ${SLOTLOCK_SOURCE_BUSY_MAX} intervals; they are clipped to the window and merged. Revisions only go forward; repeating one changes nothing (replayed: true).`,
+      method: 'PUT',
+      path: '/v1/resources/{resource_id}/coverage/{source}/busy',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID,
+          source: SOURCE,
+          start: DATE_TIME,
+          end: DATE_TIME,
+          revision: REVISION,
+          busy: z
+            .array(
+              z
+                .object({ start: DATE_TIME, end: DATE_TIME })
+                .strict()
+                .refine((value) => Date.parse(value.end) > Date.parse(value.start), SPAN_MESSAGE),
+            )
+            .max(SLOTLOCK_SOURCE_BUSY_MAX),
+        })
+        .strict()
+        .refine((value) => Date.parse(value.end) > Date.parse(value.start), SPAN_MESSAGE),
+      output: z
+        .object({
+          revision: REVISION,
+          replayed: z.boolean(),
+          busy: z.number().int().min(0),
+          conflicts: z.number().int().min(0),
+        })
+        .strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'putSourceBusy',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        source: 'google:fleet@example.com',
+        start: '2027-03-01T00:00:00Z',
+        end: '2027-03-15T00:00:00Z',
+        revision: 8,
+        busy: [{ start: '2027-03-02T09:00:00Z', end: '2027-03-02T11:00:00Z' }],
+      },
+    },
+    {
+      name: 'slotlock_report_coverage_conflict',
+      title: 'Report a booking changed in a calendar',
+      description:
+        "For a calendar sync that writes bookings to a calendar: report that one (by reservation_ref or event_id) was changed (changed_in_calendar, with where the calendar now has it) or removed (removed_from_calendar) there. It is put on the change feed as coverage.conflict, named by the source's source_id, with the booking and the calendar's times; the booking is left as it is, for someone to decide. 404 coverage_not_found for a source that has not recorded coverage of the resource; reservation_not_found or event_not_found for a booking not on it.",
+      method: 'POST',
+      path: '/v1/resources/{resource_id}/coverage/{source}/conflicts',
+      input: z
+        .object({
+          resource_id: RESOURCE_ID,
+          source: SOURCE,
+          reservation_ref: IDENTITY.optional(),
+          event_id: z.string().uuid().optional(),
+          reason: z.enum(['changed_in_calendar', 'removed_from_calendar']),
+          calendar_start: DATE_TIME.optional(),
+          calendar_end: DATE_TIME.optional(),
+        })
+        .strict()
+        .refine((value) => (value.reservation_ref === undefined) !== (value.event_id === undefined), {
+          message: 'Name reservation_ref or event_id, not both',
+        })
+        .refine(
+          (value) =>
+            (value.calendar_start === undefined) === (value.calendar_end === undefined) &&
+            (value.calendar_start === undefined || Date.parse(value.calendar_end as string) > Date.parse(value.calendar_start)),
+          { message: 'calendar_start and calendar_end come together, the end after the start' },
+        ),
+      output: z.object({ reported: z.literal(true) }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: false },
+      invoke: 'reportCoverageConflict',
+      example: {
+        resource_id: EXAMPLE_RESOURCE_ID,
+        source: 'google:fleet@example.com',
+        reservation_ref: 'booking-BK-42',
+        reason: 'changed_in_calendar',
+        calendar_start: '2027-03-29T10:00:00Z',
+        calendar_end: '2027-03-29T11:00:00Z',
       },
     },
     {
@@ -1575,6 +2130,62 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       example: { event_id: EXAMPLE_EVENT_ID },
     },
     {
+      name: 'slotlock_tenant_book_together',
+      title: 'Book resources together, as the tenant',
+      description:
+        "Book the same time on 2-20 resources at once, all or none, as agents' slotlock_book_together does but for the tenant's own systems (RFC 0004 B7): each is the tenant's event, not the key's (no key's quota counts it, and revoking the key leaves it), held to the resources' booking rules; approval policies hold it only when they include the application (include_application). If any is taken, nothing is booked and the refusal names that resource_id. A retry with the same idempotency_key answers the same events. 409 bundles_unavailable where the server books no bundles.",
+      method: 'POST',
+      path: '/v1/tenant/bundles',
+      input: z
+        .object({
+          resource_ids: z.array(RESOURCE_ID).min(2).max(20),
+          starts_at: DATE_TIME,
+          ends_at: DATE_TIME,
+          timezone: TIMEZONE,
+          title: z.string().trim().min(1).max(500).optional(),
+          idempotency_key: IDEMPOTENCY_KEY,
+        })
+        .strict(),
+      output: z.object({ events: z.array(SLOTLOCK_EVENT_OUTPUT).min(2).max(20), replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'tenantBookTogether',
+      example: {
+        resource_ids: [EXAMPLE_RESOURCE_ID, '1f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b'],
+        starts_at: '2027-03-02T09:00:00Z',
+        ends_at: '2027-03-02T10:00:00Z',
+        timezone: 'Europe/London',
+        idempotency_key: 'desk-bundle-2027-03-02',
+      },
+    },
+    {
+      name: 'slotlock_tenant_book_pool',
+      title: 'Book any member of a pool, as the tenant',
+      description:
+        "Book any one free member of a pool for a time, as agents' slotlock_book_pool does but for the tenant's own systems (RFC 0004 B7), in the pool's order: the event names the member, and is the tenant's, not the key's; approval policies hold it only when they include the application (include_application). 409 pool_full when none is free; 404 pool_not_found. A retry with the same idempotency_key answers the member it booked.",
+      method: 'POST',
+      path: '/v1/tenant/pool-bookings',
+      input: z
+        .object({
+          pool: POOL,
+          starts_at: DATE_TIME,
+          ends_at: DATE_TIME,
+          timezone: TIMEZONE,
+          title: z.string().trim().min(1).max(500).optional(),
+          idempotency_key: IDEMPOTENCY_KEY,
+        })
+        .strict(),
+      output: z.object({ event: SLOTLOCK_EVENT_OUTPUT, replayed: z.boolean() }).strict(),
+      risk: { readOnly: false, destructive: false, idempotent: true },
+      invoke: 'tenantBookPool',
+      example: {
+        pool: 'van',
+        starts_at: '2027-03-02T09:00:00Z',
+        ends_at: '2027-03-02T10:00:00Z',
+        timezone: 'Europe/London',
+        idempotency_key: 'desk-pool-2027-03-02',
+      },
+    },
+    {
       name: 'slotlock_cancel_tenant_event',
       title: 'Cancel any event of the tenant',
       description:
@@ -1589,6 +2200,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           // Required, so clients always send it; the Idempotency-Key header may stand in, since the
           // server copies it in before validation.
           idempotency_key: IDEMPOTENCY_KEY,
+          /** An admin's reason for cancelling a one-off event past its cancel cutoff (RFC 0004 B5). */
+          override_reason: OVERRIDE_REASON.optional(),
         })
         .strict(),
       output: z
@@ -1597,6 +2210,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           revision: REVISION,
           cancelled: z.literal(true),
           replayed: z.boolean(),
+          /** A late cancellation's fee, for you to charge (RFC 0004 B5); null when none. */
+          cancellation_fee: RECORDED_FEE.nullable(),
         })
         .strict(),
       risk: { readOnly: false, destructive: true, idempotent: true },
@@ -1660,6 +2275,8 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           no_shows: z.number().int().min(0),
           waitlist_offers: z.number().int().min(0),
           approvals_expired: z.number().int().min(0),
+          bookings_completed: z.number().int().min(0),
+          reminders_due: z.number().int().min(0),
           capped: z.boolean(),
         })
         .strict(),
@@ -1783,7 +2400,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
       name: 'slotlock_put_approval_policy',
       title: 'Create or replace an approval policy',
       description:
-        "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. At most 50 policies: one more is 409 approval_policy_limit_reached.",
+        "Which agent bookings (slotlock_create_event, slotlock_confirm_slot, slotlock_book_pool, slotlock_book_together, and moves by slotlock_update_event or slotlock_reschedule) a person approves first, or are refused. applies_to names resources, pools, locations (with the locations in them) and groups; empty, every resource. conditions narrow it: longer_than_minutes, outside_hours (outside the resource's bookable hours), kinds (single, pool, bundle, move); a booking meets the policy when it meets every condition given. outcome require_approval holds the exact time the booking would take, under the approval, and answers the agent 409 approval_pending; refuse answers 403 approval_policy_refused. A person has approval_ttl_minutes to decide (default 1,440; at most 43,200, and the server's ceiling), and must decide lead_minutes before the booking starts: the wait is the earlier of the two. Where several apply, refuse wins, then the one that must be decided soonest. The tenant's own bookings through this API (slotlock_tenant_book_together, slotlock_tenant_book_pool) are held only by policies with include_application true, and are the tenant's again when granted. At most 50 policies: one more is 409 approval_policy_limit_reached.",
       method: 'PUT',
       path: '/v1/approval-policies/{policy_ref}',
       input: z
@@ -1795,6 +2412,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           outcome: z.enum(['require_approval', 'refuse']),
           approval_ttl_minutes: z.number().int().min(1).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
           lead_minutes: z.number().int().min(0).max(SLOTLOCK_MAX_APPROVAL_MINUTES).optional(),
+          include_application: z.boolean().optional(),
         })
         .strict(),
       output: z.object({ policy: APPROVAL_POLICY }).strict(),

@@ -452,8 +452,7 @@
       },
       "required": [
         "start",
-        "end",
-        "duration_minutes"
+        "end"
       ],
       "additionalProperties": false
     },
@@ -646,8 +645,7 @@
       },
       "required": [
         "start",
-        "end",
-        "duration_minutes"
+        "end"
       ],
       "additionalProperties": false
     },
@@ -748,6 +746,163 @@
     },
     "annotations": {
       "title": "Find available slots",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
+        "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model",
+          "app"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_find_available_ranges",
+    "title": "Find available ranges",
+    "description": "Find hires across days, such as a car from Friday to Monday: for each resource named, or each member of a pool, the earliest range that starts between pickup_start and pickup_end and either lasts `days` days (ending at the same local time) or ends between return_start and return_end. Each range is free throughout with its buffers, allowed by the resource's booking rules (pick-up and return times, lengths, notice, step) and starts and ends inside its bookable hours. Up to `limit` ranges, earliest first, one per resource; none unless every resource's coverage is certain. Book one with slotlock_create_event, or a pool's with slotlock_book_pool, at its start and end.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 1,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "pickup_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "pickup_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 366
+        },
+        "return_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "return_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "pickup_start",
+        "pickup_end"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "ranges": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "resource_id",
+              "start",
+              "end"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "certainty": {
+              "type": "string",
+              "enum": [
+                "certain",
+                "uncertain"
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "certainty",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "selected_resource_ids": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "required": [
+        "ranges",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Find available ranges",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
@@ -950,6 +1105,9 @@
         "hold_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "notify": {
+          "type": "boolean"
         },
         "dry_run": {
           "type": "boolean",
@@ -1789,7 +1947,7 @@
   {
     "name": "slotlock_book_together",
     "title": "Book resources together",
-    "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. A retry with the same idempotency_key answers the same events.",
+    "description": "Book the same time on 2-20 resources at once, all or none: a van with its driver, a room with its projector. If any of them is taken, nothing is booked, and the refusal names that resource_id. Find such a time with slotlock_find_available_slots and require_free. With hold_group_id, it books the set slotlock_hold_together held, from those holds. A retry with the same idempotency_key answers the same events.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1820,6 +1978,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 500
+        },
+        "hold_group_id": {
+          "type": "string",
+          "format": "uuid"
         },
         "idempotency_key": {
           "type": "string",
@@ -3522,7 +3684,7 @@
   {
     "name": "slotlock_hold_slots",
     "title": "Hold candidate slots",
-    "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.",
+    "description": "Hold up to five candidate slots for a short time (30-900 seconds) while a person chooses, as alternatives in one group: each free one is held, the others are listed with why not. Book one by passing its hold_id to slotlock_create_event, which releases the rest; unbooked holds expire on their own. With payment_required, a hold is booked only once the system you book for records its payment (the person pays there): booking it before then answers payment_required, so send the person to pay and try again. A hold is yours alone, and you may have 20 live at once. A candidate refused for its time comes with alternatives (the earliest free times of its length). slotlock_confirm_slot books a held time.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3565,6 +3727,28 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "payment_required": {
+          "type": "boolean"
+        },
+        "payment": {
+          "type": "object",
+          "properties": {
+            "amount_minor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000000
+            },
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            }
+          },
+          "required": [
+            "amount_minor",
+            "currency"
+          ],
+          "additionalProperties": false
         },
         "dry_run": {
           "type": "boolean",
@@ -3610,6 +3794,36 @@
               "expires_at": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "payment_required": {
+                "type": "boolean",
+                "const": true
+              },
+              "payment_amount": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount_minor": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "currency": {
+                        "type": "string",
+                        "pattern": "^[A-Z]{3}$"
+                      }
+                    },
+                    "required": [
+                      "amount_minor",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -3706,6 +3920,133 @@
     "_meta": {
       "ui": {
         "resourceUri": "ui://slotlock/calendar",
+        "visibility": [
+          "model"
+        ]
+      }
+    }
+  },
+  {
+    "name": "slotlock_hold_together",
+    "title": "Hold resources together",
+    "description": "Hold one time on 2-20 resources at once, all or none, such as a car with its driver while a person decides: if any is taken, nothing is held and the refusal names that resource_id. The holds are one group with one time to live (ttl_seconds, the earliest of them). Book the set with slotlock_book_together and its hold_group_id; release them with slotlock_release_slots and any hold_id. A retry with the same idempotency_key answers the same holds.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resource_ids": {
+          "minItems": 2,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ttl_seconds": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 900
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
+        }
+      },
+      "required": [
+        "resource_ids",
+        "start",
+        "end",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "holds": {
+          "minItems": 2,
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hold_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "hold_id",
+              "resource_id",
+              "start",
+              "end",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "const": true,
+          "description": "Present on a dry run only: nothing was stored."
+        }
+      },
+      "required": [
+        "group_id",
+        "holds",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Hold resources together",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "ui": {
         "visibility": [
           "model"
         ]

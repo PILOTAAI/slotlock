@@ -65,7 +65,9 @@ starts; a booking too close to its start for that is `approval_too_late`. Where 
 apply, `refuse` wins, then the one that must be decided soonest. A dry run of a covered write
 answers `approval_required`; a recurring series cannot be held whole and is
 `approval_series_unsupported`; one agent may have 50 approvals waiting and a tenant 500
-(`approval_limit_reached`). Maintenance expires what no one decided. The feed records
+(`approval_limit_reached`). Policies hold agents' bookings; the tenant's own bundles and pool
+bookings through the application API (`/v1/tenant/bundles`, `/v1/tenant/pool-bookings`), which are
+the tenant's events rather than the key's, only when a policy says `include_application: true`. Maintenance expires what no one decided. The feed records
 `approval.requested`, `approval.granted`, `approval.declined` and `approval.expired`.
 
 ## Holds, bundles and pools

@@ -19,19 +19,37 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'hold.confirmed',
   'hold.released',
   'hold.expired',
+  // The integrator's payment for a hold that waits for one (RFC 0004 C3).
+  'hold.paid',
   'reservation.created',
   'reservation.updated',
   'reservation.cancelled',
   'reservation.checked_in',
   'reservation.no_show',
+  // A booking moved (also reservation.updated), and one whose end has passed (RFC 0004 B4).
+  'reservation.rescheduled',
+  'reservation.completed',
   'event.created',
   'event.updated',
   'event.cancelled',
   'event.timezone_shifted',
   'event.timezone_conflict',
+  // A reservation that carries its wall time, which now falls at another instant (RFC 0004 B9).
+  'reservation.timezone_shifted',
+  'reservation.timezone_conflict',
+  // A stored reminder fell due (RFC 0004 P3): the change's id is the send key.
+  'reminder.due',
   'coverage.stale',
+  // A source reported busy time over a booking Slotlock already holds (RFC 0004 C1, C4).
+  'coverage.conflict',
   'waitlist.offered',
   'waitlist.expired',
+  // A waitlist entry joined, its offer accepted, declined or lapsed, and an entry left (RFC 0004 B6).
+  'waitlist.joined',
+  'waitlist.accepted',
+  'waitlist.declined',
+  'waitlist.lapsed',
+  'waitlist.left',
   // A write waiting for a person (approval policies): requested, then granted, declined or expired.
   'approval.requested',
   'approval.granted',

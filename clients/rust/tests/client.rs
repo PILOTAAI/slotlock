@@ -258,7 +258,10 @@ fn books_holds_and_reservations_without_double_booking() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(cancelled, json!({"cancelled": true, "revision": 2}));
+    assert_eq!(
+        cancelled,
+        json!({"cancelled": true, "revision": 2, "cancellation_fee": null})
+    );
     let coverage = c
         .record_coverage(&RecordCoverageInput {
             resource_id: id.clone(),
@@ -277,12 +280,14 @@ fn books_holds_and_reservations_without_double_booking() {
         keys,
         [
             "approvals_expired",
+            "bookings_completed",
             "capped",
             "conflicts",
             "extended",
             "no_shows",
             "pruned",
             "refused",
+            "reminders_due",
             "stale_sources",
             "waitlist_offers",
             "zone_shifts"

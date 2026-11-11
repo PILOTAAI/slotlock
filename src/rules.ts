@@ -33,6 +33,8 @@ const MAX_SEARCH_WINDOW_MS = SLOTLOCK_CALENDAR_HORIZON_DAYS * DAY_MS;
  * many days as a rule lasts, so a longer one is skipped, as the hours validator refuses it.
  */
 export const SLOTLOCK_MAX_RULE_DURATION_MINUTES = 10_080;
+/** The most busy intervals one calendar source may report for one window (RFC 0004 C1). */
+export const SLOTLOCK_SOURCE_BUSY_MAX = 5_000;
 
 export function invalidWindowError(
   message = 'Slotlock window must contain two finite dates with end > start',

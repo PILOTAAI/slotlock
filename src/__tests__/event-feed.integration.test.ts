@@ -114,6 +114,7 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
       'hold.released',
       'reservation.created',
       'reservation.updated',
+      'reservation.rescheduled',
       'reservation.cancelled',
       'event.created',
     ]);

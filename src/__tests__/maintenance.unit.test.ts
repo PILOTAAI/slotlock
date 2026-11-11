@@ -83,6 +83,12 @@ function fakeStore() {
         async releaseNoShows() {
           return 0;
         },
+        async completeEndedBookings() {
+          return 0;
+        },
+        async dueReminders() {
+          return 0;
+        },
         async expireApprovals() {
           return { expired: 0 };
         },
@@ -165,6 +171,9 @@ const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMai
   noShows: 0,
   waitlistOffers: 0,
   approvalsExpired: 0,
+      bookingsCompleted: 0,
+      remindersDue: 0,
+      holidayCalendarsImported: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,

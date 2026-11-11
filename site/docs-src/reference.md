@@ -204,16 +204,26 @@ waits for a confirmation.
 | `DELETE /v1/resources/{resource_id}` | Delete it with its history (`409 resource_in_use` while anything on it is live) |
 | `GET /v1/resources/{resource_id}/busy?start=…&end=…` | Its occupied time, private resources included |
 | `PUT /v1/resources/{resource_id}/availability` | `{"rules":[…]}`: its own weekly hours; `"rules":[]` never bookable, `"rules":null` the server's |
-| `PUT /v1/availability` | `{"rules":[…]}`: every resource's weekly hours at once |
+| `PUT /v1/availability` | `{"rules":[…], "override_resources"?}`: the tenant's weekly hours, which resources without their own inherit; `override_resources` `none` (default), `matching` or `all` says which resources' own hours are cleared; `GET` reads them and each location's |
+| `PUT /v1/locations/{location}/availability` | `{"rules":[…]}`: a location's weekly hours, inherited by resources at it or inside it |
+| `GET /v1/availability/exceptions` | Closures and special days: `?resource_id=` those that apply to it, `?location=` one location's own |
+| `POST /v1/availability/exceptions` | `{"starts_on","ends_on"?,"outcome":"closed"\|"open","hours"?,"label","location"?,"resource_id"?}`; `DELETE …/{exception_id}` removes one |
+| `POST /v1/availability/holidays` | `{"icalendar"}` or `{"url"}`, `name`?, `subscribe`?: each all-day event of a holiday calendar closes its days; importing the calendar again (by name) removes the holidays it dropped, and `subscribe` imports a URL again every 30 days |
+| `GET /v1/availability/holiday-calendars` | The calendars imported, with their closures, and for a subscription its next import and last error; `DELETE …/{calendar_id}` deletes one with its closures |
 | `POST /v1/holds` | Hold a window for `ttl_seconds` (up to 7 days) |
 | `GET /v1/holds/{hold_id}` | One live hold; `GET /v1/resources/{resource_id}/holds` lists them |
-| `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation |
+| `POST /v1/holds/{hold_id}/confirm` | Turn the hold into a reservation (`409 payment_required` while a hold made with `payment_required` is unpaid) |
+| `POST /v1/holds/{hold_id}/paid` | `{"payment_ref","received"?}`: record a hold's payment, verified at your processor; `received` (`amount_minor`, `currency`) is checked against the hold's `payment` |
 | `DELETE /v1/holds/{hold_id}` | Release the hold |
 | `GET /v1/reservations/{reservation_ref}` | The booking at its current revision |
 | `GET /v1/resources/{resource_id}/reservations?start=…&end=…` | Its bookings in a window |
-| `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1) |
+| `PUT /v1/reservations/{reservation_ref}` | Book (`revision: 1`) or move (the current revision plus 1); `contact_ref` and `notify` say whom to tell, `reminder_minutes` (up to five) when to remind them |
+| `PUT /v1/contacts/{contact_ref}` | Keep a person a booking may name: email, phone, WhatsApp, locale and consent per channel; `GET` reads one, `DELETE` forgets them and their reference on every booking |
+| `GET /v1/contacts?limit=…&cursor=…` | The tenant's contacts a page at a time, each with `consent_at` |
 | `DELETE /v1/reservations/{reservation_ref}?revision=…` | Cancel, at the current revision plus 1 |
 | `PUT /v1/resources/{resource_id}/coverage/{source}` | Record that `source`'s events are complete for a window |
+| `PUT /v1/resources/{resource_id}/coverage/{source}/busy` | Record a window's coverage and the busy time in it, for a calendar that gives no events |
+| `POST /v1/resources/{resource_id}/coverage/{source}/conflicts` | `{"reservation_ref"\|"event_id","reason","calendar_start"?,"calendar_end"?}`: a booking the source's calendar moved or removed, put on the feed as `coverage.conflict` |
 | `GET /v1/tenant/events?resource_id=…&start=…&end=…` | Every key's events on a resource, with the `id` the next two take |
 | `GET /v1/tenant/events/{event_id}` | One of them |
 | `DELETE /v1/tenant/events/{event_id}?expected_revision=…` | Cancel it, whichever key wrote it |
@@ -264,9 +274,12 @@ that did not commit. A change carries ids, times and states, never titles, descr
 webhook URLs or secrets.
 
 - The types: `hold.created`, `.updated`, `.confirmed`, `.released`, `.expired`;
-  `reservation.created`, `.updated`, `.cancelled`, `.checked_in`, `.no_show`; `event.created`,
-  `.updated`, `.cancelled`, `.timezone_shifted`, `.timezone_conflict`; `waitlist.offered`,
-  `.expired`; `coverage.stale`; and configuration: `resource.created`, `resource.updated` (booking
+  `reservation.created`, `.updated`, `.rescheduled` (a move, besides `.updated`), `.cancelled`,
+  `.checked_in`, `.no_show`, `.completed` (maintenance, once a booking's end has passed); `event.created`,
+  `.updated`, `.cancelled`, `.timezone_shifted`, `.timezone_conflict`; `reservation.timezone_shifted`,
+  `.timezone_conflict`; `waitlist.offered`,
+  `.expired`, `.joined`, `.accepted`, `.declined`, `.lapsed`, `.left`; `hold.paid`; `reminder.due`;
+  `coverage.stale`, `.conflict`; and configuration: `resource.created`, `resource.updated` (booking
   and check-in rules, pool, location, groups, bookable hours, time zone or reference, with `before`
   and `after` of only the fields that changed, and the profile fields' names in `profile_changed`), `resource.archived`, `.restored`, `.deleted`; `coverage.recorded`
   (a source's first read; reading it again is not a change) and `coverage.deleted`. A `coverage.*`
@@ -332,8 +345,17 @@ webhook URLs or secrets.
   future one-off events whose wall time moved: it reports each once (`event.timezone_shifted`, with
   the instant it has and the one its wall time now means). The library's `followZoneRules` option
   to `maintainSlotlockTenant` moves them instead, as a new revision, unless that overlaps another
-  booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). `/healthz`
-  reports the `tzdata` the server runs.
+  booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). It also
+  re-checks a recurring series' occurrences to come, reporting each once (`event.timezone_shifted`
+  with its `recurrence_id`) or, with `followZoneRules`, moving the whole series at its next
+  revision: every shifted occurrence and the booking that holds it, each keeping its
+  `recurrence_id`, in one transaction. It moves only where this server's zone rules put each wall
+  time where the database's do; otherwise each is reported with `reason: "rules_disagree"`, since
+  a server with older rules would compute the old times again. Something in the way keeps the
+  series' times and is said once (`event.timezone_conflict`). Reservations written with a
+  `local_start` (`localStart`) are re-checked too, which
+  it reports (`reservation.timezone_shifted`) or moves (`reservation.timezone_conflict` when it
+  cannot). `/healthz` reports the `tzdata` the server runs.
 - Feed health: `GET /v1/resources/{id}/coverage` shows each source (and its `source_id`, as the feed
   names it), its window, when it was last read,
   its last error (`POST /v1/resources/{id}/coverage/{source}/failure` records one) and whether it is

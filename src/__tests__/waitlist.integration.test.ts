@@ -91,7 +91,7 @@ describe.skipIf(!url)('waitlists and check-in (real Postgres)', () => {
     // The cancel offers at once, without waiting for maintenance.
     expect(
       await application.cancelReservation(context('slotlock_cancel_reservation'), { reservation_ref: taken, revision: 2 }),
-    ).toEqual({ cancelled: true, revision: 2 });
+    ).toEqual({ cancelled: true, revision: 2, cancellation_fee: null });
     const [offered, waiting] = await entries({ resourceId: van });
     expect(offered).toMatchObject({ holderRef: 'first', status: 'offered', offeredResourceId: van });
     expect(waiting).toMatchObject({ holderRef: 'second', status: 'waiting', holdId: null });

@@ -12,6 +12,7 @@ import {
   calendarEventRollingHorizon,
 } from './store.js';
 import type { CalendarHorizonRollCursor, CalendarHorizonRollResult } from './types.js';
+import { readSlotlockHolidayCalendar } from './holiday-import.js';
 
 export interface SlotlockMaintenanceResult {
   /** Recurring events whose stored occurrences now reach the horizon. */
@@ -39,6 +40,18 @@ export interface SlotlockMaintenanceResult {
   waitlistOffers: number;
   /** Approvals no one decided in time, their held time freed (`approval.expired`). */
   approvalsExpired: number;
+  /** Bookings whose end has passed in the last week, now said on the feed (`reservation.completed`). */
+  bookingsCompleted: number;
+  /**
+   * Event reminders that came due, each now on the feed once (`reminder.due`) for a sender to send
+   * (RFC 0004 P3).
+   */
+  remindersDue: number;
+  /**
+   * Holiday calendar subscriptions imported again (RFC 0004 B1), with `holidayFetch`; one that
+   * could not be read keeps its closures and is tried again a day later.
+   */
+  holidayCalendarsImported: number;
   /** More was left than one pass does: run another. */
   capped: boolean;
   /**
@@ -66,6 +79,11 @@ export async function maintainSlotlockTenant(
      * (SLOTLOCK_USAGE=on).
      */
     usage?: boolean;
+    /**
+     * Fetches holiday calendar subscriptions due to be imported again (the guarded fetch under
+     * `serve`); without it, none is.
+     */
+    holidayFetch?: typeof fetch;
   } = {},
 ): Promise<SlotlockMaintenanceResult> {
   const batches = options.batches ?? 10;
@@ -150,6 +168,10 @@ export async function maintainSlotlockTenant(
   // in the same pass.
   const approvals = await withTenant((tenant) => tenant.expireApprovals({ tenantRef, limit: 100 }));
   const noShows = await withTenant((tenant) => tenant.releaseNoShows({ tenantRef }));
+  // Bookings that ended since the last pass (RFC 0004 B4): no row changes, the feed says so.
+  const completed = await withTenant((tenant) => tenant.completeEndedBookings({ tenantRef, limit: 500 }));
+  const reminders = await withTenant((tenant) => tenant.dueReminders({ tenantRef, limit: 500 }));
+  const holidays = options.holidayFetch ? await importDueHolidayCalendars(withTenant, tenantRef, options) : 0;
   // The whole waitlist in join order, a page per transaction, so a later free entry is offered
   // however many wait before it.
   let waitlistOffers = 0;
@@ -175,9 +197,65 @@ export async function maintainSlotlockTenant(
     noShows,
     waitlistOffers,
     approvalsExpired: approvals.expired,
-    capped: rollCapped || eventsLeft || bookingsLeft || changesLeft || approvals.expired === 100,
+    bookingsCompleted: completed,
+    remindersDue: reminders,
+    holidayCalendarsImported: holidays,
+    capped:
+      rollCapped ||
+      eventsLeft ||
+      bookingsLeft ||
+      changesLeft ||
+      approvals.expired === 100 ||
+      completed === 500 ||
+      reminders === 500,
     rollPending: rollCapped && after !== null && (after.rollRetryAt ?? null) === null,
   };
+}
+
+/** Holiday calendar subscriptions imported again in one pass, at most: each is a fetch. */
+const HOLIDAY_IMPORTS_PER_PASS = 5;
+
+/**
+ * Import again the tenant's holiday calendar subscriptions that are due: each fetched outside any
+ * transaction, then imported in one; one that cannot be read or imported keeps its closures and
+ * notes why, to be tried again a day later.
+ */
+async function importDueHolidayCalendars(
+  withTenant: <T>(work: (tenant: SlotlockTenantStore) => Promise<T>) => Promise<T>,
+  tenantRef: string,
+  options: { holidayFetch?: typeof fetch; signal?: AbortSignal },
+): Promise<number> {
+  const due = await withTenant((tenant) => tenant.dueHolidayCalendars({ tenantRef, limit: HOLIDAY_IMPORTS_PER_PASS }));
+  let imported = 0;
+  for (const calendar of due) {
+    options.signal?.throwIfAborted();
+    if (!calendar.url) continue;
+    try {
+      const read = await readSlotlockHolidayCalendar({ url: calendar.url, subscribe: true, name: calendar.name }, options.holidayFetch);
+      await withTenant((tenant) =>
+        tenant.importHolidayCalendar({
+          tenantRef,
+          ...(calendar.location !== undefined ? { location: calendar.location } : {}),
+          ...(calendar.resourceId !== undefined ? { resourceId: calendar.resourceId } : {}),
+          name: calendar.name,
+          ...(read.url !== undefined ? { url: read.url } : {}),
+          holidays: read.holidays,
+          span: read.span,
+        }),
+      );
+      imported++;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      await withTenant((tenant) =>
+        tenant.noteHolidayCalendarFailure({
+          tenantRef,
+          id: calendar.id,
+          error: error instanceof Error ? error.message : 'The import failed',
+        }),
+      );
+    }
+  }
+  return imported;
 }
 
 type WaitlistPage = { createdAt: Date; id: string };
@@ -250,6 +328,8 @@ export interface SlotlockMaintenanceSchedulerOptions {
   batches?: number;
   /** Roll each tenant's bookings and holds up into its usage, first (maintainSlotlockTenant `usage`). */
   usage?: boolean;
+  /** Fetches holiday calendar subscriptions due to be imported again (maintainSlotlockTenant). */
+  holidayFetch?: typeof fetch;
   /** A pass that ran: counts only, never the tenant. Not awaited; what it throws is ignored. */
   onPass?: (result: SlotlockMaintenanceResult) => void;
   /**
@@ -302,6 +382,7 @@ export function startSlotlockMaintenance(
             maintainSlotlockTenant(options.store, tenantRef, {
               ...(options.batches !== undefined ? { batches: options.batches } : {}),
               ...(options.usage ? { usage: true } : {}),
+              ...(options.holidayFetch ? { holidayFetch: options.holidayFetch } : {}),
               signal: controller.signal,
             }),
           );

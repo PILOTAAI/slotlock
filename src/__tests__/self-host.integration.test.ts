@@ -167,13 +167,22 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         expect.objectContaining({ id: decoy, hours: null }),
       ]);
 
-      const closedAll = await run(['hours', 'set', '[]', '--all']);
+      // --matching clears only hours the same as the tenant's or as these: closed here, so the
+      // resource set closed above loses its own and the other keeps them.
+      const matched = await run(['hours', 'set', '[]', '--all', '--matching']);
+      expect(matched.code).toBe(0);
+      expect(lines((await run(['hours', 'show', '--resource', named])).stdout.text())).toEqual([
+        expect.objectContaining({ id: named, hours: null }),
+      ]);
+      // The tenant's hours are stored and inherited (RFC 0004 B2); --override clears resources' own.
+      const closedAll = await run(['hours', 'set', '[]', '--all', '--override']);
       expect(closedAll.code).toBe(0);
-      const updated = lines(closedAll.stdout.text())[0]?.updated as number;
+      const updated = lines(closedAll.stdout.text())[0]?.inheriting as number;
       expect(updated).toBeGreaterThanOrEqual(2);
       for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
-        expect(line.hours).toEqual([]);
+        expect(line).toMatchObject({ hours: null, inherited: { source: 'tenant', rules: [] } });
       }
+      expect((await run(['hours', 'set', '[]', '--resource', 'hours-van'])).code).toBe(0);
 
       expect((await run(['hours', 'clear', '--resource', 'hours-van'])).code).toBe(0);
       expect(
@@ -181,7 +190,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       ).toEqual([expect.objectContaining({ hours: null })]);
       expect((await run(['hours', 'clear', '--all'])).code).toBe(0);
       for (const line of lines((await run(['hours', 'show'])).stdout.text())) {
-        expect(line.hours).toBeNull();
+        expect(line).toMatchObject({ hours: null, inherited: null });
       }
 
       const missing = await run(['hours', 'set', '[]', '--resource', 'no-such-van']);
@@ -542,6 +551,9 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         noShows: 0,
         waitlistOffers: 0,
         approvalsExpired: 0,
+        bookingsCompleted: 0,
+        remindersDue: 0,
+        holidayCalendarsImported: 0,
         extended: 0,
         conflicts: 0,
         refused: 0,
@@ -606,12 +618,14 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
         'slotlock_confirm_slot',
         'slotlock_create_event',
         'slotlock_delete_event',
+        'slotlock_find_available_ranges',
         'slotlock_find_available_slots',
         'slotlock_find_next_available',
         'slotlock_get_event',
         'slotlock_get_free_busy',
         'slotlock_get_pool_availability',
         'slotlock_hold_slots',
+        'slotlock_hold_together',
         'slotlock_list_events',
         'slotlock_list_resources',
         'slotlock_release_slots',
@@ -998,7 +1012,7 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       });
       expect(await rest(application.key, 'POST', '/v1/maintenance', {})).toEqual({
         status: 200,
-        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, capped: false },
+        body: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, bookings_completed: 0, reminders_due: 0, capped: false },
       });
 
       expect((await run(['key', 'revoke', application.id])).code).toBe(0);
@@ -1191,6 +1205,9 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
       noShows: 0,
       waitlistOffers: 0,
       approvalsExpired: 0,
+        bookingsCompleted: 0,
+        remindersDue: 0,
+      holidayCalendarsImported: 0,
       extended: 0,
       conflicts: 0,
       refused: 0,

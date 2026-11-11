@@ -189,7 +189,7 @@ func TestBooksHoldsAndReservationsWithoutDoubleBooking(t *testing.T) {
 	}
 
 	cancelled := s.must(c.CancelReservation(s.ctx, CancelReservationInput{ReservationRef: reference, Revision: 2}))
-	if !reflect.DeepEqual(cancelled, map[string]any{"cancelled": true, "revision": float64(2)}) {
+	if !reflect.DeepEqual(cancelled, map[string]any{"cancelled": true, "revision": float64(2), "cancellation_fee": nil}) {
 		t.Fatalf("cancel_reservation: %v", cancelled)
 	}
 	coverage := s.must(c.RecordCoverage(s.ctx, RecordCoverageInput{ResourceID: id, Source: "ics:https://calendar.example.com/fleet.ics", Start: s.at(0), End: s.at(24), Revision: 1}))
@@ -197,7 +197,7 @@ func TestBooksHoldsAndReservationsWithoutDoubleBooking(t *testing.T) {
 		t.Fatalf("record_coverage: %v", coverage)
 	}
 	maintenance := s.must(c.RunMaintenance(s.ctx, RunMaintenanceInput{}))
-	for _, key := range []string{"extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "approvals_expired", "capped"} {
+	for _, key := range []string{"extended", "conflicts", "refused", "pruned", "zone_shifts", "stale_sources", "no_shows", "waitlist_offers", "approvals_expired", "bookings_completed", "reminders_due", "capped"} {
 		if _, ok := maintenance[key]; !ok {
 			t.Fatalf("run_maintenance: %v", maintenance)
 		}

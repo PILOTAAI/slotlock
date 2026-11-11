@@ -83,8 +83,67 @@ export {
   parseVAvailability,
   recurrenceRuleFromRRule,
   SLOTLOCK_MAX_VAVAILABILITY_CHARACTERS,
+  SLOTLOCK_MAX_VAVAILABILITY_DAYS,
   toJSCalendarEvent,
 } from './interop.js';
+// Stored hours that inherit, and closures and special days (RFC 0004 B1, B2).
+export {
+  applicableHours,
+  coveredByOpenWindows,
+  exceptionDays,
+  exceptionRanges,
+  openWindows,
+  parseExceptionDays,
+  SLOTLOCK_MAX_AVAILABILITY_EXCEPTIONS,
+  SLOTLOCK_MAX_EXCEPTION_DAYS,
+  SLOTLOCK_MAX_EXCEPTION_WINDOWS,
+} from './hours.js';
+export type {
+  SlotlockAvailabilityException,
+  SlotlockExceptionDay,
+  SlotlockExceptionOutcome,
+  SlotlockExceptionSource,
+  SlotlockExceptionWindow,
+  SlotlockHoursSource,
+  SlotlockRankedException,
+} from './hours.js';
+export type {
+  SlotlockAvailabilityDefaults,
+  SlotlockAvailabilityDefaultsResult,
+  SlotlockAvailabilityExceptionInput,
+  SlotlockOverrideResources,
+  SlotlockHolidayCalendar,
+  SlotlockHolidayImport,
+} from './availability-store.js';
+export {
+  SLOTLOCK_OVERRIDE_RESOURCES,
+  SLOTLOCK_HOLIDAY_REIMPORT_DAYS,
+  SLOTLOCK_MAX_HOLIDAY_CALENDARS,
+} from './availability-store.js';
+export {
+  type SlotlockHolidayCalendarRead,
+  type SlotlockHolidaySource,
+  readSlotlockHolidayCalendar,
+} from './holiday-import.js';
+export {
+  fetchHolidayCalendar,
+  parseHolidayCalendar,
+  SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES,
+  SLOTLOCK_MAX_HOLIDAY_DAYS,
+} from './holidays.js';
+export type { ParsedHolidayCalendar, SlotlockHoliday } from './holidays.js';
+// The booking lifecycle, written down (RFC 0004 B4).
+export {
+  SLOTLOCK_BOOKING_ACTIONS,
+  SLOTLOCK_BOOKING_ENDS,
+  SLOTLOCK_BOOKING_STATUSES,
+  SLOTLOCK_BOOKING_TRANSITIONS,
+  slotlockBookingNext,
+  slotlockBookingRefusal,
+} from './lifecycle.js';
+export type { SlotlockBookingAction, SlotlockBookingStatus, SlotlockEndReason } from './lifecycle.js';
+export { findEarliestRange, sameTimeDaysLater } from './ranges.js';
+export type { SlotlockRangeSearch } from './ranges.js';
 export type {
   EmitVAvailabilityOptions,
   JSCalendarAlert,
@@ -341,11 +400,14 @@ export {
   SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA,
   SLOTLOCK_AGENT_OWNER_EVENT_QUOTA,
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
+  SLOTLOCK_SOURCE_BUSY_MAX,
   SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS,
   SLOTLOCK_INTERNAL_EVENT_OWNER_REF,
   SLOTLOCK_LOCAL_RECURRENCE_COVERAGE_SOURCE,
   SLOTLOCK_MATERIALIZATION_WINDOW_DAYS,
   SLOTLOCK_MAX_EVENT_DURATION_DAYS,
+  SLOTLOCK_MAX_CONTACTS_PER_TENANT,
+  SLOTLOCK_PAYMENT_HOLD_MAX_TTL_MS,
   SLOTLOCK_TENANT_WRITE_METHODS,
   type SlotlockHoldTenantOptions,
   type SlotlockMigrationOptions,
@@ -386,6 +448,12 @@ export type {
   Interval,
   SlotlockAgendaEntry,
   SlotlockHold,
+  MarkHoldPaidResult,
+  SlotlockContact,
+  SlotlockContactConsent,
+  PutContactResult,
+  SourceBusyCommand,
+  SourceBusyResult,
   SlotlockCalendarEvent,
   SlotlockBookingDescription,
   SlotlockReservation,
@@ -396,5 +464,6 @@ export type {
   PutCalendarEventResult,
   ReleaseHoldResult,
   TrustedICalendarEvent,
+  SlotlockInheritedAvailability,
   WeeklyAvailabilityRule,
 } from './types.js';
