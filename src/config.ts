@@ -140,6 +140,12 @@ export interface SlotlockServeDashboardConfig {
    * people to it by email, each with a role (workspaces.ts).
    */
   teamWorkspaces?: boolean;
+  /**
+   * Team invitations sent by email (SLOTLOCK_INVITATION_EMAIL resend or postmark, with
+   * SLOTLOCK_INVITATION_EMAIL_KEY and SLOTLOCK_INVITATION_EMAIL_FROM); without it, the person inviting
+   * sends the link.
+   */
+  invitationEmail?: { provider: 'resend' | 'postmark'; key: string; from: string };
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -272,6 +278,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_DASHBOARD_TEAM_WORKSPACES does not go with a list of SLOTLOCK_DASHBOARD_ORGS: with a list, everyone works in those organizations',
     );
   }
+  const invitationEmail = readInvitationEmail(env, teamWorkspaces);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -290,6 +297,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       : {}),
     ...(orgs !== undefined ? { organizations: orgs } : {}),
     ...(teamWorkspaces ? { teamWorkspaces: true } : {}),
+    ...(invitationEmail ? { invitationEmail } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(termsUrl !== undefined ? { termsUrl } : {}),
     ...(privacyUrl !== undefined ? { privacyUrl } : {}),
@@ -370,6 +378,33 @@ export function readDashboardOrganizations(env: SlotlockEnv): string[] | 'enable
     );
   }
   return [...new Set(orgs.split(','))];
+}
+
+/**
+ * SLOTLOCK_INVITATION_EMAIL (resend or postmark), with its key and the verified sender: all three, or
+ * none. Only with team workspaces, the one thing it sends.
+ */
+function readInvitationEmail(
+  env: SlotlockEnv,
+  teamWorkspaces: boolean,
+): { provider: 'resend' | 'postmark'; key: string; from: string } | undefined {
+  const provider = optional(env, 'SLOTLOCK_INVITATION_EMAIL');
+  const key = optional(env, 'SLOTLOCK_INVITATION_EMAIL_KEY');
+  const from = optional(env, 'SLOTLOCK_INVITATION_EMAIL_FROM');
+  if (provider === undefined && key === undefined && from === undefined) return undefined;
+  if (provider !== 'resend' && provider !== 'postmark') {
+    throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL must be resend or postmark');
+  }
+  if (!teamWorkspaces) {
+    throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL sends team invitations: it needs SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on');
+  }
+  if (key === undefined || !/^[\x21-\x7e]{10,500}$/.test(key)) {
+    throw new SlotlockConfigError(`SLOTLOCK_INVITATION_EMAIL_KEY must be ${provider === 'resend' ? "Resend's API key" : "Postmark's server token"}`);
+  }
+  if (from === undefined || !/^([^<>\r\n"]{1,80} )?<?[^@\s<>"]{1,64}@[^@\s<>"]+\.[^@\s<>"]+>?$/.test(from)) {
+    throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL_FROM must be the sender the provider verified: team@example.com or Name <team@example.com>');
+  }
+  return { provider, key, from };
 }
 
 /**

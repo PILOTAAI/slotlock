@@ -73,6 +73,8 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ['cy', { id: base + 2, login: 'cy', emails: [{ email: 'cy@acme.example', verified: true }] }],
     ['dee', { id: base + 3, login: 'dee', emails: [{ email: 'dee@elsewhere.example', verified: true }] }],
     ['eli', { id: base + 4, login: 'eli', emails: [] }],
+    ['fay', { id: base + 5, login: 'fay', emails: [] }],
+    ['gus', { id: base + 6, login: 'gus', emails: [] }],
   ]);
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -147,12 +149,18 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     await admin.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`);
     await owner.grantApplicationRole(role);
     application = postgres(Object.assign(new URL(url as string), { username: role, password }).href, { max: 6, onnotice: () => {} });
+    dashboard = build();
+  });
+
+  /** The dashboard with team workspaces on, as `serve` builds it, and anything a test adds. */
+  const secret = randomBytes(32).toString('hex');
+  function build(extra: Partial<Parameters<typeof createSlotlockDashboard>[0]> = {}) {
     const store = createSlotlockStore(application);
-    dashboard = createSlotlockDashboard({
+    return createSlotlockDashboard({
       publicUrl: ORIGIN,
-      github: { clientId: 'Ov23liTeams', clientSecret: randomBytes(20).toString('hex') },
+      github: { clientId: 'Ov23liTeams', clientSecret: 'f'.repeat(40) },
       google: GOOGLE,
-      sessionSecret: randomBytes(32).toString('hex'),
+      sessionSecret: secret,
       allowedUsers: '*',
       keys: createSlotlockApiKeyStore(application),
       resources: createSlotlockDashboardResources(store),
@@ -160,8 +168,9 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
       workspaces: createSlotlockDashboardWorkspaces(application),
       teamWorkspaces: true,
       fetch: fakeFetch as typeof fetch,
+      ...extra,
     });
-  });
+  }
 
   afterAll(async () => {
     for (const ref of tenants) await admin`SELECT * FROM slotlock.erase_tenant(${ref}::text)`.catch(() => undefined);
@@ -397,6 +406,182 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const next = await ada.get('/dashboard/settings/members');
     expect(next.status).toBe(404);
     expect(await teamOf(ada)).not.toBe(team);
+  });
+
+  it("shows an Owner the team's audit log, filtered and a page at a time, and nobody below Admin", async () => {
+    const ada = new Browser(dashboard);
+    await signIn(ada, 'ada');
+    await ada.post('/dashboard/teams', '/teams/create', { name: 'Audited' });
+    const team = await teamOf(ada);
+    tenants.push(team);
+    const link = await linkOf(await ada.post('/dashboard/settings/members', '/members/invite', { email: 'cy@acme.example', role: 'member' }));
+    const cy = new Browser(dashboard);
+    await cy.get(link);
+    await signIn(cy, 'cy', '?then=%2Finvite&email=1');
+    await cy.post('/dashboard/invite', '/invite/accept', {});
+    const log = await (await ada.get('/dashboard/settings/audit')).text();
+    expect(log).toContain('created the team');
+    expect(log).toContain('invited someone');
+    expect(log).toContain('@cy');
+    expect(log).toContain('joined');
+    const filtered = await (await ada.get('/dashboard/settings/audit?action=member.invited')).text();
+    const what = (page: string) => [...page.matchAll(/<td data-label="What">([^<]+)/g)].map(([, text]) => text);
+    expect(new Set(what(filtered))).toEqual(new Set(['invited someone']));
+    expect(what(log)).toContain('created the team');
+    // A Member may not read it, and is told why; the page is not in their settings.
+    const refused = await cy.get('/dashboard/settings/audit');
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain('can&#39;t read the audit log');
+    expect(await (await cy.get('/dashboard/settings/account')).text()).not.toContain('/dashboard/settings/audit');
+    // Fifty a page, the next by its cursor: 60 more events make two pages and one row over.
+    for (let index = 0; index < 60; index++) {
+      await admin`
+        INSERT INTO slotlock.audit_events (tenant_ref, action, actor_type, actor_ref, outcome)
+        VALUES (${team}, 'api_key.created', 'person', ${`github:${base}`}, 'success')`;
+    }
+    const first = await (await ada.get('/dashboard/settings/audit')).text();
+    const older = /<a href="(\/dashboard\/settings\/audit\?before=[^"]+)">Older<\/a>/.exec(first)?.[1];
+    expect(older, 'the Older link').toBeDefined();
+    expect([...first.matchAll(/<td data-label="When">/g)]).toHaveLength(50);
+    const second = await (await ada.get((older as string).replaceAll('&amp;', '&'))).text();
+    expect(second).toContain('created the team');
+    expect(second).toContain('Newest');
+  });
+
+  it("lists where a person is signed in, and signs one device out from another", async () => {
+    const laptop = new Browser(dashboard);
+    const phone = new Browser(dashboard);
+    await signIn(laptop, 'fay');
+    await signIn(phone, 'fay');
+    const account = await (await laptop.get('/dashboard/settings/account')).text();
+    expect([...account.matchAll(/<td data-label="Device"/g)]).toHaveLength(2);
+    expect(account).toContain('This device');
+    const other = [...account.matchAll(/name="id" value="([0-9a-f]{64})"/g)].map(([, id]) => id);
+    expect(other).toHaveLength(1);
+    const ended = await laptop.post('/dashboard/settings/account', '/sessions/end', { id: other[0] as string });
+    expect(ended.status).toBe(200);
+    expect(await ended.text()).toContain('Signed out of that device.');
+    // The phone's next request is signed out; the laptop goes on.
+    expect(await (await phone.get('/dashboard')).text()).toContain('Continue with GitHub');
+    expect((await laptop.get('/dashboard/settings/account')).status).toBe(200);
+    // Its own session it ends with Sign out, not here.
+    const own = (await (await laptop.get('/dashboard/settings/account')).text()).includes('name="id"');
+    expect(own).toBe(false);
+    // Sign out everywhere ends them all, this one too.
+    await signIn(phone, 'fay');
+    await laptop.post('/dashboard/settings/account', '/sign-out-everywhere', {});
+    expect(await (await phone.get('/dashboard')).text()).toContain('Continue with GitHub');
+    const rows = await admin<{ open: number }[]>`
+      SELECT count(*)::int AS open FROM slotlock.dashboard_sessions WHERE person_ref = ${`github:${base + 5}`} AND ended_at IS NULL`;
+    expect(rows[0]?.open).toBe(0);
+  });
+
+  it('offers a team Team, opened by its Owner, and emails invitations where a sender is set', async () => {
+    const checkouts: unknown[] = [];
+    const sent: unknown[] = [];
+    const billed = build({
+      billing: {
+        plan: async () => null,
+        enrol: async () => undefined,
+        checkout: async (input) => {
+          checkouts.push(input);
+          return 'https://checkout.stripe.com/c/pay/cs_test_team';
+        },
+        portal: async () => 'https://billing.stripe.com/p/session/test',
+        prices: { month: '$10', year: '$100' },
+        teamPrices: { month: '$40', year: '$400' },
+        contact: 'mailto:founder@example.com',
+        formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+      },
+      invitations: {
+        send: async (invitation) => {
+          sent.push(invitation);
+        },
+      },
+    });
+    // Fay has no team yet: where plans apply, each person creates one on Free.
+    const ada = new Browser(billed);
+    await signIn(ada, 'fay');
+    await ada.post('/dashboard/teams', '/teams/create', { name: 'Paying' });
+    const team = await teamOf(ada);
+    tenants.push(team);
+    expect(await (await ada.get('/dashboard/plan')).text()).toContain('$40');
+    // A name that would carry an address into the invitations sent is refused.
+    for (const name of ['Claim at evil.example', 'Visit https://x.io', 'Mail me@x.io', 'www.x co']) {
+      const refusedName = await ada.post('/dashboard/teams', '/teams/create', { name });
+      expect(refusedName.status, name).toBe(400);
+      expect(await refusedName.text()).toContain('can&#39;t hold a web or email address');
+    }
+    // A second free team is refused, with what to do.
+    const second = await ada.post('/dashboard/teams', '/teams/create', { name: 'Again' });
+    expect(second.status).toBe(403);
+    expect(await second.text()).toContain('Each person may create 1 team on the Free plan.');
+    const upgraded = await ada.post('/dashboard/plan', '/plan/upgrade', { interval: 'month' });
+    expect(upgraded.status).toBe(303);
+    expect(checkouts).toEqual([expect.objectContaining({ tenantRef: team, plan: 'team', interval: 'month' })]);
+    // On Free a team holds 3 people: the Owner and two invitations, then Upgrade.
+    const invited = await ada.post('/dashboard/settings/members', '/members/invite', { email: 'Desk@Clinic.example', role: 'member' });
+    expect(await invited.text()).toContain('Invitation sent to desk@clinic.example.');
+    expect(sent).toEqual([
+      expect.objectContaining({ to: 'desk@clinic.example', workspace: 'Paying', inviter: '@fay', role: 'Member', link: expect.stringMatching(/\/dashboard\/invite\?t=/) }),
+    ]);
+    await ada.post('/dashboard/settings/members', '/members/invite', { email: 'two@clinic.example', role: 'member' });
+    const full = await (await ada.get('/dashboard/settings/members')).text();
+    expect(full).toContain('3 of 3 people.');
+    expect(full).not.toContain('action="/dashboard/members/invite"');
+  });
+
+  it('exports the audit log on Team, as CSV a spreadsheet will not run and as JSON with its chain', async () => {
+    let plan: 'team' | 'free' = 'free';
+    const planned = build({
+      plans: {
+        plan: async () => ({
+          plan,
+          status: 'active',
+          limits: { resources: 500, apiKeys: 100, webhookEndpoints: 25 },
+          stripeCustomer: null,
+          stripeSubscription: null,
+          currentPeriodEnd: null,
+        }),
+      },
+    });
+    const gus = new Browser(planned);
+    await signIn(gus, 'gus');
+    await gus.post('/dashboard/teams', '/teams/create', { name: 'Exported' });
+    const team = await teamOf(gus);
+    tenants.push(team);
+    await admin`
+      INSERT INTO slotlock.audit_events (tenant_ref, action, actor_type, actor_ref, outcome, reason)
+      VALUES (${team}, 'authz.denied', 'person', ${`github:${base + 6}`}, 'denied', '=HYPERLINK("https://evil.example")')`;
+    const refused = await gus.get('/dashboard/settings/audit/export?format=csv');
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain('Exports come with the Team plan.');
+    plan = 'team';
+    const csv = await gus.get('/dashboard/settings/audit/export?format=csv');
+    expect(csv.status).toBe(200);
+    expect(csv.headers.get('content-type')).toBe('text/csv; charset=utf-8');
+    expect(csv.headers.get('content-disposition')).toMatch(/^attachment; filename="slotlock-audit-\d{4}-\d{2}-\d{2}\.csv"$/);
+    const lines = (await csv.text()).split('\r\n');
+    expect(lines[0]).toBe('occurred_at,action,outcome,actor_type,actor_ref,actor_role,target_type,target_ref,reason,ip_address,user_agent,metadata,chain_index,hash');
+    const denied = lines.find((line) => line.includes('"authz.denied"')) as string;
+    expect(denied).toContain(`"'=HYPERLINK(""https://evil.example"")"`);
+    // Whitespace before a formula is no way round it.
+    await admin`
+      INSERT INTO slotlock.audit_events (tenant_ref, action, actor_type, actor_ref, outcome, reason)
+      VALUES (${team}, 'authz.denied', 'person', ${`github:${base + 6}`}, 'denied', ' =1+1')`;
+    expect(await (await gus.get('/dashboard/settings/audit/export?format=csv')).text()).toContain(`"' =1+1"`);
+    expect(lines.some((line) => line.includes('"workspace.created"'))).toBe(true);
+    const json = (await (await gus.get('/dashboard/settings/audit/export?format=json&action=workspace.created')).json()) as {
+      action: string;
+      chain_index: string;
+      hash: string;
+      metadata: unknown;
+    }[];
+    expect(json.map((event) => event.action)).toEqual(['workspace.created']);
+    expect(json[0]?.hash).toMatch(/^[0-9a-f]{64}$/);
+    // The export is itself recorded, and the log checks out.
+    expect(await (await gus.get('/dashboard/settings/audit?action=audit.exported')).text()).toContain('exported the audit log');
+    expect(await (await gus.get('/dashboard/settings/audit?verify=1')).text()).toContain('The log is unbroken');
   });
 
   it("serves a team's keys only with team workspaces on", () => {

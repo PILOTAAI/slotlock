@@ -60,7 +60,7 @@ function fakeStore() {
       sweeps.count += 1;
       return 0;
     },
-    async sweepWorkspaceInvitations() {
+    async sweepDashboardRecords() {
       sweeps.invitations += 1;
       return 0;
     },

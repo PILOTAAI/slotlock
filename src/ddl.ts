@@ -258,6 +258,7 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   'workspace_memberships',
   'workspaces',
   'workspace_invitations',
+  'dashboard_sessions',
 ] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
@@ -287,6 +288,11 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.pending_invitations_for(text, text[])',
   'slotlock.workspace_active(text)',
   'slotlock.prune_workspace_invitations()',
+  'slotlock.dashboard_session_started(text, bytea, timestamptz, text, text)',
+  'slotlock.dashboard_session_seen(text, bytea)',
+  'slotlock.dashboard_sessions_of(text)',
+  'slotlock.dashboard_session_end(text, bytea)',
+  'slotlock.prune_dashboard_sessions()',
 ] as const);
 
 /**
@@ -2069,6 +2075,140 @@ BEGIN
 END
 $slotlock_prune_workspace_invitations$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[24]} FROM PUBLIC;
+
+-- Each dashboard session a person signed in with, for the Account page: when it began, when it was
+-- last seen (to five minutes), the browser and address it began from, and whether the person
+-- signed it out from another. Only a SHA-256 digest of the session's id is kept. Owner-only;
+-- reached through the functions below.
+CREATE TABLE IF NOT EXISTS slotlock.dashboard_sessions (
+  sid_sha256 bytea PRIMARY KEY,
+  person_ref text NOT NULL,
+  started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  last_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz NOT NULL,
+  ended_at timestamptz,
+  user_agent text,
+  ip_address text,
+  CONSTRAINT slotlock_dashboard_sessions_valid CHECK (
+    octet_length(sid_sha256) = 32
+    AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+    AND (user_agent IS NULL OR char_length(user_agent) BETWEEN 1 AND 256)
+    AND (ip_address IS NULL OR char_length(ip_address) BETWEEN 1 AND 64)
+    AND expires_at > started_at
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_dashboard_sessions_person_idx
+  ON slotlock.dashboard_sessions (person_ref, last_seen_at DESC);
+ALTER TABLE slotlock.dashboard_sessions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.dashboard_sessions FROM PUBLIC;
+
+-- A session begun: recorded, and the person's expired ones dropped; at most 50 kept, newest first.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_session_started(
+  requested_person text, requested_sid bytea, requested_expires timestamptz, requested_agent text,
+  requested_address text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_session_started$
+BEGIN
+  INSERT INTO slotlock.dashboard_sessions (sid_sha256, person_ref, expires_at, user_agent, ip_address)
+  VALUES (requested_sid, requested_person, requested_expires,
+          NULLIF(left(requested_agent, 256), ''), NULLIF(left(requested_address, 64), ''))
+  ON CONFLICT ON CONSTRAINT dashboard_sessions_pkey DO NOTHING;
+  DELETE FROM slotlock.dashboard_sessions old
+   WHERE old.person_ref = requested_person
+     AND (old.expires_at <= statement_timestamp()
+          OR old.sid_sha256 IN (SELECT kept.sid_sha256 FROM slotlock.dashboard_sessions kept
+                                 WHERE kept.person_ref = requested_person
+                                 ORDER BY kept.started_at DESC OFFSET 50));
+END
+$slotlock_dashboard_session_started$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[25]} FROM PUBLIC;
+
+-- Whether the person's session may go on: recorded for them, not signed out from another device,
+-- not expired. A session with no record (one the 50 kept dropped, one from before these records)
+-- does not, so a session signed out stays out however many sign-ins follow. Noted seen at most
+-- every five minutes.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_session_seen(requested_person text, requested_sid bytea)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_session_seen$
+BEGIN
+  UPDATE slotlock.dashboard_sessions seen SET last_seen_at = statement_timestamp()
+   WHERE seen.sid_sha256 = requested_sid AND seen.person_ref = requested_person AND seen.ended_at IS NULL
+     AND seen.last_seen_at < statement_timestamp() - interval '5 minutes';
+  RETURN EXISTS (
+    SELECT 1 FROM slotlock.dashboard_sessions alive
+     WHERE alive.sid_sha256 = requested_sid AND alive.person_ref = requested_person
+       AND alive.ended_at IS NULL AND alive.expires_at > statement_timestamp());
+END
+$slotlock_dashboard_session_seen$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[26]} FROM PUBLIC;
+
+-- The person's sessions still going, most recently seen first.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_sessions_of(requested_person text)
+RETURNS TABLE (sid_sha256 bytea, started_at timestamptz, last_seen_at timestamptz, expires_at timestamptz,
+               user_agent text, ip_address text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_sessions_of$
+BEGIN
+  RETURN QUERY SELECT kept.sid_sha256, kept.started_at, kept.last_seen_at, kept.expires_at, kept.user_agent,
+                      kept.ip_address
+    FROM slotlock.dashboard_sessions kept
+   WHERE kept.person_ref = requested_person AND kept.ended_at IS NULL
+     AND kept.expires_at > statement_timestamp()
+   ORDER BY kept.last_seen_at DESC
+   LIMIT 50;
+END
+$slotlock_dashboard_sessions_of$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[27]} FROM PUBLIC;
+
+-- Sign one of the person's sessions out (or, with no session, all of them): whether any was.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_session_end(requested_person text, requested_sid bytea)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_session_end$
+DECLARE
+  changed integer;
+BEGIN
+  UPDATE slotlock.dashboard_sessions ending SET ended_at = statement_timestamp()
+   WHERE ending.person_ref = requested_person AND ending.ended_at IS NULL
+     AND (requested_sid IS NULL OR ending.sid_sha256 = requested_sid);
+  GET DIAGNOSTICS changed = ROW_COUNT;
+  RETURN changed > 0;
+END
+$slotlock_dashboard_session_end$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[28]} FROM PUBLIC;
+
+-- Sessions that ended or expired more than a day ago: deleted.
+CREATE OR REPLACE FUNCTION slotlock.prune_dashboard_sessions()
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_prune_dashboard_sessions$
+DECLARE
+  pruned integer;
+BEGIN
+  DELETE FROM slotlock.dashboard_sessions old
+   WHERE least(coalesce(old.ended_at, 'infinity'), old.expires_at) < statement_timestamp() - interval '1 day';
+  GET DIAGNOSTICS pruned = ROW_COUNT;
+  RETURN pruned;
+END
+$slotlock_prune_dashboard_sessions$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[29]} FROM PUBLIC;
 `;
 
 // The schema's version: one row, written by the DDL itself, so running SLOTLOCK_CORE_DDL directly
@@ -3177,6 +3317,10 @@ BEGIN
           AND member.person_ref = requested_tenant_ref);
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'dashboard_sessions';
+  DELETE FROM slotlock.dashboard_sessions session_kept WHERE session_kept.person_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'dashboard_people';
   DELETE FROM slotlock.dashboard_people person WHERE person.person_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -4185,6 +4329,107 @@ CREATE TABLE IF NOT EXISTS slotlock.audit_events (
 CREATE INDEX IF NOT EXISTS slotlock_audit_events_recent_idx
   ON slotlock.audit_events (tenant_ref, occurred_at DESC, id);
 
+-- Each tenant's events form a chain: each holds the SHA-256 of the one before it with its own
+-- content, numbered in the order they were written. Rewriting, removing or reordering an event
+-- (which the serving role cannot do, but an owner of the database could) breaks every hash after
+-- it, and slotlock.verify_audit_chain says where. Events from before the chain have none.
+ALTER TABLE slotlock.audit_events ADD COLUMN IF NOT EXISTS chain_index bigint;
+ALTER TABLE slotlock.audit_events ADD COLUMN IF NOT EXISTS prev_hash bytea;
+ALTER TABLE slotlock.audit_events ADD COLUMN IF NOT EXISTS hash bytea;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_audit_events_chain_idx
+  ON slotlock.audit_events (tenant_ref, chain_index);
+
+-- An event as its hash covers it: every field, in a fixed order, separated by the unit separator.
+CREATE OR REPLACE FUNCTION slotlock.audit_event_text(event slotlock.audit_events)
+RETURNS text
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_audit_event_text$
+  SELECT concat_ws(chr(31), event.tenant_ref, event.chain_index::text, event.id::text,
+                   (extract(epoch FROM event.occurred_at) * 1000000)::bigint::text, event.action,
+                   event.actor_type, event.actor_ref, coalesce(event.actor_role, ''),
+                   coalesce(event.target_type, ''), coalesce(event.target_ref, ''), event.outcome,
+                   coalesce(event.reason, ''), coalesce(event.ip_address, ''),
+                   coalesce(event.user_agent, ''), event.metadata::text);
+$slotlock_audit_event_text$;
+
+-- Before each insert: the tenant's chain one writer at a time, the event numbered after the last
+-- and hashed with it.
+CREATE OR REPLACE FUNCTION slotlock.chain_audit_event()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_chain_audit_event$
+DECLARE
+  last_index bigint;
+  last_hash bytea;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:audit-chain:' || NEW.tenant_ref, 0));
+  SELECT kept.chain_index, kept.hash INTO last_index, last_hash FROM slotlock.audit_events kept
+   WHERE kept.tenant_ref = NEW.tenant_ref AND kept.chain_index IS NOT NULL
+   ORDER BY kept.chain_index DESC LIMIT 1;
+  -- The time is the database's, whatever the insert said: an event dated in the past would have
+  -- retention take the events after it.
+  NEW.occurred_at := statement_timestamp();
+  NEW.chain_index := coalesce(last_index, 0) + 1;
+  NEW.prev_hash := last_hash;
+  NEW.hash := sha256(coalesce(last_hash, ''::bytea) || convert_to(slotlock.audit_event_text(NEW), 'UTF8'));
+  RETURN NEW;
+END
+$slotlock_chain_audit_event$;
+DROP TRIGGER IF EXISTS slotlock_audit_events_chain ON slotlock.audit_events;
+CREATE TRIGGER slotlock_audit_events_chain BEFORE INSERT ON slotlock.audit_events
+  FOR EACH ROW EXECUTE FUNCTION slotlock.chain_audit_event();
+
+-- Whether a tenant's chain holds, from its oldest event kept: how many events it checked, and the
+-- first whose number, link or hash is wrong (null when none is). Run as the serving role, under
+-- the tenant's own row security.
+CREATE OR REPLACE FUNCTION slotlock.verify_audit_chain(requested_tenant text)
+RETURNS TABLE (checked bigint, broken_at bigint)
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_verify_audit_chain$
+DECLARE
+  event slotlock.audit_events;
+  expected_index bigint;
+  expected_prev bytea;
+  seen bigint := 0;
+  loose_at timestamptz;
+BEGIN
+  -- An event with no place in the chain, written after the chain began, was taken off it: broken
+  -- where it stood, the first chained event after it (or past the last).
+  SELECT min(loose.occurred_at) INTO loose_at FROM slotlock.audit_events loose
+   WHERE loose.tenant_ref = requested_tenant AND loose.chain_index IS NULL
+     AND loose.occurred_at >= (SELECT min(first.occurred_at) FROM slotlock.audit_events first
+                                WHERE first.tenant_ref = requested_tenant AND first.chain_index IS NOT NULL);
+  IF loose_at IS NOT NULL THEN
+    RETURN QUERY SELECT 0::bigint, coalesce(
+      (SELECT min(after.chain_index) FROM slotlock.audit_events after
+        WHERE after.tenant_ref = requested_tenant AND after.chain_index IS NOT NULL AND after.occurred_at > loose_at),
+      (SELECT max(last.chain_index) + 1 FROM slotlock.audit_events last WHERE last.tenant_ref = requested_tenant));
+    RETURN;
+  END IF;
+  FOR event IN
+    SELECT * FROM slotlock.audit_events kept
+     WHERE kept.tenant_ref = requested_tenant AND kept.chain_index IS NOT NULL
+     ORDER BY kept.chain_index
+  LOOP
+    IF (seen > 0 AND (event.chain_index <> expected_index OR event.prev_hash IS DISTINCT FROM expected_prev))
+       OR event.hash IS DISTINCT FROM
+          sha256(coalesce(event.prev_hash, ''::bytea) || convert_to(slotlock.audit_event_text(event), 'UTF8')) THEN
+      RETURN QUERY SELECT seen, event.chain_index;
+      RETURN;
+    END IF;
+    seen := seen + 1;
+    expected_index := event.chain_index + 1;
+    expected_prev := event.hash;
+  END LOOP;
+  RETURN QUERY SELECT seen, NULL::bigint;
+END
+$slotlock_verify_audit_chain$;
+
 -- A tenant's events past retention. The serving role cannot delete audit events itself: this is
 -- the one way they go, besides erasure, and it reaches only events retention has ended.
 CREATE OR REPLACE FUNCTION slotlock.prune_audit_events(requested_tenant text)
@@ -4197,9 +4442,16 @@ AS $slotlock_prune_audit_events$
 DECLARE
   pruned integer;
 BEGIN
+  -- The start of the chain only, so what is kept still links up: every event up to the last one
+  -- written before retention's cut, and events from before the chain past it.
   DELETE FROM slotlock.audit_events gone
    WHERE gone.tenant_ref = requested_tenant
-     AND gone.occurred_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_AUDIT_RETENTION_DAYS});
+     AND ((gone.chain_index IS NULL
+           AND gone.occurred_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_AUDIT_RETENTION_DAYS}))
+          OR gone.chain_index <= (
+            SELECT max(old.chain_index) FROM slotlock.audit_events old
+             WHERE old.tenant_ref = requested_tenant
+               AND old.occurred_at < statement_timestamp() - make_interval(days => ${SLOTLOCK_AUDIT_RETENTION_DAYS})));
   GET DIAGNOSTICS pruned = ROW_COUNT;
   RETURN pruned;
 END

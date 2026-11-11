@@ -168,12 +168,16 @@ describe.skipIf(!url)('workspace memberships and the audit log (real Postgres)',
 
   it('prunes only the events past retention, and only the tenant asked', async () => {
     const a = 'github-org:1';
+    // The events a has kept so far fall past retention; one written now does not. Events are
+    // chained in the order written, so retention takes the start of the chain (audit-chain.integration).
+    await admin`UPDATE slotlock.audit_events SET occurred_at = now() - interval '181 days' WHERE tenant_ref = ${a}`;
+    const [aged] = await admin<{ count: number }[]>`SELECT count(*)::int AS count FROM slotlock.audit_events WHERE tenant_ref = ${a}`;
+    await audit.record(a, { action: 'webhook.created', actorType: 'person', actorRef: person });
     await admin`
       INSERT INTO slotlock.audit_events (tenant_ref, occurred_at, action, actor_type, actor_ref)
-      VALUES (${a}, now() - interval '181 days', 'webhook.created', 'person', ${person}),
-             ('github-org:2', now() - interval '181 days', 'webhook.created', 'person', ${person})`;
-    expect(await audit.prune(a)).toBe(1);
-    expect((await audit.list(a)).map((event) => event.action)).toEqual(['api_key.created']);
+      VALUES ('github-org:2', now() - interval '181 days', 'webhook.created', 'person', ${person})`;
+    expect(await audit.prune(a)).toBe(aged?.count);
+    expect((await audit.list(a)).map((event) => event.action)).toEqual(['webhook.created']);
     const [left] = await admin<{ count: number }[]>`
       SELECT count(*)::int AS count FROM slotlock.audit_events WHERE tenant_ref = 'github-org:2' AND action = 'webhook.created'`;
     expect(left?.count).toBe(1);

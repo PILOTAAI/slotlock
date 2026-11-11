@@ -145,7 +145,9 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
   takes an organization's keys only while its own list names it (or, with `enabled`, while an
   owner has it turned on), whether or not it serves the dashboard.
 - With team workspaces, set `SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on` on both too: the server takes
-  a team's keys only with it on, and only while the team exists.
+  a team's keys only with it on, and only while the team exists. To send invitations by email, set
+  `SLOTLOCK_INVITATION_EMAIL` and `SLOTLOCK_INVITATION_EMAIL_FROM` as variables and
+  `SLOTLOCK_INVITATION_EMAIL_KEY` as a secret (`wrangler secret put`) on the Worker.
 - Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
   keys only while its own list allows them, whether or not it serves the dashboard, so removing a
   person from both lists signs them out and stops their keys. A server without it takes every

@@ -40,11 +40,12 @@ it yourself, and nothing here limits your rights under that licence.
   tax or VAT added. Stripe sells it to you as merchant of record: Stripe takes the payment, charges
   the tax and issues the invoices, under its own terms for buyers, which it shows at checkout. These
   terms cover the service itself.
-- **Team** is for a GitHub organization that an owner has turned Slotlock on for. It costs $40 a
-  month or $400 a year for the whole organization, however many of its owners and members use it,
-  and is bought, sold and taxed as Developer is. Only an owner of the organization can buy, change
-  or cancel it. If Slotlock is turned off for the organization, its plan continues until it is
-  cancelled.
+- **Team** is for a shared workspace: a team workspace, or a GitHub organization that an owner has
+  turned Slotlock on for. It costs $40 a month or $400 a year for the whole workspace, however many
+  people use it, and is bought, sold and taxed as Developer is. Only the workspace's Owners and
+  Billing managers can buy, change or cancel it. If Slotlock is turned off for an organization, its
+  plan continues until it is cancelled. On Free, a team workspace has up to 3 people, open
+  invitations included, and each person may create one.
 - A Developer or Team plan renews at the end of each period until you cancel it, which you can do at any
   time from **Manage billing** on the dashboard's Plan page. It then runs to the end of the period
   already paid for. Payments are not refunded for part of a period, except where the law gives you
@@ -65,6 +66,11 @@ it yourself, and nothing here limits your rights under that licence.
 - You are responsible for the API keys you create and for everything done with them. Give each
   agent its own key with the narrowest scope it needs, and revoke a key you no longer trust.
 - You must follow the [Acceptable Use Policy](ACCEPTABLE-USE.md), which is part of these terms.
+- **Team workspaces.** A team workspace belongs to its Owners, who are responsible for it as for an
+  account: who they invite, the role each person has, and what members do in it. Invite only people
+  who expect it, at an address they gave you. Members of a workspace see each other's GitHub login
+  or Google email, their roles, and the workspace's audit log as their role allows. When someone
+  leaves or is removed, what they made in the workspace stays the workspace's.
 
 ## Your content
 

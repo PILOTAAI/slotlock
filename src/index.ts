@@ -316,6 +316,8 @@ export type { SlotlockOverageReport } from './overage.js';
 export { createSlotlockOtlpExporter, readSlotlockOtlpConfig, slotlockCallSpan } from './otel.js';
 export type { SlotlockOtlpConfig, SlotlockTraceExporter } from './otel.js';
 export type { SlotlockDashboardTeams } from './teams.js';
+export { createSlotlockInvitationEmailSender, slotlockInvitationEmail } from './invitation-email.js';
+export type { SlotlockInvitationEmailConfig } from './invitation-email.js';
 export {
   createSlotlockDashboardWorkspaces,
   createSlotlockMemoryDashboardWorkspaces,
@@ -331,6 +333,8 @@ export type {
   SlotlockWorkspaceMember,
   SlotlockWorkspaceStanding,
   SlotlockWorkspaceTeams,
+  SlotlockDashboardSession,
+  SlotlockDashboardSessions,
 } from './workspaces.js';
 export {
   SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,

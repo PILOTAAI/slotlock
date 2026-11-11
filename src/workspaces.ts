@@ -2,6 +2,7 @@
 // request: from slotlock.workspace_memberships and slotlock.dashboard_people, through their
 // functions, never from the session cookie. A person's own workspace has no row: they are its
 // Owner. GitHub organizations' members are recorded at each sign-in from what GitHub lists.
+import { createHash } from 'node:crypto';
 import type { SlotlockSql } from './store.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 
@@ -40,6 +41,31 @@ export interface SlotlockDashboardWorkspaces {
   signOutEverywhere(person: string): Promise<number>;
   /** Team workspaces, their members and invitations: only with the database (createSlotlockDashboardWorkspaces). */
   teams?: SlotlockWorkspaceTeams;
+  /** Each session a person signed in with, to list and sign out one by one: only with the database. */
+  sessions?: SlotlockDashboardSessions;
+}
+
+/** A session a person signed in with, as their Account page lists it. */
+export interface SlotlockDashboardSession {
+  /** The SHA-256 of the session's id, in hex: names it without revealing it. */
+  id: string;
+  startedAt: Date;
+  lastSeenAt: Date;
+  expiresAt: Date;
+  userAgent: string | null;
+  ipAddress: string | null;
+}
+
+/** Sessions by person (slotlock.dashboard_sessions): only a digest of each session's id is kept. */
+export interface SlotlockDashboardSessions {
+  started(person: string, sid: string, expiresAt: Date, from: { userAgent?: string; ipAddress?: string }): Promise<void>;
+  /** Whether the session may go on: false once signed out from another device. Notes it seen. */
+  seen(person: string, sid: string): Promise<boolean>;
+  list(person: string): Promise<SlotlockDashboardSession[]>;
+  /** Sign out one session by its id (SlotlockDashboardSession.id), or every one with null. */
+  end(person: string, id: string | null): Promise<boolean>;
+  /** The id a session is listed under. */
+  idOf(sid: string): string;
 }
 
 /** A team workspace (team:<uuid>) as a person sees it in their list. */
@@ -207,6 +233,47 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
       return Number(row?.epoch ?? 0);
     },
     teams: createTeams(sql),
+    sessions: createSessions(sql),
+  };
+}
+
+const sessionDigest = (sid: string) => createHash('sha256').update(sid, 'utf8').digest();
+const SESSION_ID = /^[0-9a-f]{64}$/;
+
+function createSessions(sql: SlotlockSql): SlotlockDashboardSessions {
+  return {
+    async started(person, sid, expiresAt, from) {
+      if (!PERSON.test(person)) refuse('needs github:<id> or google:<subject>');
+      await sql`SELECT slotlock.dashboard_session_started(${person}::text, ${sessionDigest(sid)}::bytea,
+        ${expiresAt}::timestamptz, ${from.userAgent?.slice(0, 256) ?? null}::text, ${from.ipAddress?.slice(0, 64) ?? null}::text)`;
+    },
+    async seen(person, sid) {
+      if (!PERSON.test(person)) return false;
+      const [row] = await sql<{ alive: boolean }[]>`
+        SELECT slotlock.dashboard_session_seen(${person}::text, ${sessionDigest(sid)}::bytea) AS alive`;
+      return row?.alive === true;
+    },
+    async list(person) {
+      if (!PERSON.test(person)) return [];
+      const rows = await sql<
+        { sid_sha256: Buffer; started_at: Date; last_seen_at: Date; expires_at: Date; user_agent: string | null; ip_address: string | null }[]
+      >`SELECT * FROM slotlock.dashboard_sessions_of(${person}::text)`;
+      return rows.map((row) => ({
+        id: row.sid_sha256.toString('hex'),
+        startedAt: row.started_at,
+        lastSeenAt: row.last_seen_at,
+        expiresAt: row.expires_at,
+        userAgent: row.user_agent,
+        ipAddress: row.ip_address,
+      }));
+    },
+    async end(person, id) {
+      if (!PERSON.test(person) || (id !== null && !SESSION_ID.test(id))) return false;
+      const [row] = await sql<{ ended: boolean }[]>`
+        SELECT slotlock.dashboard_session_end(${person}::text, ${id === null ? null : Buffer.from(id, 'hex')}::bytea) AS ended`;
+      return row?.ended === true;
+    },
+    idOf: (sid) => sessionDigest(sid).toString('hex'),
   };
 }
 
