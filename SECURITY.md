@@ -223,6 +223,20 @@ than 90 days needs one Owner to ask and another to approve. The console reads St
 restricted key that reads subscriptions and invoices, and keeps what it read for an hour. It
 cannot change a subscription, refund or invoice.
 
+The blog is written in the console too, but it stays files in this repository. The console writes
+it through a GitHub App, "Slotlock CMS", installed on this repository only, which can write only
+`cms/` branches. A post is saved there as the staff member who wrote it, with their sign-off, and
+reaches `main` only by a pull request that passes the same required checks as any other; the App
+has no bypass. Only an Owner publishes, and the console merges a pull request only:
+
+- at the commit the Owner saw;
+- when it changes nothing but blog files (posts, their images, redirects, the author list);
+- once its checks pass.
+
+The hourly workflow that publishes scheduled posts holds to the same rules, and acts only on a
+schedule the App itself wrote. The renderer escapes every character of a post, so a post cannot
+carry a script, a style or raw HTML. An image is accepted only as PNG, JPEG or WebP, by its bytes.
+
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
 

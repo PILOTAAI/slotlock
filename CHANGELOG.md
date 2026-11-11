@@ -184,6 +184,18 @@ notes first.
   - **Billing jobs.** `slotlock billing daily` and `slotlock overage report` record each run.
   - **Stripe.** With a restricted read-only key (`SLOTLOCK_ADMIN_STRIPE_KEY`), the console shows
     revenue and a customer's subscriptions and invoices, kept for an hour.
+- **A CMS for the blog in the admin console** (RFC 0006, Phase 4):
+  - **Posts are files.** Each post is `site/content/blog/<slug>.md`, rendered by one renderer with
+    no dependencies (`site/src/lib/post-format.ts`) that escapes every character, for the site's
+    build and the console's preview alike. The site's CI draws a missing link-preview image.
+  - **Writing.** An Editor or Owner writes a post with a live preview and the site's own checks;
+    saving commits it to a `cms/<slug>` branch through the "Slotlock CMS" GitHub App, as the staff
+    member, signed off, on a pull request. Images go beside the post.
+  - **Publishing.** Only an Owner publishes: the console merges at the commit they saw, only a
+    pull request that changes blog files, once its checks pass. A later date schedules it, and
+    `cms-schedule.yml` publishes it each hour. A renamed post gets redirects from its old address.
+  - **Previews.** A CMS pull request gets a preview deploy of the whole site, marked `noindex`.
+  - **The live site publishes `/facts.json`**, the short facts a post may name, for the preview.
 - **Verified domains** (`SLOTLOCK_VERIFIED_DOMAINS=on`, with team workspaces): a team's Owners add
   their organization's domain on Settings, Identity and publish a TXT record
   (`_slotlock-challenge.<domain>`, a 128-bit token per claim). The server's maintenance looks it up

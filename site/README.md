@@ -29,7 +29,9 @@ site/
   src/styles/tokens.mjs   colour tokens (Pylota's, after PR #505), light and dark
   src/styles/docs.css     the docs theme on those tokens
   scripts/sync-content.mjs  builds docs pages and src/generated/facts.json from README, SPEC,
-                            SECURITY, CHANGELOG and src/*.ts; fails if a fact moved
+                            SECURITY, CHANGELOG and src/*.ts; fails if a fact moved. It also writes
+                            public/facts.json, the short facts a post names as {{facts.name}}, which
+                            the admin console's preview reads from the live site
   scripts/tool-schemas.mjs  reads each tool's Zod input and output schemas and example from
                             src/agent-server.ts as text (the site has no package dependencies)
   scripts/tools-page.mjs  renders /docs/tools/ from those schemas and scripts/tool-notes.mjs
@@ -44,11 +46,14 @@ site/
   scripts/copy-lint.mjs   Pylota's voice rules (no em dash, no filler words) and the word count
   scripts/subset-fonts.sh rebuilds public/fonts from the OFL sources
   public/_headers         CSP, HSTS, caching, Markdown content types
+  public/_redirects       old addresses of renamed posts (the console adds them)
+  wrangler.preview.jsonc  the preview Worker each CMS pull request's build goes to, as
+                          https://pr-<number>-<host>/ (site.yml, the preview job)
 ```
 
 Tool names and schemas, versions, limits, the exclusion constraint and the README quick start are
 read from the repository on every build, so the site cannot claim something the code does not do. Generated files
-(`src/content/docs/`, `src/generated/`, `public/schema/`) are git-ignored.
+(`src/content/docs/`, `src/generated/`, `public/schema/`, `public/facts.json`) are git-ignored.
 
 ## Work on it
 

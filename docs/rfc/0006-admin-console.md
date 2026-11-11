@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 to 3 are built and wait for their independent security review and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 to 4 are built and wait for their independent security review and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -345,11 +345,12 @@ lint, the SEO check and a strict CSP.
    `author`, `status` and `publishAt`) and a Markdown body. The four posts move across unchanged in
    words; `blog.ts` goes. (Done in Phase 4a: the four posts render the same HTML and Markdown twins
    as before.)
-2. **Rendering without inline styles.** A content loader renders Markdown with remark and rehype,
-   without Expressive Code:
+2. **Rendering without inline styles.** One renderer, `site/src/lib/post-format.ts`, with no
+   dependencies, renders a strict Markdown subset for the site's build and the console's preview:
    - code blocks become plain `<pre><code class="language-…">`, styled by `pages.css`;
-   - raw HTML is not allowed, so a post cannot carry a script.
-   The page and its Markdown twin come from the same file.
+   - raw HTML is never let through: every character is escaped, so a post cannot carry a script.
+   The page and its Markdown twin come from the same file. (Built that way in Phase 4a instead of
+   remark and rehype: a library to keep up to date, and one more thing between a post and the CSP.)
 3. **Open Graph images.** `og-images.mjs` reads titles from the posts' frontmatter, and the site's
    CI draws any missing image (Playwright, cached) before the build. Nobody commits an image by
    hand.
@@ -358,12 +359,16 @@ lint, the SEO check and a strict CSP.
    - **Submit** commits the post and its images to `cms/<slug>`, authored and signed off as the
      staff member, so the DCO check passes. It then opens a pull request, which runs the site's
      checks.
-   - **Publish** merges it: Owner only (E5). The merge deploys the site.
-   - A **scheduled** post's pull request carries a label; an hourly workflow merges those whose
-     `publishAt` has passed and whose checks are green.
+   - **Publish** merges it: Owner only (E5). The merge deploys the site. The App gets no bypass:
+     main's ruleset holds its merges to the same required checks, on a branch up to date with
+     main, as everyone's.
+   - A **scheduled** post's pull request carries a label and the App's comment naming the commit;
+     an hourly workflow merges those whose `publishAt` has passed, whose post is still that
+     commit's and whose checks are green.
 5. **Preview.** The editor's live preview uses the same renderer, compiled into the admin
    Worker. Each CMS pull request also gets a preview deploy of the whole site on a `noindex`
-   preview Worker, linked from the pull request and the console.
+   preview Worker (a version with the preview alias `pr-<number>`), linked from the pull request
+   and the console.
 6. **Redirects.** A changed slug adds a line to `site/public/_redirects`.
 
 A database-backed CMS was considered and set aside:
@@ -627,6 +632,64 @@ shows each partner's month instead.
 The database keeps no GitHub login or email for a person, only the numeric id, and that does not
 change. The console reads logins from GitHub's public profile API when it shows or searches an
 account, and caches them for an hour. PRIVACY.md says so before the console goes live.
+
+**Where Phase 4 stands.** The CMS is built and tested. Its done-when holds, end to end against a
+fake GitHub and a real site build: an Editor writes a post with an image in the console, an Owner
+publishes it, and it builds live with its image, `BlogPosting` structured data, RSS item and
+sitemap entry, with the copy lint and the SEO check clean.
+
+- **4a, posts as files.** The four posts are `site/content/blog/<slug>.md`, rendered by
+  `post-format.ts` (4.5, item 2) to the same HTML and Markdown twins as before. Authors are
+  `site/src/data/authors.json`. The site's CI draws a missing link-preview image before the build.
+- **The roles.** `content.write` (the Owner and an Editor) writes, submits and discards posts and
+  adds images; `content.publish` (the Owner) publishes, schedules and unschedules (E5).
+  `admin_content_record` checks the role and writes the staff log before the console asks GitHub
+  for anything. Publishing, renaming and discarding need a passkey in the last 15 minutes; saving
+  does not, so a long edit is never lost to the passkey step.
+- **The editor (M8).** Settings, the Markdown, and in a rail:
+  - the post's status, pull request, checks and preview deploy;
+  - the site's checks, each pass or fail;
+  - a search result, with title and description counters;
+  - the link-preview card;
+  - images, with the Markdown to paste.
+
+  As you type, `/content/preview` renders the post and its checks with the site's renderer. The
+  link check reads the live site's sitemap; facts come from the live `/facts.json`.
+- **Saving and submitting.** A save commits to `cms/<slug>` as the staff member, with their
+  `Signed-off-by` (their GitHub no-reply address, so the DCO check passes), and opens a pull request
+  labelled `cms`. Submitting sets `status: published` in the file and needs every check to pass.
+  A save over a branch that moved since the page opened is refused, never merged over.
+- **Images.** PNG, JPEG or WebP, known by their first bytes, up to 1 MB, 20 a post, beside the post
+  in `site/public/blog/<slug>/`. Alt text is required by the Markdown check.
+- **Publishing.** The console merges (squash) only:
+  - at the commit the Owner saw;
+  - a pull request that changes nothing but blog files (posts, their images, `_redirects`,
+    `authors.json`);
+  - once the post is submitted, its checks on GitHub pass and the console's checks pass.
+
+  A branch behind main is brought up to date first, and the Owner publishes once the checks pass
+  again. The merge message carries every `Signed-off-by` of the pull request and the Owner's.
+- **Scheduling.** A post with a later `publishAt` is scheduled: a label, and the App's comment
+  naming the commit. `cms-schedule.yml` runs `scripts/cms-scheduled-merge.mjs` each hour as the
+  App. It merges when the time has come, if the post's files are still that commit's (bringing in
+  main is fine) and the rules above hold, and unschedules, saying why, when they are not. Only
+  the App's own comment counts, so a label someone else adds merges nothing.
+- **Renaming and redirects.** A published post's address changes on its own pull request, which
+  moves the post and its images and adds `301` lines for the page and its Markdown twin to
+  `site/public/_redirects`, pointing older redirects at the new address.
+- **Preview deploys.** `site.yml` uploads a CMS pull request's build to the preview Worker
+  (`site/wrangler.preview.jsonc`) with `noindex` on every page. It checks out main for Wrangler and
+  never runs the pull request's code with the Cloudflare token.
+- **Owner settings (Phase 0).** The Slotlock CMS GitHub App (permissions in
+  `workers/admin/wrangler.jsonc`), its key on the console's Worker and on the `cms` environment,
+  and the preview Worker with its `site-preview` environment. `scripts/configure-github.sh`
+  creates both environments; the App, its key and the Cloudflare token are set by hand.
+
+Left for later phases:
+
+- search clicks per post on the list (M9, Phase 6);
+- the comparison pages' "last checked" flags on Home (M8);
+- adding an author from the console: `authors.json` is edited in a pull request for now.
 
 ## Part 8: Non-goals and risks
 
