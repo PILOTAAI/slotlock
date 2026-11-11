@@ -1,5 +1,6 @@
 ---
 title: MCP and A2A server
+seoTitle: 'MCP and A2A server reference | Slotlock'
 description: Serve the Slotlock tools from your own application, behind your authentication, and what the server does on the wire.
 sidebar:
   label: MCP and A2A server

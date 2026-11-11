@@ -45,6 +45,7 @@ LABEL org.opencontainers.image.title="Slotlock" \
       org.opencontainers.image.description="Calendar and availability engine for AI agents, served over MCP and A2A" \
       org.opencontainers.image.source="https://github.com/PILOTAAI/slotlock" \
       org.opencontainers.image.url="https://slotlock.pylota.io" \
+      org.opencontainers.image.documentation="https://slotlock.pylota.io/docs/self-host/" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="TREFT LTD" \
       io.modelcontextprotocol.server.name="io.github.PILOTAAI/slotlock" \

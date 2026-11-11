@@ -1,5 +1,6 @@
 ---
 title: Tools reference
+seoTitle: 'MCP tools reference: every slotlock_* booking tool'
 description: The slotlock_* tools an agent calls over MCP or as A2A skills, with what each one takes, returns and refuses.
 sidebar:
   label: Tools

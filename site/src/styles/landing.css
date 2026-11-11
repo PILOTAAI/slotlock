@@ -338,6 +338,20 @@ svg {
   line-height: 1.08;
 }
 
+/* The section's topic in plain words, inside its heading so the heading says what a searcher
+   types; set like an eyebrow. */
+.h2__topic {
+  display: block;
+  margin-bottom: 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
 .soft {
   display: block;
   color: var(--ink-3);
@@ -1242,8 +1256,11 @@ svg {
   height: 12px;
 }
 
+/* A lapsed hold fades its fill and outline, never its label, so the label keeps its contrast. */
 .block--lapsed {
-  opacity: 0.6;
+  background-color: transparent;
+  background-image: none;
+  border-color: color-mix(in srgb, var(--hold) 45%, transparent);
 }
 
 .outcome__note {

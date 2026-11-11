@@ -1,0 +1,47 @@
+---
+import '../../styles/pages.css';
+import Marketing from '../../layouts/Marketing.astro';
+import { POSTS, postPath } from '../../data/blog';
+import { BLOG, blogSeo, longDate } from '../../lib/blog';
+---
+
+<Marketing seo={blogSeo()}>
+  <section class="hero page-hero" aria-labelledby="page-title">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <ol>
+          <li><a href="/">Slotlock</a></li>
+          <li aria-current="page">Blog</li>
+        </ol>
+      </nav>
+      <h1 class="h1" id="page-title">
+        <span class="h2__topic">Blog</span>
+        <span class="soft">Notes on booking, calendars</span>
+        <span class="strong">and AI agents.</span>
+      </h1>
+      <p class="lede">{BLOG.description}</p>
+    </div>
+  </section>
+  <section class="band" aria-label="Posts">
+    <div class="wrap">
+      <ul class="posts">
+        {
+          POSTS.map((post) => (
+            <li>
+              <h2>
+                <a href={postPath(post)}>{post.title}</a>
+              </h2>
+              <p>{post.description}</p>
+              <p class="post-meta">
+                <time datetime={post.date}>{longDate(post.date)}</time> · {post.tags.join(', ')}
+              </p>
+            </li>
+          ))
+        }
+      </ul>
+      <p class="post-meta">
+        <a href="/blog/rss.xml">RSS feed</a>
+      </p>
+    </div>
+  </section>
+</Marketing>

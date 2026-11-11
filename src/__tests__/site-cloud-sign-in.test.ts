@@ -16,9 +16,13 @@ describe('the site signs people in to Slotlock Cloud', () => {
     expect(landing).toContain(`export const CLOUD_API_URL = '${API}';`);
     expect(landing).toMatch(/export const signIn = \{\n {2}label: 'Sign in',[^}]*href: SIGN_IN_URL,/);
     const page = read('site/src/pages/index.astro');
-    // Sign in and Start free in the header, Sign in in the phone menu, Start free in the hero and
-    // the closing band. The Free plan's button takes the same URL from its plan.
-    expect(page.match(/href=\{signIn\.href\}/g)?.length).toBe(5);
+    const layout = read('site/src/layouts/Marketing.astro');
+    // Sign in and Start free in the header and Sign in in the phone menu (the layout every page
+    // outside the docs shares), Start free in the hero and the closing band. The Free plan's
+    // button takes the same URL from its plan.
+    expect(layout.match(/href=\{signIn\.href\}/g)?.length).toBe(3);
+    expect(page.match(/href=\{signIn\.href\}/g)?.length).toBe(2);
+    expect(layout).not.toMatch(/target="_blank"/);
     expect(landing).toMatch(/cta: \{ label: signIn\.start, href: SIGN_IN_URL \}/);
     expect(page).not.toMatch(/target="_blank"/);
     // The docs: beside GitHub in the wide header and the menu (Starlight's SocialIcons), and beside

@@ -1,5 +1,6 @@
 ---
 title: External calendars
+seoTitle: 'Import external calendars as busy time (iCalendar)'
 description: Bring Google, Microsoft and CalDAV calendars in through neutral iCalendar boundaries, read untrusted feeds off the main thread, and record how much is proven.
 sidebar:
   label: External calendars

@@ -5,12 +5,14 @@
 #
 # scripts/postbuild.mjs replaces __SCRIPT_HASHES__ and __STYLE_HASHES__ with the SHA-256 of each
 # inline <script> and <style> Starlight renders on the docs and 404 pages (the 404 page is served
-# at whatever path was asked for, so one policy covers every path). It fails the build if the
-# landing page carries any inline script, style block or style attribute. No 'unsafe-inline', no
-# 'unsafe-eval', no third-party origin.
+# at whatever path was asked for, so one policy covers every path). It fails the build if a page
+# outside the docs carries any inline script, style block or style attribute. No 'unsafe-inline',
+# no 'unsafe-eval'. One third party: Cloudflare Web Analytics, which the zone injects and which
+# sets no cookie (PRIVACY.md; docs/rfc/0005-search.md, D3): its script from
+# static.cloudflareinsights.com, its beacon to cloudflareinsights.com.
 
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self' __SCRIPT_HASHES__; style-src 'self' __STYLE_HASHES__; style-src-attr __STYLE_ATTR_HASHES__; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'none'; script-src 'self' https://static.cloudflareinsights.com __SCRIPT_HASHES__; style-src 'self' __STYLE_HASHES__; style-src-attr __STYLE_ATTR_HASHES__; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cloudflareinsights.com; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
@@ -25,23 +27,73 @@
 /fonts/*
   Cache-Control: public, max-age=31536000, immutable
 
+# Link previews and the logo: stable names, so a day's cache.
+/og/*
+  Cache-Control: public, max-age=86400
+
+/brand/*
+  Cache-Control: public, max-age=86400
+
 # Markdown and text for agents, readable from any origin.
 /*.md
   Content-Type: text/markdown; charset=utf-8
   Access-Control-Allow-Origin: *
 
+# Each Markdown twin names its HTML page as canonical, so search engines index the page and not
+# the twin (docs/rfc/0005-search.md 1.6). A placeholder matches one path segment.
+/:page.md
+  Link: <https://slotlock.pylota.io/:page/>; rel="canonical"
+
+/index.md
+  ! Link
+  Link: <https://slotlock.pylota.io/>; rel="canonical"
+
+/docs/:page.md
+  Link: <https://slotlock.pylota.io/docs/:page/>; rel="canonical"
+
+/docs/index.md
+  ! Link
+  Link: <https://slotlock.pylota.io/docs/>; rel="canonical"
+
+/docs/api/:page.md
+  Link: <https://slotlock.pylota.io/docs/api/:page/>; rel="canonical"
+
+/use-cases/:page.md
+  Link: <https://slotlock.pylota.io/use-cases/:page/>; rel="canonical"
+
+/compare/:page.md
+  Link: <https://slotlock.pylota.io/compare/:page/>; rel="canonical"
+
+/blog/:page.md
+  Link: <https://slotlock.pylota.io/blog/:page/>; rel="canonical"
+
+# Files for agents and tools, not pages: readable by anyone, listed by no search engine.
+/slotlock-setup-prompt.md
+  ! Link
+  X-Robots-Tag: noindex
+
+/openapi.json
+  X-Robots-Tag: noindex
+
+/slotlock.postman_collection.json
+  X-Robots-Tag: noindex
+
 /llms.txt
   Content-Type: text/plain; charset=utf-8
   Access-Control-Allow-Origin: *
+  X-Robots-Tag: noindex
 
 /llms-full.txt
   Content-Type: text/plain; charset=utf-8
   Access-Control-Allow-Origin: *
+  X-Robots-Tag: noindex
 
 /llms-small.txt
   Content-Type: text/plain; charset=utf-8
   Access-Control-Allow-Origin: *
+  X-Robots-Tag: noindex
 
 /schema/*
   Content-Type: application/schema+json; charset=utf-8
   Access-Control-Allow-Origin: *
+  X-Robots-Tag: noindex

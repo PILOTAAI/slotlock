@@ -1,5 +1,6 @@
 ---
 title: Quickstart
+seoTitle: 'Quickstart: run Slotlock and let Claude Code book a slot'
 description: Run Slotlock and PostgreSQL 18 with Docker, connect Claude Code, and have an agent find and book a free slot.
 ---
 

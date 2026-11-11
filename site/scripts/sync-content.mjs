@@ -12,8 +12,11 @@
 //   src/generated/facts.json          numbers and names the landing page prints
 //   public/schema/manifest.schema.json
 //   public/openapi.json               the REST API, which client generators read
+//   src/generated/lastmod.json        when each page's sources last changed in git: the sitemap's
+//                                     lastmod and the docs' dateModified (RFC 0005, 1.7)
 //
 // Any fact it cannot find fails the build: a renamed constant must be looked at, not guessed.
+import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve } from 'node:path';
@@ -186,8 +189,13 @@ async function sourceSections(file) {
   return sourceCache.get(file);
 }
 
+/** The repository files each docs page is built from, filled in by expand(). */
+const pageInputs = new Map();
+
 /** Expand the include markers of one docs-src page. */
 async function expand(template, facts, page, toolsPage) {
+  const inputs = new Set([`site/docs-src/${page}`]);
+  pageInputs.set(page, inputs);
   const optional =
     /<!-- include\? ([^#\s]+)#([a-z0-9_-]+)((?: (?:body|lead|promote))*) -->\n([\s\S]*?)<!-- end include -->/g;
   let out = '';
@@ -196,6 +204,7 @@ async function expand(template, facts, page, toolsPage) {
     out += template.slice(last, match.index);
     const [, file, anchor, modifiers, fallback] = match;
     const section = (await sourceSections(file)).sections.get(anchor);
+    inputs.add(file);
     out += section ? `${renderSection(section, modifiers)}\n` : fallback;
     facts.optionalIncludes[`${file}#${anchor}`] = Boolean(section);
     last = match.index + match[0].length;
@@ -209,6 +218,7 @@ async function expand(template, facts, page, toolsPage) {
   for (const match of out.matchAll(required)) {
     parts.push(out.slice(last, match.index));
     const [, file, anchor, modifiers] = match;
+    inputs.add(file);
     const source = await sourceSections(file);
     if (!anchor) {
       // Whole file without its title. `snippet` also drops the opening paragraph and a closing
@@ -238,6 +248,7 @@ async function expand(template, facts, page, toolsPage) {
   for (const match of joined.matchAll(/<!-- code ([^#\s]+)#([a-z0-9-]+) -->/g)) {
     codeParts.push(joined.slice(last, match.index));
     const [, file, region] = match;
+    inputs.add(file);
     const text = await read(file);
     const found = new RegExp(
       `// #region ${region}\\n([\\s\\S]*?)// #endregion ${region}`,
@@ -247,7 +258,10 @@ async function expand(template, facts, page, toolsPage) {
     last = match.index + match[0].length;
   }
   codeParts.push(joined.slice(last));
-  return clean(codeParts.join(''))
+  const done = codeParts.join('');
+  if (/<!-- tools-/.test(done)) ['src/agent-server.ts', 'site/scripts/tool-notes.mjs'].forEach((f) => inputs.add(f));
+  if (/<!-- benchmark-results -->/.test(done)) inputs.add('bench/baseline.json');
+  return clean(done)
     .replace(/\{\{(\w+)\}\}/g, (_, key) => String(must(facts[key], `fact ${key}`)))
     .replace(/<!-- benchmark-results -->/g, () => facts.benchmarkResults)
     .replace(/<!-- agent-setup-prompt -->/g, () => `\`\`\`markdown wrap\n${facts.agentSetupPrompt}\`\`\``)
@@ -616,6 +630,76 @@ async function readBenchmark() {
   return baseline();
 }
 
+/**
+ * Pages outside the docs and the files their words come from. A page missing here gets no
+ * lastmod; scripts/seo-check.mjs fails the build when a page in the sitemap has none.
+ */
+const MARKETING_INPUTS = {
+  '/': ['site/src/data/landing.ts', 'site/src/pages/index.astro', 'src/plans.ts'],
+  '/pricing/': ['site/src/data/pages/pricing.ts', 'src/plans.ts', 'docs/hosted/README.md'],
+  '/about/': ['site/src/data/pages/about.ts'],
+  '/mcp-server/': ['site/src/data/pages/mcp-server.ts', 'src/agent-server.ts'],
+  '/booking-api/': ['site/src/data/pages/booking-api.ts', 'openapi.json'],
+  '/open-source/': ['site/src/data/pages/open-source.ts'],
+  '/use-cases/': ['site/src/data/pages/use-cases.ts'],
+  '/compare/': ['site/src/data/pages/compare.ts'],
+  '/blog/': ['site/src/data/blog.ts'],
+};
+
+const BUILT = new Date().toISOString();
+
+/**
+ * The newest commit date (ISO 8601) touching any of these repository paths. A file with changes
+ * not yet committed (a page being written) dates from this build; null when git is not there.
+ */
+function gitDate(files) {
+  const git = (args) =>
+    execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  try {
+    if (git(['status', '--porcelain', '--', ...files])) return BUILT;
+    return git(['log', '-1', '--format=%cI', '--', ...files]) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** URL path → lastmod, for every page the build makes from the repository. */
+async function lastModified(apiSlugs) {
+  const dates = {};
+  const put = (path, files) => {
+    const date = gitDate(files);
+    if (date) dates[path] = date;
+  };
+  for (const [page, inputs] of pageInputs) {
+    if (page === '404.md') continue;
+    const name = page.replace(/\.md$/, '');
+    put(name === 'index' ? '/docs/' : `/docs/${name}/`, [...inputs]);
+  }
+  const api = ['openapi.json', 'site/scripts/api-reference.mjs'];
+  put('/docs/api/', api);
+  for (const slug of apiSlugs) put(`/docs/api/${slug}/`, api);
+  for (const [path, files] of Object.entries(MARKETING_INPUTS)) put(path, files);
+  // A use case or comparison changes with the page of them all; a post with its own file.
+  const pages = join(SITE, 'src/data/pages');
+  for (const [file, prefix] of [
+    ['use-cases.ts', '/use-cases/'],
+    ['compare.ts', '/compare/'],
+    ['competitors.ts', '/compare/'],
+  ]) {
+    const text = await readFile(join(pages, file), 'utf8').catch(() => '');
+    for (const match of text.matchAll(/^\s+slug: '([a-z0-9-]+)',$/gm)) {
+      put(`${prefix}${match[1]}/`, [`site/src/data/pages/${file}`]);
+    }
+  }
+  // A post dates from its own `updated` (or `date`) in src/data/blog.ts, which says when its words
+  // last changed; a commit that only touches another post leaves it alone.
+  const blog = await readFile(join(SITE, 'src/data/blog.ts'), 'utf8');
+  for (const post of blog.matchAll(/^ {2}slug: '([a-z0-9-]+)',[\s\S]*?^ {2}date: '(\d{4}-\d{2}-\d{2})',(?:\n {2}updated: '(\d{4}-\d{2}-\d{2})',)?/gm)) {
+    dates[`/blog/${post[1]}/`] = post[3] ?? post[2];
+  }
+  return dates;
+}
+
 async function main() {
   const facts = await readFacts();
   const hosted = await readPlans();
@@ -668,6 +752,8 @@ async function main() {
   );
 
   await writeFile(join(GENERATED, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`);
+  const dates = await lastModified(api.pages.map((apiPage) => apiPage.slug));
+  await writeFile(join(GENERATED, 'lastmod.json'), `${JSON.stringify(dates, null, 2)}\n`);
   const { tokensCss } = await import('../src/styles/tokens.mjs');
   await writeFile(join(GENERATED, 'tokens.css'), tokensCss());
   const missing = Object.entries(facts.optionalIncludes)

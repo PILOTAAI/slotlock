@@ -1,5 +1,6 @@
 ---
 title: Set up with a coding agent
+seoTitle: 'Set up Slotlock with Claude Code, Cursor or Codex'
 description: Paste one prompt into Claude Code, Cursor or Codex and let it set Slotlock up for your project, then prove it works.
 sidebar:
   label: Set up with a coding agent

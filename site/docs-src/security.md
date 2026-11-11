@@ -1,5 +1,6 @@
 ---
 title: Security model
+seoTitle: 'Security model: tenants, API keys and row-level security'
 description: How Slotlock keeps agent writes safe. An MCP client can ask its person to confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
 ---
 

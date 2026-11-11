@@ -1,5 +1,6 @@
 ---
 title: Operations
+seoTitle: 'Running Slotlock in production: operations guide'
 description: Run Slotlock in production. Maintenance, quotas, retention, erasure and the production checklist.
 ---
 

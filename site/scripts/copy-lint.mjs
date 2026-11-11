@@ -6,10 +6,13 @@
 // rendered verbatim from the repository's README/SPEC/CHANGELOG (they are linted where they live).
 //
 // It also counts the landing page's words and fails above WORD_LIMIT: the design brief sets about
-// 1,200, and the count includes the footer and the words drawn inside the product pictures.
+// 1,200, and the count includes the footer and the words drawn inside the product pictures. RFC 0005
+// (docs/rfc/0005-search.md) added a topic label to each heading and the new pages to the footer,
+// about 30 words; depth belongs on the pages outside the docs, each checked here too, at least
+// MIN_PAGE_WORDS of prose so none is thin.
 //
 //   npm run check:copy        run after `npm run build`; exits 1 on any finding
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const BANNED_WORDS = [
@@ -184,8 +187,23 @@ const PAGES = [
   '404.html',
   'llms.txt',
 ];
+/** Every page outside the docs (src/layouts/Marketing.astro): the landing page's peers and the blog. */
+async function marketingPages(dir = '', out = []) {
+  for (const entry of await readdir(new URL(dir || '.', DIST), { withFileTypes: true })) {
+    const path = `${dir}${entry.name}`;
+    if (entry.isDirectory()) {
+      if (!['docs', '_astro', 'fonts', 'og', 'brand', 'schema', 'js'].includes(path)) await marketingPages(`${path}/`, out);
+    } else if (entry.name === 'index.html' && dir) out.push(path);
+  }
+  return out.sort();
+}
+const MARKETING = await marketingPages();
+PAGES.push(...MARKETING);
+// The landing page's source too, where no code sample lives; the other pages' data files carry
+// code (SQL, shell), so they are linted as built HTML above, where <pre> and <code> are skipped.
 const LANDING_SOURCES = ['../src/data/landing.ts'];
-const WORD_LIMIT = 1300;
+const WORD_LIMIT = 1350;
+const MIN_PAGE_WORDS = 400;
 
 let failures = 0;
 for (const page of PAGES) {
@@ -232,5 +250,20 @@ if (prose > WORD_LIMIT) {
   failures += 1;
   console.log(`index.html: ${prose} words of visible prose, over the limit of ${WORD_LIMIT}.`);
 }
+const counts = [];
+for (const page of MARKETING) {
+  const html = await readFile(new URL(page, DIST), 'utf8');
+  const body = /<main[\s\S]*?<\/main>/.exec(html)?.[0] ?? '';
+  const count = words(visibleProse(body));
+  counts.push(count);
+  // The blog's index lists posts; each post is checked on its own page.
+  if (count < MIN_PAGE_WORDS && page !== 'blog/index.html') {
+    failures += 1;
+    console.log(`${page}: ${count} words of visible prose, under ${MIN_PAGE_WORDS}: say more, or fold it into another page.`);
+  }
+}
+console.log(
+  `Pages outside the docs: ${MARKETING.length}, ${Math.min(...counts)} to ${Math.max(...counts)} words of prose each.`,
+);
 console.log(failures === 0 ? 'Copy lint: no findings.' : `Copy lint: ${failures} finding(s).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -456,6 +456,34 @@ function curlExample(operation, parts) {
   return lines.join('\n');
 }
 
+/**
+ * What a search result shows for a route (docs/rfc/0005-search.md 1.3): the summary with the method
+ * and path developers search for, and the description cut to whole sentences within 155
+ * characters. The page keeps the full description as its lede.
+ */
+export function searchTitle(operation) {
+  const route = `${operation.summary}: ${operation.method.toUpperCase()} ${operation.path}`;
+  if (route.length <= 65) return route;
+  const named = `${operation.summary} | Slotlock REST API`;
+  return named.length <= 65 ? named : `${operation.summary} | Slotlock`;
+}
+
+export function searchDescription(text) {
+  const flat = text.replace(/\s+/g, ' ').replace(/`/g, '').trim();
+  let out = '';
+  for (const sentence of flat.match(/[^.!?]+[.!?]+(?=\s|$)/g) ?? [flat]) {
+    if ((out + sentence).trim().length > 155) break;
+    out += sentence;
+  }
+  out = out.trim();
+  if (out.length < 70) {
+    const cut = flat.length <= 155 ? flat : `${flat.slice(0, 154).replace(/\s+\S*$/, '').replace(/[,;:(]$/, '')}…`;
+    out = cut;
+  }
+  if (out.length < 70) out = `${out} Fields, errors and a curl example for the Slotlock REST API.`;
+  return out;
+}
+
 const methodBadge = (method) =>
   `<span class="api-method api-method-${method}">${method.toUpperCase()}</span>`;
 
@@ -482,6 +510,8 @@ function renderPage(operation, { order, group, toolNames }) {
     '---',
     `title: ${JSON.stringify(operation.summary)}`,
     `description: ${JSON.stringify(operation.description)}`,
+    `seoTitle: ${JSON.stringify(searchTitle(operation))}`,
+    `seoDescription: ${JSON.stringify(searchDescription(operation.description))}`,
     'sidebar:',
     `  order: ${order}`,
     `  label: ${JSON.stringify(operation.summary)}`,

@@ -1,5 +1,6 @@
 ---
 title: Recurring events
+seoTitle: 'Recurring events with RRULE and time zones | Slotlock'
 description: Store a repeating event, and know what Slotlock expands, within which budget, and which RFC 5545 rules it refuses.
 sidebar:
   label: Recurring events

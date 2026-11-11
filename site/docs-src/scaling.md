@@ -1,5 +1,6 @@
 ---
 title: Scaling
+seoTitle: 'Scaling Slotlock: one PostgreSQL, regions and replicas'
 description: How far one PostgreSQL takes Slotlock, how to measure it, and how to grow past it, by resource, by region, with replicas and alongside a solver.
 ---
 
