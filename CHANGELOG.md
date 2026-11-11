@@ -34,6 +34,9 @@ GOVERNANCE.md requires.
 - **A `@slotlock/sync` connect link could be reused** by anyone who had it for 30 minutes. A link is
   now followed once, and its flow is finished only in the browser that followed it.
 
+
+## 0.9.1 - 2026-11-11
+
 ### Fixed
 
 - **The dashboard asks an owner to upgrade where a plan stops them.** A workspace at a limit of its
