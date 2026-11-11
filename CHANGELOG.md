@@ -3,7 +3,7 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
-## Unreleased
+## 0.10.0 - 2026-11-11
 
 This release gives a workspace its people and an audit trail. It brings six roles read from the
 database on every request, team workspaces with invitations, verified domains that let colleagues
