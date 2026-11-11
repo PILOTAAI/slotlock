@@ -613,6 +613,12 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
       });
       await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
+      // A plan override staff gave it (RFC 0006, M5), and a billing alert the Stripe webhook noted.
+      await superuser`
+        INSERT INTO slotlock.tenant_plan_overrides (tenant_ref, plan, max_resources, max_api_keys,
+          max_webhook_endpoints, ends_at, reason, created_by, approved_by, approved_at)
+        VALUES (${tenantRef}, 'team', 500, 100, 25, now() + interval '30 days', 'Pilot', 'github:1', 'github:1', now())`;
+      await application`SELECT slotlock.note_billing_event('payment_failed', ${tenantRef}, ${`in_${uid}`}, '{}'::jsonb)`;
       // Its usage: operations a server counted, and its feed rolled up (which writes its cursor).
       await recordSlotlockUsage(application, randomUUID(), [
         { tenantRef, day: slotlockUsageDay(Date.now()), metric: 'operations', keyId: '', origin: 'rest', count: 1 },

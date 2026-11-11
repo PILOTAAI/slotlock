@@ -22,6 +22,10 @@
 //     and, optionally:
 //       SLOTLOCK_ADMIN_GITHUB_TOKEN          a fine-grained token with no permissions, to raise
 //                                            GitHub's rate limit on reading public profiles
+//       SLOTLOCK_ADMIN_STRIPE_KEY            a restricted Stripe key (rk_live_…) with Read on
+//                                            Subscriptions and Invoices, and nothing else: revenue
+//                                            on Billing and a customer's subscriptions. Without it
+//                                            those parts say Stripe is not connected
 //   - the first Owner, as the schema owner: `slotlock staff add <github-id> owner`, which prints a
 //     one-time code to create their passkey.
 {

@@ -317,6 +317,11 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
       await send('sub_T2');
       expect(duplicates).toEqual([['sub_T1', 'sub_T2']]);
       expect(await readSlotlockTenantPlan(sql, twice)).toMatchObject({ stripeSubscription: 'sub_T2' });
+      // Noted for the admin console too (RFC 0006, M4), once however often Stripe delivers it.
+      await send('sub_T2');
+      expect(await sql`SELECT kind, stripe_ref, detail FROM slotlock.billing_alerts WHERE tenant_ref = ${twice}`).toEqual([
+        { kind: 'duplicate_subscription', stripe_ref: 'sub_T2', detail: { first: 'sub_T1' } },
+      ]);
 
       // The one the plan names ends; the other still renews, so the plan stays and names it.
       subscriptions.set('sub_T2', paid('sub_T2', 'cus_Tab2', 'canceled'));
@@ -336,6 +341,49 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
       });
     } finally {
       await sql`SELECT * FROM slotlock.erase_tenant(${twice}::text)`;
+    }
+  });
+
+  it('notes a failed payment for the console, once, and clears it when the payment recovers', async () => {
+    const late = `billing-late-${randomUUID()}`;
+    // Stripe's ids are unique everywhere, so the alert is keyed by them alone.
+    const invoice = `in_${randomUUID().replaceAll('-', '')}`;
+    const owing = (status: string): SlotlockStripeSubscription => ({
+      ...subscription('sub_L1', status),
+      metadata: { tenant_ref: late },
+    });
+    try {
+      subscriptions.set('sub_L1', owing('past_due'));
+      const failed = {
+        type: 'invoice.payment_failed',
+        data: {
+          object: {
+            object: 'invoice', id: invoice, subscription: 'sub_L1', amount_due: 1200, currency: 'usd',
+            attempt_count: 2, customer_email: 'ada@example.com', customer_address: { line1: '1 Main St' },
+          },
+        },
+      };
+      expect((await deliver(failed)).status).toBe(200);
+      expect((await deliver(failed)).status).toBe(200);
+      expect(await readSlotlockTenantPlan(sql, late)).toMatchObject({ plan: 'developer', status: 'past_due' });
+      const [alert] = await sql<{ kind: string; stripe_ref: string; detail: Record<string, unknown>; resolved_by: string | null }[]>`
+        SELECT kind, stripe_ref, detail, resolved_by FROM slotlock.billing_alerts WHERE tenant_ref = ${late}`;
+      expect(alert).toEqual({
+        kind: 'payment_failed',
+        stripe_ref: invoice,
+        detail: { amount_due: 1200, currency: 'usd', attempt_count: 2, next_payment_attempt: null, subscription: 'sub_L1' },
+        resolved_by: null,
+      });
+      // Never the customer's email or address.
+      expect(JSON.stringify(alert)).not.toMatch(/ada@|Main St/);
+
+      subscriptions.set('sub_L1', owing('active'));
+      await deliver({ type: 'invoice.paid', data: { object: { object: 'invoice', id: 'in_L2', subscription: 'sub_L1' } } });
+      expect((await sql`SELECT resolved_by FROM slotlock.billing_alerts WHERE tenant_ref = ${late}`)[0]?.resolved_by).toBe('stripe');
+    } finally {
+      // Erasure refuses a live subscription; the test's plan goes first.
+      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${late}`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${late}::text)`;
     }
   });
 

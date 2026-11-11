@@ -654,6 +654,167 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     }
   });
 
+  // ---------- Phase 3: billing and usage ----------
+
+  /** A new member of the given role, signed in all the way. */
+  async function newStaff(id: number, role: string) {
+    const code = `code-${role}-${id}`;
+    PEOPLE[code] = { id, login: `octo-${role}-${id}` };
+    await asOwner((tx) => tx`SELECT slotlock.staff_add(${`github:${id}`}, ${role}, 'cli:ops', ${sha(`enrol-${id}`)}, ${new Date(Date.now() + 86_400_000)})`);
+    return fullySignedIn(code, `enrol-${id}`);
+  }
+  const effective = async () =>
+    (await superuser<{ plan: string; status: string; max_resources: number; max_api_keys: number; max_webhook_endpoints: number }[]>`
+      SELECT plan, status, max_resources, max_api_keys, max_webhook_endpoints FROM slotlock.tenant_plan(${PERSON})`)[0];
+  const isoDay = (days: number) => new Date(clock + days * 86_400_000).toISOString().slice(0, 10);
+
+  it('gives an account a plan until a date: in force at once, gone when it ends, seen by the customer', async () => {
+    const { browser: billing } = await newStaff(1006, 'billing');
+    const csrf = await tokenOn(billing, accountPath);
+    expect(await effective()).toMatchObject({ plan: 'developer', max_resources: 100 });
+    const given = await send(billing, `${accountPath}/overrides`, {
+      csrf, back: accountPath, kind: 'plan', plan: 'team', ends: isoDay(30), reason: 'Pilot for the Team plan',
+    });
+    expect(given.headers.get('location')).toBe(`${accountPath}?done=override_given`);
+    // Wherever limits are read, at once.
+    expect(await effective()).toEqual({ plan: 'team', status: 'active', max_resources: 500, max_api_keys: 100, max_webhook_endpoints: 25 });
+    expect((await customerAudit(PERSON)).at(-1)).toMatchObject({
+      action: 'staff.plan_overridden', actor_ref: 'slotlock-staff:billing', reason: 'Pilot for the Team plan',
+    });
+    const page = await (await billing.request(accountPath)).text();
+    expect(page).toContain('An override is in force until');
+    expect(page).toContain('Pilot for the Team plan');
+
+    // Raised limits and quotas replace it (one in force at a time) and reach the quotas too.
+    await send(billing, `${accountPath}/overrides`, {
+      csrf, back: accountPath, kind: 'limits', resources: '250', keys: '50', webhooks: '20', operations: '900000', bookings: '40000', stop: '110',
+      ends: isoDay(14), reason: 'Launch week',
+    });
+    expect(await effective()).toMatchObject({ plan: 'developer', max_resources: 250, max_api_keys: 50, max_webhook_endpoints: 20 });
+    expect((await superuser`SELECT operations::int, bookings::int, stop_percent FROM slotlock.tenant_plan_quotas(${PERSON})`)[0]).toEqual({
+      operations: 900000, bookings: 40000, stop_percent: 110,
+    });
+    // It ends on its date, and the account is back on its own plan: no job needed.
+    await superuser`UPDATE slotlock.tenant_plan_overrides SET starts_at = now() - interval '2 days', ends_at = now() - interval '1 second' WHERE tenant_ref = ${PERSON} AND ended_at IS NULL`;
+    expect(await effective()).toMatchObject({ plan: 'developer', max_resources: 100 });
+    // Only whole numbers, a date ahead, and a reason.
+    expect((await send(billing, `${accountPath}/overrides`, { csrf, back: accountPath, kind: 'limits', resources: 'lots', keys: '1', webhooks: '1', ends: isoDay(5), reason: 'x' })).headers.get('location')).toBe(
+      `${accountPath}?error=invalid`,
+    );
+    // Over 90 days is not Billing's to give.
+    expect((await send(billing, `${accountPath}/overrides`, { csrf, back: accountPath, kind: 'plan', plan: 'team', ends: isoDay(120), reason: 'Annual pilot' })).headers.get('location')).toBe(
+      `${accountPath}?error=override_needs_owner`,
+    );
+    await expect(adminSql`SELECT slotlock.admin_override_create('github:1006', ${PERSON}, 'team', 500, 100, 25, NULL, NULL, NULL, now() + interval '120 days', 'Annual')`).rejects.toMatchObject({ code: '22023' });
+  });
+
+  it('needs a second Owner for an override longer than 90 days', async () => {
+    const owner = browsers.owner();
+    await owner.signIn('code-owner');
+    expect((await owner.usePasskey(ownerKey)).status).toBe(200);
+    const csrf = await tokenOn(owner, accountPath);
+    const asked = await send(owner, `${accountPath}/overrides`, { csrf, back: accountPath, kind: 'plan', plan: 'team', ends: isoDay(180), reason: 'Annual pilot agreed' });
+    expect(asked.headers.get('location')).toBe(`${accountPath}?done=override_requested`);
+    expect(await effective()).toMatchObject({ plan: 'developer' });
+    const [pending] = await superuser<{ id: string }[]>`SELECT id FROM slotlock.tenant_plan_overrides WHERE tenant_ref = ${PERSON} AND approved_at IS NULL AND ended_at IS NULL`;
+    // Its asker cannot approve it.
+    expect((await send(owner, '/overrides/approve', { csrf, back: '/billing', override: pending?.id ?? '' })).headers.get('location')).toBe('/billing?error=override_own');
+    expect(await effective()).toMatchObject({ plan: 'developer' });
+    expect(await (await owner.request('/')).text()).toContain('1 override waits for a second Owner');
+
+    const { browser: second } = await newStaff(1007, 'owner');
+    const billingPage = await (await second.request('/billing')).text();
+    expect(billingPage).toContain('Approve an override');
+    const csrf2 = await tokenOn(second, '/billing');
+    expect((await send(second, '/overrides/approve', { csrf: csrf2, back: accountPath, override: pending?.id ?? '' })).headers.get('location')).toBe(
+      `${accountPath}?done=override_approved`,
+    );
+    expect(await effective()).toMatchObject({ plan: 'team', max_resources: 500 });
+    expect(await log('github:1007')).toContain('override.approved');
+    // Ended early, with a reason the customer sees.
+    expect((await send(second, '/overrides/end', { csrf: csrf2, back: '/billing', override: pending?.id ?? '', reason: 'Pilot cancelled' })).headers.get('location')).toBe(
+      '/billing?done=override_ended',
+    );
+    expect(await effective()).toMatchObject({ plan: 'developer' });
+    expect((await customerAudit(PERSON)).at(-1)).toMatchObject({ action: 'staff.plan_override_ended', reason: 'Pilot cancelled' });
+  });
+
+  it('shows a failed payment on Home at once, links it to Stripe, and lets Billing resolve it', async () => {
+    const invoice = `in_${randomBytes(6).toString('hex')}`;
+    // As the Stripe webhook records it (billing.integration covers the webhook itself).
+    await superuser`SELECT slotlock.note_billing_event('payment_failed', ${PERSON}, ${invoice}, ${superuser.json({ amount_due: 1900, currency: 'eur', attempt_count: 1 })})`;
+    const { browser: billing } = await newStaff(1008, 'billing');
+    const home = await (await billing.request('/')).text();
+    expect(home).toContain('1 billing alert');
+    const page = await (await billing.request('/billing')).text();
+    expect(page).toContain(`https://dashboard.stripe.com/invoices/${invoice}`);
+    expect(page).toContain('€19.00, attempt 1');
+    const [alert] = await superuser<{ id: string }[]>`SELECT id FROM slotlock.billing_alerts WHERE stripe_ref = ${invoice}`;
+    const csrf = await tokenOn(billing, '/billing');
+    expect((await send(billing, '/billing/alerts/resolve', { csrf, back: '/billing', alert: alert?.id ?? '', reason: 'Customer updated their card' })).headers.get('location')).toBe(
+      '/billing?done=alert_resolved',
+    );
+    expect(await (await billing.request('/')).text()).not.toContain('billing alert');
+    expect(await log('github:1008')).toContain('billing.alert_resolved');
+  });
+
+  it('reads revenue from Stripe once an hour, and shows usage by surface', async () => {
+    const calls: string[] = [];
+    const stripeFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const target = String(input instanceof Request ? input.url : input);
+      if (!target.startsWith('https://api.stripe.com/')) return githubFetch(input, init);
+      calls.push(target);
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer rk_test_admin');
+      const month = Math.floor(Date.UTC(new Date(clock).getUTCFullYear(), new Date(clock).getUTCMonth(), 2) / 1000);
+      const price = (amount: number, interval: string, usage = 'licensed') => ({ unit_amount: amount, currency: 'eur', recurring: { interval, interval_count: 1, usage_type: usage } });
+      return new Response(JSON.stringify({
+        has_more: false,
+        data: [
+          { id: 'sub_m', status: 'active', created: month, items: { data: [{ price: price(1900, 'month'), quantity: 1 }, { price: price(1, 'month', 'metered') }] } },
+          { id: 'sub_y', status: 'past_due', created: 1, items: { data: [{ price: price(19000, 'year'), quantity: 1 }] } },
+          { id: 'sub_c', status: 'canceled', created: 1, canceled_at: month, items: { data: [{ price: price(1900, 'month') }] } },
+        ],
+      }), { headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const withStripe = createSlotlockAdmin({
+      sql: () => adminSql, publicUrl: ORIGIN, sessionSecret: 'a-test-session-secret-of-forty-characters',
+      github: { clientId: 'client-id', clientSecret: 'client-secret' },
+      access: { verify: async (request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
+      fetch: stripeFetch, now: () => clock, stripeKey: 'rk_test_admin',
+    });
+    const browser = new Browser(() => withStripe);
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    const first = await (await browser.request('/billing')).text();
+    // €19 a month, plus €190 a year (€15.83 a month); the metered overage price has no fixed amount.
+    expect(first).toContain('€34.83');
+    expect(first).toContain('2 live subscriptions');
+    expect(first).toMatch(/New this month<\/span>\s*<strong class="stat-value">1</);
+    // The second page is from the hour's cache: the same numbers, no second read of Stripe.
+    expect(await (await browser.request('/billing')).text()).toContain('€34.83');
+    expect(calls).toHaveLength(1);
+    const [kept] = await superuser<{ type: string }[]>`SELECT jsonb_typeof(value) AS type FROM slotlock.admin_cache WHERE key = 'revenue:summary'`;
+    expect(kept?.type).toBe('object');
+
+    const usage = await (await browser.request('/usage')).text();
+    expect(usage).toContain('<code>mcp</code>');
+    expect(usage).toContain(`href="${accountPath}"`);
+  });
+
+  it('opens Billing to a Viewer to read, and nothing else of it', async () => {
+    await asOwner((tx) => tx`SELECT slotlock.staff_reset('github:1003', 'cli:ops', ${sha('viewer-2')}, ${new Date(Date.now() + 86_400_000)})`);
+    const { browser: viewer } = await fullySignedIn('code-viewer', 'viewer-2');
+    const page = await viewer.request('/billing');
+    expect(page.status).toBe(200);
+    const text = await page.text();
+    expect(text).not.toContain('Resolve an alert');
+    expect(text).not.toContain('End or withdraw an override');
+    expect(text).not.toContain(`href="${accountPath}"`);
+    expect((await viewer.request('/usage')).status).toBe(403);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(text)?.[1] ?? '';
+    expect((await send(viewer, '/overrides/end', { csrf, back: '/billing', override: '1', reason: 'x' })).status).toBe(403);
+  });
+
   it('refuses a session cookie that was changed, that sat idle, or whose member was removed', async () => {
     const browser = browsers.owner();
     await browser.signIn('code-owner');

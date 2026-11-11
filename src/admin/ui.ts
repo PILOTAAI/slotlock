@@ -361,6 +361,8 @@ details.act[open]>summary{border-color:var(--ink-3)}
 .notes li{display:block;padding:8px 0;border-top:1px solid var(--line-2)}.notes li:first-child{border-top:0}
 .pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
 .rail h3{margin:18px 0 8px;font-size:13px;font-weight:600}
+.subhead{margin:18px 0 8px;font-size:14px;font-weight:600}
+pre.pop{max-height:320px;overflow:auto;font-size:12px}
 .tabs{display:flex;gap:4px;margin:0 0 12px}.tab{padding:6px 12px;border-radius:8px;color:var(--ink-2);text-decoration:none;font-weight:500}
 .tab[aria-current]{background:var(--paper);color:var(--ink);border:1px solid var(--line)}
 .sub-inline{color:var(--ink-3);font-size:13px}

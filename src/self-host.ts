@@ -2159,7 +2159,11 @@ async function runBillingDaily(
   io: { stdout: OutputStream; stderr: OutputStream },
   options: { now: number; stripeSecretKey: string | undefined; overage: boolean },
 ): Promise<number> {
-  const line = (value: unknown) => io.stdout.write(`${JSON.stringify(value)}\n`);
+  const lines: unknown[] = [];
+  const line = (value: unknown) => {
+    lines.push(value);
+    io.stdout.write(`${JSON.stringify(value)}\n`);
+  };
   let attention = false;
   const month = slotlockPreviousMonth(options.now);
   const today = new Date(options.now);
@@ -2205,8 +2209,28 @@ async function runBillingDaily(
     attention = true;
   }
   line({ job: 'done', month, attention });
+  // For the admin console's Home and Billing pages (RFC 0006, M4).
+  await recordMaintenanceRun(owner, 'billing_daily', options.now, attention, { lines: lines.slice(-50) });
   if (attention) io.stderr.write('slotlock: billing needs attention: see the lines above; run billing daily again once it is resolved\n');
   return attention ? 1 : 0;
+}
+
+/**
+ * A billing job's run (`billing daily`, `overage report`) in the database, by `cli:<user>`, for the
+ * admin console. Skipped on a schema from before it, so the job still runs against one.
+ */
+async function recordMaintenanceRun(
+  owner: postgres.Sql,
+  job: 'billing_daily' | 'overage_report',
+  startedMs: number,
+  attention: boolean,
+  summary: Record<string, unknown>,
+): Promise<void> {
+  const [found] = await owner<{ present: boolean }[]>`
+    SELECT to_regprocedure('slotlock.record_maintenance_run(text, text, timestamptz, boolean, jsonb)') IS NOT NULL AS present`;
+  if (!found?.present) return;
+  await owner`SELECT slotlock.record_maintenance_run(${job}, ${cliActor()}, ${new Date(Math.min(startedMs, Date.now()))},
+    ${attention}, ${owner.json(summary as never)})`;
 }
 
 /** How long after a month ends billing daily waits to close it: late counts settle first. */
@@ -3380,12 +3404,15 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
         }
         const database = readSlotlockDatabaseConfig(io.env);
         const owner = connect(database.migrateDatabaseUrl ?? database.databaseUrl, 1);
+        const started = Date.now();
         try {
           const report = await reportSlotlockOverage(owner, {
             month: values.month ?? slotlockMonthOf(Date.now()),
             stripe: { secretKey, eventName: values.event ?? 'slotlock_operations' },
           });
-          io.stdout.write(`${JSON.stringify({ month: report.month, tenants: report.tenants.length, sent: report.sent, failed: report.failed })}\n`);
+          const summary = { month: report.month, tenants: report.tenants.length, sent: report.sent, failed: report.failed };
+          io.stdout.write(`${JSON.stringify(summary)}\n`);
+          await recordMaintenanceRun(owner, 'overage_report', started, report.failed > 0, summary);
           if (report.failed > 0) {
             io.stderr.write('slotlock: Stripe did not take some events; run overage report again\n');
             return 1;

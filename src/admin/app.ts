@@ -11,8 +11,10 @@
 // console's role can read no table (staff-ddl.ts).
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan } from '../plans.js';
 import {
   SLOTLOCK_CASE_ACTIONS,
+  SLOTLOCK_OVERRIDE_SOLO_DAYS,
   SLOTLOCK_STAFF_NOTE_MAX,
   SLOTLOCK_STAFF_ROLES,
   type SlotlockStaffCapability,
@@ -27,6 +29,12 @@ import {
   verifySlotlockPasskeyAssertion,
   verifySlotlockPasskeyRegistration,
 } from './webauthn.js';
+import {
+  type SlotlockStripeCustomer,
+  type SlotlockStripeRevenue,
+  createSlotlockAdminStripe,
+  slotlockMoney,
+} from './stripe.js';
 import {
   Html,
   SLOTLOCK_ADMIN_CSS,
@@ -61,6 +69,11 @@ export interface SlotlockAdminOptions {
   insecureWithoutAccess?: boolean;
   /** Reads GitHub's public profiles (logins by id and back); a token raises GitHub's rate limit. */
   githubToken?: string;
+  /**
+   * A restricted Stripe key that reads subscriptions and invoices (RFC 0006, 4.6): revenue on the
+   * Billing page and a customer's subscriptions on the account page. Without it those parts say so.
+   */
+  stripeKey?: string;
   fetch?: typeof fetch;
   now?: () => number;
 }
@@ -105,7 +118,20 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   case_opened: { kind: 'done', text: 'Case opened.' },
   case_updated: { kind: 'done', text: 'Case saved.' },
   invalid: { kind: 'warn', text: 'Check the form: a reason is 1 to 200 characters on one line, and every required field is filled.' },
+  override_given: { kind: 'done', text: 'Override in force. The account is held to it from its next request.' },
+  override_requested: { kind: 'done', text: 'Override asked for. It takes effect when another Owner approves it.' },
+  override_needs_owner: { kind: 'warn', text: 'An override longer than 90 days needs an Owner to ask, and another Owner to approve.' },
+  override_approved: { kind: 'done', text: 'Override approved. It is in force.' },
+  override_own: { kind: 'warn', text: 'You asked for this override, so another Owner has to approve it.' },
+  override_not_pending: { kind: 'warn', text: 'That override is not waiting for approval any more.' },
+  override_ended: { kind: 'done', text: 'Override ended. The account is back on its own plan.' },
+  override_unchanged: { kind: 'warn', text: 'That override had ended already.' },
+  alert_resolved: { kind: 'done', text: 'Alert resolved.' },
+  alert_unchanged: { kind: 'warn', text: 'That alert was resolved already.' },
 });
+
+const PLANS: readonly SlotlockPlan[] = ['free', 'developer', 'team'];
+const DAY_MS = 86_400_000;
 
 /** What was done about a case, in words. */
 const CASE_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
@@ -115,6 +141,25 @@ const CASE_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   suspended: 'Suspended',
   other: 'Other',
 });
+
+interface OverrideRow {
+  id: string;
+  plan: string | null;
+  max_resources: number;
+  max_api_keys: number;
+  max_webhook_endpoints: number;
+  quota_operations: string | null;
+  quota_bookings: string | null;
+  quota_stop_percent: number | null;
+  starts_at: Date;
+  ends_at: Date;
+  reason: string;
+  created_by: string;
+  approved_by: string | null;
+  ended_by: string | null;
+  ended_at: Date | null;
+  state: string;
+}
 
 interface CaseRow {
   id: string;
@@ -272,6 +317,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const navFor = (session: Session) => [
     { href: '/', label: 'Home' },
     ...(slotlockStaffMay(session.r, 'accounts.read') ? [{ href: '/accounts', label: 'Accounts' }] : []),
+    ...(slotlockStaffMay(session.r, 'billing.read') ? [{ href: '/billing', label: 'Billing' }] : []),
+    ...(slotlockStaffMay(session.r, 'accounts.read') ? [{ href: '/usage', label: 'Usage' }] : []),
     ...(slotlockStaffMay(session.r, 'safety.act') ? [{ href: '/cases', label: 'Cases' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.read') ? [{ href: '/staff', label: 'Staff' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.log') ? [{ href: '/staff/log', label: 'Staff log' }] : []),
@@ -303,6 +350,15 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     suspended ? pill('Suspended', 'bad') : planStatus === 'past_due' ? pill('Past due', 'warn') : pill('Active', 'good');
   const accountHref = (ref: string) => `/accounts/${encodeURIComponent(ref)}`;
 
+  /** Whether billing daily ran in the last day, and cleanly. */
+  function billingDailyAttention(last: { finished_at: string; attention: boolean } | null | undefined): Html[] {
+    if (!last) return [html`<li><a href="/billing#runs">Billing daily has never run</a> <span class="sub">Schedule <code>slotlock billing daily</code>.</span></li>`];
+    if (now() - new Date(last.finished_at).getTime() > 26 * 3_600_000) {
+      return [html`<li><a href="/billing#runs">Billing daily has not run since ${when(last.finished_at)}</a> <span class="sub">Partner months close and overage is reported only when it runs.</span></li>`];
+    }
+    return last.attention ? [html`<li><a href="/billing#runs">The last billing daily needs attention</a> <span class="sub">See what it printed.</span></li>`] : [];
+  }
+
   async function home(session: Session): Promise<Response> {
     const sql = options.sql();
     const [row] = await sql<{ home: Record<string, number | { day: string; count: number }[]> }[]>`
@@ -314,6 +370,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const attention = [
       ...(n('suspended') > 0 ? [html`<li><a href="/accounts?status=suspended">${count(n('suspended'))} suspended ${n('suspended') === 1 ? 'account' : 'accounts'}</a> <span class="sub">Check each has a case and a reason.</span></li>`] : []),
       ...(n('past_due') > 0 ? [html`<li>${count(n('past_due'))} ${n('past_due') === 1 ? 'payment' : 'payments'} past due <span class="sub">Stripe retries; the plan ends if it fails.</span></li>`] : []),
+      ...(n('billing_alerts_open') > 0 && slotlockStaffMay(session.r, 'billing.read')
+        ? [html`<li><a href="/billing#alerts">${count(n('billing_alerts_open'))} billing ${n('billing_alerts_open') === 1 ? 'alert' : 'alerts'}</a> <span class="sub">Failed payments and duplicate subscriptions, from Stripe.</span></li>`]
+        : []),
+      ...(n('overrides_pending') > 0 && slotlockStaffMay(session.r, 'plans.approve')
+        ? [html`<li><a href="/billing#overrides">${count(n('overrides_pending'))} ${n('overrides_pending') === 1 ? 'override waits' : 'overrides wait'} for a second Owner</a></li>`]
+        : []),
+      ...(slotlockStaffMay(session.r, 'billing.read') ? billingDailyAttention(row?.home.billing_daily as unknown as { finished_at: string; attention: boolean } | null) : []),
       ...(n('cases_open') > 0 && slotlockStaffMay(session.r, 'safety.act')
         ? [html`<li><a href="/cases">${count(n('cases_open'))} open ${n('cases_open') === 1 ? 'case' : 'cases'}</a> <span class="sub">Each needs an action and an outcome.</span></li>`]
         : []),
@@ -396,7 +459,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const person = PERSON_REF.test(ref);
     const act = slotlockStaffMay(session.r, 'accounts.act');
     const safety = slotlockStaffMay(session.r, 'safety.act');
-    const [keys, usage, audit, login, sessions, notes, cases] = await Promise.all([
+    const [keys, usage, audit, login, sessions, notes, cases, overrides] = await Promise.all([
       sql<{ id: string; name: string; prefix: string; scopes: string[]; created_at: Date; expires_at: Date | null; last_used_at: Date | null; revoked_at: Date | null }[]>`
         SELECT * FROM slotlock.admin_account_keys(${session.s}, ${ref})`,
       sql<{ day: Date; metric: string; count: string }[]>`SELECT * FROM slotlock.admin_account_usage(${session.s}, ${ref}, 30)`,
@@ -411,9 +474,15 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       safety
         ? sql<CaseRow[]>`SELECT * FROM slotlock.admin_cases(${session.s}, ${null}, ${ref}, ${null}, ${20})`
         : Promise.resolve([] as CaseRow[]),
+      sql<OverrideRow[]>`SELECT * FROM slotlock.admin_account_overrides(${session.s}, ${ref})`,
     ]);
+    const plan = await planSection(session, ref, data, overrides);
     const authors = await staffNames(notes.map((note) => note.staff_ref));
-    const limits = (data.limits ?? null) as Record<string, number> | null;
+    // What it is held to now, an override included; else its plan row's.
+    const held = (data.effective ?? null) as { max_resources: number; max_api_keys: number; max_webhook_endpoints: number } | null;
+    const limits = held
+      ? { resources: held.max_resources, api_keys: held.max_api_keys, webhook_endpoints: held.max_webhook_endpoints }
+      : ((data.limits ?? null) as Record<string, number> | null);
     const monthUse = (data.usage_month ?? {}) as Record<string, number>;
     const meter = (label: string, value: number, max: number | undefined) =>
       html`<div class="meter"><span><span>${label}</span><span>${count(value)}${max ? ` of ${count(max)}` : ''}</span></span>${max ? html`<progress max="${max}" value="${Math.min(value, max)}">${value}</progress>` : ''}</div>`;
@@ -449,6 +518,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           ])}
           <h2>Last 30 days</h2>
           ${bars('Operations', series('operations'))}
+          ${plan}
           <h2 id="keys">API keys</h2>
           ${table('API keys', ['Name', 'Prefix', 'Access', 'Last used', 'State'], keys.map((key) => [
             html`${key.name}<span class="sub">Created ${day(key.created_at)}</span>`,
@@ -862,11 +932,275 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return json({ ok: true }, 200, [clear(PASSKEY_COOKIE), sessionCookie(upgraded)]);
   }
 
+  // ---------- Billing and usage (Phase 3) ----------
+  const stripe = options.stripeKey
+    ? createSlotlockAdminStripe({ key: options.stripeKey, ...(options.fetch ? { fetch: options.fetch } : {}), now })
+    : null;
+
+  /** A provider read, from the hour's cache or fresh (then kept); null when the provider failed. */
+  async function cached<T>(session: Session, key: string, read: () => Promise<T>): Promise<T | null> {
+    const sql = options.sql();
+    const [row] = await sql<{ value: T | null }[]>`SELECT slotlock.admin_cache_read(${session.s}, ${key}) AS value`;
+    if (row?.value) return row.value;
+    try {
+      const value = await read();
+      // An object, sent as one: postgres.js encodes JSON parameters itself (a string would be stored as a JSON string).
+      await sql`SELECT slotlock.admin_cache_write(${session.s}, ${key}, ${sql.json(value as never)})`;
+      return value;
+    } catch (error) {
+      console.error('slotlock-admin provider read failed', (error as { code?: unknown } | null)?.code ?? 'unknown');
+      return null;
+    }
+  }
+
+  const stripeLink = (ref: string) =>
+    ref.startsWith('in_')
+      ? `https://dashboard.stripe.com/invoices/${encodeURIComponent(ref)}`
+      : `https://dashboard.stripe.com/subscriptions/${encodeURIComponent(ref)}`;
+  const OVERRIDE_STATE: Record<string, Html> = {
+    in_force: pill('In force', 'good'),
+    pending: pill('Waiting for approval', 'warn'),
+    ended: pill('Ended', 'muted'),
+    expired: pill('Past its end', 'muted'),
+  };
+  const limitsText = (row: { max_resources: number; max_api_keys: number; max_webhook_endpoints: number }) =>
+    `${count(row.max_resources)} resources, ${count(row.max_api_keys)} keys, ${count(row.max_webhook_endpoints)} webhooks`;
+  const dateInput = (days: number) => new Date(now() + days * DAY_MS).toISOString().slice(0, 10);
+
+  async function billingPage(session: Session, url: URL): Promise<Response> {
+    const sql = options.sql();
+    const showAll = url.searchParams.get('alerts') === 'all';
+    const [[summaryRow], alerts, overrides, partners] = await Promise.all([
+      sql<{ billing: Record<string, unknown> }[]>`SELECT slotlock.admin_billing(${session.s}) AS billing`,
+      sql<{ id: string; kind: string; account_ref: string; stripe_ref: string; detail: Record<string, unknown>; created_at: Date; resolved_at: Date | null; resolved_by: string | null }[]>`
+        SELECT * FROM slotlock.admin_billing_alerts(${session.s}, ${!showAll}, ${null}, ${50})`,
+      sql<{ id: string; account_ref: string; plan: string | null; starts_at: Date; ends_at: Date; reason: string; created_by: string; approved_by: string | null; state: string }[]>`
+        SELECT * FROM slotlock.admin_overrides(${session.s})`,
+      sql<{ id: string; name: string; status: string; accounts: string; last_month: Date | null; closed_at: Date | null; webhook_status: number | null; invoiced: string | null; currency: string | null; unsent: string; mismatched_days: string }[]>`
+        SELECT * FROM slotlock.admin_partners(${session.s})`,
+    ]);
+    const billing = summaryRow?.billing ?? {};
+    const paying = (billing.paying ?? {}) as Record<string, number>;
+    const runs = (billing.runs ?? {}) as Record<string, { started_at: string; finished_at: string; attention: boolean; actor: string; summary: { lines?: unknown[] } & Record<string, unknown> }>;
+    const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:summary', () => stripe.revenue()) : null;
+    const askers = await staffNames(overrides.map((item) => item.created_by));
+    const may = (capability: SlotlockStaffCapability) => slotlockStaffMay(session.r, capability);
+    const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}"><input type="hidden" name="back" value="/billing">`;
+    const openAlerts = alerts.filter((alert) => !alert.resolved_at);
+    const pending = overrides.filter((item) => item.state === 'pending');
+    const approvable = pending.filter((item) => item.created_by !== session.s);
+    const mrr = revenue ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(minor, currency)).join(' + ') || slotlockMoney(0, 'eur') : null;
+    const body = html`
+      ${pageHead('Slotlock Cloud', 'Billing', 'Revenue, what Stripe told us needs a person, plan overrides, the billing jobs and partners.')}
+      ${stats([
+        { label: 'Monthly recurring revenue', value: mrr ?? '–', note: revenue ? `${count(revenue.live)} live subscriptions` : stripe ? 'Stripe could not be read' : 'Stripe not connected' },
+        { label: 'Paying', value: count(Object.values(paying).reduce((sum, value) => sum + Number(value), 0)), note: `${count(paying.developer ?? 0)} Developer, ${count(paying.team ?? 0)} Team` },
+        { label: 'Past due', value: count(Number(billing.past_due ?? 0)), note: 'Stripe is retrying' },
+        { label: 'New this month', value: revenue ? count(revenue.newThisMonth) : '–', note: 'Subscriptions, from Stripe' },
+        { label: 'Cancelled this month', value: revenue ? count(revenue.cancelledThisMonth) : count(Number(billing.canceled_month ?? 0)), note: revenue ? 'Subscriptions, from Stripe' : 'Plans ended' },
+        { label: 'Open alerts', value: count(Number(billing.alerts_open ?? 0)) },
+      ])}
+      <p class="fine">${revenue ? html`Read from Stripe ${when(new Date(revenue.readAt))}, and kept for an hour.${revenue.truncated ? ' Only the first 1,000 subscriptions were read.' : ''}` : stripe ? 'Stripe could not be read just now; the numbers from Stripe are missing.' : html`Revenue needs a restricted Stripe key that reads subscriptions and invoices (<code>SLOTLOCK_ADMIN_STRIPE_KEY</code>).`}</p>
+
+      <h2 id="alerts">Needs a person</h2>
+      <p class="fine">Payments that failed and second subscriptions, as the Stripe webhook saw them. A failed payment clears itself when the subscription is paid again. ${showAll ? html`<a href="/billing#alerts">Open ones only</a>` : html`<a href="/billing?alerts=all#alerts">Show resolved too</a>`}</p>
+      ${table('Billing alerts', ['Alert', 'Account', 'In Stripe', 'When', 'State'], alerts.map((alert) => [
+        html`${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'}${alert.kind === 'payment_failed' && typeof alert.detail.amount_due === 'number' ? html`<span class="sub">${slotlockMoney(alert.detail.amount_due, typeof alert.detail.currency === 'string' ? alert.detail.currency : null)}, attempt ${String(alert.detail.attempt_count ?? '?')}</span>` : alert.detail.first ? html`<span class="sub mono">besides ${String(alert.detail.first)}: refund one</span>` : ''}`,
+        may('accounts.read') ? html`<a class="mono" href="${accountHref(alert.account_ref)}">${alert.account_ref}</a>` : html`<span class="mono">${alert.account_ref}</span>`,
+        html`<a class="mono" href="${stripeLink(alert.stripe_ref)}" rel="noreferrer">${alert.stripe_ref}</a>`,
+        html`${when(alert.created_at)}`,
+        alert.resolved_at ? html`${pill('Resolved', 'muted')}<span class="sub mono">${alert.resolved_by ?? ''}</span>` : pill('Open', 'warn'),
+      ]), showAll ? 'No billing alerts yet.' : 'Nothing needs a person.')}
+      ${may('billing.act') && openAlerts.length
+        ? html`<details class="act wide"><summary>Resolve an alert</summary><form class="pop form" method="post" action="/billing/alerts/resolve">${csrf}
+            <label for="alert-id">Alert</label><select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'} · ${alert.account_ref} · ${alert.stripe_ref}</option>`)}</select>
+            <label for="alert-reason">What was done <span class="hint">for the staff log</span></label><input id="alert-reason" name="reason" required maxlength="200" autocomplete="off">
+            <button class="btn" type="submit">Resolve</button></form></details>`
+        : ''}
+
+      <h2 id="overrides">Plan overrides</h2>
+      <p class="fine">In force, or waiting for a second Owner. Give one on the account's page; up to ${SLOTLOCK_OVERRIDE_SOLO_DAYS} days it is in force at once.</p>
+      ${table('Plan overrides', ['Account', 'Plan', 'Ends', 'Reason', 'Asked by', 'State'], overrides.map((item, index) => [
+        may('accounts.read') ? html`<a class="mono" href="${accountHref(item.account_ref)}">${item.account_ref}</a>` : html`<span class="mono">${item.account_ref}</span>`,
+        html`${item.plan ?? 'its own'}`,
+        html`${day(item.ends_at)}`,
+        html`${item.reason}`,
+        html`${askers[index] ?? item.created_by}`,
+        OVERRIDE_STATE[item.state] ?? pill(item.state, 'muted'),
+      ]), 'No overrides in force.')}
+      ${may('plans.approve') && approvable.length
+        ? html`<details class="act wide"><summary>Approve an override</summary><form class="pop form" method="post" action="/overrides/approve">${csrf}
+            <label for="approve-id">Override</label><select id="approve-id" name="override">${approvable.map((item) => html`<option value="${item.id}">${item.account_ref} · ${item.plan ?? 'its own plan'} until ${day(item.ends_at)} · ${item.reason}</option>`)}</select>
+            <p>Four eyes: the Owner who asked cannot approve it.</p><button class="btn" type="submit">Approve</button></form></details>`
+        : ''}
+      ${may('billing.act') && overrides.length
+        ? html`<details class="act wide"><summary>End or withdraw an override</summary><form class="pop form" method="post" action="/overrides/end">${csrf}
+            <label for="end-override">Override</label><select id="end-override" name="override">${overrides.map((item) => html`<option value="${item.id}">${item.account_ref} · ${item.plan ?? 'its own plan'} until ${day(item.ends_at)}</option>`)}</select>
+            <label for="end-override-reason">Reason <span class="hint">the customer sees it, for one in force</span></label><input id="end-override-reason" name="reason" required maxlength="200" autocomplete="off">
+            <button class="btn danger" type="submit">End it</button></form></details>`
+        : ''}
+
+      <h2 id="runs">Billing jobs</h2>
+      <p class="fine">Run <code>slotlock billing daily</code> once a day, as the schema owner: it closes partner months, reports overage and checks partner counts.</p>
+      ${table('Billing jobs', ['Job', 'Last run', 'By', 'State'], (['billing_daily', 'overage_report'] as const).map((job) => {
+        const last = runs[job];
+        return [
+          html`<code>${job === 'billing_daily' ? 'billing daily' : 'overage report'}</code>${last ? html`<details class="act"><summary>What it printed</summary><pre class="pop pre mono">${JSON.stringify(last.summary.lines ?? last.summary, null, 1)}</pre></details>` : ''}`,
+          html`${last ? when(new Date(last.finished_at)) : 'Never'}`,
+          html`<span class="mono">${last?.actor ?? '–'}</span>`,
+          !last ? pill('Not run', 'muted') : last.attention ? pill('Needs attention', 'bad') : pill('Clean', 'good'),
+        ];
+      }), '')}
+
+      <h2>Partners</h2>
+      ${table('Partners', ['Partner', 'Accounts', 'Last month closed', 'Invoiced', 'Webhook', 'Needs a look'], partners.map((partner) => [
+        html`${partner.name}<span class="sub mono">${partner.id} ${partner.status === 'active' ? '' : pill(partner.status, 'warn')}</span>`,
+        html`${count(partner.accounts)}`,
+        html`${partner.last_month ? new Date(partner.last_month).toISOString().slice(0, 7) : 'None yet'}${partner.closed_at ? html`<span class="sub">${when(partner.closed_at)}</span>` : ''}`,
+        html`${partner.invoiced !== null ? slotlockMoney(Number(partner.invoiced), partner.currency) : '–'}`,
+        partner.webhook_status === null ? html`–` : partner.webhook_status < 300 ? pill(String(partner.webhook_status), 'good') : pill(String(partner.webhook_status), 'bad'),
+        Number(partner.unsent) > 0 || Number(partner.mismatched_days) > 0
+          ? html`${Number(partner.unsent) > 0 ? html`${count(partner.unsent)} invoice lines not sent ` : ''}${Number(partner.mismatched_days) > 0 ? html`<span class="sub">${count(partner.mismatched_days)} days of counts that disagree</span>` : ''}`
+          : html`–`,
+      ]), 'No partners.')}`;
+    return page(session, 'Billing', '/billing', body, undefined, noticeOf(url));
+  }
+
+  async function usagePage(session: Session): Promise<Response> {
+    const sql = options.sql();
+    const [usage, leaders] = await Promise.all([
+      sql<{ day: Date; metric: string; origin: string; count: string }[]>`SELECT * FROM slotlock.admin_usage(${session.s}, ${30})`,
+      sql<{ account_ref: string; plan: string | null; operations: string; bookings: string; quota_operations: string | null; quota_bookings: string | null; quota_stop_percent: number | null }[]>`
+        SELECT * FROM slotlock.admin_usage_accounts(${session.s})`,
+    ]);
+    const monthStart = new Date(now()).toISOString().slice(0, 7);
+    const byDay = new Map<string, number>();
+    const bySurface = new Map<string, { operations: number; bookings: number }>();
+    for (const row of usage) {
+      const key = day(row.day);
+      if (row.metric === 'operations') byDay.set(key, (byDay.get(key) ?? 0) + Number(row.count));
+      if (key.slice(0, 7) !== monthStart) continue;
+      const surface = bySurface.get(row.origin) ?? { operations: 0, bookings: 0 };
+      if (row.metric === 'operations') surface.operations += Number(row.count);
+      if (row.metric === 'bookings') surface.bookings += Number(row.count);
+      bySurface.set(row.origin, surface);
+    }
+    const share = (used: number, quota: number | null) => (quota ? Math.round((used / quota) * 100) : null);
+    const rows = leaders.map((row) => {
+      const plan = row.plan && Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, row.plan) ? SLOTLOCK_PLAN_QUOTAS[row.plan as SlotlockPlan] : null;
+      const operations = share(Number(row.operations), row.quota_operations !== null ? Number(row.quota_operations) : (plan?.operations ?? null));
+      const bookings = share(Number(row.bookings), row.quota_bookings !== null ? Number(row.quota_bookings) : (plan?.bookings ?? null));
+      return { row, worst: Math.max(operations ?? 0, bookings ?? 0), operations, bookings };
+    });
+    const tone = (percent: number | null) => (percent === null ? pill('No quota', 'muted') : percent >= 100 ? pill(`${percent}%`, 'bad') : percent >= 80 ? pill(`${percent}%`, 'warn') : html`${percent}%`);
+    const body = html`
+      ${pageHead('Slotlock Cloud', 'Usage', 'Operations and bookings across the platform, by surface, and the accounts using most of their monthly quotas. Test environments left out.')}
+      <h2>Operations, last 30 days</h2>
+      ${bars('Operations', [...byDay].map(([key, total]) => ({ day: key, count: total })))}
+      <h2>This month, by surface</h2>
+      ${table('By surface', ['Surface', 'Operations', 'Bookings'], [...bySurface].sort((a, b) => b[1].operations - a[1].operations).map(([origin, totals]) => [
+        html`<code>${origin}</code>`, html`${count(totals.operations)}`, html`${count(totals.bookings)}`,
+      ]), 'No use this month yet.')}
+      <h2>Accounts using most</h2>
+      ${table('Accounts using most', ['Account', 'Plan', 'Operations', 'Of quota', 'Bookings', 'Of quota'], rows.sort((a, b) => b.worst - a.worst).map(({ row, operations, bookings }) => [
+        html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>`,
+        planPill(row.plan),
+        html`${count(row.operations)}`, tone(operations),
+        html`${count(row.bookings)}`, tone(bookings),
+      ]), 'No use this month yet.')}`;
+    return page(session, 'Usage', '/usage', body);
+  }
+
+  /** The account page's plan section: what it is held to, its overrides, and Stripe's view. */
+  async function planSection(session: Session, ref: string, data: Record<string, unknown>, overrides: OverrideRow[]): Promise<Html> {
+    const effective = (data.effective ?? null) as { plan: string; status: string; max_resources: number; max_api_keys: number; max_webhook_endpoints: number } | null;
+    const quotas = (data.effective_quotas ?? null) as { operations: number | null; bookings: number | null; stop_percent: number | null } | null;
+    const planQuotas = effective && Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, effective.plan) ? SLOTLOCK_PLAN_QUOTAS[effective.plan as SlotlockPlan] : null;
+    const may = (capability: SlotlockStaffCapability) => slotlockStaffMay(session.r, capability);
+    const base = accountHref(ref);
+    const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}"><input type="hidden" name="back" value="${base}">`;
+    const inForce = overrides.find((item) => item.state === 'in_force');
+    const live = overrides.filter((item) => item.state === 'in_force' || item.state === 'pending');
+    const approvable = overrides.filter((item) => item.state === 'pending' && item.created_by !== session.s);
+    const names = await staffNames(overrides.map((item) => item.created_by));
+    const stripeCustomer = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
+    const customer = stripe && stripeCustomer && may('accounts.read')
+      ? await cached<SlotlockStripeCustomer>(session, `account:stripe:${stripeCustomer}`, () => stripe.customer(stripeCustomer))
+      : null;
+    const quotaText = quotas?.operations
+      ? `${count(quotas.operations)} operations and ${count(quotas.bookings ?? 0)} bookings a month, stopped at ${quotas.stop_percent ?? 100}%`
+      : planQuotas
+        ? `${count(planQuotas.operations)} operations and ${count(planQuotas.bookings)} bookings a month (the plan's)`
+        : 'No monthly quotas';
+    return html`
+      <h2 id="plan">Plan</h2>
+      ${effective
+        ? html`<p>${planPill(effective.plan)} ${effective.status === 'past_due' ? pill('Past due', 'warn') : ''} ${limitsText(effective)}. ${quotaText}.</p>`
+        : html`<p class="fine">No plan: no plan limits apply.</p>`}
+      ${inForce ? html`<p class="notice done">An override is in force until ${day(inForce.ends_at)}: ${inForce.plan ? `the ${inForce.plan} plan` : 'its own plan'}, ${limitsText(inForce)}. ${inForce.reason}</p>` : ''}
+      ${overrides.length
+        ? table('Overrides', ['Override', 'Limits', 'Ends', 'Reason', 'Asked by', 'State'], overrides.map((item, index) => [
+            html`${item.plan ? `Plan: ${item.plan}` : 'Limits'}${item.quota_operations ? html`<span class="sub">${count(item.quota_operations)} operations, ${count(item.quota_bookings ?? 0)} bookings a month</span>` : ''}`,
+            html`${limitsText(item)}`,
+            html`${day(item.ends_at)}`,
+            html`${item.reason}`,
+            html`${names[index] ?? item.created_by}`,
+            OVERRIDE_STATE[item.state] ?? pill(item.state, 'muted'),
+          ]), '')
+        : ''}
+      ${may('billing.act')
+        ? html`<details class="act wide"><summary>Put on a plan until a date</summary><form class="pop form" method="post" action="${base}/overrides">${csrf}<input type="hidden" name="kind" value="plan">
+            <label for="override-plan">Plan</label><select id="override-plan" name="plan">${PLANS.map((plan) => html`<option value="${plan}" ${plan === 'developer' ? html`selected` : ''}>${plan} (${limitsText({ max_resources: SLOTLOCK_PLAN_LIMITS[plan].resources, max_api_keys: SLOTLOCK_PLAN_LIMITS[plan].apiKeys, max_webhook_endpoints: SLOTLOCK_PLAN_LIMITS[plan].webhookEndpoints })})</option>`)}</select>
+            <label for="override-plan-ends">Until <span class="hint">00:00 UTC that day; over ${SLOTLOCK_OVERRIDE_SOLO_DAYS} days needs a second Owner</span></label><input id="override-plan-ends" name="ends" type="date" required value="${dateInput(30)}" min="${dateInput(1)}" max="${dateInput(400)}">
+            <label for="override-plan-reason">Reason <span class="hint">the customer sees it in their audit log</span></label><input id="override-plan-reason" name="reason" required maxlength="200" autocomplete="off">
+            <p>It takes precedence over what Stripe gives, until it ends.</p><button class="btn" type="submit">Put on this plan</button></form></details>
+          <details class="act wide"><summary>Raise limits until a date</summary><form class="pop form" method="post" action="${base}/overrides">${csrf}<input type="hidden" name="kind" value="limits">
+            <label for="override-resources">Resources</label><input id="override-resources" name="resources" type="number" min="1" max="100000" required value="${effective?.max_resources ?? SLOTLOCK_PLAN_LIMITS.free.resources}">
+            <label for="override-keys">Active API keys</label><input id="override-keys" name="keys" type="number" min="1" max="100" required value="${effective?.max_api_keys ?? SLOTLOCK_PLAN_LIMITS.free.apiKeys}">
+            <label for="override-webhooks">Webhook endpoints</label><input id="override-webhooks" name="webhooks" type="number" min="1" max="1000" required value="${effective?.max_webhook_endpoints ?? SLOTLOCK_PLAN_LIMITS.free.webhookEndpoints}">
+            <label for="override-operations">Operations a month <span class="hint">optional; with bookings, replaces the plan's quotas</span></label><input id="override-operations" name="operations" type="number" min="1" placeholder="${planQuotas ? String(planQuotas.operations) : ''}">
+            <label for="override-bookings">Bookings a month <span class="hint">optional</span></label><input id="override-bookings" name="bookings" type="number" min="1" placeholder="${planQuotas ? String(planQuotas.bookings) : ''}">
+            <input type="hidden" name="stop" value="${planQuotas?.stopPercent ?? 100}">
+            <label for="override-limits-ends">Until <span class="hint">00:00 UTC that day</span></label><input id="override-limits-ends" name="ends" type="date" required value="${dateInput(30)}" min="${dateInput(1)}" max="${dateInput(400)}">
+            <label for="override-limits-reason">Reason <span class="hint">the customer sees it in their audit log</span></label><input id="override-limits-reason" name="reason" required maxlength="200" autocomplete="off">
+            <button class="btn" type="submit">Raise the limits</button></form></details>`
+        : ''}
+      ${may('plans.approve') && approvable.length
+        ? html`<details class="act wide"><summary>Approve an override</summary><form class="pop form" method="post" action="/overrides/approve">${csrf}
+            <label for="account-approve">Override</label><select id="account-approve" name="override">${approvable.map((item) => html`<option value="${item.id}">${item.plan ?? 'Limits'} until ${day(item.ends_at)} · ${item.reason}</option>`)}</select>
+            <p>Four eyes: the Owner who asked cannot approve it.</p><button class="btn" type="submit">Approve</button></form></details>`
+        : ''}
+      ${may('billing.act') && live.length
+        ? html`<details class="act wide"><summary>End or withdraw an override</summary><form class="pop form" method="post" action="/overrides/end">${csrf}
+            <label for="account-end-override">Override</label><select id="account-end-override" name="override">${live.map((item) => html`<option value="${item.id}">${item.plan ?? 'Limits'} until ${day(item.ends_at)}</option>`)}</select>
+            <label for="account-end-reason">Reason <span class="hint">the customer sees it</span></label><input id="account-end-reason" name="reason" required maxlength="200" autocomplete="off">
+            <button class="btn danger" type="submit">End it</button></form></details>`
+        : ''}
+      ${stripeCustomer
+        ? html`<h3 class="subhead">In Stripe</h3>${customer
+            ? html`${table('Subscriptions', ['Subscription', 'Status', 'A month', 'Renews'], customer.subscriptions.map((item) => [
+                html`<a class="mono" href="${stripeLink(item.id)}" rel="noreferrer">${item.id}</a>`,
+                item.status === 'active' ? pill('Active', 'good') : item.status === 'past_due' ? pill('Past due', 'warn') : pill(item.status, 'muted'),
+                html`${slotlockMoney(item.monthly, item.currency)}`,
+                html`${item.currentPeriodEnd ? day(new Date(item.currentPeriodEnd * 1000)) : '–'}${item.cancelAtPeriodEnd ? html`<span class="sub">Cancels then</span>` : ''}`,
+              ]), 'No subscriptions.')}
+              ${table('Invoices', ['Invoice', 'Status', 'Due', 'Paid', 'Date'], customer.invoices.map((item) => [
+                html`<a class="mono" href="${stripeLink(item.id)}" rel="noreferrer">${item.number ?? item.id}</a>`,
+                item.status === 'paid' ? pill('Paid', 'good') : item.status === 'open' ? pill('Open', 'warn') : pill(item.status ?? 'draft', 'muted'),
+                html`${slotlockMoney(item.amountDue, item.currency)}`,
+                html`${slotlockMoney(item.amountPaid, item.currency)}`,
+                html`${day(new Date(item.created * 1000))}`,
+              ]), 'No invoices.')}
+              <p class="fine">Read from Stripe ${when(new Date(customer.readAt))}, kept for an hour. Refunds and disputes stay in Stripe.</p>`
+            : html`<p class="fine">${stripe ? 'Stripe could not be read just now.' : 'Stripe is not connected to the console.'} <a href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripeCustomer)}" rel="noreferrer">Open the customer in Stripe</a>.</p>`}`
+        : ''}`;
+  }
+
   // ---------- Actions ----------
   interface Action {
     capability: SlotlockStaffCapability;
-    /** The page the browser goes back to, which shows what happened. */
-    back: string;
+    /** The page the browser goes back to, which shows what happened; or the one the form names. */
+    back: string | ((form: URLSearchParams) => string);
     run(form: URLSearchParams): Promise<{ code: keyof typeof NOTICES; ok: boolean; to?: string }>;
   }
 
@@ -878,7 +1212,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   /** Each form's route: what it needs, where it goes back to, and the admin function it calls. */
   function actionOf(path: string, session: Session): Action | null {
     const sql = options.sql();
-    const onAccount = /^\/accounts\/([^/]+)\/(suspend|unsuspend|keys\/revoke|sessions\/end|notes)$/.exec(path);
+    const onAccount = /^\/accounts\/([^/]+)\/(suspend|unsuspend|keys\/revoke|sessions\/end|notes|overrides)$/.exec(path);
     if (onAccount) {
       let ref: string;
       try {
@@ -935,6 +1269,46 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
                 : { code: 'sessions_ended', ok: true };
             },
           };
+        case 'overrides':
+          return {
+            capability: 'billing.act',
+            back,
+            async run(form) {
+              const ends = /^\d{4}-\d{2}-\d{2}$/.test(field(form, 'ends')) ? Date.parse(`${field(form, 'ends')}T00:00:00Z`) : Number.NaN;
+              if (!Number.isFinite(ends)) return { code: 'invalid', ok: false };
+              if (ends - now() > SLOTLOCK_OVERRIDE_SOLO_DAYS * DAY_MS && !slotlockStaffMay(session.r, 'plans.approve')) {
+                return { code: 'override_needs_owner', ok: false };
+              }
+              const whole = (name: string) => (/^[1-9][0-9]{0,12}$/.test(field(form, name)) ? Number(field(form, name)) : null);
+              let plan: SlotlockPlan | null = null;
+              let limits: [number | null, number | null, number | null];
+              let quotas: [number | null, number | null, number | null] = [null, null, null];
+              if (field(form, 'kind') === 'plan') {
+                if (!(PLANS as readonly string[]).includes(field(form, 'plan'))) return { code: 'invalid', ok: false };
+                plan = field(form, 'plan') as SlotlockPlan;
+                const given = SLOTLOCK_PLAN_LIMITS[plan];
+                limits = [given.resources, given.apiKeys, given.webhookEndpoints];
+              } else {
+                limits = [whole('resources'), whole('keys'), whole('webhooks')];
+                const operations = whole('operations');
+                const bookings = whole('bookings');
+                if ((operations === null) !== (bookings === null)) return { code: 'invalid', ok: false };
+                // Where the account's plan stops (the form carries it), so a raised quota stops there too.
+                const stop = whole('stop');
+                if (operations !== null) {
+                  if (stop === null || stop < 100 || stop > 1000) return { code: 'invalid', ok: false };
+                  quotas = [operations, bookings, stop];
+                }
+              }
+              if (limits.some((value) => value === null)) return { code: 'invalid', ok: false };
+              await sql`
+                SELECT slotlock.admin_override_create(${session.s}, ${ref}, ${plan}, ${limits[0]}, ${limits[1]}, ${limits[2]},
+                  ${quotas[0]}, ${quotas[1]}, ${quotas[2]}, ${new Date(ends)}, ${field(form, 'reason')})`;
+              return ends - now() > SLOTLOCK_OVERRIDE_SOLO_DAYS * DAY_MS
+                ? { code: 'override_requested', ok: true }
+                : { code: 'override_given', ok: true };
+            },
+          };
         default:
           return {
             capability: 'accounts.act',
@@ -945,6 +1319,49 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             },
           };
       }
+    }
+    // Forms on the Billing page and on an account's: they go back to the page they came from.
+    const backOf = (form: URLSearchParams) => {
+      const asked = field(form, 'back');
+      return LOCAL_PATH.test(asked) && (asked === '/billing' || asked.startsWith('/accounts/')) ? asked : '/billing';
+    };
+    const idOf = (form: URLSearchParams, name: string) => (/^[1-9][0-9]{0,17}$/.test(field(form, name)) ? field(form, name) : null);
+    if (path === '/overrides/approve') {
+      return {
+        capability: 'plans.approve',
+        back: backOf,
+        async run(form) {
+          const id = idOf(form, 'override');
+          if (!id) return { code: 'invalid', ok: false };
+          const [row] = await sql<{ result: string }[]>`SELECT slotlock.admin_override_approve(${session.s}, ${id}::bigint) AS result`;
+          if (row?.result === 'approved') return { code: 'override_approved', ok: true };
+          return { code: row?.result === 'own' ? 'override_own' : 'override_not_pending', ok: false };
+        },
+      };
+    }
+    if (path === '/overrides/end') {
+      return {
+        capability: 'billing.act',
+        back: backOf,
+        async run(form) {
+          const id = idOf(form, 'override');
+          if (!id) return { code: 'invalid', ok: false };
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_override_end(${session.s}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
+          return row?.ok ? { code: 'override_ended', ok: true } : { code: 'override_unchanged', ok: false };
+        },
+      };
+    }
+    if (path === '/billing/alerts/resolve') {
+      return {
+        capability: 'billing.act',
+        back: backOf,
+        async run(form) {
+          const id = idOf(form, 'alert');
+          if (!id) return { code: 'invalid', ok: false };
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_billing_alert_resolve(${session.s}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
+          return row?.ok ? { code: 'alert_resolved', ok: true } : { code: 'alert_unchanged', ok: false };
+        },
+      };
     }
     if (path === '/cases') {
       return {
@@ -1003,8 +1420,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       await record(session.s, 'page.refused', null, path.slice(0, 200));
       return respond(layout(shellOf(session, 'Not allowed', path), pageHead('Slotlock admin', 'Not allowed', `Your role (${session.r}) does not do this.`)), 403, { 'Set-Cookie': sessionCookie(session) });
     }
+    const back = typeof action.back === 'string' ? action.back : action.back(form);
     if (!session.pv || now() - session.pv > FRESH_MS) {
-      return redirect(`/passkey?${new URLSearchParams({ next: action.back, fresh: '1' }).toString()}`);
+      return redirect(`/passkey?${new URLSearchParams({ next: back, fresh: '1' }).toString()}`);
     }
     let outcome: { code: keyof typeof NOTICES; ok: boolean; to?: string };
     try {
@@ -1014,7 +1432,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       if ((error as { code?: unknown } | null)?.code !== '22023') throw error;
       outcome = { code: 'invalid', ok: false };
     }
-    const to = outcome.to ?? action.back;
+    const to = outcome.to ?? back;
     return redirect(`${to}?${new URLSearchParams({ [outcome.ok ? 'done' : 'error']: outcome.code }).toString()}`, [sessionCookie(session)]);
   }
 
@@ -1026,6 +1444,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     '/staff': 'staff.read',
     '/staff/log': 'staff.log',
     '/cases': 'safety.act',
+    '/billing': 'billing.read',
+    '/usage': 'accounts.read',
   };
 
   async function handle(request: Request): Promise<Response> {
@@ -1116,6 +1536,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
     if (caseMatch) return casePage(session, caseMatch[1] as string, url);
     if (path === '/cases') return casesPage(session, url);
+    if (path === '/billing') return billingPage(session, url);
+    if (path === '/usage') return usagePage(session);
     if (path === '/') return home(session);
     if (path === '/accounts') return accounts(session, url);
     if (path === '/search') return search(session, url);

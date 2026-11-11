@@ -174,6 +174,16 @@ notes first.
     suspension lasts (`slotlock.tenant_suspension_notice`; `SlotlockDashboardWorkspaces.suspension`).
   - `slotlock tenant suspend`, `unsuspend` and `erase`, and `slotlock plan default`, are recorded in
     the staff log by `cli:<user>`.
+- **Billing and usage in the admin console** (RFC 0006, Phase 3):
+  - **Overrides.** Staff can put an account on a plan, or raise its limits and quotas, until a date
+    (`slotlock.tenant_plan_overrides`). Every limit check reads it through `slotlock.tenant_plan`,
+    so it applies at once and ends on its date. One longer than 90 days needs a second Owner.
+  - **Billing alerts.** The Stripe webhook records failed payments and second subscriptions
+    (`slotlock.billing_alerts`) for the console's Home and Billing pages, and resolves a failed
+    payment once the subscription is paid again.
+  - **Billing jobs.** `slotlock billing daily` and `slotlock overage report` record each run.
+  - **Stripe.** With a restricted read-only key (`SLOTLOCK_ADMIN_STRIPE_KEY`), the console shows
+    revenue and a customer's subscriptions and invoices, kept for an hour.
 - **Verified domains** (`SLOTLOCK_VERIFIED_DOMAINS=on`, with team workspaces): a team's Owners add
   their organization's domain on Settings, Identity and publish a TXT record
   (`_slotlock-challenge.<domain>`, a 128-bit token per claim). The server's maintenance looks it up

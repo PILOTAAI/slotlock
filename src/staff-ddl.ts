@@ -21,16 +21,22 @@ export const SLOTLOCK_STAFF_ROLES = Object.freeze(['owner', 'support', 'billing'
 export type SlotlockStaffRole = (typeof SLOTLOCK_STAFF_ROLES)[number];
 
 /**
- * What each role may do (RFC 0006, 4.3). `accounts.act` ends sessions, revokes keys and writes
- * notes; `safety.act` suspends, lifts suspensions and works abuse cases. The database checks the
- * same map (slotlock.staff_require), so the console and the database cannot disagree.
+ * What each role may do (RFC 0006, 4.3):
+ * - `accounts.act` ends sessions, revokes keys and writes notes;
+ * - `safety.act` suspends, lifts suspensions and works abuse cases;
+ * - `billing.read` opens revenue, payments, partners and job runs;
+ * - `billing.act` gives a plan override of up to 90 days and resolves billing alerts;
+ * - `plans.approve` asks for an override longer than 90 days, and approves another Owner's (four
+ *   eyes).
+ * The database checks the same map (slotlock.staff_require), so the console and the database cannot
+ * disagree.
  */
 export const SLOTLOCK_STAFF_CAPABILITIES = Object.freeze({
-  owner: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'staff.read', 'staff.log'],
+  owner: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'billing.read', 'billing.act', 'plans.approve', 'staff.read', 'staff.log'],
   support: ['home', 'accounts.read', 'accounts.act', 'safety.act'],
-  billing: ['home', 'accounts.read'],
+  billing: ['home', 'accounts.read', 'billing.read', 'billing.act'],
   editor: ['home'],
-  viewer: ['home'],
+  viewer: ['home', 'billing.read'],
 } as const satisfies Record<SlotlockStaffRole, readonly string[]>);
 export type SlotlockStaffCapability = (typeof SLOTLOCK_STAFF_CAPABILITIES)[SlotlockStaffRole][number];
 
@@ -55,6 +61,12 @@ export const SLOTLOCK_CASE_SOURCES = Object.freeze(['report', 'staff'] as const)
 export const SLOTLOCK_CASE_ACTIONS = Object.freeze(['none', 'warned', 'keys_revoked', 'suspended', 'other'] as const);
 /** Longest internal note on an account, in characters. */
 export const SLOTLOCK_STAFF_NOTE_MAX = 2000;
+/** The longest plan override one person may give; a longer one needs a second Owner. */
+export const SLOTLOCK_OVERRIDE_SOLO_DAYS = 90;
+/** Jobs whose runs the console shows: `slotlock billing daily` and `slotlock overage report`. */
+export const SLOTLOCK_MAINTENANCE_JOBS = Object.freeze(['billing_daily', 'overage_report'] as const);
+/** How long a cached provider read (Stripe) is kept, in seconds (RFC 0006, 4.6). */
+export const SLOTLOCK_ADMIN_CACHE_SECONDS = 3600;
 
 export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'staff_members',
@@ -62,6 +74,8 @@ export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'staff_audit_events',
   'account_notes',
   'abuse_cases',
+  'maintenance_runs',
+  'admin_cache',
 ] as const);
 
 /** The SECURITY DEFINER functions the console's role executes, and nothing else. */
@@ -90,6 +104,19 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_case_update(text, bigint, text, text, text)',
   'slotlock.admin_cases(text, text, text, bigint, integer)',
   'slotlock.admin_case(text, bigint)',
+  'slotlock.admin_override_create(text, text, text, integer, integer, integer, bigint, bigint, integer, timestamptz, text)',
+  'slotlock.admin_override_approve(text, bigint)',
+  'slotlock.admin_override_end(text, bigint, text)',
+  'slotlock.admin_account_overrides(text, text)',
+  'slotlock.admin_overrides(text)',
+  'slotlock.admin_billing(text)',
+  'slotlock.admin_billing_alerts(text, boolean, bigint, integer)',
+  'slotlock.admin_billing_alert_resolve(text, bigint, text)',
+  'slotlock.admin_usage(text, integer)',
+  'slotlock.admin_usage_accounts(text)',
+  'slotlock.admin_partners(text)',
+  'slotlock.admin_cache_read(text, text)',
+  'slotlock.admin_cache_write(text, text, jsonb)',
 ] as const);
 
 /** Functions only the deployment role runs (`slotlock staff …`): granted to no role. */
@@ -99,6 +126,7 @@ export const SLOTLOCK_STAFF_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.staff_reset(text, text, bytea, timestamptz)',
   'slotlock.staff_remove(text, text)',
   'slotlock.staff_operator_record(text, text, text, text)',
+  'slotlock.record_maintenance_run(text, text, timestamptz, boolean, jsonb)',
 ] as const);
 
 /** Internal helpers the functions above call; executable by their owner only. */
@@ -109,6 +137,7 @@ const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_account_known(text)',
   'slotlock.staff_reason_valid(text)',
   'slotlock.staff_customer_audit(text, text, text, text, text, text)',
+  'slotlock.staff_cache_capability(text)',
 ] as const;
 
 const roleList = SLOTLOCK_STAFF_ROLES.map((role) => `'${role}'`).join(', ');
@@ -583,6 +612,482 @@ END
 $slotlock_staff_operator_record$;
 `;
 
+const maintenanceJobs = SLOTLOCK_MAINTENANCE_JOBS.map((job) => `'${job}'`).join(', ');
+/** Overrides in force now: approved, not ended, between their dates. */
+const inForce = (alias: string) =>
+  `${alias}.approved_at IS NOT NULL AND ${alias}.ended_at IS NULL AND ${alias}.starts_at <= statement_timestamp() AND ${alias}.ends_at > statement_timestamp()`;
+/** An override's state, in words the console shows. */
+const overrideState = (alias: string) => `CASE
+      WHEN ${alias}.ended_at IS NOT NULL THEN 'ended'
+      WHEN ${alias}.ends_at <= statement_timestamp() THEN 'expired'
+      WHEN ${alias}.approved_at IS NULL THEN 'pending'
+      ELSE 'in_force' END`;
+
+/**
+ * Phase 3 (RFC 0006): billing and usage. Plan overrides (tenant_plan_overrides, read by
+ * slotlock.tenant_plan wherever limits are read), billing alerts from the Stripe webhook, the runs
+ * of billing jobs, platform usage, partners' months, and an hour's cache of what Stripe said.
+ */
+const STAFF_BILLING_DDL = `
+-- Each run of a billing job (slotlock billing daily, slotlock overage report): when, by whom, and
+-- whether it needs a person, with the lines it printed. The newest 400 of each job are kept.
+CREATE TABLE IF NOT EXISTS slotlock.maintenance_runs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  job text NOT NULL,
+  actor text NOT NULL,
+  started_at timestamptz NOT NULL,
+  finished_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  attention boolean NOT NULL,
+  summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT slotlock_maintenance_runs_valid CHECK (
+    job IN (${maintenanceJobs})
+    AND actor ~ '^cli:[a-z_][a-z0-9_.-]{0,63}$'
+    AND finished_at >= started_at
+    AND jsonb_typeof(summary) = 'object' AND pg_column_size(summary) <= 16384
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_maintenance_runs_job_idx ON slotlock.maintenance_runs (job, id DESC);
+ALTER TABLE slotlock.maintenance_runs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.maintenance_runs FROM PUBLIC;
+
+-- What the console read from a provider (Stripe), kept an hour so pages stay fast and within the
+-- provider's limits (RFC 0006, 4.6). revenue: keys need billing.read, account: keys accounts.read.
+CREATE TABLE IF NOT EXISTS slotlock.admin_cache (
+  key text PRIMARY KEY,
+  value jsonb NOT NULL,
+  stored_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz NOT NULL,
+  CONSTRAINT slotlock_admin_cache_valid CHECK (
+    key ~ '^(revenue|account):[A-Za-z0-9:_.~-]{1,200}$' AND pg_column_size(value) <= 262144
+  )
+);
+ALTER TABLE slotlock.admin_cache ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.admin_cache FROM PUBLIC;
+
+-- The capability a cache key needs; an error (22023) for a key of no known kind.
+CREATE OR REPLACE FUNCTION slotlock.staff_cache_capability(cache_key text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_cache_capability$
+BEGIN
+  IF cache_key LIKE 'revenue:%' THEN
+    RETURN 'billing.read';
+  ELSIF cache_key LIKE 'account:%' THEN
+    RETURN 'accounts.read';
+  END IF;
+  RAISE EXCEPTION 'admin_cache_key' USING ERRCODE = '22023';
+END
+$slotlock_staff_cache_capability$;
+
+-- Give an account a plan, limits or quotas until a date (billing.act), with a reason the customer
+-- sees. Up to ${SLOTLOCK_OVERRIDE_SOLO_DAYS} days it is in force at once, and ends the account's
+-- override in force before it. Longer, it needs an Owner to ask (plans.approve) and another Owner
+-- to approve (admin_override_approve). The override's id.
+CREATE OR REPLACE FUNCTION slotlock.admin_override_create(actor text, account text, new_plan text,
+  new_resources integer, new_keys integer, new_webhooks integer, new_operations bigint, new_bookings bigint,
+  new_stop integer, until timestamptz, why text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_override_create$
+DECLARE
+  added bigint;
+  long boolean;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.act');
+  PERFORM slotlock.staff_account_known(account);
+  PERFORM slotlock.staff_reason_valid(why);
+  IF until IS NULL OR until <= statement_timestamp() THEN
+    RAISE EXCEPTION 'admin_override_dates' USING ERRCODE = '22023';
+  END IF;
+  long := until > statement_timestamp() + interval '${SLOTLOCK_OVERRIDE_SOLO_DAYS} days';
+  IF long THEN
+    BEGIN
+      PERFORM slotlock.staff_require(actor, 'plans.approve');
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE EXCEPTION 'admin_override_needs_owner' USING ERRCODE = '22023';
+    END;
+  END IF;
+  BEGIN
+    INSERT INTO slotlock.tenant_plan_overrides (tenant_ref, plan, max_resources, max_api_keys,
+      max_webhook_endpoints, quota_operations, quota_bookings, quota_stop_percent, ends_at, reason,
+      created_by, approved_by, approved_at)
+    VALUES (account, new_plan, new_resources, new_keys, new_webhooks, new_operations, new_bookings, new_stop,
+      until, why, actor, CASE WHEN long THEN NULL ELSE actor END,
+      CASE WHEN long THEN NULL ELSE statement_timestamp() END)
+    RETURNING tenant_plan_overrides.id INTO added;
+  EXCEPTION WHEN check_violation OR not_null_violation THEN
+    RAISE EXCEPTION 'admin_override_invalid' USING ERRCODE = '22023';
+  END;
+  IF long THEN
+    PERFORM slotlock.staff_log(actor, 'override.requested', account, 'override:' || added, why,
+      jsonb_strip_nulls(jsonb_build_object('plan', new_plan, 'ends_at', until)));
+    RETURN added;
+  END IF;
+  UPDATE slotlock.tenant_plan_overrides other
+     SET ended_at = statement_timestamp(), ended_by = actor
+   WHERE other.tenant_ref = account AND other.id <> added AND other.approved_at IS NOT NULL
+     AND other.ended_at IS NULL AND other.ends_at > statement_timestamp();
+  PERFORM slotlock.staff_log(actor, 'override.given', account, 'override:' || added, why,
+    jsonb_strip_nulls(jsonb_build_object('plan', new_plan, 'ends_at', until)));
+  PERFORM slotlock.staff_customer_audit(actor, account, 'staff.plan_overridden', 'override', added::text, why);
+  RETURN added;
+END
+$slotlock_admin_override_create$;
+
+-- Approve another Owner's override of more than ${SLOTLOCK_OVERRIDE_SOLO_DAYS} days (plans.approve): four
+-- eyes, so never one's own. 'approved', 'own' (refused: the asker cannot approve), or 'not_pending'
+-- (approved already, ended, past its end, or no such override).
+CREATE OR REPLACE FUNCTION slotlock.admin_override_approve(actor text, override_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_override_approve$
+DECLARE
+  asked slotlock.tenant_plan_overrides%ROWTYPE;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'plans.approve');
+  SELECT * INTO asked FROM slotlock.tenant_plan_overrides waiting WHERE waiting.id = override_id FOR UPDATE;
+  IF NOT FOUND OR asked.approved_at IS NOT NULL OR asked.ended_at IS NOT NULL
+     OR asked.ends_at <= statement_timestamp() THEN
+    RETURN 'not_pending';
+  END IF;
+  IF asked.created_by = actor THEN
+    PERFORM slotlock.staff_log(actor, 'override.approval_refused', asked.tenant_ref, 'override:' || override_id,
+      'the Owner who asked cannot approve', '{}'::jsonb);
+    RETURN 'own';
+  END IF;
+  UPDATE slotlock.tenant_plan_overrides waiting
+     SET approved_by = actor, approved_at = statement_timestamp()
+   WHERE waiting.id = override_id;
+  UPDATE slotlock.tenant_plan_overrides other
+     SET ended_at = statement_timestamp(), ended_by = actor
+   WHERE other.tenant_ref = asked.tenant_ref AND other.id <> override_id AND other.approved_at IS NOT NULL
+     AND other.ended_at IS NULL AND other.ends_at > statement_timestamp();
+  PERFORM slotlock.staff_log(actor, 'override.approved', asked.tenant_ref, 'override:' || override_id, NULL,
+    jsonb_build_object('asked_by', asked.created_by));
+  PERFORM slotlock.staff_customer_audit(asked.created_by, asked.tenant_ref, 'staff.plan_overridden', 'override',
+    override_id::text, asked.reason);
+  RETURN 'approved';
+END
+$slotlock_admin_override_approve$;
+
+-- End an override before its date, or withdraw one waiting for approval (billing.act). The
+-- account is back on its own plan from the next read. False when it had ended already.
+CREATE OR REPLACE FUNCTION slotlock.admin_override_end(actor text, override_id bigint, why text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_override_end$
+DECLARE
+  account text;
+  was_approved boolean;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  UPDATE slotlock.tenant_plan_overrides ending
+     SET ended_at = statement_timestamp(), ended_by = actor
+   WHERE ending.id = override_id AND ending.ended_at IS NULL AND ending.ends_at > statement_timestamp()
+  RETURNING ending.tenant_ref, ending.approved_at IS NOT NULL INTO account, was_approved;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, CASE WHEN was_approved THEN 'override.ended' ELSE 'override.withdrawn' END,
+    account, 'override:' || override_id, why, '{}'::jsonb);
+  IF was_approved THEN
+    PERFORM slotlock.staff_customer_audit(actor, account, 'staff.plan_override_ended', 'override', override_id::text, why);
+  END IF;
+  RETURN true;
+END
+$slotlock_admin_override_end$;
+
+-- An account's overrides, newest first, with each one's state.
+CREATE OR REPLACE FUNCTION slotlock.admin_account_overrides(actor text, account text)
+RETURNS TABLE (id bigint, plan text, max_resources integer, max_api_keys integer, max_webhook_endpoints integer,
+               quota_operations bigint, quota_bookings bigint, quota_stop_percent integer, starts_at timestamptz,
+               ends_at timestamptz, reason text, created_by text, approved_by text, ended_by text,
+               ended_at timestamptz, state text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_account_overrides$
+#variable_conflict use_column
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  PERFORM slotlock.staff_log(actor, 'account.overrides_viewed', account, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT given.id, given.plan, given.max_resources, given.max_api_keys, given.max_webhook_endpoints,
+         given.quota_operations, given.quota_bookings, given.quota_stop_percent, given.starts_at, given.ends_at,
+         given.reason, given.created_by, given.approved_by, given.ended_by, given.ended_at, ${overrideState('given')}
+    FROM slotlock.tenant_plan_overrides given
+   WHERE given.tenant_ref = account
+   ORDER BY given.id DESC
+   LIMIT 20;
+END
+$slotlock_admin_account_overrides$;
+
+-- Overrides in force or waiting for approval, across accounts, newest first.
+CREATE OR REPLACE FUNCTION slotlock.admin_overrides(actor text)
+RETURNS TABLE (id bigint, account_ref text, plan text, starts_at timestamptz, ends_at timestamptz, reason text,
+               created_by text, approved_by text, state text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_overrides$
+#variable_conflict use_column
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.read');
+  PERFORM slotlock.staff_log(actor, 'overrides.listed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT given.id, given.tenant_ref, given.plan, given.starts_at, given.ends_at, given.reason, given.created_by,
+         given.approved_by, ${overrideState('given')}
+    FROM slotlock.tenant_plan_overrides given
+   WHERE given.ended_at IS NULL AND given.ends_at > statement_timestamp()
+   ORDER BY given.id DESC
+   LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT};
+END
+$slotlock_admin_overrides$;
+
+-- Billing at a glance: paying accounts by plan, past due, cancelled this month, open alerts,
+-- overrides in force and waiting, and each billing job's last run. Test environments left out.
+CREATE OR REPLACE FUNCTION slotlock.admin_billing(actor text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_billing$
+DECLARE
+  month_start date := ${monthStart};
+  result jsonb;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.read');
+  SELECT jsonb_build_object(
+    'paying', (SELECT coalesce(jsonb_object_agg(paid.plan, paid.total), '{}'::jsonb) FROM (
+                 SELECT planned.plan, count(*) AS total FROM slotlock.tenant_plans planned
+                  WHERE planned.stripe_subscription IS NOT NULL AND planned.status IN ('active', 'past_due')
+                    AND planned.tenant_ref !~ '~test$'
+                  GROUP BY planned.plan) paid),
+    'past_due', (SELECT count(*) FROM slotlock.tenant_plans planned
+                  WHERE planned.status = 'past_due' AND planned.tenant_ref !~ '~test$'),
+    'canceled_month', (SELECT count(*) FROM slotlock.tenant_plans planned
+                        WHERE planned.status = 'canceled' AND planned.updated_at >= month_start
+                          AND planned.tenant_ref !~ '~test$'),
+    'alerts_open', (SELECT count(*) FROM slotlock.billing_alerts open WHERE open.resolved_at IS NULL),
+    'overrides_in_force', (SELECT count(*) FROM slotlock.tenant_plan_overrides given WHERE ${inForce('given')}),
+    'overrides_pending', (SELECT count(*) FROM slotlock.tenant_plan_overrides given
+                           WHERE given.approved_at IS NULL AND given.ended_at IS NULL
+                             AND given.ends_at > statement_timestamp()),
+    'runs', (SELECT coalesce(jsonb_object_agg(latest.job, jsonb_build_object(
+               'started_at', latest.started_at, 'finished_at', latest.finished_at, 'attention', latest.attention,
+               'actor', latest.actor, 'summary', latest.summary)), '{}'::jsonb)
+               FROM (SELECT DISTINCT ON (run.job) run.* FROM slotlock.maintenance_runs run
+                      ORDER BY run.job, run.id DESC) latest)
+  ) INTO result;
+  PERFORM slotlock.staff_log(actor, 'billing.viewed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN result;
+END
+$slotlock_admin_billing$;
+
+-- Billing alerts, newest first, a page at a time (after: an alert id): open ones, or all.
+CREATE OR REPLACE FUNCTION slotlock.admin_billing_alerts(actor text, open_only boolean, after bigint, page_size integer)
+RETURNS TABLE (id bigint, kind text, account_ref text, stripe_ref text, detail jsonb, created_at timestamptz,
+               resolved_at timestamptz, resolved_by text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_billing_alerts$
+#variable_conflict use_column
+DECLARE
+  shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.read');
+  PERFORM slotlock.staff_log(actor, 'billing.alerts_listed', NULL, NULL, NULL,
+    jsonb_build_object('open_only', coalesce(open_only, true)));
+  RETURN QUERY
+  SELECT seen.id, seen.kind, seen.tenant_ref, seen.stripe_ref, seen.detail, seen.created_at, seen.resolved_at,
+         seen.resolved_by
+    FROM slotlock.billing_alerts seen
+   WHERE (NOT coalesce(open_only, true) OR seen.resolved_at IS NULL)
+     AND (after IS NULL OR seen.id < after)
+   ORDER BY seen.id DESC
+   LIMIT shown;
+END
+$slotlock_admin_billing_alerts$;
+
+-- Mark a billing alert dealt with (billing.act), with what was done. False when it was already.
+CREATE OR REPLACE FUNCTION slotlock.admin_billing_alert_resolve(actor text, alert_id bigint, why text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_billing_alert_resolve$
+DECLARE
+  account text;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  UPDATE slotlock.billing_alerts open
+     SET resolved_at = statement_timestamp(), resolved_by = actor
+   WHERE open.id = alert_id AND open.resolved_at IS NULL
+  RETURNING open.tenant_ref INTO account;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'billing.alert_resolved', account, 'alert:' || alert_id, why, '{}'::jsonb);
+  RETURN true;
+END
+$slotlock_admin_billing_alert_resolve$;
+
+-- The platform's use by day, metric and surface (usage_daily's origin) over its last days, test
+-- environments left out.
+CREATE OR REPLACE FUNCTION slotlock.admin_usage(actor text, days integer)
+RETURNS TABLE (day date, metric text, origin text, count bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_usage$
+#variable_conflict use_column
+DECLARE
+  span integer := least(greatest(coalesce(days, 30), 1), 400);
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  PERFORM slotlock.staff_log(actor, 'usage.viewed', NULL, NULL, NULL, jsonb_build_object('days', span));
+  RETURN QUERY
+  SELECT used.day, used.metric, used.origin, sum(used.count)::bigint
+    FROM slotlock.usage_daily used
+   WHERE used.day > ${today} - span AND used.tenant_ref !~ '~test$'
+   GROUP BY used.day, used.metric, used.origin
+   ORDER BY used.day, used.metric, used.origin;
+END
+$slotlock_admin_usage$;
+
+-- The accounts using most this month, with the quotas they are held to: their own or an
+-- override's (null quotas are the plan's, plans.ts SLOTLOCK_PLAN_QUOTAS).
+CREATE OR REPLACE FUNCTION slotlock.admin_usage_accounts(actor text)
+RETURNS TABLE (account_ref text, plan text, operations bigint, bookings bigint, quota_operations bigint,
+               quota_bookings bigint, quota_stop_percent integer)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_usage_accounts$
+#variable_conflict use_column
+DECLARE
+  month_start date := ${monthStart};
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  PERFORM slotlock.staff_log(actor, 'usage.accounts_listed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  WITH month AS (
+    SELECT used.tenant_ref,
+           sum(used.count) FILTER (WHERE used.metric = 'operations')::bigint AS operations,
+           sum(used.count) FILTER (WHERE used.metric = 'bookings')::bigint AS bookings
+      FROM slotlock.usage_daily used
+     WHERE used.day >= month_start AND used.tenant_ref !~ '~test$'
+     GROUP BY used.tenant_ref
+     ORDER BY 2 DESC NULLS LAST
+     LIMIT 50
+  )
+  SELECT month.tenant_ref, quotas.plan, coalesce(month.operations, 0), coalesce(month.bookings, 0),
+         quotas.operations, quotas.bookings, quotas.stop_percent
+    FROM month
+    LEFT JOIN LATERAL (SELECT * FROM slotlock.tenant_plan_quotas(month.tenant_ref)) quotas ON true
+   ORDER BY 3 DESC;
+END
+$slotlock_admin_usage_accounts$;
+
+-- Partners and their months: accounts, the last month closed, whether its webhook was delivered,
+-- what it invoiced and what is not sent yet, and days in the last week whose counts disagreed.
+CREATE OR REPLACE FUNCTION slotlock.admin_partners(actor text)
+RETURNS TABLE (id text, name text, status text, accounts bigint, last_month date, closed_at timestamptz,
+               webhook_status integer, invoiced bigint, currency text, unsent bigint, mismatched_days bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_partners$
+#variable_conflict use_column
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'billing.read');
+  PERFORM slotlock.staff_log(actor, 'partners.viewed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT partner.id, partner.name, partner.status,
+         (SELECT count(*) FROM slotlock.partner_accounts owned WHERE owned.partner_id = partner.id),
+         closed.month, closed.closed_at, closed.webhook_status,
+         (SELECT sum(line.amount)::bigint FROM slotlock.partner_invoices line
+           WHERE line.partner_id = partner.id AND line.month = closed.month),
+         (SELECT min(line.currency) FROM slotlock.partner_invoices line
+           WHERE line.partner_id = partner.id AND line.month = closed.month),
+         (SELECT count(*) FROM slotlock.partner_invoices line
+           WHERE line.partner_id = partner.id AND line.sent_at IS NULL),
+         (SELECT count(*) FROM slotlock.partner_reconciliations checked
+           WHERE checked.partner_id = partner.id AND checked.mismatched > 0 AND checked.day >= ${today} - 7)
+    FROM slotlock.partners partner
+    LEFT JOIN LATERAL (SELECT * FROM slotlock.partner_month_closes done
+                        WHERE done.partner_id = partner.id ORDER BY done.month DESC LIMIT 1) closed ON true
+   ORDER BY partner.id
+   LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT};
+END
+$slotlock_admin_partners$;
+
+-- A provider read the console kept within the hour, or NULL. Not recorded in the staff log: the
+-- page that reads it is.
+CREATE OR REPLACE FUNCTION slotlock.admin_cache_read(actor text, cache_key text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_cache_read$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'home');
+  PERFORM slotlock.staff_require(actor, slotlock.staff_cache_capability(cache_key));
+  RETURN (SELECT kept.value FROM slotlock.admin_cache kept
+           WHERE kept.key = cache_key AND kept.expires_at > statement_timestamp());
+END
+$slotlock_admin_cache_read$;
+
+-- Keep a provider read for an hour; expired ones go.
+CREATE OR REPLACE FUNCTION slotlock.admin_cache_write(actor text, cache_key text, cache_value jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_cache_write$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'home');
+  PERFORM slotlock.staff_require(actor, slotlock.staff_cache_capability(cache_key));
+  DELETE FROM slotlock.admin_cache old WHERE old.expires_at < statement_timestamp();
+  INSERT INTO slotlock.admin_cache AS kept (key, value, expires_at)
+  VALUES (cache_key, cache_value, statement_timestamp() + interval '${SLOTLOCK_ADMIN_CACHE_SECONDS} seconds')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, stored_at = statement_timestamp(),
+                                  expires_at = EXCLUDED.expires_at;
+EXCEPTION WHEN check_violation THEN
+  RAISE EXCEPTION 'admin_cache_value' USING ERRCODE = '22023';
+END
+$slotlock_admin_cache_write$;
+
+-- A billing job's run, from the CLI as the deployment role (slotlock billing daily, slotlock
+-- overage report). Deployment role only.
+CREATE OR REPLACE FUNCTION slotlock.record_maintenance_run(run_job text, actor text, began timestamptz,
+  needs_attention boolean, run_summary jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_record_maintenance_run$
+BEGIN
+  INSERT INTO slotlock.maintenance_runs (job, actor, started_at, attention, summary)
+  VALUES (run_job, actor, began, needs_attention, coalesce(run_summary, '{}'::jsonb));
+  DELETE FROM slotlock.maintenance_runs old
+   WHERE old.job = run_job
+     AND old.id < (SELECT kept.id FROM slotlock.maintenance_runs kept WHERE kept.job = run_job
+                    ORDER BY kept.id DESC OFFSET 399 LIMIT 1);
+END
+$slotlock_record_maintenance_run$;
+`;
+
 export const SLOTLOCK_STAFF_DDL = `
 -- Staff (RFC 0006): who may use the admin console, as which role. Added, changed and removed only
 -- by the deployment role (slotlock.staff_add and the others below), never by the console.
@@ -876,7 +1381,14 @@ BEGIN
     'bookings_last_month', (SELECT coalesce(sum(count), 0) FROM usage WHERE day < month_start AND metric = 'bookings'),
     'signups', (SELECT coalesce(jsonb_agg(jsonb_build_object('day', day, 'count', added) ORDER BY day), '[]'::jsonb) FROM signups),
     'staff', (SELECT count(*) FROM slotlock.staff_members member WHERE member.status = 'active'),
-    'cases_open', (SELECT count(*) FROM slotlock.abuse_cases opened WHERE opened.status = 'open')
+    'cases_open', (SELECT count(*) FROM slotlock.abuse_cases opened WHERE opened.status = 'open'),
+    'billing_alerts_open', (SELECT count(*) FROM slotlock.billing_alerts open WHERE open.resolved_at IS NULL),
+    'overrides_pending', (SELECT count(*) FROM slotlock.tenant_plan_overrides given
+                           WHERE given.approved_at IS NULL AND given.ended_at IS NULL
+                             AND given.ends_at > statement_timestamp()),
+    'billing_daily', (SELECT jsonb_build_object('finished_at', run.finished_at, 'attention', run.attention)
+                        FROM slotlock.maintenance_runs run WHERE run.job = 'billing_daily'
+                       ORDER BY run.id DESC LIMIT 1)
   ) INTO result;
   PERFORM slotlock.staff_log(actor, 'home.viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN result;
@@ -989,6 +1501,9 @@ BEGIN
     'cases_open', (SELECT count(*) FROM slotlock.abuse_cases opened
                     WHERE opened.account_ref = listed.account_ref AND opened.status = 'open'),
     'notes', (SELECT count(*) FROM slotlock.account_notes kept WHERE kept.account_ref = listed.account_ref),
+    -- What it is held to now: its plan, the default, or an override on top (tenant_plan).
+    'effective', (SELECT to_jsonb(given) FROM slotlock.tenant_plan(listed.account_ref) given LIMIT 1),
+    'effective_quotas', (SELECT to_jsonb(quotas) FROM slotlock.tenant_plan_quotas(listed.account_ref) quotas LIMIT 1),
     'team_status', team.status,
     'last_active', (SELECT max(used.day) FROM slotlock.usage_daily used WHERE used.tenant_ref = listed.account_ref),
     'members', (SELECT count(*) FROM slotlock.workspace_memberships member
@@ -1324,6 +1839,7 @@ END
 $slotlock_staff_remove$;
 
 ${STAFF_SUPPORT_DDL}
+${STAFF_BILLING_DDL}
 ${[...STAFF_HELPER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS]
   .map((signature) => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`)
   .join('\n')}

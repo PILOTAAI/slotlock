@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 and 2 are built and wait for their independent security review and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 to 3 are built and wait for their independent security review and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -581,6 +581,47 @@ Left for later phases:
 - the members and invitations of a team on its page (M3);
 - what erasure does with an account's notes and cases, decided with the erasure checklist in
   Phase 5. Until then both are kept, like the staff log.
+
+**Where Phase 3 stands.** Billing and usage are built and tested. Its done-when holds, end to end:
+
+- **An override changes an account's limits at once and ends on its date.**
+  `tenant_plan_overrides` is read inside `slotlock.tenant_plan`, which every limit check uses (keys,
+  resources, webhooks), and inside `tenant_plan_quotas`, which the server reads at most every 30
+  seconds. An override in force sets the plan, the three limits and, optionally, the monthly
+  quotas, until it ends. When it ends, the account is back on what Stripe or the default gives,
+  with no job to run.
+- **A failed payment appears on Home within seconds, not the hour.** The Stripe webhook records it
+  in `billing_alerts`, once per invoice. It records a second subscription too, and closes the
+  account's payment alerts itself when Stripe says the subscription is paid again.
+
+What is built:
+
+- **The roles.** `billing.read` (the Owner, Billing and the Viewer) opens the Billing page.
+  `billing.act` (the Owner and Billing) gives an override of up to 90 days and resolves alerts.
+  `plans.approve` (the Owner) asks for a longer override, which another Owner must approve; the
+  asker cannot (four eyes). Each override, approval and early end goes to the staff log, and to the
+  customer's audit log with its reason (E8).
+- **The Billing page (M4).** It shows:
+  - monthly recurring revenue, live, new and cancelled subscriptions, read from Stripe with a
+    restricted key (`SLOTLOCK_ADMIN_STRIPE_KEY`) and kept an hour in `admin_cache` (4.6);
+  - paying accounts by plan and past-due ones, from the database;
+  - the open billing alerts, each linked to its account and to Stripe;
+  - the overrides in force or waiting;
+  - the last run of `billing daily` and `overage report`;
+  - each partner's last closed month, what it invoiced, what is unsent, and days whose counts
+    disagreed.
+- **An account's Plan section (M3).** What the account is held to now; its overrides; forms to put
+  it on a plan or raise its limits until a date, to approve, and to end. With the Stripe key, it
+  also shows its Stripe subscriptions and last invoices.
+- **The Usage page (M5).** Operations by day, use by surface this month, and the accounts using
+  most of their quotas.
+- **The billing jobs.** `billing daily` and `overage report` record each run, with what they
+  printed (`maintenance_runs`). Home says when billing daily has not run in a day, or needs
+  attention.
+
+The month close stays in `billing daily`, which the deployment schedules. It sends invoices
+through Stripe with a write key, and the console holds only a key that reads (4.6). The console
+shows each partner's month instead.
 
 The database keeps no GitHub login or email for a person, only the numeric id, and that does not
 change. The console reads logins from GitHub's public profile API when it shows or searches an

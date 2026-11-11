@@ -364,4 +364,21 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     await expect(asOwner((tx) => tx`SELECT slotlock.staff_operator_record('cli:ops', 'staff.added', NULL, NULL)`)).rejects.toMatchObject({ code: '22023' });
     await expect(adminSql`SELECT slotlock.staff_operator_record('cli:ops', 'account.erased', ${OTHER}, NULL)`).rejects.toMatchObject({ code: '42501' });
   });
+  it('records each run of a billing job for the console, by cli:<user>', async () => {
+    const [before] = await adminSql<{ home: { billing_daily: unknown } }[]>`SELECT slotlock.admin_home(${OWNER}) AS home`;
+    expect(before?.home.billing_daily).toBeNull();
+    const run = await cli(['billing', 'daily']);
+    expect(run.code).toBe(0);
+    const [recorded] = await superuser<{ actor: string; attention: boolean; summary: { lines: { job: string }[] } }[]>`
+      SELECT actor, attention, summary FROM slotlock.maintenance_runs WHERE job = 'billing_daily' ORDER BY id DESC LIMIT 1`;
+    expect(recorded?.actor).toMatch(/^cli:/);
+    expect(recorded?.attention).toBe(false);
+    expect(recorded?.summary.lines.at(-1)).toMatchObject({ job: 'done', attention: false });
+    const [after] = await adminSql<{ home: { billing_daily: { attention: boolean } } }[]>`SELECT slotlock.admin_home(${OWNER}) AS home`;
+    expect(after?.home.billing_daily).toMatchObject({ attention: false });
+    const [billing] = await adminSql<{ billing: { runs: Record<string, unknown> } }[]>`SELECT slotlock.admin_billing(${OWNER}) AS billing`;
+    expect(Object.keys(billing?.billing.runs ?? {})).toEqual(['billing_daily']);
+    // Only the deployment role records a run.
+    await expect(adminSql`SELECT slotlock.record_maintenance_run('billing_daily', 'cli:x', now(), false, '{}')`).rejects.toMatchObject({ code: '42501' });
+  });
 });

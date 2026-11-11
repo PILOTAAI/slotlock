@@ -76,7 +76,8 @@ describe('the admin console schema', () => {
   });
 
   it('records every call in the staff log, except the reads the log itself and sign-in need', () => {
-    const silent = ['slotlock.admin_staff_log(', 'slotlock.admin_passkeys('];
+    // The log's own reads, sign-in's passkey list, and the provider cache (the page using it is logged).
+    const silent = ['slotlock.admin_staff_log(', 'slotlock.admin_passkeys(', 'slotlock.admin_cache_read(', 'slotlock.admin_cache_write('];
     for (const signature of SLOTLOCK_ADMIN_FUNCTIONS) {
       if (silent.some((prefix) => signature.startsWith(prefix))) continue;
       expect(named(signature)?.body, signature).toContain('slotlock.staff_log(');

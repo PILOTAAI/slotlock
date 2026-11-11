@@ -218,6 +218,11 @@ person's dashboard sessions, add an internal note, and work an abuse case. Each 
 The reason is written to the staff log and to the account's own audit log, as "Slotlock staff"
 and the role, in the same transaction. The customer always sees what staff did to their account.
 
+Billing staff can put an account on a plan, or raise its limits, until a date. An override longer
+than 90 days needs one Owner to ask and another to approve. The console reads Stripe only with a
+restricted key that reads subscriptions and invoices, and keeps what it read for an hour. It
+cannot change a subscription, refund or invoice.
+
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
 

@@ -33,6 +33,8 @@ export interface SlotlockAdminWorkerEnv {
   SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET?: string;
   SLOTLOCK_ADMIN_SESSION_SECRET?: string;
   SLOTLOCK_ADMIN_GITHUB_TOKEN?: string;
+  /** A restricted Stripe key that reads subscriptions and invoices: revenue and customers. */
+  SLOTLOCK_ADMIN_STRIPE_KEY?: string;
   [name: string]: unknown;
 }
 
@@ -76,7 +78,7 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
     if (!isRateLimit(env.SLOTLOCK_ADMIN_RATE_LIMIT)) return 'The admin console is not configured: bind SLOTLOCK_ADMIN_RATE_LIMIT.';
     if (typeof env.HYPERDRIVE?.connectionString !== 'string') return 'The admin console is not configured: bind HYPERDRIVE.';
     // Built once per isolate, again only if its configuration changed.
-    const key = REQUIRED.map((name) => env[name]).join('\n') + String(env.SLOTLOCK_ADMIN_GITHUB_TOKEN ?? '');
+    const key = [...REQUIRED.map((name) => env[name]), env.SLOTLOCK_ADMIN_GITHUB_TOKEN ?? '', env.SLOTLOCK_ADMIN_STRIPE_KEY ?? ''].join('\n');
     if (admin && built === key) return admin;
     const publicUrl = (env.SLOTLOCK_ADMIN_PUBLIC_URL as string).trim();
     if (new URL(publicUrl).protocol !== 'https:') return 'SLOTLOCK_ADMIN_PUBLIC_URL must be https.';
@@ -100,6 +102,9 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
       }),
       ...(typeof env.SLOTLOCK_ADMIN_GITHUB_TOKEN === 'string' && env.SLOTLOCK_ADMIN_GITHUB_TOKEN.trim()
         ? { githubToken: env.SLOTLOCK_ADMIN_GITHUB_TOKEN.trim() }
+        : {}),
+      ...(typeof env.SLOTLOCK_ADMIN_STRIPE_KEY === 'string' && env.SLOTLOCK_ADMIN_STRIPE_KEY.trim()
+        ? { stripeKey: env.SLOTLOCK_ADMIN_STRIPE_KEY.trim() }
         : {}),
       ...(workerOptions.fetch ? { fetch: workerOptions.fetch } : {}),
     });
