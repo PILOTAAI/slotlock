@@ -185,6 +185,8 @@ const expectedFiles = new Set([
   'lifecycle.d.ts',
   'holidays.js',
   'holidays.d.ts',
+  'holiday-import.js',
+  'holiday-import.d.ts',
   'self-host.js',
   'self-host.d.ts',
   'store.js',
