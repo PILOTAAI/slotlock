@@ -149,7 +149,10 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
   `SLOTLOCK_INVITATION_EMAIL` and `SLOTLOCK_INVITATION_EMAIL_FROM` as variables and
   `SLOTLOCK_INVITATION_EMAIL_KEY` as a secret (`wrangler secret put`) on the Worker. With verified
   domains, set `SLOTLOCK_VERIFIED_DOMAINS=on` on both: the Worker looks a record up when an Owner
-  asks, over DNS-over-HTTPS, and the server's maintenance checks every domain daily.
+  asks, over DNS-over-HTTPS, and the server's maintenance checks every domain daily. With single
+  sign-on, set `SLOTLOCK_TEAM_SSO=on` and `SLOTLOCK_SSO_SECRET` (a secret, the same on both) on the
+  Worker and the server. With SCIM, set `SLOTLOCK_TEAM_SCIM=on` on the Worker: the identity
+  provider calls the dashboard's `/scim/v2`.
 - Set `SLOTLOCK_DASHBOARD_USERS` on both the Worker and the server too: the server takes a person's
   keys only while its own list allows them, whether or not it serves the dashboard, so removing a
   person from both lists signs them out and stops their keys. A server without it takes every

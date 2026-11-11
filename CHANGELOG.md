@@ -7,7 +7,8 @@ versioning.
 
 This release gives a workspace its people and an audit trail. It brings six roles read from the
 database on every request, team workspaces with invitations, verified domains that let colleagues
-find and ask to join their team, sign-out everywhere and a hash-chained audit log, and lets a
+find and ask to join their team, single sign-on and SCIM provisioning through each team's own
+identity provider, sign-out everywhere and a hash-chained audit log, and lets a
 member be limited to locations or groups (RFC 0004 D1). The change history
 becomes append-only and is kept by plan (D2). A person's data can be exported or erased, and a whole
 tenant exported (D3), from the API, the command line and the dashboard's new Privacy page. It closes
@@ -25,7 +26,9 @@ notes first.
     columns (among them `cutoff_anchor` on bookings and events, and the audit log's chain) and 39
     functions.
   - Verified domains add three more tables (`workspace_domains`, `workspace_join_requests`,
-    `workspace_join_blocks`), with their functions, unused until turned on.
+    `workspace_join_blocks`) and single sign-on five (`sso_connections`, `sso_identities`,
+    `sso_role_mappings`, `dashboard_session_sso`, `sso_bypasses`) and SCIM four (`scim_tokens`,
+    `scim_users`, `scim_groups`, `scim_group_members`), with their functions, unused until turned on.
   - It grants the serving role what this release needs; a library user runs
     `grantApplicationRole` again.
 - **The change history can no longer be edited by the serving role.** It may only add to
@@ -53,7 +56,11 @@ notes first.
   - invitations by email (`SLOTLOCK_INVITATION_EMAIL`, `SLOTLOCK_INVITATION_EMAIL_KEY`,
     `SLOTLOCK_INVITATION_EMAIL_FROM`);
   - verified domains, with team workspaces (`SLOTLOCK_VERIFIED_DOMAINS=on`; the server's maintenance
-    checks each domain daily, so set it on the server too).
+    checks each domain daily, so set it on the server too);
+  - single sign-on through each team's provider, with verified domains (`SLOTLOCK_TEAM_SSO=on` and
+    `SLOTLOCK_SSO_SECRET`, the same on the server and the Worker);
+  - SCIM provisioning from each team's provider, with verified domains (`SLOTLOCK_TEAM_SCIM=on`, on
+    whichever serves the dashboard: its `/scim/v2` is where providers call).
 
 ### Added
 
@@ -180,6 +187,34 @@ notes first.
   as a Viewer (an address verified once by Google or GitHub, or one the team removed or declined,
   only asks), or turn joining off. A record behind a CNAME does not count, and 14 days of resolver
   errors lapse a domain too.
+- **Single sign-on through each team's own identity provider** (`SLOTLOCK_TEAM_SSO=on`, with
+  verified domains, and `SLOTLOCK_SSO_SECRET`): Okta, Microsoft Entra ID (one tenant), Google
+  Workspace or any OpenID Connect provider, set up, tested and turned on by the team's Owners on
+  Settings, Identity. ID tokens are checked with WebCrypto on both runtimes (`verifySlotlockIdToken`:
+  RS256, PS256 or ES256, never none or HMAC; RSA of 2048 bits or more; exact issuer; audience and
+  azp; time with 60 seconds' skew; nonce), keys cached per JWKS URL, an Owner's URLs fetched as
+  hostile (https on public names, no redirects, 5 seconds, 256 KB), client secrets sealed with
+  AES-256-GCM. Identities are the provider's subject, never an email; a sign-in through a provider
+  alone makes a person with no workspace of their own, scoped to the team (no other team, nor the
+  person's other sessions); members link their GitHub or Google person by signing in through it,
+  with a work account at the verified domain, while signed in. Members at the verified domains
+  join at their first sign-in (on by default, as Viewer), groups map to roles (never Owner, and
+  nobody who signs in only through a provider is made one), and the team may require single
+  sign-on, with an Owner's audited one-hour bypass. Turning a connection off or changing it ends the
+  sessions and proofs it gave; deleting it, or erasing the team, erases the people who signed in
+  only through it. Google sign-in now goes through the same verifier, which allows 60 seconds of
+  clock skew.
+- **SCIM 2.0 provisioning for each team** (`SLOTLOCK_TEAM_SCIM=on`, with verified domains): the
+  team's identity provider adds, deactivates and groups its people at the dashboard's
+  `/scim/v2/<team id>` (RFC 7643/7644: Users and Groups with GET, POST, PUT, PATCH and DELETE,
+  `eq` filters, paging, discovery), with bearer tokens an Owner makes on Settings, Identity (two at
+  a time, kept as SHA-256), and Okta's and Entra's requests read as they send them. Users at the
+  verified domains only; one becomes a member on signing in with a Google Workspace account of the
+  domain or through the team's single sign-on. Deactivation ends that membership at the next
+  request and, as the Owner chose when turning SCIM on, revokes the person's keys; reactivation
+  needs a new sign-in. Groups give roles (`slotlock-role-<role>`, or as an Owner maps them; never
+  Owner), and the directory never changes an Owner. The dashboard's `scim` option;
+  `workspaces.scim`.
   An Owner may also hold invitations to the team's verified domains. New capability
   `identity.manage` (Owners, fresh sign-in); `createSlotlockWorkspaceDomains`,
   `runSlotlockDomainChecks`, `normalizeSlotlockDomain`, `createSlotlockDohResolver`.

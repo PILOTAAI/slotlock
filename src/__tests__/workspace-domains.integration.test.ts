@@ -362,7 +362,7 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     const other = await team(hal);
     expect((await domains.decide({ tenantRef: other, actor: hal, id, decision: 'approve', role: 'viewer', memberCap: null })).refusal).toBe('not_found');
     expect(await domains.decide({ tenantRef, actor: bea, id, decision: 'approve', role: 'developer', memberCap: null })).toEqual({ person: dee, refusal: null });
-    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, dee)).role).toBe('developer');
+    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, dee, null)).role).toBe('developer');
     expect((await domains.domainMembers(tenantRef)).get(dee)).toEqual({ domain, status: 'verified' });
     expect(await domains.discoverable(dee, at)).toEqual([]);
     expect(await domains.requestToJoin(tenantRef, dee, at, 'github', null)).toEqual({ refusal: 'already_member' });
@@ -370,7 +370,7 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     expect(await domains.requestToJoin(tenantRef, eli, [`eli@${domain}`], 'github', null)).toEqual({ outcome: 'requested' });
     const eliRequest = (await domains.requests(tenantRef)).find((row) => row.person === eli)?.id as string;
     expect(await domains.decide({ tenantRef, actor: ada, id: eliRequest, decision: 'decline', role: null, memberCap: null })).toEqual({ person: eli, refusal: null });
-    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, eli)).role).toBeNull();
+    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, eli, null)).role).toBeNull();
   });
 
   it('joins at once as a Viewer where the domain says so, once however many race, and asks again after a removal', async () => {
@@ -378,11 +378,11 @@ describe.skipIf(!url)('verified domains and joining by them (real Postgres)', ()
     expect(await domains.setJoinPolicy(tenantRef, ada, id, 'auto')).toBeNull();
     const outcomes = await Promise.all(Array.from({ length: 6 }, () => domains.requestToJoin(tenantRef, fay, [`fay@${domain}`], 'google_workspace', null)));
     expect(outcomes.filter((result) => 'outcome' in result && result.outcome === 'joined')).toHaveLength(1);
-    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, fay)).role).toBe('viewer');
+    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, fay, null)).role).toBe('viewer');
     // Removed by an Owner, the person cannot rejoin at once: they ask, and wait.
     expect(await teams.remove(tenantRef, ada, fay)).toBeNull();
     expect(await domains.requestToJoin(tenantRef, fay, [`fay@${domain}`], 'google_workspace', null)).toEqual({ outcome: 'requested' });
-    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, fay)).role).toBeNull();
+    expect((await createSlotlockDashboardWorkspaces(application).standing(tenantRef, fay, null)).role).toBeNull();
     // At the member cap (here 2: Ada and one more), joining is refused.
     expect(await domains.requestToJoin(tenantRef, gus, [`gus@${domain}`], 'google_workspace', 2)).toEqual({ outcome: 'joined' });
     expect(await domains.requestToJoin(tenantRef, hal, [`hal@${domain}`], 'google_workspace', 2)).toEqual({ refusal: 'member_cap' });

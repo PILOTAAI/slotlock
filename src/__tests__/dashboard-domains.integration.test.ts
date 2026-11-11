@@ -133,7 +133,7 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
     return browser.get(`/dashboard/callback?code=g&state=${location.searchParams.get('state')}`);
   }
   const roleIn = async (tenantRef: string, person: string) =>
-    (await createSlotlockDashboardWorkspaces(application).standing(tenantRef, person)).role;
+    (await createSlotlockDashboardWorkspaces(application).standing(tenantRef, person, null)).role;
 
   beforeAll(async () => {
     admin = postgres(url as string, { max: 1, onnotice: () => {} });

@@ -236,7 +236,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(desk.cookies.has('__Host-slotlock-invite')).toBe(false);
     expect(await teamOf(desk)).toBe(team);
     const workspaces = createSlotlockDashboardWorkspaces(application);
-    expect((await workspaces.standing(team, `google:${googleSubject}`)).role).toBe('member');
+    expect((await workspaces.standing(team, `google:${googleSubject}`, null)).role).toBe('member');
     // The link is spent for everyone, the scanner included.
     expect(await (await scanner.get('/dashboard/invite')).text()).toContain('This invitation was already used.');
     const roster = await (await ada.get('/dashboard/settings/members')).text();
@@ -274,7 +274,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     await signIn(bea, 'bea', '?then=%2Finvite&email=1');
     expect(bea.cookies.get('__Host-slotlock-session')).toBeDefined();
     expect((await bea.post('/dashboard/invite', '/invite/accept', {})).status).toBe(303);
-    expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 1}`)).role).toBe('developer');
+    expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 1}`, null)).role).toBe('developer');
   });
 
   it("refuses a role above one's own, and records each refusal", async () => {
@@ -289,7 +289,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
       await browser.get(link);
       await signIn(browser, code, '?then=%2Finvite&email=1');
       expect((await browser.post('/dashboard/invite', '/invite/accept', {})).status).toBe(303);
-      expect((await createSlotlockDashboardWorkspaces(application).standing(team, person)).role).toBe(roleName);
+      expect((await createSlotlockDashboardWorkspaces(application).standing(team, person, null)).role).toBe(roleName);
     }
     // A Member sends the invitation form (it is not shown them) asking for an Owner.
     const cy = new Browser(dashboard);
@@ -321,7 +321,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(denied.map((row) => row.reason)).toEqual(['needs members.manage', 'needs billing.manage', 'needs workspace.own']);
     // Nothing was made: no invitation to either address, and Cy is still a Member.
     expect(await (await ada.get('/dashboard/settings/members')).text()).not.toContain('y@acme.example');
-    expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 2}`)).role).toBe('member');
+    expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 2}`, null)).role).toBe('member');
   });
 
   it("keeps each team's people and forms to itself", async () => {
@@ -348,7 +348,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
       }),
     );
     expect(removed.status).toBe(404);
-    expect((await createSlotlockDashboardWorkspaces(application).standing(south, `github:${base + 4}`)).role).toBe('owner');
+    expect((await createSlotlockDashboardWorkspaces(application).standing(south, `github:${base + 4}`, null)).role).toBe('owner');
     // Switching to a team she is not in is refused.
     const switched = await ada.post('/dashboard/teams', '/organization', { organization: south });
     expect(switched.status).toBe(400);
@@ -388,7 +388,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     // The only Owner may not leave; once Cy is an Owner too, she may, and Cy is left the Owner.
     expect(await (await ada.get('/dashboard/settings/members')).text()).toContain('You’re the only owner. Make someone else an owner before leaving.');
     expect((await ada.post('/dashboard/settings/members', '/members/role', { person: `github:${base + 2}`, role: 'owner' })).status).toBe(200);
-    expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 2}`)).role).toBe('owner');
+    expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 2}`, null)).role).toBe('owner');
     const left = await ada.post('/dashboard/settings/members', '/members/leave', {});
     expect(left.status).toBe(303);
     expect(await teamOf(ada)).not.toBe(team);

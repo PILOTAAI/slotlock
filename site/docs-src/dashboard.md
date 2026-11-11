@@ -206,6 +206,77 @@ with a sign-in in the last 15 minutes.
   30 days after it is decided or expires. Claims that ended go three months later. An address the
   team removed or declined is remembered by its SHA-256 for a year.
 
+### Single sign-on
+
+Set `SLOTLOCK_TEAM_SSO=on` (with verified domains) and `SLOTLOCK_SSO_SECRET` (32+ characters,
+which seals each team's client secret; keep it) for each team to sign in through its own identity
+provider over OpenID Connect: Okta, Microsoft Entra ID, Google Workspace or any other. Its Owners set
+it up on Settings, Identity. A provider that speaks only SAML cannot be connected.
+
+- **Connect**: the provider, its issuer URL (for Entra, the tenant's ID: one tenant, never
+  `common`), the client ID and secret of an app registered there with the redirect URI the page
+  shows (one per team). Slotlock reads the issuer's discovery document, which must name that exact
+  issuer, over https on a public host name only. The secret is sealed with AES-256-GCM and shown
+  as its last four characters.
+- **Test sign-in** runs the whole flow and shows what the provider sent, changing no access. Only a
+  tested configuration turns on; changing the issuer, client or secret needs a new test.
+- **Who someone is**: the provider's subject (and Entra's tenant and object id), never an email.
+  A first sign-in through the provider alone makes a new person, with no workspace of their own,
+  who acts in this team only: a session through the provider alone sees no other team the person
+  is in, nor their other sessions. An email counts only at a domain the team verified (with Entra,
+  only when Entra says the domain's owner verified it; never when the provider marks it unverified).
+  With Google Workspace, only an account of the team's verified domain signs in at all.
+- **Who joins**: someone the team invited by that address joins as invited (an Owner's invitation
+  excepted); otherwise, by default, anyone at the verified domains joins at their first sign-in as a
+  Viewer (Member or Developer if the Owner chooses), or as the role a group maps to (never Owner).
+  A member the provider added has their role recomputed at each sign-in; a role changed by hand
+  stays. Someone removed in Slotlock is not brought back by the provider under any address Slotlock
+  knew for them (the one they joined with, or one their sign-ins through it carried); to keep out
+  someone the provider still lists under another, unassign them there.
+- **Owners** sign in with GitHub or Google, for when the provider is down: nobody who signs in only
+  through it is made an Owner.
+- **Members who already sign in with GitHub or Google** sign in with single sign-on once while
+  signed in, with their work account at the verified domain, which links the two (one account at
+  the provider each; linking another replaces it); Slotlock never links by email.
+- **Require single sign-on**, once it is on and an Owner has just signed in through it: every
+  member's session then needs a sign-in through the provider in the last 24 hours (1 to 168) to act
+  in the team, whatever else it signed in with; their other workspaces are untouched. An Owner who
+  signs in with GitHub or Google can bypass it for an hour from that browser, which the audit log
+  records; the connection cannot be deleted or turned off while every Owner signs in only through
+  it. Changing the connection stops requiring it until it is tested and required again.
+- **Turning it off, or changing it**, ends the sessions signed in through it alone and every sign-in
+  it vouched for. **Deleting it** also erases the people who signed in only through it, who have no
+  other way in; erasing the team does too.
+- People see "Continue with single sign-on" on the sign-in page, and type their work email. A link
+  to `/dashboard/sso/<team handle>` opens a page naming the team, whose button goes on to the provider.
+
+### SCIM
+
+Set `SLOTLOCK_TEAM_SCIM=on` (with verified domains) for each team's identity provider (Okta,
+Microsoft Entra ID, or any SCIM 2.0 client) to add, deactivate and group its people. Its Owners set
+it up on Settings, Identity.
+
+- **Turn on SCIM** and choose what happens to the API keys of someone the directory deactivates:
+  revoked, or kept working. There is no default.
+- **New token** shows a bearer token once (Slotlock keeps its SHA-256 only), with the SCIM URL,
+  `https://<your dashboard>/scim/v2/<team id>`, to paste into the provider. A team keeps two
+  tokens at a time, so one can replace the other; each works for its own team only.
+- **Users** the directory adds must be at a domain the team verified. One becomes a member, as a
+  Viewer unless a group says otherwise, when they sign in with a Google Workspace account of that
+  domain or through the team's single sign-on with that address; an address GitHub or a personal
+  Google account verified does not count. With single sign-on, the directory decides who joins at
+  its addresses, whatever "Who joins" says.
+- **Deactivated** (or deleted) in the directory, someone leaves the team at their next request,
+  and only that team: their own workspace and other teams are untouched. Their keys go as the Owner
+  chose. Reactivated, they need a new sign-in.
+- **Groups** named `slotlock-role-admin`, `-developer`, `-member`, `-viewer` or `-billing` give
+  that role; an Owner can map any other group to a role on Settings, Identity. The highest wins. A
+  role set by hand on Members stays.
+- The directory never changes, deactivates or deletes an Owner, and no group makes one.
+- Okta's and Entra's requests work as they send them (`Replace` with a capital, `"False"` as a
+  string, a member removed without a filter). Bulk, sorting and ETags are not offered, as the
+  service provider configuration says.
+
 ## Organizations
 
 For organizations instead of people, set `SLOTLOCK_DASHBOARD_ORGS` to the GitHub organization ids

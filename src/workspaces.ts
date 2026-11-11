@@ -5,11 +5,16 @@
 import { createHash } from 'node:crypto';
 import type { SlotlockSql } from './store.js';
 import { type SlotlockWorkspaceDomains, createSlotlockWorkspaceDomains } from './workspace-domains.js';
+import { type SlotlockWorkspaceSso, createSlotlockWorkspaceSso } from './workspace-sso.js';
+import { type SlotlockWorkspaceScim, createSlotlockWorkspaceScim } from './workspace-scim.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
 
-/** A person as the dashboard knows them: `github:<id>` or `google:<subject>`, never an email. */
-const PERSON = /^(github:[1-9]\d{0,19}|google:[A-Za-z0-9._-]{1,255})$/;
+/**
+ * A person as the dashboard knows them: `github:<id>`, `google:<subject>`, or `sso:<uuid>` (one a
+ * team's identity provider signed in, ddl-sso.ts), never an email.
+ */
+const PERSON = /^(github:[1-9]\d{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const ORGANIZATION_ID = /^[1-9]\d{0,19}$/;
 
 /** A GitHub organization the person is an active owner (`admin`) or member of, as GitHub lists it. */
@@ -27,6 +32,14 @@ export interface SlotlockWorkspaceStanding {
    * with this store, or erased): then no session passes. "Sign out everywhere" draws a new one.
    */
   sessionEpoch: number | null;
+  /**
+   * Why there is no role though the person is a member: the team requires single sign-on and this
+   * session holds no recent proof (`sso_required`), or the session was signed in through another
+   * team's provider alone (`sso_scope`). Null otherwise.
+   */
+  refusal?: 'sso_required' | 'sso_scope' | null;
+  /** With sso_required: whether this person (an Owner who signs in with GitHub or Google) may bypass. */
+  mayBypass?: boolean;
 }
 
 /** What the dashboard reads and records of people and their memberships. */
@@ -37,8 +50,13 @@ export interface SlotlockDashboardWorkspaces {
    * Developer), and one GitHub no longer lists ends.
    */
   signedIn(person: string, githubOrganizations?: readonly SlotlockGitHubMembership[]): Promise<number>;
-  /** The person's role in a tenant (its test environment is its live tenant's) and their epoch. */
-  standing(tenantRef: string, person: string): Promise<SlotlockWorkspaceStanding>;
+  /**
+   * The person's role in a tenant (its test environment is its live tenant's) and their epoch, for
+   * this session (its id, as the cookie holds it, or null where there is none): a team that requires
+   * single sign-on gives a session without a recent proof no role, and a session scoped to a team's
+   * provider has none elsewhere. Required, so no caller with a session leaves its scope unchecked.
+   */
+  standing(tenantRef: string, person: string, sid: string | null): Promise<SlotlockWorkspaceStanding>;
   /**
    * The locations and groups the person is limited to in the tenant (RFC 0004 D1), or null for all
    * of it. An Owner is never limited.
@@ -57,6 +75,10 @@ export interface SlotlockDashboardWorkspaces {
   suspension?(tenantRef: string): Promise<SlotlockSuspensionNotice | null>;
   /** Teams' verified domains and requests to join through them (workspace-domains.ts): only with the database. */
   domains?: SlotlockWorkspaceDomains;
+  /** Teams' single sign-on (workspace-sso.ts): only with the database. */
+  sso?: SlotlockWorkspaceSso;
+  /** Teams' SCIM provisioning (workspace-scim.ts): only with the database. */
+  scim?: SlotlockWorkspaceScim;
 }
 
 /** A suspended workspace's notice: never the internal reason. */
@@ -147,6 +169,7 @@ export type SlotlockTeamRefusal =
   | 'expired'
   | 'not_for_you'
   | 'last_owner'
+  | 'sso_owner'
   | 'confirm'
   | 'subscription_live'
   | 'domain_restricted'
@@ -260,15 +283,20 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
         SELECT slotlock.member_scope(${tenantRef}::text, ${person}::text) AS scope`;
       return scopeOf(row?.scope);
     },
-    async standing(tenantRef, person) {
+    async standing(tenantRef, person, sid) {
       if (!PERSON.test(person)) return { role: null, sessionEpoch: null };
-      const [row] = await sql<{ role: string | null; session_epoch: number | null }[]>`
-        SELECT role, session_epoch FROM slotlock.dashboard_standing(${tenantRef}::text, ${person}::text)`;
+      const digest = sid === null ? null : sessionDigest(sid);
+      const [row] = await sql<{ role: string | null; session_epoch: number | null; refusal: string | null; may_bypass: boolean }[]>`
+        SELECT role, session_epoch, refusal, may_bypass
+          FROM slotlock.dashboard_standing(${tenantRef}::text, ${person}::text, ${digest}::bytea)`;
       const role = row?.role ?? null;
       const epoch = row?.session_epoch;
+      const refusal = row?.refusal === 'sso_required' || row?.refusal === 'sso_scope' ? row.refusal : null;
       return {
         role: isSlotlockWorkspaceRole(role) ? role : null,
         sessionEpoch: epoch === null || epoch === undefined ? null : Number(epoch),
+        refusal,
+        mayBypass: row?.may_bypass === true,
       };
     },
     async signOutEverywhere(person) {
@@ -293,6 +321,8 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
       }
     },
     domains: createSlotlockWorkspaceDomains(sql),
+    sso: createSlotlockWorkspaceSso(sql),
+    scim: createSlotlockWorkspaceScim(sql),
   };
 }
 

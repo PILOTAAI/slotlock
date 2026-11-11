@@ -10,8 +10,13 @@
 // domain at a time. A domain's join policy decides what a person whose verified address is at it may
 // do: ask to join (`request`, the default), join as a Viewer at once (`auto`), or nothing (`off`).
 
-/** Who a person is, as every dashboard table checks it. */
-const PERSON = '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$';
+/**
+ * Who a person is, as every dashboard table checks it: a GitHub account, a Google account, or a
+ * person a team's identity provider signed in (sso:<uuid>, teams phase 5.4).
+ */
+export const SLOTLOCK_PERSON_PATTERN =
+  '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$';
+const PERSON = SLOTLOCK_PERSON_PATTERN;
 /** A domain as normalizeSlotlockDomain keys it: lowercase ASCII labels, two or more. */
 const DOMAIN = '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$';
 
@@ -119,12 +124,12 @@ ALTER TABLE slotlock.workspace_memberships ADD COLUMN IF NOT EXISTS joined_via_d
 ALTER TABLE slotlock.workspace_memberships ADD COLUMN IF NOT EXISTS joined_email text
   CONSTRAINT slotlock_workspace_memberships_joined_email_valid
   CHECK (joined_email IS NULL OR (char_length(joined_email) BETWEEN 3 AND 254 AND joined_email = lower(joined_email)));
-DO $slotlock_memberships_domain_source$
+DO $slotlock_memberships_sources$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
      WHERE conname = 'slotlock_workspace_memberships_valid' AND conrelid = 'slotlock.workspace_memberships'::regclass
-       AND pg_get_constraintdef(oid) LIKE '%''domain''%'
+       AND pg_get_constraintdef(oid) LIKE '%''scim''%'
   ) THEN
     ALTER TABLE slotlock.workspace_memberships DROP CONSTRAINT IF EXISTS slotlock_workspace_memberships_valid;
     ALTER TABLE slotlock.workspace_memberships ADD CONSTRAINT slotlock_workspace_memberships_valid CHECK (
@@ -132,12 +137,12 @@ BEGIN
       AND person_ref ~ '${PERSON}'
       AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
       AND status IN ('active', 'inactive')
-      AND source IN ('github_org', 'invitation', 'created', 'domain')
+      AND source IN ('github_org', 'invitation', 'created', 'domain', 'sso', 'scim')
       AND (status = 'active') = (deactivated_at IS NULL)
     );
   END IF;
 END
-$slotlock_memberships_domain_source$;
+$slotlock_memberships_sources$;
 
 -- A person's request to join a team, by an address they hold verified at one of its domains. It
 -- waits seven days for an Owner or Admin, who picks the role (Viewer, Member or Developer).
@@ -815,7 +820,7 @@ BEGIN
   INSERT INTO slotlock.workspace_memberships (tenant_ref, person_ref, role, source, joined_via_domain, joined_email)
   VALUES (requested_tenant, asked.person_ref, requested_role, 'domain', asked.domain_id, asked.email)
   ON CONFLICT ON CONSTRAINT slotlock_workspace_memberships_pkey DO UPDATE
-     SET role = excluded.role, status = 'active', source = 'domain', joined_via_domain = excluded.joined_via_domain,
+     SET role = excluded.role, status = 'active', source = 'domain', joined_via_domain = excluded.joined_via_domain, deactivated_by = NULL,
          joined_email = excluded.joined_email, deactivated_at = NULL, updated_at = statement_timestamp();
   -- Let in by a person who decided: the address is no longer one the team turned away.
   DELETE FROM slotlock.workspace_join_blocks blocked

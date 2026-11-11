@@ -175,6 +175,23 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/identity/domains/remove': 'identity.manage',
   '/identity/domains/policy': 'identity.manage',
   '/identity/invites': 'identity.manage',
+  // A team's single sign-on: its Owners only.
+  '/identity/sso': 'identity.manage',
+  '/identity/sso/test': 'identity.manage',
+  '/identity/sso/status': 'identity.manage',
+  '/identity/sso/delete': 'identity.manage',
+  '/identity/sso/provisioning': 'identity.manage',
+  '/identity/sso/mapping': 'identity.manage',
+  '/identity/sso/require': 'identity.manage',
+  '/identity/scim/enable': 'identity.manage',
+  '/identity/scim/disable': 'identity.manage',
+  '/identity/scim/token': 'identity.manage',
+  '/identity/scim/token/revoke': 'identity.manage',
+  '/identity/scim/group': 'identity.manage',
+  // Signing in through one's team's provider (to link it or prove oneself), or an Owner's bypass:
+  // from wherever one is, for a team the handler and the database check one belongs to.
+  '/sso/proof': 'account.use',
+  '/sso/bypass': 'account.use',
   '/keys': 'keys.manage_own',
   '/keys/rotate': 'keys.manage_own',
   '/keys/revoke': 'keys.manage_own',

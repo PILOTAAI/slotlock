@@ -117,6 +117,10 @@ services:
       # Verified domains for team workspaces: off while empty; doh (the default) or system.
       SLOTLOCK_VERIFIED_DOMAINS: ${SLOTLOCK_VERIFIED_DOMAINS:-}
       SLOTLOCK_DNS_RESOLVER: ${SLOTLOCK_DNS_RESOLVER:-}
+      # Single sign-on through each team's own identity provider: off while empty; needs the secret.
+      SLOTLOCK_TEAM_SSO: ${SLOTLOCK_TEAM_SSO:-}
+      SLOTLOCK_SSO_SECRET: ${SLOTLOCK_SSO_SECRET:-}
+      SLOTLOCK_TEAM_SCIM: ${SLOTLOCK_TEAM_SCIM:-}
       # The dashboard assistant: off while empty.
       SLOTLOCK_ASSISTANT_SECRET: ${SLOTLOCK_ASSISTANT_SECRET:-}
       SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: ${SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS:-}
