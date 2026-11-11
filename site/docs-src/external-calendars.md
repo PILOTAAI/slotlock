@@ -111,8 +111,10 @@ each its own process with its own credentials (RFC 0004 P3). The core gives them
 - **Payments.** A hold made with `paymentRequired` (at most 30 minutes) is confirmed only after
   `markHoldPaid` (`POST /v1/holds/{hold_id}/paid`) records the payment's reference at your
   processor, once you or an adapter verified it. A hold that names its `payment` (amount and
-  currency) needs at least that `received`. The feed says `hold.paid`. Slotlock records payment
-  state and never moves money.
+  currency) needs at least that `received`. The feed says `hold.paid`. A paid hold that ends without
+  a booking (it expired, or was let go) was never applied. Its `hold.expired` or `hold.released`
+  carries `payment_unapplied` (the payment's reference and amount), and `markHoldPaid` with that
+  reference answers `hold_ended`: refund it. Slotlock records payment state and never moves money.
 
 Three packages in `packages/` build on these: `@slotlock/sync` (Google, Microsoft and iCalendar
 busy time in, bookings written back), `@slotlock/notify` (email, SMS and WhatsApp, each message

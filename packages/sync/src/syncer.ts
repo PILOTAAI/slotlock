@@ -421,7 +421,14 @@ export function createSyncer(options: SyncerOptions) {
      * Start connecting a Google or Microsoft account for a tenant: the URL to send the person to.
      * The flow's state is kept here (its digest, with the verifier sealed) for ten minutes.
      */
-    async beginConnection(params: { tenantRef: string; provider: OAuthProvider; writeBack: boolean; loginHint?: string }) {
+    async beginConnection(params: {
+      tenantRef: string;
+      provider: OAuthProvider;
+      writeBack: boolean;
+      /** SHA-256 (hex) of the secret the starting browser holds: finishConnection must be given it. */
+      browserHash: string;
+      loginHint?: string;
+    }) {
       if (!(await options.store.getTenant(params.tenantRef))) throw new Error('tenant_not_found');
       const flow = beginAuthorization(oauthClient(params.provider), {
         writeBack: params.writeBack,
@@ -434,6 +441,7 @@ export function createSyncer(options: SyncerOptions) {
         provider: params.provider,
         sealedVerifier: seal(options.keys, flow.verifier, `oauth:${hash}`),
         writeBack: params.writeBack,
+        browserHash: params.browserHash,
         expiresAt: new Date(now().getTime() + OAUTH_STATE_TTL_MS),
       });
       return { url: flow.url };
@@ -444,9 +452,14 @@ export function createSyncer(options: SyncerOptions) {
      * an unknown or expired one is refused (`oauth_state_invalid`). Keeps the tokens sealed and the
      * account's address; returns the connection and the calendars it can choose from.
      */
-    async finishConnection(params: { state: string; code: string }): Promise<{ connection: SyncConnection; calendars: ProviderCalendar[] }> {
+    async finishConnection(params: {
+      state: string;
+      code: string;
+      /** SHA-256 (hex) of the browser's secret: a flow is finished only in the browser that began it. */
+      browserHash: string;
+    }): Promise<{ connection: SyncConnection; calendars: ProviderCalendar[] }> {
       const flow = await options.store.takeOAuthState(stateHash(params.state), now());
-      if (!flow) throw new Error('oauth_state_invalid');
+      if (!flow || !flow.browserHash || flow.browserHash !== params.browserHash) throw new Error('oauth_state_invalid');
       const verifier = open(options.keys, flow.sealedVerifier, `oauth:${flow.stateHash}`);
       const tokens = await exchangeCode(oauthClient(flow.provider), { code: params.code, verifier }, send);
       const listed =

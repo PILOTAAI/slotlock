@@ -9,7 +9,7 @@
 //
 // Pages carry no script or style, a strict Content-Security-Policy, and no referrer (the callback's
 // URL holds the provider's code).
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { OAuthProvider } from './oauth.js';
 import type { ProviderCalendar } from './providers.js';
 import { type SlotlockResourceSummary, withoutTrailingSlashes } from './slotlock-api.js';
@@ -80,22 +80,46 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
   /** A connect link: the tenant, provider and write-back, until when, signed. */
   function connectLink(tenantRef: string, provider: OAuthProvider, writeBack: boolean): { url: string; expiresAt: Date } {
     const expiresAt = new Date(now().getTime() + LINK_TTL_MS);
-    const payload = Buffer.from(JSON.stringify({ t: tenantRef, p: provider, w: writeBack, e: expiresAt.getTime() })).toString('base64url');
+    // Its own id: a link is followed once (claimLink), so one forwarded or found later is refused.
+    const payload = Buffer.from(
+      JSON.stringify({ t: tenantRef, p: provider, w: writeBack, e: expiresAt.getTime(), n: randomBytes(18).toString('base64url') }),
+    ).toString('base64url');
     return { url: `${publicUrl}/connect?link=${payload}.${sign('connect', payload)}`, expiresAt };
   }
 
-  function readLink(link: string | null): { tenantRef: string; provider: OAuthProvider; writeBack: boolean } | null {
+  function readLink(
+    link: string | null,
+  ): { tenantRef: string; provider: OAuthProvider; writeBack: boolean; linkId: string; expiresAt: Date } | null {
     const [payload, signature, ...rest] = (link ?? '').split('.');
     if (!payload || !signature || rest.length > 0 || !sameSecret(signature, sign('connect', payload))) return null;
     try {
-      const value = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { t?: unknown; p?: unknown; w?: unknown; e?: unknown };
+      const value = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+        t?: unknown;
+        p?: unknown;
+        w?: unknown;
+        e?: unknown;
+        n?: unknown;
+      };
       if (typeof value.t !== 'string' || (value.p !== 'google' && value.p !== 'microsoft') || typeof value.w !== 'boolean') return null;
       if (typeof value.e !== 'number' || value.e < now().getTime()) return null;
-      return { tenantRef: value.t, provider: value.p, writeBack: value.w };
+      if (typeof value.n !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/.test(value.n)) return null;
+      return { tenantRef: value.t, provider: value.p, writeBack: value.w, linkId: value.n, expiresAt: new Date(value.e) };
     } catch {
       return null;
     }
   }
+
+  /** The cookie that ties a flow to the browser that began it: sent back only to the callback. */
+  const FLOW_COOKIE = 'slotlock_sync_flow';
+  const secureCookie = publicUrl.startsWith('https://') ? '; Secure' : '';
+  const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
+  const flowCookie = (request: Request): string | null => {
+    for (const part of (request.headers.get('cookie') ?? '').split(';')) {
+      const [name, ...value] = part.trim().split('=');
+      if (name === FLOW_COOKIE && value.length > 0) return value.join('=');
+    }
+    return null;
+  };
 
   const formToken = (connectionId: string, expires: number) => sign('choose', `${connectionId}\n${expires}`);
 
@@ -237,8 +261,27 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
       if (url.pathname === '/connect' && request.method === 'GET') {
         const link = readLink(url.searchParams.get('link'));
         if (!link) return page('This link has expired', '<p>Ask for a new link to connect your calendar.</p>', 400);
-        const { url: to } = await options.syncer.beginConnection(link);
-        return new Response(null, { status: 302, headers: { location: to, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
+        // Followed once: whoever opens it again, or after it was forwarded, is asked for a new one.
+        if (!(await options.store.claimLink(link.linkId, link.expiresAt))) {
+          return page('This link was used', '<p>Each link connects a calendar once. Ask for a new link.</p>', 400);
+        }
+        // Finished only in this browser, so the provider's page cannot be handed to someone else.
+        const browser = randomBytes(32).toString('base64url');
+        const { url: to } = await options.syncer.beginConnection({
+          tenantRef: link.tenantRef,
+          provider: link.provider,
+          writeBack: link.writeBack,
+          browserHash: digest(browser),
+        });
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: to,
+            'cache-control': 'no-store',
+            'referrer-policy': 'no-referrer',
+            'set-cookie': `${FLOW_COOKIE}=${browser}; Path=/oauth/callback; Max-Age=600; HttpOnly; SameSite=Lax${secureCookie}`,
+          },
+        });
       }
       if (url.pathname === '/oauth/callback' && request.method === 'GET') {
         const state = url.searchParams.get('state');
@@ -246,14 +289,20 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
         if (url.searchParams.has('error') || !state || !code) {
           return page('Not connected', '<p>The calendar was not connected. You can close this page and try the link again.</p>', 400);
         }
+        const browser = flowCookie(request);
+        if (!browser) {
+          return page('Open the link in this browser', '<p>Connect from the browser you opened the link in, or ask for a new link.</p>', 400);
+        }
         let finished: Awaited<ReturnType<Syncer['finishConnection']>>;
         try {
-          finished = await options.syncer.finishConnection({ state, code });
+          finished = await options.syncer.finishConnection({ state, code, browserHash: digest(browser) });
         } catch {
           return page('This link has expired', '<p>Ask for a new link to connect your calendar.</p>', 400);
         }
         const resources = await options.syncer.listResources(finished.connection.tenantRef);
-        return choosePage(finished.connection.id, finished.connection.account, finished.calendars, resources);
+        const chosen = choosePage(finished.connection.id, finished.connection.account, finished.calendars, resources);
+        chosen.headers.append('set-cookie', `${FLOW_COOKIE}=; Path=/oauth/callback; Max-Age=0; HttpOnly; SameSite=Lax${secureCookie}`);
+        return chosen;
       }
       const choose = /^\/connections\/([0-9a-f-]{36})\/choose$/.exec(url.pathname);
       if (choose && request.method === 'POST') {
