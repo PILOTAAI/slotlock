@@ -3,6 +3,56 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+The admin console for the people who run Slotlock Cloud ([RFC 0006](docs/rfc/0006-admin-console.md)),
+not yet live: its staff and sign-in, support actions, billing and usage, and a CMS for the blog.
+
+### Added
+
+- **Staff for the admin console** ([RFC 0006](docs/rfc/0006-admin-console.md), not yet live).
+  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL` grants the console's own role the admin
+  functions and no table. `slotlock staff list|add|role|reset|remove`, run as the schema owner,
+  manages who may use the console, and `add` and `reset` print a one-time code for the first
+  passkey. The console itself is `workers/admin`; SECURITY.md describes it.
+- **Support actions in the admin console** (RFC 0006, Phase 2):
+  - Staff can suspend an account and lift the suspension, revoke a key, end a person's dashboard
+    sessions, keep internal notes, and work abuse cases.
+  - Each action needs a reason, which also goes into the account's own audit log as "Slotlock staff
+    (Support)".
+  - A suspension may carry a message, which the customer's dashboard shows on every page while the
+    suspension lasts (`slotlock.tenant_suspension_notice`; `SlotlockDashboardWorkspaces.suspension`).
+  - `slotlock tenant suspend`, `unsuspend` and `erase`, and `slotlock plan default`, are recorded in
+    the staff log by `cli:<user>`.
+- **Billing and usage in the admin console** (RFC 0006, Phase 3):
+  - **Overrides.** Staff can put an account on a plan, or raise its limits and quotas, until a date
+    (`slotlock.tenant_plan_overrides`). Every limit check reads it through `slotlock.tenant_plan`,
+    so it applies at once and ends on its date. One longer than 90 days needs a second Owner.
+  - **Billing alerts.** The Stripe webhook records failed payments and second subscriptions
+    (`slotlock.billing_alerts`) for the console's Home and Billing pages, and resolves a failed
+    payment once the subscription is paid again.
+  - **Billing jobs.** `slotlock billing daily` and `slotlock overage report` record each run.
+  - **Stripe.** With a restricted read-only key (`SLOTLOCK_ADMIN_STRIPE_KEY`), the console shows
+    revenue and a customer's subscriptions and invoices, kept for an hour.
+- **A CMS for the blog in the admin console** (RFC 0006, Phase 4):
+  - **Posts are files.** Each post is `site/content/blog/<slug>.md`, rendered by one renderer with
+    no dependencies (`site/src/lib/post-format.ts`) that escapes every character, for the site's
+    build and the console's preview alike. The site's CI draws a missing link-preview image.
+  - **Writing.** An Editor or Owner writes a post with a live preview and the site's own checks;
+    saving commits it to a `cms/<slug>` branch through the "Slotlock CMS" GitHub App, as the staff
+    member, signed off, on a pull request. Images go beside the post.
+  - **Publishing.** Only an Owner publishes: the console merges at the commit they saw, only a
+    pull request that changes blog files, once its checks pass. A later date schedules it, and
+    `cms-schedule.yml` publishes it each hour. A renamed post gets redirects from its old address.
+  - **Previews.** A CMS pull request gets a preview deploy of the whole site, marked `noindex`.
+  - **The live site publishes `/facts.json`**, the short facts a post may name, for the preview.
+
+### Changed
+
+- **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
+  a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
+  the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.
+
 ## 0.10.0 - 2026-11-11
 
 This release gives a workspace its people and an audit trail. It brings six roles read from the
@@ -166,42 +216,6 @@ notes first.
 - **The audit log over the API and the command line** (RFC 0004 D2): `GET /v1/audit` (on the Team
   plan where plans apply, as the dashboard's export) and `GET /v1/audit/verify`;
   `slotlock audit export` and `slotlock audit verify` (exit 1 when the chain breaks).
-- **Staff for the admin console** ([RFC 0006](docs/rfc/0006-admin-console.md), not yet live).
-  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL` grants the console's own role the admin
-  functions and no table. `slotlock staff list|add|role|reset|remove`, run as the schema owner,
-  manages who may use the console, and `add` and `reset` print a one-time code for the first
-  passkey. The console itself is `workers/admin`; SECURITY.md describes it.
-- **Support actions in the admin console** (RFC 0006, Phase 2):
-  - Staff can suspend an account and lift the suspension, revoke a key, end a person's dashboard
-    sessions, keep internal notes, and work abuse cases.
-  - Each action needs a reason, which also goes into the account's own audit log as "Slotlock staff
-    (Support)".
-  - A suspension may carry a message, which the customer's dashboard shows on every page while the
-    suspension lasts (`slotlock.tenant_suspension_notice`; `SlotlockDashboardWorkspaces.suspension`).
-  - `slotlock tenant suspend`, `unsuspend` and `erase`, and `slotlock plan default`, are recorded in
-    the staff log by `cli:<user>`.
-- **Billing and usage in the admin console** (RFC 0006, Phase 3):
-  - **Overrides.** Staff can put an account on a plan, or raise its limits and quotas, until a date
-    (`slotlock.tenant_plan_overrides`). Every limit check reads it through `slotlock.tenant_plan`,
-    so it applies at once and ends on its date. One longer than 90 days needs a second Owner.
-  - **Billing alerts.** The Stripe webhook records failed payments and second subscriptions
-    (`slotlock.billing_alerts`) for the console's Home and Billing pages, and resolves a failed
-    payment once the subscription is paid again.
-  - **Billing jobs.** `slotlock billing daily` and `slotlock overage report` record each run.
-  - **Stripe.** With a restricted read-only key (`SLOTLOCK_ADMIN_STRIPE_KEY`), the console shows
-    revenue and a customer's subscriptions and invoices, kept for an hour.
-- **A CMS for the blog in the admin console** (RFC 0006, Phase 4):
-  - **Posts are files.** Each post is `site/content/blog/<slug>.md`, rendered by one renderer with
-    no dependencies (`site/src/lib/post-format.ts`) that escapes every character, for the site's
-    build and the console's preview alike. The site's CI draws a missing link-preview image.
-  - **Writing.** An Editor or Owner writes a post with a live preview and the site's own checks;
-    saving commits it to a `cms/<slug>` branch through the "Slotlock CMS" GitHub App, as the staff
-    member, signed off, on a pull request. Images go beside the post.
-  - **Publishing.** Only an Owner publishes: the console merges at the commit they saw, only a
-    pull request that changes blog files, once its checks pass. A later date schedules it, and
-    `cms-schedule.yml` publishes it each hour. A renamed post gets redirects from its old address.
-  - **Previews.** A CMS pull request gets a preview deploy of the whole site, marked `noindex`.
-  - **The live site publishes `/facts.json`**, the short facts a post may name, for the preview.
 - **Verified domains** (`SLOTLOCK_VERIFIED_DOMAINS=on`, with team workspaces): a team's Owners add
   their organization's domain on Settings, Identity and publish a TXT record
   (`_slotlock-challenge.<domain>`, a 128-bit token per claim). The server's maintenance looks it up
@@ -251,9 +265,6 @@ notes first.
 
 ### Changed
 
-- **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
-  a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
-  the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.
 - **The change history cannot be edited** (RFC 0004 D2). The serving role may only add changes
   and read them (`SLOTLOCK_APPEND_ONLY_TABLES` includes `outbox`): pruning goes through the
   definer `slotlock.prune_changes`, and the one edit is taking a person out
