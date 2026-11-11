@@ -12,7 +12,7 @@ export interface SlotlockHolidaySource {
   url?: string;
   /**
    * The calendar's name at its scope (1-200 characters): importing again under it replaces what
-   * it said. By default the calendar's own (X-WR-CALNAME), else the URL's host and path, else
+   * it said. By default the calendar's own (X-WR-CALNAME), else the URL's host, else
    * "Holidays".
    */
   name?: string;
@@ -38,11 +38,10 @@ export interface SlotlockHolidayCalendarRead {
 const MAX_SPAN_DAYS = 1_096;
 const DEFAULT_SPAN_DAYS = 730;
 
-/** A URL's host and path, as a calendar's name. */
+/** A URL's host, as a calendar's name: never its path or query, which may hold its secret. */
 function nameOfUrl(url: string): string {
   try {
-    const parsed = new URL(url);
-    return [...`${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`].slice(0, 200).join('');
+    return [...new URL(url).host].slice(0, 200).join('') || 'Holidays';
   } catch {
     return 'Holidays';
   }

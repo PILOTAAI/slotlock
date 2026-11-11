@@ -3242,7 +3242,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
   listHolidayCalendars(params: { tenantRef: string }): Promise<SlotlockHolidayCalendar[]>;
   /** Delete a holiday calendar and its closures; null for one the tenant does not have. */
   deleteHolidayCalendar(params: { tenantRef: string; id: string }): Promise<{ closures: number } | null>;
-  /** Subscriptions due to be imported again, the longest waiting first. */
+  /**
+   * Subscriptions due to be imported again, each put off a day before it is read (maintenance):
+   * importing it sets its next import, so one a pass never finishes is not tried again at once.
+   */
   dueHolidayCalendars(params: { tenantRef: string; limit: number }): Promise<SlotlockHolidayCalendar[]>;
   /** Note why a subscription's import failed; it is tried again a day later. */
   noteHolidayCalendarFailure(params: { tenantRef: string; id: string; error: string }): Promise<void>;

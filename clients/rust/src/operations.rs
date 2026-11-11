@@ -3046,13 +3046,15 @@ impl Client {
     /// seconds; private addresses refused). Each all-day event closes the days it covers, and
     /// each occurrence of a recurring one within from to to (default today to two years on, at
     /// most three years); timed and cancelled events are skipped. The calendar is kept by name at
-    /// its scope (name, by default its own X-WR-CALNAME, else the url's host and path, else
-    /// Holidays): importing it again updates its closures instead of adding more, and deletes the
-    /// ones it made that it no longer names within the span (removed), so a holiday it dropped
-    /// goes too. With subscribe (and a url), the server keeps the url and imports it again every
-    /// 30 days. At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
-    /// invalid_holiday_calendar for text that is not one; 400 holiday_calendar_unreachable when
-    /// the url cannot be read; 400 holiday_url_not_served where the server fetches no urls.
+    /// its scope (name, by default its own X-WR-CALNAME, else the url's host, else Holidays):
+    /// importing it again updates its closures instead of adding more, and deletes the ones it
+    /// made that it no longer names within the span (removed), so a holiday it dropped goes too.
+    /// With subscribe (and a url), the server keeps the url and imports it again every 30 days.
+    /// At most 50 calendars a tenant (409 holiday_calendars_limit_reached). 400
+    /// invalid_holiday_calendar for text that is not one, or one that repeats more often than
+    /// daily, daily on days of the month or year, or too much to read; 400
+    /// holiday_calendar_unreachable when the url cannot be read; 400 holiday_url_not_served where
+    /// the server fetches no urls.
     pub fn import_holidays(&self, input: &ImportHolidaysInput) -> Result<Value, Error> {
         self.call("slotlock_import_holidays", serde_json::to_value(input)?)
     }
