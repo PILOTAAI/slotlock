@@ -347,7 +347,13 @@ webhook URLs or secrets.
   to `maintainSlotlockTenant` moves them instead, as a new revision, unless that overlaps another
   booking (`event.timezone_conflict`; it stays, for a person or an agent to decide). It also
   re-checks a recurring series' occurrences to come, reporting each once (`event.timezone_shifted`
-  with its `recurrence_id`), and reservations written with a `local_start` (`localStart`), which
+  with its `recurrence_id`) or, with `followZoneRules`, moving the whole series at its next
+  revision: every shifted occurrence and the booking that holds it, each keeping its
+  `recurrence_id`, in one transaction. It moves only where this server's zone rules put each wall
+  time where the database's do; otherwise each is reported with `reason: "rules_disagree"`, since
+  a server with older rules would compute the old times again. Something in the way keeps the
+  series' times and is said once (`event.timezone_conflict`). Reservations written with a
+  `local_start` (`localStart`) are re-checked too, which
   it reports (`reservation.timezone_shifted`) or moves (`reservation.timezone_conflict` when it
   cannot). `/healthz` reports the `tzdata` the server runs.
 - Feed health: `GET /v1/resources/{id}/coverage` shows each source (and its `source_id`, as the feed

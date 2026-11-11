@@ -117,7 +117,11 @@ versioning.
   enforced. A pick-up or return refusal comes with alternatives, as other refusals of a time do.
 - Zone rule changes reach everything (RFC 0004 B9): `followZoneRules` also re-checks a recurring
   series' occurrences to come (each kept with its wall time, reported once as
-  `event.timezone_shifted` with its `recurrence_id`), and reservations written with the new
+  `event.timezone_shifted` with its `recurrence_id`; with `move`, the whole series moves at its
+  next revision in one transaction, each occurrence and its booking keeping its `recurrence_id`,
+  but only where the server's zone rules agree with the database's, else each is reported with
+  `reason: "rules_disagree"`; something in the way keeps its times, said once as
+  `event.timezone_conflict`), and reservations written with the new
   optional `local_start` (`localStart`), reported as `reservation.timezone_shifted` or, with
   `move`, moved at the next revision (`reservation.timezone_conflict` when something is in the
   way). A `local_start` that does not name the reservation's start is `400 invalid_local_start`.

@@ -8334,18 +8334,23 @@ function buildSlotlockStore(
           conflicts++;
         }
       }
-      // A series' occurrences to come (RFC 0004 B9): said on the feed, once each; the series moves
-      // when it is written again.
+      // A series' occurrences to come (RFC 0004 B9): said on the feed, once each; with `move`, each
+      // series moves whole, in one transaction, where Node's zone rules agree with the database's.
       const occurrences = await sql<{
         event_id: string;
         recurrence_id: string;
         resource_id: string;
+        reservation_id: string | null;
+        timezone: string;
+        wall: string;
         starts_at: Date;
         ends_at: Date;
         moved_start: Date;
       }[]>`
-        SELECT occurrence.event_id, occurrence.recurrence_id, event.resource_id, occurrence.starts_at,
-               occurrence.ends_at, slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) AS moved_start
+        SELECT occurrence.event_id, occurrence.recurrence_id, event.resource_id, occurrence.reservation_id,
+               event.timezone, to_char(occurrence.wall_starts_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS wall,
+               occurrence.starts_at, occurrence.ends_at,
+               slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) AS moved_start
           FROM slotlock.calendar_event_occurrences occurrence
           JOIN slotlock.calendar_events event ON event.id = occurrence.event_id
          WHERE event.tenant_ref = ${params.tenantRef} AND event.recurrence_rule IS NOT NULL
@@ -8355,14 +8360,19 @@ function buildSlotlockStore(
            AND slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) <> occurrence.starts_at
          ORDER BY occurrence.starts_at, occurrence.event_id
          LIMIT ${limit}`;
-      for (const occurrence of occurrences) {
+      type ShiftedOccurrence = (typeof occurrences)[number];
+      const reportOccurrence = async (
+        occurrence: ShiftedOccurrence,
+        type: 'event.timezone_shifted' | 'event.timezone_conflict',
+        reason?: 'rules_disagree',
+      ) => {
         await sql`
           UPDATE slotlock.calendar_event_occurrences SET zone_shift_reported_at = now()
            WHERE event_id = ${occurrence.event_id} AND recurrence_id = ${occurrence.recurrence_id}`;
         const shift = occurrence.moved_start.getTime() - occurrence.starts_at.getTime();
         await sql`
           INSERT INTO slotlock.outbox (tenant_ref, resource_id, type, subject, data, actor)
-          VALUES (${params.tenantRef}, ${occurrence.resource_id}, 'event.timezone_shifted', ${occurrence.event_id},
+          VALUES (${params.tenantRef}, ${occurrence.resource_id}, ${type}, ${occurrence.event_id},
                   ${sql.json({
                     id: occurrence.event_id,
                     recurrence_id: occurrence.recurrence_id,
@@ -8371,7 +8381,103 @@ function buildSlotlockStore(
                     end: occurrence.ends_at.toISOString(),
                     zone_start: occurrence.moved_start.toISOString(),
                     zone_end: new Date(occurrence.ends_at.getTime() + shift).toISOString(),
+                    ...(reason ? { reason } : {}),
                   })}, 'slotlock:tzdata')`;
+      };
+      const series = new Map<string, ShiftedOccurrence[]>();
+      for (const occurrence of occurrences) {
+        const list = series.get(occurrence.event_id) ?? [];
+        list.push(occurrence);
+        series.set(occurrence.event_id, list);
+      }
+      for (const batch of series.values()) {
+        if (!params.move) {
+          for (const occurrence of batch) await reportOccurrence(occurrence, 'event.timezone_shifted');
+          continue;
+        }
+        // The whole series moves at once: every occurrence to come that shifted, past the batch.
+        const shiftedOccurrences = await sql<ShiftedOccurrence[]>`
+          SELECT occurrence.event_id, occurrence.recurrence_id, event.resource_id, occurrence.reservation_id,
+                 event.timezone, to_char(occurrence.wall_starts_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS wall,
+                 occurrence.starts_at, occurrence.ends_at,
+                 slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) AS moved_start
+            FROM slotlock.calendar_event_occurrences occurrence
+            JOIN slotlock.calendar_events event ON event.id = occurrence.event_id
+           WHERE event.tenant_ref = ${params.tenantRef} AND occurrence.event_id = ${(batch[0] as ShiftedOccurrence).event_id}
+             AND occurrence.starts_at > now() AND occurrence.zone_shift_reported_at IS NULL
+             AND occurrence.wall_starts_at IS NOT NULL
+             AND slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) IS NOT NULL
+             AND slotlock.zoned_instant(occurrence.wall_starts_at, event.timezone) <> occurrence.starts_at
+           ORDER BY occurrence.starts_at`;
+        if (shiftedOccurrences.length === 0) continue;
+        // Moved only where this server's zone rules put each wall time where the database's do: a
+        // server with older rules would compute the old times again on the series' next write.
+        const agree = shiftedOccurrences.every((occurrence) => {
+          const wall = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(occurrence.wall);
+          if (!wall) return false;
+          try {
+            const node = zonedDateTimeToUtc(
+              {
+                year: Number(wall[1]),
+                month: Number(wall[2]),
+                day: Number(wall[3]),
+                hour: Number(wall[4]),
+                minute: Number(wall[5]),
+                second: Number(wall[6]),
+              },
+              occurrence.timezone,
+            );
+            return node.getTime() === occurrence.moved_start.getTime();
+          } catch {
+            return false;
+          }
+        });
+        if (!agree) {
+          for (const occurrence of shiftedOccurrences) await reportOccurrence(occurrence, 'event.timezone_shifted', 'rules_disagree');
+          continue;
+        }
+        const eventId = (shiftedOccurrences[0] as ShiftedOccurrence).event_id;
+        try {
+          await inTransaction(sql, async (tx) => {
+            await tx`SELECT set_config('slotlock.actor', 'slotlock:tzdata', true)`;
+            for (const occurrence of shiftedOccurrences) {
+              const movedEnd = new Date(occurrence.ends_at.getTime() + occurrence.moved_start.getTime() - occurrence.starts_at.getTime());
+              await tx`
+                UPDATE slotlock.calendar_event_occurrences
+                   SET starts_at = ${occurrence.moved_start}, ends_at = ${movedEnd}
+                 WHERE event_id = ${eventId} AND recurrence_id = ${occurrence.recurrence_id}`;
+              if (occurrence.reservation_id !== null) {
+                await tx`
+                  UPDATE slotlock.reservations SET starts_at = ${occurrence.moved_start}, ends_at = ${movedEnd}
+                   WHERE id = ${occurrence.reservation_id}::uuid`;
+              }
+            }
+            // The series at its next revision; its anchor too, while it is still to come.
+            const [bumped] = await tx<{ revision: string | number }[]>`
+              UPDATE slotlock.calendar_events
+                 SET starts_at = CASE WHEN starts_at > now()
+                                      THEN COALESCE(slotlock.zoned_instant(wall_starts_at, timezone), starts_at)
+                                      ELSE starts_at END,
+                     ends_at = CASE WHEN starts_at > now()
+                                    THEN COALESCE(slotlock.zoned_instant(wall_ends_at, timezone), ends_at)
+                                    ELSE ends_at END,
+                     revision = revision + 1, updated_at = now()
+               WHERE id = ${eventId}
+               RETURNING revision`;
+            await tx`UPDATE slotlock.reservations SET revision = ${Number(bumped?.revision)} WHERE calendar_event_id = ${eventId}`;
+          });
+          moved++;
+        } catch (error) {
+          if (pgCode(error) !== EXCLUSION_VIOLATION) throw error;
+          // Something is in the way: the series keeps its times, said once, at its first shifted one.
+          await reportOccurrence(shiftedOccurrences[0] as ShiftedOccurrence, 'event.timezone_conflict');
+          for (const occurrence of shiftedOccurrences.slice(1)) {
+            await sql`
+              UPDATE slotlock.calendar_event_occurrences SET zone_shift_reported_at = now()
+               WHERE event_id = ${occurrence.event_id} AND recurrence_id = ${occurrence.recurrence_id}`;
+          }
+          conflicts++;
+        }
       }
       // Reservations that carry the wall time they were booked for (RFC 0004 B9).
       const reservations = await sql<{

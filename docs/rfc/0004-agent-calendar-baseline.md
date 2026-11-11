@@ -456,7 +456,13 @@ occurrences, and reservations that carry a wall time (a new optional `local_star
 
 As built: an occurrence keeps its wall time when it is written, by a trigger, and occurrences to
 come from before were given theirs as the rules read at upgrade. Shifted occurrences are reported
-once, each. A series is not moved occurrence by occurrence; it moves when it is written again. A
+once, each. With `move`, a series moves whole at its next revision, in one transaction: every
+shifted occurrence and its booking, each keeping its `recurrence_id`, so exceptions keyed by it
+still apply. It moves only where the server's zone rules (ICU) put each wall time where
+PostgreSQL's do, otherwise each is reported with `reason: "rules_disagree"`; a conflict keeps the
+series' times and is said once. Keying occurrences by wall time instead of instant (so a later
+re-expansion keeps exceptions however the rules change) is left for the next change to recurrence
+storage. A
 reservation's `local_start` must name its start when written (`invalid_local_start`). With `move`,
 a shifted reservation is moved at the next revision, on the feed as any move, or reported as a
 conflict when the constraint refuses.

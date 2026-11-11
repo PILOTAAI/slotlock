@@ -111,4 +111,66 @@ describe.skipIf(!url)('zone rule changes (real Postgres)', () => {
          AND type = 'event.timezone_shifted'`;
     expect(reported?.data).toMatchObject({ recurrence_id: first?.recurrence_id, zone_start: new Date(at(9).getTime() + HOUR).toISOString() });
   });
+
+  it('moves a whole series when asked, at its next revision, unless something is in the way', async () => {
+    const series = async (ref: string) => {
+      const room = await store.withTenant(tenantRef, (tenant) =>
+        tenant.createResource({ tenantRef, externalRef: ref, timezone: 'Europe/London' }),
+      );
+      const put = await store.withTenant(tenantRef, (tenant) =>
+        tenant.putCalendarEvent({
+          tenantRef,
+          externalRef: `${ref}-standup`,
+          resourceId: room.id,
+          expectedRevision: 0,
+          idempotencyKey: `${ref}-standup-1`,
+          start: at(9),
+          end: at(9.5),
+          timezone: 'Europe/London',
+          summary: 'Stand-up',
+          recurrence: { rrule: 'FREQ=DAILY;COUNT=3' },
+          materializationWindow: { start: at(0), end: at(24 * 5) },
+        }),
+      );
+      expect(put.ok).toBe(true);
+      const eventId = (put as { eventId: string }).eventId;
+      await shiftRules('calendar_event_occurrences', sql`event_id = ${eventId}`);
+      // The series' own start names an hour later too.
+      await sql`
+        UPDATE slotlock.calendar_events
+           SET wall_starts_at = wall_starts_at + interval '1 hour', wall_ends_at = wall_ends_at + interval '1 hour'
+         WHERE id = ${eventId}`;
+      return { roomId: room.id, eventId };
+    };
+    const occurrences = (eventId: string) =>
+      sql<{ recurrence_id: string; starts_at: Date; booked: Date }[]>`
+        SELECT occurrence.recurrence_id, occurrence.starts_at, booking.starts_at AS booked
+          FROM slotlock.calendar_event_occurrences occurrence
+          JOIN slotlock.reservations booking ON booking.id = occurrence.reservation_id
+         WHERE occurrence.event_id = ${eventId} ORDER BY occurrence.starts_at`;
+
+    const free = await series('room-free');
+    const before = await occurrences(free.eventId);
+    const result = await follow(true);
+    expect(result).toMatchObject({ moved: 1, conflicts: 0 });
+    const after = await occurrences(free.eventId);
+    // Each occurrence, and the booking that holds its time, an hour on; each keeps its id.
+    expect(after.map((row) => row.recurrence_id)).toEqual(before.map((row) => row.recurrence_id));
+    expect(after.map((row) => row.starts_at.getTime())).toEqual(before.map((row) => row.starts_at.getTime() + HOUR));
+    expect(after.map((row) => row.booked.getTime())).toEqual(after.map((row) => row.starts_at.getTime()));
+    const [event] = await sql<{ revision: number; starts_at: Date }[]>`
+      SELECT revision, starts_at FROM slotlock.calendar_events WHERE id = ${free.eventId}`;
+    expect(Number(event?.revision)).toBe(2);
+    expect(event?.starts_at.getTime()).toBe(at(10).getTime());
+    expect(await follow(true)).toMatchObject({ shifted: 0, moved: 0 });
+
+    // A booking where the second stand-up would move: the series keeps its times, said once.
+    const blocked = await series('room-taken');
+    await reserve(blocked.roomId, 'taken-day-2', 24 + 10);
+    expect(await follow(true)).toMatchObject({ moved: 0, conflicts: 1 });
+    expect((await occurrences(blocked.eventId)).map((row) => row.starts_at.getTime())).toEqual([at(9), at(33), at(57)].map((time) => time.getTime()));
+    const said = await changes(blocked.eventId);
+    expect(said.filter(([type]) => type === 'event.timezone_conflict')).toEqual([['event.timezone_conflict', 'slotlock:tzdata']]);
+    expect(await follow(true)).toMatchObject({ conflicts: 0 });
+  });
 });
