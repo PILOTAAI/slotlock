@@ -56,7 +56,8 @@ export interface FakeGithubRepo {
   merges: { title: string; message: string; number: number }[];
 }
 
-const hash = (value: string | Uint8Array) => createHash('sha1').update(value).digest('hex');
+/** An object id shaped like git's (40 hex characters), from SHA-256: the fake needs only unique names. */
+const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex').slice(0, 40);
 const utf8 = (value: string) => new TextEncoder().encode(value);
 
 export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, options: { now?: () => number } = {}): FakeGithubRepo {
