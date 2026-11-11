@@ -79,6 +79,8 @@ const UPKEEP = [
   'recordAuditEvent',
   'pruneAuditEvents',
   'sweepAssistantConversations',
+  // Deleting finished team invitations: no tenant's data, and nothing a suspension holds.
+  'sweepWorkspaceInvitations',
   // Counting what was written already: a suspension stops new writes, not the count of old ones.
   'rollUpUsage',
 ];

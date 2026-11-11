@@ -21,6 +21,16 @@ versioning.
 - **An audit log** (`slotlock.audit_events`, 180 days): key, webhook, billing, assistant-model,
   contact and session changes, and every refusal, with where they came from. The serving role may
   only add to it and read it (`SLOTLOCK_APPEND_ONLY_TABLES`); maintenance prunes it.
+- **Team workspaces** (`SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on`): anyone signed in creates a
+  workspace of its own (`team:<id>`) on the Teams page, invites people to it by email with a role,
+  and changes their roles, removes them (revoking the keys they made, or keeping them) or leaves on
+  Settings, Members. An invitation's link works once, for seven days, only for the address it was
+  sent to (verified by Google, or by GitHub when the person confirms it), and opening it consumes
+  nothing. A team always keeps an Owner; nobody gives a role above their own. `serve` takes a
+  team's keys only with the setting on and while the team exists. Where plans apply, each person
+  creates one team on Free, which holds up to 3 people. `SlotlockInvitationSender` sends the
+  links by email where a deployment has one; otherwise the person inviting copies it.
+- Google's `email_verified` is accepted as the string `"true"` as well as `true`.
 
 ### Changed
 
@@ -28,7 +38,8 @@ versioning.
   Full-access key (which reaches contacts, webhooks, history and erasure), revoke anyone's key and
   add webhooks. Members are now Developers: read-only and read-write keys of their own, resources,
   rules and hours. Review the Full-access keys your organization's members created.
-- Run `slotlock migrate`: three new tables and four functions. With the membership store (as
+- Run `slotlock migrate`: five new tables and twenty functions; the schema version becomes 5, which
+  a 0.9 release refuses. With the membership store (as
   `serve` and the hosted dashboard run), every session carries its person's epoch: sessions from
   before this release have none, so everyone signs in once more after it.
 

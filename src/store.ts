@@ -4006,6 +4006,11 @@ export interface SlotlockStore extends SlotlockEventFeed {
    */
   sweepAssistantConversations(params?: { limit?: number }): Promise<number>;
   /**
+   * Delete team workspace invitations finished (accepted, revoked or expired) more than 30 days ago,
+   * with the addresses they were sent to (slotlock.prune_workspace_invitations): how many.
+   */
+  sweepWorkspaceInvitations(): Promise<number>;
+  /**
    * Offer freed time to the waitlist in join order: each waiting entry whose window is free (on its
    * resource, or the first free pool member) gets a hold for its holder (`waitlist.offered`).
    * Started windows expire (`waitlist.expired`); finished entries past retention are deleted. One
@@ -9994,6 +9999,12 @@ function buildSlotlockStore(
       }
       const [row] = await sql<{ deleted: string | number }[]>`
         SELECT slotlock.sweep_assistant_conversations(${limit}::integer) AS deleted`;
+      return Number(row?.deleted ?? 0);
+    },
+
+    async sweepWorkspaceInvitations() {
+      const [row] = await sql<{ deleted: string | number }[]>`
+        SELECT slotlock.prune_workspace_invitations() AS deleted`;
       return Number(row?.deleted ?? 0);
     },
 

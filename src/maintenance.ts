@@ -433,6 +433,8 @@ export function startSlotlockMaintenance(
     if (controller.signal.aborted || Date.now() - lastSweep < Math.min(intervalMs, SWEEP_INTERVAL_MS)) return;
     lastSweep = Date.now();
     options.store.sweepAssistantConversations().catch(report);
+    // Team invitations finished a month ago, with the addresses they were sent to.
+    options.store.sweepWorkspaceInvitations().catch(report);
   };
   // Every tenant with data, once an interval: those no key has called since the server started too.
   let lastDiscovery = Number.NEGATIVE_INFINITY;

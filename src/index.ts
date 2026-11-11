@@ -293,6 +293,7 @@ export type {
   SlotlockDashboardOptions,
   SlotlockDashboardResources,
   SlotlockDashboardState,
+  SlotlockInvitationSender,
 } from './dashboard.js';
 export {
   createSlotlockAssistantStore,
@@ -318,11 +319,18 @@ export type { SlotlockDashboardTeams } from './teams.js';
 export {
   createSlotlockDashboardWorkspaces,
   createSlotlockMemoryDashboardWorkspaces,
+  createSlotlockWorkspaceCheck,
 } from './workspaces.js';
 export type {
   SlotlockDashboardWorkspaces,
   SlotlockGitHubMembership,
+  SlotlockInvitationPreview,
+  SlotlockTeamRefusal,
+  SlotlockTeamWorkspace,
+  SlotlockWorkspaceInvitation,
+  SlotlockWorkspaceMember,
   SlotlockWorkspaceStanding,
+  SlotlockWorkspaceTeams,
 } from './workspaces.js';
 export {
   SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,

@@ -93,6 +93,38 @@ refused.
   out everywhere, and every refusal, with the address and browser it came from. The serving role
   can only add to it and read it.
 
+## Team workspaces
+
+Set `SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on` (on the server, and on the Worker when the dashboard
+runs there) for workspaces people make and share, apart from GitHub: each is a tenant of its own,
+`team:<id>`. It needs the database the dashboard's roles come from, and does not go with a list of
+`SLOTLOCK_DASHBOARD_ORGS`.
+
+- **Create one** on the Teams page: a name is all it asks, and its handle follows from it. Its
+  creator is its Owner and lands on Settings, Members. The workspace menu lists each team a person
+  is in beside their own workspace.
+- **Invite by email**, with a role, on Members. An Owner gives any role; an Admin any up to Admin;
+  nobody else invites. Making an Owner or a Billing manager also needs the inviter's own sign-in
+  in the last 15 minutes.
+- **The link** is shown once to the person who invited, and sent by email where a sender is set.
+  It works once, for seven days, and only for that address: a Google account with it verified, or
+  a GitHub account that verifies it (the dashboard asks GitHub for the account's verified
+  addresses, `user:email`, only then, and keeps only the invited one, in the session, until the
+  person joins). Opening the link consumes nothing, so a mail scanner's visit is harmless; only the
+  token's SHA-256 digest is stored. Sending one again makes a new link and ends the old one.
+- **Invitations open to a person** also appear on their Teams page to join, without the link.
+- **Change a role, remove someone, or leave** on Members. A team always keeps an Owner: the last
+  one makes another Owner first, then may step down or leave. Removing someone revokes the keys
+  they created, Live and Test, unless the form keeps them. Their next request is refused.
+- **Limits**: a team sends at most 50 invitations a day. Where plans apply, each person may create
+  one team on the Free plan, which has up to 3 people, open invitations included.
+- The server takes a team's keys only with the setting on, and only while the team exists (checked
+  in the database, kept 30 seconds).
+- Each person's GitHub login, or the email Google verified, is kept (`slotlock.dashboard_people`)
+  to show them to the others in their teams. Invitations keep the address they were sent to until
+  30 days after they are accepted, revoked or expire. Erasing a person refuses while they are a
+  team's only Owner; erasing a team takes its members and invitations with it.
+
 ## Organizations
 
 For organizations instead of people, set `SLOTLOCK_DASHBOARD_ORGS` to the GitHub organization ids
