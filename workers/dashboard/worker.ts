@@ -61,7 +61,11 @@ import {
 } from '../../src/rate-limit.js';
 import { createSlotlockStore } from '../../src/store.js';
 import { createSlotlockDashboardTeams } from '../../src/teams.js';
-import { type SlotlockDashboardWorkspaces, createSlotlockDashboardWorkspaces } from '../../src/workspaces.js';
+import {
+  type SlotlockDashboardWorkspaces,
+  type SlotlockWorkspaceTeams,
+  createSlotlockDashboardWorkspaces,
+} from '../../src/workspaces.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT } from '../../src/overage.js';
 
 /**
@@ -248,6 +252,22 @@ function perRequest<T extends object>(current: () => T): T {
 }
 
 /**
+ * The membership store through the request's client, its team workspaces too: the dashboard reads
+ * `teams` once, as it is built, outside any request.
+ */
+function perRequestWorkspaces(current: () => SlotlockDashboardWorkspaces): SlotlockDashboardWorkspaces {
+  const teams = perRequest(() => current().teams as SlotlockWorkspaceTeams);
+  return new Proxy({} as SlotlockDashboardWorkspaces, {
+    get(_target, property) {
+      if (property === 'teams') return teams;
+      const target = current();
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
  * The client a request is counted as: CF-Connecting-IP, which Cloudflare sets itself, keyed as
  * `slotlock serve` keys an address, so an IPv6 client is its whole /64 and rotating the rest of its
  * address buys it no new budget. Undefined without a valid address.
@@ -362,6 +382,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         : {}),
       ...(config.name ? { name: config.name } : {}),
       ...(config.termsUrl ? { termsUrl: config.termsUrl } : {}),
+      ...(config.teamWorkspaces ? { teamWorkspaces: true } : {}),
       ...(config.privacyUrl ? { privacyUrl: config.privacyUrl } : {}),
       availability: readAvailability(vars),
       // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through
@@ -444,7 +465,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
       resources: perRequest(() => current().resources),
       state: perRequest(() => current().state),
       // Roles from the database on every request, and "Sign out everywhere" (workspaces.ts).
-      workspaces: perRequest(() => current().workspaces),
+      workspaces: perRequestWorkspaces(() => current().workspaces),
       onError: (error) =>
         console.error(
           JSON.stringify({

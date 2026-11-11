@@ -135,6 +135,11 @@ export interface SlotlockServeDashboardConfig {
    * `'enabled'`: those an owner turned on from the dashboard (Teams on Cloud, teams.ts).
    */
   organizations?: string[] | 'enabled';
+  /**
+   * Team workspaces (SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on): anyone signed in creates one and invites
+   * people to it by email, each with a role (workspaces.ts).
+   */
+  teamWorkspaces?: boolean;
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
   /**
@@ -261,6 +266,12 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_GOOGLE_CLIENT_ID does not go with a list of SLOTLOCK_DASHBOARD_ORGS: those organizations are GitHub\'s; use SLOTLOCK_DASHBOARD_ORGS=enabled to have both',
     );
   }
+  const teamWorkspaces = readDashboardTeamWorkspaces(env);
+  if (teamWorkspaces && Array.isArray(orgs)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_TEAM_WORKSPACES does not go with a list of SLOTLOCK_DASHBOARD_ORGS: with a list, everyone works in those organizations',
+    );
+  }
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
@@ -278,6 +289,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       ? { google: { clientId: googleClientId, clientSecret: googleClientSecret } }
       : {}),
     ...(orgs !== undefined ? { organizations: orgs } : {}),
+    ...(teamWorkspaces ? { teamWorkspaces: true } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
     ...(termsUrl !== undefined ? { termsUrl } : {}),
     ...(privacyUrl !== undefined ? { privacyUrl } : {}),
@@ -358,6 +370,18 @@ export function readDashboardOrganizations(env: SlotlockEnv): string[] | 'enable
     );
   }
   return [...new Set(orgs.split(','))];
+}
+
+/**
+ * SLOTLOCK_DASHBOARD_TEAM_WORKSPACES: on or off (the default). Read on its own as well: a server whose
+ * dashboard runs elsewhere (on Cloudflare Workers) takes team workspaces' keys only with it on.
+ */
+export function readDashboardTeamWorkspaces(env: SlotlockEnv): boolean {
+  const value = optional(env, 'SLOTLOCK_DASHBOARD_TEAM_WORKSPACES') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_DASHBOARD_TEAM_WORKSPACES must be on or off');
+  }
+  return value === 'on';
 }
 
 /** A token bucket: `perSecond` tokens come back each second, and it holds at most `burst`. */

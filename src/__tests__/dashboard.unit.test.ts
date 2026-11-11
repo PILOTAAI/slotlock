@@ -1812,7 +1812,7 @@ describe('organizations', () => {
       moved,
     );
     expect(refused.status).toBe(409);
-    expect(await refused.text()).toContain('another organization');
+    expect(await refused.text()).toContain('That page was for another workspace.');
     expect(keys.store.create).not.toHaveBeenCalled();
   });
 

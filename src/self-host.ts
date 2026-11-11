@@ -65,6 +65,7 @@ import {
   readAvailability,
   readDashboardConfig,
   readDashboardOrganizations,
+  readDashboardTeamWorkspaces,
   readDashboardUsers,
   readLimits,
   readSecret,
@@ -93,7 +94,7 @@ import {
 } from './partners.js';
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
-import { createSlotlockDashboardWorkspaces } from './workspaces.js';
+import { createSlotlockDashboardWorkspaces, createSlotlockWorkspaceCheck } from './workspaces.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import {
   type SlotlockOtlpConfig,
@@ -190,6 +191,7 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_ASSISTANT_PRIVATE_URLS',
   'SLOTLOCK_DASHBOARD_USERS',
   'SLOTLOCK_DASHBOARD_ORGS',
+  'SLOTLOCK_DASHBOARD_TEAM_WORKSPACES',
   'SLOTLOCK_DASHBOARD_NAME',
   'SLOTLOCK_DASHBOARD_TERMS_URL',
   'SLOTLOCK_DASHBOARD_PRIVACY_URL',
@@ -306,6 +308,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * keys may act for, whether it serves the dashboard or another server (a Worker) does.
    */
   allowedUsers?: '*' | string[];
+  /**
+   * Team workspaces (SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on), whether this server serves the dashboard
+   * or a Worker does: their `team:<id>` keys act only while the workspace exists (workspace_active).
+   */
+  teamWorkspaces?: boolean;
   /**
    * Serve the REST API under /v1, with the application API for admin keys, and its OpenAPI document
    * (SLOTLOCK_REST_API: on unless off).
@@ -573,6 +580,7 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   if (dashboard !== undefined) config.dashboard = dashboard;
   const organizations = readDashboardOrganizations(env);
   if (organizations !== undefined) config.organizations = organizations;
+  if (readDashboardTeamWorkspaces(env)) config.teamWorkspaces = true;
   const allowedUsers = dashboard?.allowedUsers ?? readDashboardUsers(env);
   if (allowedUsers !== undefined) config.allowedUsers = allowedUsers;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
@@ -876,16 +884,18 @@ function serveMetrics(
 
 /**
  * Whether the dashboard's allowlists let a tenant act, wherever the dashboard runs: a
- * `github-org:<id>` tenant only while SLOTLOCK_DASHBOARD_ORGS lists that organization; a
- * `github:<id>` tenant only while SLOTLOCK_DASHBOARD_USERS is `*` or lists that id; every tenant when
- * SLOTLOCK_DASHBOARD_USERS is not set, and every other tenant.
+ * `github-org:<id>` tenant only while SLOTLOCK_DASHBOARD_ORGS lists that organization; a `team:<id>`
+ * tenant only with SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on (and, as serve's authenticate asks, while
+ * it exists); a `github:<id>` tenant only while SLOTLOCK_DASHBOARD_USERS is `*` or lists that id;
+ * every tenant when SLOTLOCK_DASHBOARD_USERS is not set, and every other tenant.
  */
 export function slotlockServeAllowsTenant(
-  config: Pick<SlotlockServeConfig, 'organizations' | 'allowedUsers'>,
+  config: Pick<SlotlockServeConfig, 'organizations' | 'allowedUsers' | 'teamWorkspaces'>,
   tenantRef: string,
 ): boolean {
   // A test environment (RFC 0003 G9) is let through exactly as its live tenant.
   const live = slotlockLiveTenant(tenantRef);
+  if (live.startsWith('team:')) return config.teamWorkspaces === true;
   const orgId = /^github-org:(\d+)$/.exec(live)?.[1];
   // With `enabled`, the database decides, as serve's authenticate asks (createSlotlockOrganizationCheck).
   if (orgId !== undefined) return config.organizations === 'enabled' || config.organizations?.includes(orgId) === true;
@@ -1148,6 +1158,8 @@ export async function startSlotlockServer(
     // Teams on Cloud: an organization's keys work while an owner has it turned on.
     const organizationEnabled =
       config.organizations === 'enabled' ? createSlotlockOrganizationCheck(sql) : null;
+    // Team workspaces: a team's keys work while it exists.
+    const teamActive = config.teamWorkspaces ? createSlotlockWorkspaceCheck(sql) : null;
     const limits = createSlotlockRequestLimits({
       limits: config.limits,
       ...(config.sharedLimits
@@ -1182,6 +1194,7 @@ export async function startSlotlockServer(
         if (!principal || !slotlockServeAllowsTenant(config, principal.tenantRef)) return null;
         const orgId = organizationEnabled ? /^github-org:(\d+)$/.exec(slotlockLiveTenant(principal.tenantRef))?.[1] : undefined;
         if (orgId !== undefined && !(await organizationEnabled?.(orgId))) return null;
+        if (slotlockLiveTenant(principal.tenantRef).startsWith('team:') && !(await teamActive?.(principal.tenantRef))) return null;
         // Slotlock-Account is a partner key's alone (RFC 0003 P3): with any other credential, or one
         // that could not act for that account, the request is refused rather than run elsewhere.
         if (request.headers.has(SLOTLOCK_ACCOUNT_FIELD) && principal.onBehalfOf === undefined) return null;
@@ -1303,6 +1316,7 @@ export async function startSlotlockServer(
               ? { organizations: config.dashboard.organizations }
               : {}),
             ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
+            ...(config.dashboard.teamWorkspaces ? { teamWorkspaces: true } : {}),
             keys: createSlotlockApiKeyStore(sql),
             // Holiday calendars by address (RFC 0004 B1), never from a private address.
             resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: createSlotlockGuardedFetch() }),
@@ -2372,6 +2386,8 @@ async function maintainTenant(
       // Every tenant's expired assistant conversations, a tenant only the dashboard serves
       // included. Counted nowhere: the counts above are this tenant's.
       await store.sweepAssistantConversations();
+      // And finished team invitations, with the addresses they were sent to.
+      await store.sweepWorkspaceInvitations();
       return sum;
     });
     return total ?? null;
@@ -2641,6 +2657,9 @@ Environment:
   SLOTLOCK_DASHBOARD_ORGS        comma-separated GitHub organization ids: each is one shared tenant;
                                  or enabled: each person's own tenant, plus the organizations an
                                  owner turns on from the dashboard's Teams page
+  SLOTLOCK_DASHBOARD_TEAM_WORKSPACES on: anyone signed in creates team workspaces and invites
+                                 people to them by email, each with a role (default off; not
+                                 with organization ids)
   SLOTLOCK_DASHBOARD_NAME        What the dashboard calls this deployment (default Slotlock)
   SLOTLOCK_DASHBOARD_TERMS_URL   https URL of the terms people accept by signing in, linked on the
                                  sign-in page (none named without it)

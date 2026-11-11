@@ -54,10 +54,14 @@ function fakeStore() {
     params: Record<string, unknown>;
   }[] = [];
   let gate: Promise<void> | null = null;
-  const sweeps = { count: 0 };
+  const sweeps = { count: 0, invitations: 0 };
   const store = {
     async sweepAssistantConversations() {
       sweeps.count += 1;
+      return 0;
+    },
+    async sweepWorkspaceInvitations() {
+      sweeps.invitations += 1;
       return 0;
     },
     async withTenant(tenantRef: string, callback: (tenant: unknown) => Promise<unknown>) {
@@ -366,16 +370,18 @@ describe('startSlotlockMaintenance', () => {
     await scheduler.close();
   });
 
-  it("sweeps every tenant's expired assistant conversations at once, then every quarter hour, with no tenant of its own", async () => {
+  it("sweeps every tenant's expired assistant conversations, and finished team invitations, at once, then every quarter hour, with no tenant of its own", async () => {
     const fake = fakeStore();
     const scheduler = startSlotlockMaintenance({ store: fake.store, sql: fakeSql().sql, tenants: [], intervalMs: HOUR });
     const sweeps = () => fake.sweeps.count;
     await settle();
     expect(sweeps()).toBe(1);
+    expect(fake.sweeps.invitations).toBe(1);
     await vi.advanceTimersByTimeAsync(14 * 60_000);
     expect(sweeps()).toBe(1);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(sweeps()).toBe(2);
+    expect(fake.sweeps.invitations).toBe(2);
     await scheduler.close();
   });
 
