@@ -75,6 +75,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ['eli', { id: base + 4, login: 'eli', emails: [] }],
     ['fay', { id: base + 5, login: 'fay', emails: [] }],
     ['gus', { id: base + 6, login: 'gus', emails: [] }],
+    ['hal', { id: base + 7, login: 'hal', emails: [] }],
   ]);
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -582,6 +583,55 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     // The export is itself recorded, and the log checks out.
     expect(await (await gus.get('/dashboard/settings/audit?action=audit.exported')).text()).toContain('exported the audit log');
     expect(await (await gus.get('/dashboard/settings/audit?verify=1')).text()).toContain('The log is unbroken');
+  });
+
+  it('deletes a team after an Owner types its handle, tells every member, and lets an Owner keep it', async () => {
+    const hal = new Browser(dashboard);
+    await signIn(hal, 'hal');
+    await hal.post('/dashboard/teams', '/teams/create', { name: 'Short Lived' });
+    const team = await teamOf(hal);
+    tenants.push(team);
+    const page = await (await hal.get('/dashboard/settings/team')).text();
+    expect(page).toContain('1 member, 0 resources');
+    expect(page).toContain('Type short-lived to confirm');
+    const wrong = await hal.post('/dashboard/settings/team', '/teams/delete', { confirm: 'short' });
+    expect(wrong.status).toBe(400);
+    expect(await wrong.text()).toContain('Type the team&#39;s handle to confirm.');
+    const asked = await hal.post('/dashboard/settings/team', '/teams/delete', { confirm: 'short-lived' });
+    expect(asked.status).toBe(303);
+    const banner = await (await hal.get('/dashboard')).text();
+    expect(banner).toContain('This team is deleted on');
+    expect(banner).toContain('its keys are refused.');
+    // Being deleted, it takes no plan: kept first.
+    const checkouts: unknown[] = [];
+    const billed = build({
+      billing: {
+        plan: async () => null,
+        enrol: async () => undefined,
+        checkout: async (input) => {
+          checkouts.push(input);
+          return 'https://checkout.stripe.com/c/pay/cs_test_deleting';
+        },
+        portal: async () => 'https://billing.stripe.com/p/session/test',
+        prices: { month: '$10', year: '$100' },
+        teamPrices: { month: '$40', year: '$400' },
+        contact: 'mailto:founder@example.com',
+        formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+      },
+    });
+    const paying = new Browser(billed);
+    for (const [name, value] of hal.cookies) paying.cookies.set(name, value);
+    const upgrade = await paying.post('/dashboard/plan', '/plan/upgrade', { interval: 'month' });
+    expect(upgrade.status).toBe(409);
+    expect(await upgrade.text()).toContain('This team is being deleted.');
+    expect(checkouts).toEqual([]);
+    expect(await createSlotlockDashboardWorkspaces(application).teams?.isActive(team)).toBe(false);
+    expect((await hal.post('/dashboard/settings/team', '/teams/restore', {})).status).toBe(303);
+    expect(await (await hal.get('/dashboard')).text()).not.toContain('This team is deleted on');
+    expect(await createSlotlockDashboardWorkspaces(application).teams?.isActive(team)).toBe(true);
+    const audited = await (await hal.get('/dashboard/settings/audit')).text();
+    expect(audited).toContain('asked for the team to be deleted');
+    expect(audited).toContain('kept the team');
   });
 
   it("serves a team's keys only with team workspaces on", () => {
