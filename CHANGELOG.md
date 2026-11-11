@@ -5,6 +5,33 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- **Roles in the dashboard.** What each person may do in a workspace is one of six roles (Owner,
+  Admin, Developer, Member, Viewer, Billing), read from the database on every request
+  (`slotlock.workspace_memberships`, `createSlotlockDashboardWorkspaces`), so a role changed or a
+  membership ended applies at the next request. Every dashboard route needs a capability
+  (`workspace-roles.ts`); one with none is refused. A person is the Owner of their own workspace;
+  in an organization's, GitHub's owners are its Owners and its members Developers.
+- **Confirm it's you.** Full-access keys, webhooks, billing and the assistant's model need a
+  sign-in in the last 15 minutes; past it, the dashboard asks the person to sign in again and
+  returns to the page.
+- **Sign out everywhere** (Settings, Account) ends every session of the person, on every device
+  (a per-person session epoch, `slotlock.dashboard_people`).
+- **An audit log** (`slotlock.audit_events`, 180 days): key, webhook, billing, assistant-model,
+  contact and session changes, and every refusal, with where they came from. The serving role may
+  only add to it and read it (`SLOTLOCK_APPEND_ONLY_TABLES`); maintenance prunes it.
+
+### Changed
+
+- **An organization's members no longer have every power.** Before, any member could create a
+  Full-access key (which reaches contacts, webhooks, history and erasure), revoke anyone's key and
+  add webhooks. Members are now Developers: read-only and read-write keys of their own, resources,
+  rules and hours. Review the Full-access keys your organization's members created.
+- Run `slotlock migrate`: three new tables and four functions. With the membership store (as
+  `serve` and the hosted dashboard run), every session carries its person's epoch: sessions from
+  before this release have none, so everyone signs in once more after it.
+
 ### Security
 
 From a review of RFC 0004's T2 changes, in five areas, each finding reproduced against a real
@@ -33,7 +60,6 @@ GOVERNANCE.md requires.
   refuse it too. Busy time that ended a month ago goes.
 - **A `@slotlock/sync` connect link could be reused** by anyone who had it for 30 minutes. A link is
   now followed once, and its flow is finished only in the browser that followed it.
-
 
 ## 0.9.1 - 2026-11-11
 

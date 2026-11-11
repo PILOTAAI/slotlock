@@ -20,6 +20,7 @@ import {
   slotlockGroupingRef,
 } from './resource-profile.js';
 import { type SlotlockUsageRow, readSlotlockTenantUsage } from './usage.js';
+import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 import { slotlockPlanReadRefusal } from './plans.js';
 import {
   SLOTLOCK_CHANGE_ORIGINS,
@@ -193,6 +194,28 @@ const MAX_HOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BUFFER_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 /** A day, as bufferBeforeMinutes allows: a read by start can then still use the index. */
 const MAX_BUFFER_BEFORE_MS = 24 * 60 * 60 * 1000;
+/** An audit action: `area.verb` (or `area.thing.verb`), lowercase. */
+const AUDIT_ACTION = /^[a-z][a-z_]{0,31}(\.[a-z][a-z_]{0,31}){1,2}$/;
+const AUDIT_TARGET_TYPE = /^[a-z][a-z_]{0,31}$/;
+const AUDIT_ACTOR_TYPES: ReadonlySet<string> = new Set(['person', 'api_key', 'assistant', 'system']);
+
+/** Text cut to at most `max` UTF-8 bytes on a character boundary; null when absent or empty. */
+function cutBytes(value: string | undefined, max: number): string | null {
+  if (value === undefined || value === '') return null;
+  if (Buffer.byteLength(value, 'utf8') <= max) return value;
+  let out = '';
+  for (const character of value) {
+    if (Buffer.byteLength(out + character, 'utf8') > max) break;
+    out += character;
+  }
+  return out === '' ? null : out;
+}
+
+/** Audit metadata kept under the column's 4 KB: past it, the event says it was cut. */
+function boundAuditMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const text = JSON.stringify(metadata);
+  return text !== undefined && Buffer.byteLength(text, 'utf8') <= 3_000 ? metadata : { truncated: true };
+}
 export { SLOTLOCK_CALENDAR_HORIZON_DAYS, SLOTLOCK_SOURCE_BUSY_MAX };
 /**
  * Longest one-off event (ten years and some leap days); a recurring series is bounded by its
@@ -3957,6 +3980,24 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<Record<string, unknown> | null>;
   /** Delete one of a member's conversations. False when there was none. */
   deleteAssistantChat(params: { tenantRef: string; memberRef: string; chatId: string }): Promise<boolean>;
+  /**
+   * Add an event to the tenant's audit log (slotlock.audit_events). The log is append-only for the
+   * serving role: nothing here changes or removes an event. Text past its column's bound is cut.
+   */
+  recordAuditEvent(params: { tenantRef: string; event: SlotlockAuditEventInput }): Promise<void>;
+  /**
+   * The tenant's audit events, newest first: up to `limit` (1-200, default 50), before the event
+   * `before` names, and only those of `action` or `actorRef` when given.
+   */
+  listAuditEvents(params: {
+    tenantRef: string;
+    limit?: number;
+    before?: { occurredAt: Date; id: string };
+    action?: string;
+    actorRef?: string;
+  }): Promise<SlotlockAuditEvent[]>;
+  /** Delete the tenant's audit events older than SLOTLOCK_AUDIT_RETENTION_DAYS; how many went. */
+  pruneAuditEvents(params: { tenantRef: string }): Promise<number>;
   /** Delete up to `limit` (default 1,000) of the tenant's expired assistant conversations: how many. */
   pruneAssistantConversations(params: { tenantRef: string; limit?: number }): Promise<number>;
   /**
@@ -4100,6 +4141,33 @@ export interface SlotlockAssistantChatRecord extends SlotlockAssistantChatSummar
   createdAt: Date;
   /** When it is deleted unless used again; null when it is kept until the member deletes it. */
   expiresAt: Date | null;
+}
+
+/** What an audit event records (slotlock.audit_events): who did what, to what, from where. */
+export interface SlotlockAuditEventInput {
+  /** `<area>.<verb>`, such as `api_key.created` or `authz.denied`. */
+  action: string;
+  actorType: 'person' | 'api_key' | 'assistant' | 'system';
+  /** `github:<id>`, `google:<subject>`, `api_key:<id>`: a reference, never a name or an email. */
+  actorRef: string;
+  /** The actor's role in the workspace when it acted. */
+  actorRole?: SlotlockWorkspaceRole | null;
+  targetType?: string;
+  targetRef?: string;
+  outcome?: 'success' | 'denied';
+  reason?: string;
+  ipAddress?: string;
+  userAgent?: string;
+  /** Before-and-after values and the like: never a secret, a token or a key. */
+  metadata?: Record<string, unknown>;
+}
+
+/** An audit event as the log keeps it. */
+export interface SlotlockAuditEvent extends SlotlockAuditEventInput {
+  id: string;
+  occurredAt: Date;
+  outcome: 'success' | 'denied';
+  metadata: Record<string, unknown>;
 }
 
 
@@ -9938,6 +10006,88 @@ function buildSlotlockStore(
          WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
            AND chat_id = ${params.chatId} RETURNING 1`;
       return rows.length > 0;
+    },
+
+    async recordAuditEvent(params) {
+      if (!isValidIdentity(params.tenantRef)) {
+        throw invalidIdentityError('Slotlock tenant references must be 1-500 UTF-8 bytes');
+      }
+      const event = params.event;
+      if (!AUDIT_ACTION.test(event.action) || !AUDIT_ACTOR_TYPES.has(event.actorType) || !isValidIdentity(event.actorRef)) {
+        throw invalidIdentityError('Slotlock audit events need an action (area.verb), an actor type and an actor reference');
+      }
+      if (event.targetType !== undefined && !AUDIT_TARGET_TYPE.test(event.targetType)) {
+        throw invalidIdentityError('Slotlock audit event target types are lowercase words');
+      }
+      if (event.actorRole !== undefined && event.actorRole !== null && !isSlotlockWorkspaceRole(event.actorRole)) {
+        throw invalidIdentityError('Slotlock audit event roles are workspace roles');
+      }
+      await sql`
+        INSERT INTO slotlock.audit_events
+          (tenant_ref, action, actor_type, actor_ref, actor_role, target_type, target_ref, outcome,
+           reason, ip_address, user_agent, metadata)
+        VALUES (${params.tenantRef}, ${event.action}, ${event.actorType}, ${event.actorRef},
+                ${event.actorRole ?? null}, ${event.targetType ?? null}, ${cutBytes(event.targetRef, 500)},
+                ${event.outcome === 'denied' ? 'denied' : 'success'}, ${cutBytes(event.reason, 200)},
+                ${cutBytes(event.ipAddress, 64)}, ${cutBytes(event.userAgent, 256)},
+                ${sql.json(boundAuditMetadata(event.metadata ?? {}) as never)})`;
+    },
+
+    async listAuditEvents(params) {
+      if (!isValidIdentity(params.tenantRef)) return [];
+      const limit = Math.min(Math.max(Math.trunc(params.limit ?? 50), 1), 200);
+      const before = params.before;
+      const action = params.action !== undefined && AUDIT_ACTION.test(params.action) ? params.action : null;
+      const actor = params.actorRef !== undefined && isValidIdentity(params.actorRef) ? params.actorRef : null;
+      const rows = await sql<
+        {
+          id: string;
+          occurred_at: Date;
+          action: string;
+          actor_type: SlotlockAuditEventInput['actorType'];
+          actor_ref: string;
+          actor_role: SlotlockWorkspaceRole | null;
+          target_type: string | null;
+          target_ref: string | null;
+          outcome: 'success' | 'denied';
+          reason: string | null;
+          ip_address: string | null;
+          user_agent: string | null;
+          metadata: Record<string, unknown>;
+        }[]
+      >`
+        SELECT id, occurred_at, action, actor_type, actor_ref, actor_role, target_type, target_ref,
+               outcome, reason, ip_address, user_agent, metadata
+          FROM slotlock.audit_events
+         WHERE tenant_ref = ${params.tenantRef}
+           AND (${action}::text IS NULL OR action = ${action}::text)
+           AND (${actor}::text IS NULL OR actor_ref = ${actor}::text)
+           AND (${before?.occurredAt ?? null}::timestamptz IS NULL
+                OR (occurred_at, id) < (${before?.occurredAt ?? null}::timestamptz, ${before?.id ?? null}::uuid))
+         ORDER BY occurred_at DESC, id DESC
+         LIMIT ${limit}`;
+      return rows.map((row) => ({
+        id: row.id,
+        occurredAt: row.occurred_at,
+        action: row.action,
+        actorType: row.actor_type,
+        actorRef: row.actor_ref,
+        actorRole: row.actor_role,
+        ...(row.target_type !== null ? { targetType: row.target_type } : {}),
+        ...(row.target_ref !== null ? { targetRef: row.target_ref } : {}),
+        outcome: row.outcome,
+        ...(row.reason !== null ? { reason: row.reason } : {}),
+        ...(row.ip_address !== null ? { ipAddress: row.ip_address } : {}),
+        ...(row.user_agent !== null ? { userAgent: row.user_agent } : {}),
+        metadata: row.metadata,
+      }));
+    },
+
+    async pruneAuditEvents(params) {
+      if (!isValidIdentity(params.tenantRef)) return 0;
+      const [row] = await sql<{ pruned: number }[]>`
+        SELECT slotlock.prune_audit_events(${params.tenantRef}::text) AS pruned`;
+      return Number(row?.pruned ?? 0);
     },
 
     async offerWaitlist(params) {

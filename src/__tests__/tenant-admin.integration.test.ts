@@ -500,6 +500,10 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           keep: [],
           ttlMs: HOUR,
         });
+        await tenant.recordAuditEvent({
+          tenantRef,
+          event: { action: 'api_key.created', actorType: 'person', actorRef: `github:${uid}`, actorRole: 'owner' },
+        });
         expect(
           (
             await tenant.recordCalendarCoverage({
@@ -644,7 +648,11 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       // a tenant column is the tenant's data and must be erased.
       // partner_accounts is a partner's record of one of its accounts (partner:<id>:<account>):
       // erased with it, which partners.integration covers, and never a direct tenant's.
-      const owned = tables.filter((table) => table !== 'tenant_suspensions' && table !== 'partner_accounts');
+      // workspace_memberships holds a shared workspace's members (github-org:, team:), never a
+      // person's own tenant's: workspaces.integration covers its erasure, a person's included.
+      const owned = tables.filter(
+        (table) => table !== 'tenant_suspensions' && table !== 'partner_accounts' && table !== 'workspace_memberships',
+      );
       expect(tables).toContain('tenant_suspensions');
       const before = await counts(tenantRef, owned);
       const canaryBefore = await counts(canary, owned);

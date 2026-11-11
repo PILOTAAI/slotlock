@@ -95,6 +95,9 @@ function fakeStore() {
         async pruneAssistantConversations() {
           return 0;
         },
+        async pruneAuditEvents() {
+          return 0;
+        },
         async offerWaitlist() {
           return { offered: 0, expired: 0, next: null };
         },

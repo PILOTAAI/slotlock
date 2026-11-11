@@ -23,8 +23,8 @@ export interface SlotlockMaintenanceResult {
   refused: number;
   /**
    * Rows deleted: expired holds and their keyed answers; past retention, event idempotency answers,
-   * agent event cancellations, stray booking retirements and feed changes; and expired assistant
-   * conversations. A cancelled booking's tombstone stays.
+   * agent event cancellations, stray booking retirements and feed changes; expired assistant
+   * conversations; and audit events past retention. A cancelled booking's tombstone stays.
    */
   pruned: number;
   /**
@@ -160,6 +160,8 @@ export async function maintainSlotlockTenant(
   pruned += await withTenant((tenant) =>
     tenant.pruneAssistantConversations({ tenantRef }),
   );
+  // Audit events past retention (SLOTLOCK_AUDIT_RETENTION_DAYS, 180).
+  pruned += await withTenant((tenant) => tenant.pruneAuditEvents({ tenantRef }));
   const zones = await withTenant((tenant) =>
     tenant.followZoneRules({ tenantRef, move: options.followZoneRules === true }),
   );

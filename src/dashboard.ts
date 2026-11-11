@@ -17,6 +17,17 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import type { Sql } from 'postgres';
 import type { SlotlockDashboardTeams } from './teams.js';
 import {
+  SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,
+  SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
+  SLOTLOCK_FRESH_CAPABILITIES,
+  SLOTLOCK_WORKSPACE_ROLE_NAMES,
+  type SlotlockWorkspaceCapability,
+  type SlotlockWorkspaceRole,
+  slotlockRoleCan,
+} from './workspace-roles.js';
+import type { SlotlockDashboardWorkspaces } from './workspaces.js';
+import type { SlotlockAuditEvent, SlotlockAuditEventInput } from './store.js';
+import {
   SLOTLOCK_TEST_TENANT_SUFFIX,
   type SlotlockApiKey,
   type SlotlockApiKeyLimits,
@@ -178,6 +189,7 @@ const MAX_REMEMBERED = 10_000;
 const FORM_NONCE = /^([A-Za-z0-9_-]{24})\.([A-Za-z0-9_-]{43})$/;
 const POST_ROUTES: ReadonlySet<string> = new Set([
   '/sign-out',
+  '/sign-out-everywhere',
   '/keys',
   '/keys/rotate',
   '/keys/revoke',
@@ -224,6 +236,47 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/plan/upgrade',
   '/plan/manage',
 ]);
+/** The forms whose success the audit log records, by the action it records. */
+const AUDITED_ROUTES: Readonly<Record<string, string>> = Object.freeze({
+  '/keys': 'api_key.created',
+  '/keys/rotate': 'api_key.rotated',
+  '/keys/revoke': 'api_key.revoked',
+  '/keys/limits': 'api_key.limits_changed',
+  '/webhooks': 'webhook.created',
+  '/webhooks/delete': 'webhook.deleted',
+  '/webhooks/enable': 'webhook.enabled',
+  '/contacts/forget': 'contact.forgotten',
+  '/settings/assistant': 'assistant.settings_saved',
+  '/settings/assistant/remove': 'assistant.settings_removed',
+  '/plan/upgrade': 'billing.checkout_started',
+  '/plan/manage': 'billing.portal_opened',
+  '/teams/enable': 'organization.enabled',
+  '/teams/disable': 'organization.disabled',
+  '/sandbox/reset': 'sandbox.reset',
+  '/sign-out-everywhere': 'session.signed_out_everywhere',
+});
+/** What each capability lets a person do, as a refusal says it. */
+const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = Object.freeze({
+  'account.use': 'use this account',
+  'workspace.read': 'see this workspace',
+  'usage.read': 'see its usage',
+  'assistant.chat': 'chat with the assistant',
+  'operations.run': 'change bookings, hours or closures',
+  'resources.manage': 'change resources',
+  'sandbox.manage': 'change the test environment',
+  'keys.manage_own': 'create or change API keys',
+  'keys.full': 'create or change Full-access keys',
+  'keys.manage_any': "change a key someone else created",
+  'webhooks.manage': 'change webhooks',
+  'contacts.forget': 'forget contacts',
+  'assistant.settings': "change the assistant's model",
+  'members.manage': 'manage members',
+  'audit.read': 'read the audit log',
+  'billing.manage': 'change the plan or billing',
+  'workspace.own': 'change who owns this workspace',
+});
+/** The pages a sign-in made to confirm it's you may come back to. */
+const STEP_UP_PAGES: ReadonlySet<string> = new Set(['/keys', '/webhooks', '/plan', '/settings', '/teams', '/contacts']);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
@@ -455,6 +508,17 @@ export interface SlotlockDashboardResources {
   };
   /** The tenant's assistant settings and its members' conversations (assistant.ts). */
   assistant?: SlotlockAssistantStore;
+  /**
+   * The tenant's audit log (slotlock.audit_events): who changed keys, webhooks, billing and
+   * settings, and every refusal. Append-only: record, and read newest first.
+   */
+  audit?: {
+    record(tenantRef: string, event: SlotlockAuditEventInput): Promise<void>;
+    list(
+      tenantRef: string,
+      params?: { limit?: number; before?: { occurredAt: Date; id: string }; action?: string; actorRef?: string },
+    ): Promise<SlotlockAuditEvent[]>;
+  };
   /** The tenant's webhook endpoints, as the event feed keeps them. */
   webhooks?: {
     list(tenantRef: string): Promise<SlotlockWebhookEndpoint[]>;
@@ -694,6 +758,13 @@ export interface SlotlockDashboardOptions {
   organizations?: readonly string[] | 'enabled';
   /** The organizations turned on, with `organizations: 'enabled'` (teams.ts). */
   teams?: SlotlockDashboardTeams;
+  /**
+   * Who belongs to which workspace, and as what (workspaces.ts, workspace-roles.ts): read on every
+   * request, so a role changed or a membership ended applies at the next one, and "Sign out
+   * everywhere" ends every session. Without it, a person is the Owner of their own workspace, and an
+   * organization's GitHub owners are its Owners and its other members Developers, as read at sign-in.
+   */
+  workspaces?: SlotlockDashboardWorkspaces;
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
@@ -1001,6 +1072,11 @@ export function createSlotlockDashboardResources(
         ),
     },
     assistant: createSlotlockAssistantStore(store),
+    audit: {
+      record: (tenantRef, event) => store.withTenant(tenantRef, (tenant) => tenant.recordAuditEvent({ tenantRef, event })),
+      list: (tenantRef, params = {}) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listAuditEvents({ tenantRef, ...params })),
+    },
   };
 }
 
@@ -1156,6 +1232,8 @@ interface Session {
   env?: 'test';
   /** Signed in with Google: `uid` is the Google subject, `login` the account's email. GitHub when absent. */
   idp?: 'google';
+  /** The person's session epoch when sealed (workspaces): "Sign out everywhere" moves it on. */
+  ep?: number;
 }
 
 interface Organization {
@@ -1791,6 +1869,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
   // Teams on Cloud: organizations turned on in the database, beside every person's own tenant.
   const teams = options.organizations === 'enabled' ? (options.teams ?? null) : null;
+  const workspaces = options.workspaces ?? null;
+  /** Each session's role in the workspace it acts in, as the database said when it was read. */
+  const roles = new WeakMap<Session, SlotlockWorkspaceRole>();
+  /** Where each request came from, for the audit log. */
+  const origins = new WeakMap<Session, { ipAddress?: string; userAgent?: string }>();
   // Plans whether or not billing sells them; billing's own reader when only it is given.
   const plans: SlotlockDashboardPlans | undefined =
     options.plans ??
@@ -1918,19 +2001,57 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ) {
       return null;
     }
-    const session = payload as unknown as Session;
+    let session = payload as unknown as Session;
     if (teams) {
       // Which of the person's organizations are on now: one turned off since is left at once.
       const enabled = session.orgs?.length ? await teams.enabled(session.orgs.map((org) => org.id)) : new Set<string>();
       if (session.org !== undefined && !enabled.has(session.org)) {
         const { org: _, ...personal } = session;
-        enabledOf.set(personal, enabled);
-        return personal;
+        session = personal;
       }
       enabledOf.set(session, enabled);
     }
-    return session;
+    return await withStanding(session);
   }
+
+  /**
+   * The session with the person's role in its workspace as the database says now (workspaces): one
+   * signed out everywhere since it was sealed is refused, and one whose membership ended falls back
+   * to the person's own workspace or, where there is none (a fixed list of organizations), ends.
+   */
+  async function withStanding(session: Session): Promise<Session | null> {
+    if (!workspaces) {
+      roles.set(session, derivedRole(session));
+      return session;
+    }
+    const standing = await workspaces.standing(tenantOf(session), personOf(session));
+    // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
+    // from before this store, or of a person erased since (no record, no epoch) never passes.
+    if (session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
+    if (standing.role !== null) {
+      roles.set(session, standing.role);
+      return session;
+    }
+    if (session.org === undefined || served) return null;
+    const { org: _, ...personal } = session;
+    const enabled = enabledOf.get(session);
+    if (enabled) enabledOf.set(personal, enabled);
+    roles.set(personal, 'owner');
+    return personal;
+  }
+
+  /**
+   * Without a membership store: the Owner of one's own workspace; in an organization's, its GitHub
+   * owners are Owners and its other members Developers, as GitHub said at sign-in.
+   */
+  function derivedRole(session: Session): SlotlockWorkspaceRole {
+    if (session.org === undefined) return 'owner';
+    return session.orgs?.find((org) => org.id === session.org)?.role === 'admin' ? 'owner' : 'developer';
+  }
+  const roleOf = (session: Session): SlotlockWorkspaceRole => roles.get(session) ?? derivedRole(session);
+  const can = (session: Session, capability: SlotlockWorkspaceCapability) => slotlockRoleCan(roleOf(session), capability);
+  /** Signed in within the last 15 minutes: what a fresh capability needs. */
+  const freshlySignedIn = (session: Session) => now() - (session.exp - SESSION_TTL_MS) <= FRESH_SIGN_IN_MS;
 
   /**
    * With organizations, the session names one the server still serves, from its own list; without
@@ -2079,7 +2200,9 @@ ${live}
 </body>
 </html>`;
     }
-    const links = nav().map(
+    const links = nav()
+      .filter((item) => can(session, SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[item.path || '/'] ?? 'workspace.read'))
+      .map(
       (item) =>
         html`<a href="${root}${item.path}"${item.section === section ? html` aria-current="page"` : html``}>${item.icon}<span>${item.label}</span></a>`,
     );
@@ -2769,9 +2892,11 @@ ${
         current && others.length > 0
           ? html`<div class="row"><span class="row-label">Also a member of</span><div class="row-value">${others.map((org) => org.login).join(', ')}</div></div>`
           : html``
-      }<div class="row"><span class="row-label">Session ends</span><div class="row-value">${formatDate(new Date(session.exp))}</div></div></div>${
-        current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``
-      }`;
+      }<div class="row"><span class="row-label">Role</span><div class="row-value">${SLOTLOCK_WORKSPACE_ROLE_NAMES[roleOf(session)]}</div></div><div class="row"><span class="row-label">Session ends</span><div class="row-value">${formatDate(new Date(session.exp))}</div></div>${
+        workspaces
+          ? html`<div class="row"><span class="row-label">Sessions</span><div class="row-value"><form method="post" action="${root}/sign-out-everywhere"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Sign out everywhere</button></form></div></div>`
+          : html``
+      }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}`;
     }
     const content = html`${pageHead('Settings')}<div class="settings">${nav}<div class="settings-body">${body}</div></div>`;
     return respond(status, layout('Settings', content, session, 'settings'));
@@ -3653,12 +3778,15 @@ ${
 
   /** Owners of the organization in use may change its assistant; a person always may their own. */
   /** An owner of the workspace: the person in their own, an organization's owner in its. */
-  const isAdmin = (session: Session) =>
-    session.org === undefined || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
+  /** May connect or change the assistant's model (Owner, Admin). */
+  const isAdmin = (session: Session) => can(session, 'assistant.settings');
+  /** May change the plan and open billing (Owner, Billing). */
+  const mayBill = (session: Session) => can(session, 'billing.manage');
+  /** Never more than the person may do: a Viewer's assistant only reads; it never holds admin. */
   const assistantPrincipal = (session: Session): SlotlockAgentPrincipal => ({
     subject: assistantActor(session),
     tenantRef: tenantOf(session),
-    scopes: ['read', 'write'],
+    scopes: can(session, 'operations.run') ? ['read', 'write'] : ['read'],
   });
   /** The fixed list, then the embedder's check: nothing the model sends adds to it. */
   const assistantAuthorize: SlotlockAgentOperationDispatchOptions['authorize'] = async (args) =>
@@ -4253,7 +4381,7 @@ ${
   }
 
   const adminOnly = (session: Session) =>
-    settingsPage(session, 403, 'Only an owner of this organization can change the assistant.');
+    settingsPage(session, 403, 'Only an owner or an admin of this workspace can change the assistant.');
 
   async function saveAssistantSettings(session: Session, form: URLSearchParams): Promise<Response> {
     const store = assistantStore();
@@ -4811,7 +4939,7 @@ ${
     const keyCount = keys.filter(
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
     ).length;
-    const admin = isAdmin(session);
+    const admin = mayBill(session);
     const paying = plan !== null && plan.plan !== 'free';
     const upcoming = !plan && planDefault && planDefault.appliesFrom.getTime() > now() ? planDefault : null;
     const limits = plan?.limits ?? upcoming?.limits;
@@ -4953,7 +5081,7 @@ ${
   async function pastLimit(session: Session): Promise<Html> {
     const plan = plans ? await plans.plan(tenantOf(session)).catch(() => null) : null;
     const paying = plan !== null && plan.plan !== 'free';
-    return !paying && isAdmin(session) && Boolean(options.billing || plans?.contact)
+    return !paying && mayBill(session) && Boolean(options.billing || plans?.contact)
       ? html`<a href="${root}/plan#upgrade">upgrade</a>`
       : html`see <a href="${root}/plan">Usage</a>`;
   }
@@ -5083,7 +5211,7 @@ ${
     const billing = options.billing;
     if (!billing) return notFound(session);
     if (session.env === 'test') return planPage(session, 400, 'Plans are changed in Live.');
-    if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can change its plan.');
+    if (!mayBill(session)) return planPage(session, 403, 'Only an owner or a billing manager of this workspace can change its plan.');
     const interval = form.get('interval') === 'year' ? 'year' : 'month';
     const tenantRef = tenantOf(session);
     const plan = await billing.plan(tenantRef);
@@ -5118,7 +5246,7 @@ ${
     const billing = options.billing;
     if (!billing) return notFound(session);
     if (session.env === 'test') return planPage(session, 400, 'Billing is managed in Live.');
-    if (!isAdmin(session)) return planPage(session, 403, 'Only owners of the organization can manage its billing.');
+    if (!mayBill(session)) return planPage(session, 403, 'Only an owner or a billing manager of this workspace can manage its billing.');
     const plan = await billing.plan(tenantOf(session));
     if (!plan?.stripeCustomer) return planPage(session, 409, 'There is no billing to manage yet.');
     let url: string;
@@ -5132,22 +5260,188 @@ ${
   }
 
   /** The page a form was sent from, to show what went wrong with it. */
-  function pageFor(route: string) {
-    if (route.startsWith('/keys')) return keysPage;
-    if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
-    if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
-    if (route.startsWith('/approvals') && options.resources.approvals) return approvalsPage;
-    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
-      return locationsPage;
+  /** Where a request came from, as the audit log keeps it: the client's address, and its browser. */
+  function requestOrigin(request: Request): { ipAddress?: string; userAgent?: string } {
+    const address = options.clientAddress?.(request);
+    const agent = request.headers.get('user-agent')?.slice(0, 256);
+    return { ...(address ? { ipAddress: address.slice(0, 64) } : {}), ...(agent ? { userAgent: agent } : {}) };
+  }
+
+  /**
+   * Record what the person did (or was refused) in the workspace's audit log. An action already done
+   * is not undone because its record failed: the failure goes to onError.
+   */
+  async function audit(
+    session: Session,
+    event: { action: string } & Partial<Omit<SlotlockAuditEventInput, 'action' | 'actorType' | 'actorRef'>>,
+  ): Promise<void> {
+    const log = options.resources.audit;
+    if (!log) return;
+    const from = origins.get(session) ?? {};
+    try {
+      await log.record(tenantOf(session), {
+        actorType: 'person',
+        actorRef: personOf(session),
+        actorRole: roleOf(session),
+        ...from,
+        ...event,
+      });
+    } catch (error) {
+      try {
+        ignoreRejection(options.onError?.(error));
+      } catch {
+        // A failing reporter must not change the response.
+      }
     }
-    if (route.startsWith('/closures') && options.resources.hours) return closuresPage;
-    if (route.startsWith('/contacts') && options.resources.contacts) return contactsPage;
-    if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
-    if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
-    if (route.startsWith('/settings')) return settingsPage;
-    if (route.startsWith('/plan') && plans) return planPage;
-    if (route.startsWith('/teams') && teams) return teamsPage;
-    return overviewPage;
+  }
+
+  /** What an audited form changed: its target, and what describes the change (never a secret). */
+  function auditDetails(route: string, form: URLSearchParams): Partial<SlotlockAuditEventInput> {
+    const id = form.get('id') ?? '';
+    if (route === '/keys') {
+      return { targetType: 'api_key', metadata: { access: form.get('access') ?? '', expires: form.get('expires') ?? '' } };
+    }
+    if (route.startsWith('/keys/') && UUID_PATTERN.test(id)) return { targetType: 'api_key', targetRef: id };
+    if (route === '/webhooks') {
+      let host = '';
+      try {
+        host = new URL(form.get('url') ?? '').host;
+      } catch {
+        // An address the form refused names no host.
+      }
+      return { targetType: 'webhook', metadata: host ? { host } : {} };
+    }
+    if (route.startsWith('/webhooks/') && UUID_PATTERN.test(id)) return { targetType: 'webhook', targetRef: id };
+    if (route.startsWith('/teams/')) {
+      const org = form.get('organization') ?? '';
+      return ORGANIZATION_ID.test(org) ? { targetType: 'organization', targetRef: `github-org:${org}` } : {};
+    }
+    if (route === '/settings/assistant') {
+      return { metadata: { provider: (form.get('provider') ?? '').slice(0, 40), model: (form.get('model') ?? '').slice(0, 120) } };
+    }
+    return {};
+  }
+
+  /**
+   * Every capability a form needs: its route's, and more where the form decides. A Full-access key
+   * asks `keys.full`; a key someone else created asks `keys.manage_any`; rotating or limiting a
+   * Full-access key asks `keys.full` as well, so a person who lost that power cannot keep it by
+   * rotating, and anyone rotating one signed in recently. An empty list is a route with none.
+   */
+  async function capabilitiesOf(session: Session, route: string, form: URLSearchParams): Promise<SlotlockWorkspaceCapability[]> {
+    const base = SLOTLOCK_DASHBOARD_POST_CAPABILITIES[route];
+    if (base === undefined) return [];
+    const needed: SlotlockWorkspaceCapability[] = [base];
+    if (route === '/keys' && form.get('access') === 'full') needed.push('keys.full');
+    if (route === '/keys/rotate' || route === '/keys/revoke' || route === '/keys/limits') {
+      // As PostgreSQL reads a uuid, whatever its case: the key the handler would act on.
+      const id = (form.get('id') ?? '').toLowerCase();
+      if (UUID_PATTERN.test(id)) {
+        const key = (await options.keys.list({ tenantRef: tenantOf(session) })).find((candidate) => candidate.id.toLowerCase() === id);
+        // A key not listed here is not one the person made: only who may change anyone's tries it.
+        if (!key || key.createdBy !== personOf(session)) needed.push('keys.manage_any');
+        if (key?.scopes.includes('admin') && route !== '/keys/revoke') needed.push('keys.full');
+      }
+    }
+    return needed;
+  }
+
+  /** The page a form's route belongs to, to go back to. */
+  const backOf = (route: string) => {
+    const first = `/${route.split('/')[1] ?? ''}`;
+    return first === '/' ? '' : first;
+  };
+
+  /** Refuse a form the person's role does not allow, or ask them to sign in again for a fresh one. */
+  async function authorizePost(session: Session, route: string, form: URLSearchParams): Promise<Response | null> {
+    const needed = await capabilitiesOf(session, route, form);
+    const missing = needed.length === 0 ? undefined : needed.find((capability) => !can(session, capability));
+    if (needed.length === 0 || missing !== undefined) {
+      await audit(session, {
+        action: 'authz.denied',
+        outcome: 'denied',
+        reason: missing ? `needs ${missing}` : 'not a listed route',
+        metadata: { route },
+      });
+      return deniedPage(session, missing, backOf(route));
+    }
+    const fresh = needed.find((capability) => SLOTLOCK_FRESH_CAPABILITIES.has(capability));
+    if (fresh !== undefined && !freshlySignedIn(session)) return confirmPage(session, fresh, backOf(route));
+    return null;
+  }
+
+  /** Refuse a page the person's role does not reach; a billing manager's overview is Usage. */
+  function authorizePage(session: Session, page: string): Response | null {
+    const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[page];
+    if (capability !== undefined && can(session, capability)) return null;
+    if (page === '/' && plans && can(session, 'usage.read')) return redirect(303, `${root}/plan`);
+    return deniedPage(session, capability, plans && can(session, 'usage.read') ? '/plan' : '');
+  }
+
+  function deniedPage(session: Session, capability: SlotlockWorkspaceCapability | undefined, back: string): Response {
+    const role = SLOTLOCK_WORKSPACE_ROLE_NAMES[roleOf(session)];
+    const text = capability
+      ? `As ${/^[AEIOU]/.test(role) ? 'an' : 'a'} ${role} in this workspace, you can't ${CAPABILITY_WORDS[capability]}.`
+      : 'Nothing is here.';
+    return respond(
+      403,
+      layout('Not allowed', html`<p class="notice" role="alert">${text}</p><p><a href="${root}${back}">Back</a></p>`, session),
+    );
+  }
+
+  /** A fresh capability after more than 15 minutes: sign in again, then come back to the page. */
+  function confirmPage(session: Session, capability: SlotlockWorkspaceCapability, back: string): Response {
+    const query = new URLSearchParams({
+      ...(session.idp === 'google' ? { with: 'google' } : {}),
+      ...(STEP_UP_PAGES.has(back) ? { then: back } : {}),
+    }).toString();
+    return respond(
+      403,
+      layout(
+        'Confirm it’s you',
+        html`${pageHead('Confirm it’s you')}<p>To ${CAPABILITY_WORDS[capability]}, sign in again: your last sign-in was more than 15 minutes ago.</p><p class="actions"><a class="button primary" href="${root}/sign-in${query ? `?${query}` : ''}">Sign in again</a> <a class="button" href="${root}${back}">Cancel</a></p>`,
+        session,
+      ),
+    );
+  }
+
+  /** A page as the answers about a form render it: the person, the status, and a notice. */
+  type FormAnswerPage = (session: Session, status: number, notice: string) => Promise<Response> | Response;
+
+  /**
+   * The page a form's route belongs to, and the page path whose capability reading it needs: the
+   * page rendered, not the one the route names (without the store a page needs, it is the overview).
+   */
+  function pageEntryFor(route: string): { path: string; page: FormAnswerPage } {
+    if (route.startsWith('/keys')) return { path: '/keys', page: keysPage };
+    if (route.startsWith('/webhooks') && options.resources.webhooks) return { path: '/webhooks', page: webhooksPage };
+    if (route.startsWith('/waitlist') && options.resources.waitlist) return { path: '/waitlist', page: waitlistPage };
+    if (route.startsWith('/approvals') && options.resources.approvals) return { path: '/approvals', page: approvalsPage };
+    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
+      return { path: '/locations', page: locationsPage };
+    }
+    if (route.startsWith('/closures') && options.resources.hours) return { path: '/closures', page: closuresPage };
+    if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
+    if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
+    if (route.startsWith('/assistant') && assistantStore()) return { path: '/assistant', page: assistantPage };
+    if (route.startsWith('/settings')) return { path: '/settings', page: settingsPage };
+    if (route.startsWith('/plan') && plans) return { path: '/plan', page: planPage };
+    if (route.startsWith('/teams') && teams) return { path: '/teams', page: teamsPage };
+    return { path: '/', page: overviewPage };
+  }
+
+  /**
+   * The page a form's route belongs to, for an answer about the form itself (already sent, too many
+   * forms, another organization's page), only to a person whose role reads the page rendered:
+   * anyone else gets the notice alone. These answers come before the role is checked.
+   */
+  function pageOrNotice(route: string): FormAnswerPage {
+    const { path, page } = pageEntryFor(route);
+    return (session, status, notice) => {
+      const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[path];
+      if (capability !== undefined && can(session, capability)) return page(session, status, notice);
+      return respond(status, layout('Refused', html`<p class="notice" role="alert">${notice}</p>`, session));
+    };
   }
 
   /** Whose hours an editor sets: the tenant's, one location's, or one resource's. */
@@ -5726,6 +6020,10 @@ ${
     const org = session.orgs?.find((candidate) => candidate.id === form.get('organization'));
     if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
     if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    // And an Owner of its workspace in Slotlock: a GitHub owner Slotlock gave a lesser role may not.
+    if (workspaces && (await workspaces.standing(`github-org:${org.id}`, personOf(session))).role !== 'owner') {
+      return teamsPage(session, 403, `Only an owner of ${org.login}'s workspace can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    }
     // Who owns it was read as the person signed in: only a recent sign-in is trusted to say so.
     if (now() - (session.exp - SESSION_TTL_MS) > FRESH_SIGN_IN_MS) {
       return teamsPage(
@@ -5773,7 +6071,7 @@ ${
     return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
   }
 
-  async function startSignIn(): Promise<Response> {
+  async function startSignIn(then?: string): Promise<Response> {
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -5791,6 +6089,7 @@ ${
       state,
       verifier,
       exp: now() + SIGN_IN_TTL_MS,
+      ...(then ? { then } : {}),
     });
     return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
   }
@@ -5910,7 +6209,7 @@ ${
   }
 
   /** Google's sign-in (OpenID Connect, code flow with PKCE and a nonce), back to the same callback. */
-  async function startGoogleSignIn(provider: NonNullable<typeof google>): Promise<Response> {
+  async function startGoogleSignIn(provider: NonNullable<typeof google>, then?: string): Promise<Response> {
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
     const nonce = randomBytes(24).toString('base64url');
@@ -5931,6 +6230,7 @@ ${
       nonce,
       idp: 'google',
       exp: now() + SIGN_IN_TTL_MS,
+      ...(then ? { then } : {}),
     });
     return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
   }
@@ -6145,15 +6445,36 @@ ${
         [clearSignIn],
       );
     }
+    // The person and, with GitHub, the organizations GitHub lists them in, as memberships now; the
+    // epoch their sessions must carry.
+    const person = user.idp === 'google' ? `google:${user.uid}` : `github:${user.uid}`;
+    const epoch = workspaces
+      ? await workspaces.signedIn(
+          person,
+          user.idp === 'google' || user.orgs === undefined
+            ? undefined
+            : user.orgs.map((org) => ({ id: org.id, role: org.role === 'admin' ? ('admin' as const) : ('member' as const) })),
+        )
+      : undefined;
+    const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
     const session = seal('slotlock-dashboard-session-v1', {
       uid: user.uid,
       login: user.login,
       sid: randomBytes(24).toString('base64url'),
       exp: now() + SESSION_TTL_MS,
       ...(user.idp === 'google' ? { idp: 'google' } : {}),
-      ...(served ? { orgs, org: (orgs[0] as Organization).id } : teams && user.idp !== 'google' ? { orgs } : {}),
+      ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
+      ...(epoch !== undefined ? { ep: epoch } : {}),
     });
-    return redirect(303, root, [
+    if (options.resources.audit) {
+      const signedInTo = sealedOrg !== undefined ? `github-org:${sealedOrg}` : person;
+      const from = requestOrigin(request);
+      await options.resources.audit
+        .record(signedInTo, { action: 'session.signed_in', actorType: 'person', actorRef: person, ...from })
+        .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
+    }
+    const back = typeof pending.then === 'string' && STEP_UP_PAGES.has(pending.then) ? pending.then : '';
+    return redirect(303, `${root}${back}`, [
       clearSignIn,
       setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
     ]);
@@ -6401,6 +6722,7 @@ ${
         layout('Not found', html`<p class="notice">Nothing is here.</p>`, session),
       );
     }
+    origins.set(session, requestOrigin(request));
     // A form sent again (a reload of its result, a double click) must not create or rotate twice.
     // Every form but sign-out carries a single-use value, so leaving it out cannot skip this check
     // or the per-person form limit.
@@ -6414,7 +6736,7 @@ ${
     if (once !== null) {
       const checked = checkFormNonce(session, once);
       if (checked === 'other_org') {
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           409,
           'That page was for another organization. Nothing was changed: check the organization and try again.',
@@ -6427,7 +6749,7 @@ ${
           (await options.state.use('form', once, session.exp, session.idp === 'google' ? personOf(session) : session.uid));
       } catch (error) {
         if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           429,
           'Too many forms sent from this account in the last 12 hours. Try again later.',
@@ -6439,18 +6761,36 @@ ${
           const chat = chatOf(form.get('chat'));
           return redirect(303, chat ? `${chatUrl(chat)}#latest` : `${root}/assistant#latest`);
         }
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           409,
           'That form was already sent. Reload the page to start again.',
         );
       }
     }
+    // What the person may do, from their role now: before anything changes, and after the form's
+    // single-use value and the per-person form limit, so refusals cannot flood the audit log.
+    const refused = await authorizePost(session, route, form);
+    if (refused) return refused;
     // A tenant new to plans is put on the default plan before it adds what plans limit.
     if (route === '/keys' || route === '/resources' || route === '/webhooks') {
       await plans?.enrol?.(tenantOf(session));
     }
+    const response = await dispatchPost(session, route, form, request);
+    const action = AUDITED_ROUTES[route];
+    if (action && response.status < 400) await audit(session, { action, ...auditDetails(route, form) });
+    return response;
+  }
+
+  async function dispatchPost(session: Session, route: string, form: URLSearchParams, request: Request): Promise<Response> {
     switch (route) {
+      case '/sign-out-everywhere':
+        // Every session of the person, on every device and server, this one included: only with
+        // the membership store, which holds the epoch every session carries.
+        if (!workspaces) return notFound(session);
+        await workspaces.signOutEverywhere(personOf(session));
+        await options.state.endSession(session.sid, session.exp);
+        return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
       case '/sign-out':
         await options.state.endSession(session.sid, session.exp);
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
@@ -6566,7 +6906,8 @@ ${
           switch (route) {
             case '/': {
               const session = await readSession(request);
-              return session ? await overviewPage(session) : signedOutPage(200);
+              if (!session) return signedOutPage(200);
+              return authorizePage(session, '/') ?? (await overviewPage(session));
             }
             case '/keys':
             case '/resources':
@@ -6583,6 +6924,8 @@ ${
             case '/settings': {
               const session = await readSession(request);
               if (!session) return redirect(303, root);
+              const denied = authorizePage(session, route);
+              if (denied) return denied;
               if (route === '/teams') return await teamsPage(session);
               if (route === '/plan') {
                 return await planPage(
@@ -6623,36 +6966,43 @@ ${
               return asset(DASHBOARD_ASSETS.js, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
             case '/favicon.svg':
               return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
-            case '/sign-in':
+            case '/sign-in': {
+              // After signing in again to confirm it's you, back to the page that asked.
+              const then = url.searchParams.get('then') ?? '';
+              const back = STEP_UP_PAGES.has(then) ? then : undefined;
               return google && url.searchParams.get('with') === 'google'
-                ? await startGoogleSignIn(google)
-                : await startSignIn();
+                ? await startGoogleSignIn(google, back)
+                : await startSignIn(back);
+            }
             case '/callback':
               return await finishSignIn(request, url);
             case '/hours': {
               const session = await readSession(request);
-              return session ? await hoursEditor(session, url) : redirect(303, root);
+              if (!session) return redirect(303, root);
+              return authorizePage(session, route) ?? (await hoursEditor(session, url));
             }
             case '/closures': {
               const session = await readSession(request);
-              return session ? await closuresPage(session) : redirect(303, root);
+              if (!session) return redirect(303, root);
+              return authorizePage(session, route) ?? (await closuresPage(session));
             }
             case '/contacts': {
               const session = await readSession(request);
               const after = url.searchParams.get('after') ?? undefined;
-              return session ? await contactsPage(session, 200, undefined, after) : redirect(303, root);
+              if (!session) return redirect(303, root);
+              return authorizePage(session, route) ?? (await contactsPage(session, 200, undefined, after));
             }
             case '/locations': {
               const session = await readSession(request);
-              return session ? await locationsPage(session) : redirect(303, root);
+              if (!session) return redirect(303, root);
+              return authorizePage(session, route) ?? (await locationsPage(session));
             }
             default: {
               const resourceId = RESOURCE_PAGE.exec(route)?.[1];
               if (resourceId !== undefined) {
                 const session = await readSession(request);
-                return session
-                  ? await resourceDetailPage(session, resourceId.toLowerCase())
-                  : redirect(303, root);
+                if (!session) return redirect(303, root);
+                return authorizePage(session, '/resources/:id') ?? (await resourceDetailPage(session, resourceId.toLowerCase()));
               }
               return respond(
                 404,
