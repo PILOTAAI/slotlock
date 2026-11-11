@@ -27,6 +27,7 @@ import {
   SLOTLOCK_WEBHOOK_FILTER_RESOURCES,
   legacyCoverageSourceDigestSql,
 } from './event-feed.js';
+import { SLOTLOCK_IDENTITY_DDL, SLOTLOCK_IDENTITY_FUNCTIONS, SLOTLOCK_IDENTITY_TABLES } from './ddl-identity.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -259,6 +260,8 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   'workspaces',
   'workspace_invitations',
   'dashboard_sessions',
+  // Verified domains and requests to join (ddl-identity.ts).
+  ...SLOTLOCK_IDENTITY_TABLES,
 ] as const);
 
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
@@ -297,6 +300,7 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.cancel_team_deletion(text, text)',
   'slotlock.erase_deleted_teams()',
   'slotlock.workspace_delete_after(text)',
+  ...SLOTLOCK_IDENTITY_FUNCTIONS,
 ] as const);
 
 /**
@@ -1267,7 +1271,7 @@ CREATE TABLE IF NOT EXISTS slotlock.workspace_memberships (
     AND person_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
     AND role IN ('owner', 'admin', 'developer', 'member', 'viewer', 'billing')
     AND status IN ('active', 'inactive')
-    AND source IN ('github_org', 'invitation', 'created')
+    AND source IN ('github_org', 'invitation', 'created', 'domain')
     AND (status = 'active') = (deactivated_at IS NULL)
   )
 );
@@ -1672,6 +1676,17 @@ BEGIN
   END IF;
   IF (email_normalized IS NULL) = (requested_github IS NULL) THEN
     RAISE EXCEPTION 'Slotlock teams: invite an email or a GitHub account' USING ERRCODE = '22023';
+  END IF;
+  -- Held to the team's verified domains (ddl-identity.ts): only addresses at one, and so no GitHub
+  -- account, which carries none.
+  IF (SELECT ws.invites_domain_restricted FROM slotlock.workspaces ws WHERE ws.tenant_ref = requested_tenant)
+     AND (email_normalized IS NULL OR NOT EXISTS (
+       SELECT 1 FROM slotlock.workspace_domains claim
+        WHERE claim.tenant_ref = requested_tenant AND claim.status IN ('verified', 'lapsing')
+          AND lower(substring(email_normalized FROM '@([^@]+)$')) IN (claim.domain_ascii, claim.domain_unicode)
+     )) THEN
+    RETURN QUERY SELECT NULL::uuid, 'domain_restricted'::text;
+    RETURN;
   END IF;
   IF requested_github IS NOT NULL AND EXISTS (
     SELECT 1 FROM slotlock.workspace_memberships member
@@ -3457,6 +3472,29 @@ BEGIN
     ON CONFLICT DO NOTHING
   )
   SELECT count(*) INTO erased_rows FROM erased;
+  RETURN NEXT;
+  -- A team's requests to join and domains go with it; a person's own tenant takes their requests,
+  -- and their name off the domains they claimed and the requests they decided.
+  erased_table := 'workspace_join_requests';
+  DELETE FROM slotlock.workspace_join_requests asked
+   WHERE asked.tenant_ref = requested_tenant_ref
+      OR (requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$'
+          AND asked.person_ref = requested_tenant_ref);
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    UPDATE slotlock.workspace_join_requests asked SET decided_by = NULL WHERE asked.decided_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
+  RETURN NEXT;
+  erased_table := 'workspace_domains';
+  DELETE FROM slotlock.workspace_domains claim WHERE claim.tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  IF requested_tenant_ref ~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+    UPDATE slotlock.workspace_domains claim SET created_by = NULL WHERE claim.created_by = requested_tenant_ref;
+    GET DIAGNOSTICS cleared_rows = ROW_COUNT;
+    erased_rows := erased_rows + cleared_rows;
+  END IF;
   RETURN NEXT;
   -- A team workspace's record and invitations go with it.
   erased_table := 'workspace_invitations';
@@ -7907,7 +7945,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_IDENTITY_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id

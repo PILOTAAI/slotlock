@@ -332,6 +332,11 @@ export interface SlotlockMaintenanceSchedulerOptions {
   usage?: boolean;
   /** Fetches holiday calendar subscriptions due to be imported again (maintainSlotlockTenant). */
   holidayFetch?: typeof fetch;
+  /**
+   * Team workspaces' verified domains looked up again (workspace-domains.ts runSlotlockDomainChecks):
+   * run with each sweep, at most every quarter hour. What it throws goes to onError.
+   */
+  domainChecks?: () => Promise<unknown>;
   /** A pass that ran: counts only, never the tenant. Not awaited; what it throws is ignored. */
   onPass?: (result: SlotlockMaintenanceResult) => void;
   /**
@@ -436,6 +441,8 @@ export function startSlotlockMaintenance(
     // Team invitations finished a month ago, with the addresses they were sent to, and sessions
     // ended a day ago.
     options.store.sweepDashboardRecords().catch(report);
+    // Verified domains whose daily check (or a pending claim's hourly one) is due.
+    options.domainChecks?.().catch(report);
   };
   // Every tenant with data, once an interval: those no key has called since the server started too.
   let lastDiscovery = Number.NEGATIVE_INFINITY;

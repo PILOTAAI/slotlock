@@ -4,6 +4,7 @@
 // Owner. GitHub organizations' members are recorded at each sign-in from what GitHub lists.
 import { createHash } from 'node:crypto';
 import type { SlotlockSql } from './store.js';
+import { type SlotlockWorkspaceDomains, createSlotlockWorkspaceDomains } from './workspace-domains.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 
 /** A person as the dashboard knows them: `github:<id>` or `google:<subject>`, never an email. */
@@ -43,6 +44,8 @@ export interface SlotlockDashboardWorkspaces {
   teams?: SlotlockWorkspaceTeams;
   /** Each session a person signed in with, to list and sign out one by one: only with the database. */
   sessions?: SlotlockDashboardSessions;
+  /** Teams' verified domains and requests to join through them (workspace-domains.ts): only with the database. */
+  domains?: SlotlockWorkspaceDomains;
 }
 
 /** A session a person signed in with, as their Account page lists it. */
@@ -128,7 +131,8 @@ export type SlotlockTeamRefusal =
   | 'not_for_you'
   | 'last_owner'
   | 'confirm'
-  | 'subscription_live';
+  | 'subscription_live'
+  | 'domain_restricted';
 
 /**
  * Team workspaces through their SECURITY DEFINER functions: each checks the actor's role and
@@ -242,6 +246,7 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
     },
     teams: createTeams(sql),
     sessions: createSessions(sql),
+    domains: createSlotlockWorkspaceDomains(sql),
   };
 }
 

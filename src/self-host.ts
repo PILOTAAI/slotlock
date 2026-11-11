@@ -67,6 +67,7 @@ import {
   readDashboardOrganizations,
   readDashboardTeamWorkspaces,
   readDashboardUsers,
+  readVerifiedDomains,
   readLimits,
   readSecret,
   readServerUrl,
@@ -95,6 +96,8 @@ import {
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
 import { createSlotlockDashboardWorkspaces, createSlotlockWorkspaceCheck } from './workspaces.js';
+import { createSlotlockWorkspaceDomains, runSlotlockDomainChecks } from './workspace-domains.js';
+import { slotlockDomainResolvers } from './domains.js';
 import { createSlotlockInvitationEmailSender } from './invitation-email.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import {
@@ -319,6 +322,11 @@ export interface SlotlockServeConfig extends SlotlockDatabaseConfig {
    * or a Worker does: their `team:<id>` keys act only while the workspace exists (workspace_active).
    */
   teamWorkspaces?: boolean;
+  /**
+   * Verified domains (SLOTLOCK_VERIFIED_DOMAINS=on), whether this server serves the dashboard or a
+   * Worker does: their daily check runs in this server's maintenance.
+   */
+  verifiedDomains?: { resolver: 'doh' | 'system' };
   /**
    * Serve the REST API under /v1, with the application API for admin keys, and its OpenAPI document
    * (SLOTLOCK_REST_API: on unless off).
@@ -587,6 +595,8 @@ export function readSlotlockServeConfig(env: SlotlockEnv): SlotlockServeConfig {
   const organizations = readDashboardOrganizations(env);
   if (organizations !== undefined) config.organizations = organizations;
   if (readDashboardTeamWorkspaces(env)) config.teamWorkspaces = true;
+  const verifiedDomains = readVerifiedDomains(env);
+  if (verifiedDomains !== undefined) config.verifiedDomains = verifiedDomains;
   const allowedUsers = dashboard?.allowedUsers ?? readDashboardUsers(env);
   if (allowedUsers !== undefined) config.allowedUsers = allowedUsers;
   if (confirmWrites.length > 0 && confirmationSecret !== undefined) {
@@ -1323,6 +1333,9 @@ export async function startSlotlockServer(
               : {}),
             ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             ...(config.dashboard.teamWorkspaces ? { teamWorkspaces: true } : {}),
+            ...(config.dashboard.verifiedDomains
+              ? { domains: { resolvers: slotlockDomainResolvers(config.dashboard.verifiedDomains.resolver) } }
+              : {}),
             ...(config.dashboard.invitationEmail
               ? {
                   invitations: createSlotlockInvitationEmailSender(config.dashboard.invitationEmail, {
@@ -1405,6 +1418,23 @@ export async function startSlotlockServer(
       ...(config.usage ? { usage: true } : {}),
       // Holiday calendar subscriptions (RFC 0004 B1), never from a private address.
       holidayFetch: createSlotlockGuardedFetch(),
+      // Team workspaces' verified domains, looked up again each day; each change in the team's audit log.
+      ...(config.verifiedDomains
+        ? {
+            domainChecks: (() => {
+              const domains = createSlotlockWorkspaceDomains(sql);
+              const resolvers = slotlockDomainResolvers(config.verifiedDomains.resolver);
+              const audit = createSlotlockStore(sql, retention);
+              return () =>
+                runSlotlockDomainChecks({
+                  domains,
+                  resolvers,
+                  record: (tenantRef, event) =>
+                    audit.withTenant(tenantRef, (tenant) => tenant.recordAuditEvent({ tenantRef, event })).then(() => undefined),
+                });
+            })(),
+          }
+        : {}),
       // Counts only, never the tenant.
       onPass: (result) => {
         metrics?.maintenance(result);

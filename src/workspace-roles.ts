@@ -63,6 +63,8 @@ export const SLOTLOCK_WORKSPACE_CAPABILITIES = Object.freeze([
   'billing.manage',
   /** Grant Owner or Billing, transfer, delete the workspace, link a GitHub organization. Fresh. */
   'workspace.own',
+  /** The team's identity: its verified domains and who may join through them. Owner only. Fresh. */
+  'identity.manage',
 ] as const);
 export type SlotlockWorkspaceCapability = (typeof SLOTLOCK_WORKSPACE_CAPABILITIES)[number];
 
@@ -73,6 +75,7 @@ export const SLOTLOCK_FRESH_CAPABILITIES: ReadonlySet<SlotlockWorkspaceCapabilit
   'assistant.settings',
   'billing.manage',
   'workspace.own',
+  'identity.manage',
 ]);
 
 const everyCapability = SLOTLOCK_WORKSPACE_CAPABILITIES;
@@ -82,7 +85,7 @@ const without = (...left: SlotlockWorkspaceCapability[]) => everyCapability.filt
 export const SLOTLOCK_ROLE_CAPABILITIES: Readonly<Record<SlotlockWorkspaceRole, ReadonlySet<SlotlockWorkspaceCapability>>> =
   Object.freeze({
     owner: new Set(everyCapability),
-    admin: new Set(without('billing.manage', 'workspace.own')),
+    admin: new Set(without('billing.manage', 'workspace.own', 'identity.manage')),
     developer: new Set<SlotlockWorkspaceCapability>([
       'account.use',
       'workspace.read',
@@ -154,6 +157,16 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/members/revoke': 'members.manage',
   '/members/role': 'members.manage',
   '/members/remove': 'members.manage',
+  // Approving or declining a request to join through a verified domain.
+  '/members/requests': 'members.manage',
+  // Asking to join a team through a verified address: anyone signed in, for a team they are not in.
+  '/join/request': 'account.use',
+  // A team's domains, and holding invitations to them: its Owners only.
+  '/identity/domains': 'identity.manage',
+  '/identity/domains/verify': 'identity.manage',
+  '/identity/domains/remove': 'identity.manage',
+  '/identity/domains/policy': 'identity.manage',
+  '/identity/invites': 'identity.manage',
   '/keys': 'keys.manage_own',
   '/keys/rotate': 'keys.manage_own',
   '/keys/revoke': 'keys.manage_own',
@@ -223,4 +236,5 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/settings/audit': 'audit.read',
   '/settings/audit/export': 'audit.read',
   '/settings/team': 'workspace.own',
+  '/settings/identity': 'identity.manage',
 });

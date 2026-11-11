@@ -63,6 +63,7 @@
   "dependencies": {
     "ical.js": "2.2.1",
     "rrule": "2.8.1",
+    "tldts": "7.4.19",
     "zod": "4.6.7"
   },
   "peerDependencies": {
@@ -80,5 +81,8 @@
     "standardwebhooks": "1.1.1",
     "typescript": "7.0.2",
     "vitest": "5.1.0"
+  },
+  "overrides": {
+    "tldts-core": "7.4.19"
   }
 }
