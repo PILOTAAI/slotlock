@@ -2332,6 +2332,23 @@ function withApprovalPolicies(
     return !coveredByOpenWindows(windows, { start, end });
   }
 
+  /**
+   * What an update may change without booking any time: everything else (time, resource, zone,
+   * transparency, status, recurrence and its exceptions) is judged by what it would add.
+   */
+  const EVENT_DETAIL_FIELDS: ReadonlySet<string> = new Set([
+    'event_id',
+    'expected_revision',
+    'expected_resource_id',
+    'idempotency_key',
+    'title',
+    'description',
+    'location',
+    'organizer',
+    'attendees',
+    'reminders',
+  ]);
+
   /** The write's ask and the policies that may cover it, or null when none can. */
   async function plan(
     tenantStore: SlotlockTenantStore,
@@ -2388,15 +2405,18 @@ function withApprovalPolicies(
     } else {
       const current = await tenantStore.getCalendarEvent({ tenantRef, ownerRef, externalRef: input.event_id as string });
       if (!current) return null;
+      // Details alone book nothing. Any other change may: a move, or time the event did not hold
+      // (made opaque or confirmed, given occurrences or fewer exceptions, another zone), judged
+      // below by what the write would add to what the event holds.
+      if (Object.keys(input).every((field) => EVENT_DETAIL_FIELDS.has(field))) return null;
       const resourceId = (input.resource_id as string | undefined) ?? current.resourceId;
       const start = input.starts_at ? new Date(input.starts_at as string) : current.start;
       const end = input.ends_at ? new Date(input.ends_at as string) : current.end;
-      // Only a move to another time or resource is a booking a policy can be about.
-      if (resourceId === current.resourceId && start.getTime() === current.start.getTime() && end.getTime() === current.end.getTime()) {
-        return null;
-      }
+      const moved =
+        resourceId !== current.resourceId || start.getTime() !== current.start.getTime() || end.getTime() !== current.end.getTime();
       asked = {
-        kind: 'move',
+        // Time added in place is a booking of its own; a move is a move.
+        kind: moved ? 'move' : 'single',
         stored: 'slotlock_update_event',
         resourceIds: [resourceId],
         externalRefs: [current.externalRef],
@@ -2434,16 +2454,18 @@ function withApprovalPolicies(
       });
       if (asked.prior) {
         const { hold_id: _held, ...request } = input;
-        // Granted: the booking was made with this key, so the write answers it as a replay (and
-        // the store refuses another request with it). Without the hold the approval took over,
-        // as the grant made it.
-        if (asked.prior.status === 'granted') return method.call(this, context, request);
         const kept: Record<string, unknown> = { ...asked.prior.request };
         // A pool booking is kept as the member it would take.
         if (operation === 'slotlock_book_pool') delete kept.resource_id;
+        // The key answers only the request a person was asked about, granted or not: a grant
+        // approves that booking, never another made with its key (a bundle's other resources, say,
+        // which the store would take as new).
         if (JSON.stringify(canonical(kept)) !== JSON.stringify(canonical(request))) {
           throw new SlotlockAgentOperationError('idempotency_conflict', 409);
         }
+        // Granted: the booking was made with this key, so the write answers it as a replay.
+        // Without the hold the approval took over, as the grant made it.
+        if (asked.prior.status === 'granted') return method.call(this, context, request);
         throw approvalAnswer(asked.prior);
       }
       const ask = asked.plan;
@@ -2470,6 +2492,10 @@ function withApprovalPolicies(
       if (probed.replayed === true || occupied.length === 0) {
         return context.dryRun ? probed : method.call(this, context, input);
       }
+      // Only time the event did not already hold needs a person: an edit or a move within its own
+      // time books nothing new.
+      const holds = uncovered(occupied, ask.before);
+      if (holds.length === 0) return context.dryRun ? probed : method.call(this, context, input);
       const written = [...new Set(occupied.map((occupation) => occupation.resourceId))];
       const decided = await withTenant(store, { ...context, dryRun: false }, async (tenantStore) => {
         // A pool's policies are those of the member the write would take, and its pool.
@@ -2519,8 +2545,6 @@ function withApprovalPolicies(
           expires_at: expiresAt.toISOString(),
         });
       }
-      const holds = uncovered(occupied, ask.before);
-      if (holds.length === 0) return method.call(this, context, input);
       const chosen = ask.pool ? written[0] : undefined;
       const { hold_id: _hold, ...request } = input;
       const principal = context.principal;
