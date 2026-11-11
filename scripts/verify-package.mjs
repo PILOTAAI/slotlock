@@ -125,6 +125,13 @@ const expectedFiles = new Set([
   'dashboard.d.ts',
   'ddl.js',
   'ddl.d.ts',
+  // Teams phase 5: verified domains (the DNS side, their tables and functions, the adapter).
+  'ddl-identity.js',
+  'ddl-identity.d.ts',
+  'domains.js',
+  'domains.d.ts',
+  'workspace-domains.js',
+  'workspace-domains.d.ts',
   'engine.js',
   'engine.d.ts',
   'event-schema.js',
