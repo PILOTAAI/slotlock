@@ -158,6 +158,61 @@ describe.skipIf(!url)('resource profiles (real Postgres, application role)', () 
     await expect(list({ labels: ['Not A Label'] })).rejects.toMatchObject({ code: 'invalid_resource_profile' });
   });
 
+  it('lets an agent find a resource by what a person calls it, and names candidates for a name given as an id', async () => {
+    const acme = tenant('search');
+    const make = (externalRef: string, name?: string, visibility: 'shared' | 'private' = 'shared') =>
+      store.withTenant(acme, (scoped) =>
+        scoped.createResource({ tenantRef: acme, externalRef, visibility, ...(name ? { profile: { name } } : {}) }),
+      );
+    const benz = await make('car-17', 'Mercedes-Benz 2025');
+    await make('car-18', 'Mercedes-Benz 2019');
+    await make('phase-b-exit-20261108T142642Z-3444');
+    await make('car-99', 'Mercedes-Benz 2025 (owner only)', 'private');
+    // Another tenant's resource of the same name is never found or named.
+    const other = tenant('search-other');
+    await store.withTenant(other, (scoped) =>
+      scoped.createResource({ tenantRef: other, externalRef: 'theirs', profile: { name: 'Mercedes-Benz 2025' } }),
+    );
+    const agents = createSlotlockStoreAgentBackend(store, { availabilityRules: async () => [] });
+    const as = <T extends string>(operation: T) => ({
+      principal: { subject: 'key:agent', tenantRef: acme, scopes: ['read'] },
+      operation,
+      signal: new AbortController().signal,
+    });
+    const search = async (query: string, filter: Record<string, unknown> = {}) =>
+      (
+        (await agents.listResources(as('slotlock_list_resources'), { limit: 50, query, ...filter })) as {
+          resources: { id: string; name?: string; external_ref: string | null }[];
+          next_cursor: string | null;
+        }
+      );
+    const found = await search('mercedez benz 2025');
+    expect(found.resources.map((resource) => resource.name)).toEqual(['Mercedes-Benz 2025', 'Mercedes-Benz 2019']);
+    expect(found.resources[0]?.id).toBe(benz.id);
+    expect(found.next_cursor).toBeNull();
+    expect((await search('phase-b-exit')).resources.map((resource) => resource.external_ref)).toEqual([
+      'phase-b-exit-20261108T142642Z-3444',
+    ]);
+    // A filter the resource does not state leaves it out; the search without it finds it.
+    expect((await search('mercedes 2025', { kind: 'vehicle' })).resources).toEqual([]);
+    expect((await search('tesla')).resources).toEqual([]);
+    await expect(search('a b c d e f g h i j k l m')).rejects.toMatchObject({ code: 'invalid_arguments' });
+    // A name or reference passed where an id belongs is refused, naming the likely resources.
+    const window = { start: '2026-11-12T08:00:00Z', end: '2026-11-12T12:00:00Z' };
+    await expect(
+      agents.getFreeBusy(as('slotlock_get_free_busy'), { resource_ids: ['Mercedes-Benz 2025'], ...window }),
+    ).rejects.toMatchObject({
+      code: 'resource_not_found',
+      details: { candidate_1: `${benz.id} Mercedes-Benz 2025`, candidate_2: expect.stringContaining('Mercedes-Benz 2019') },
+    });
+    const byRef = agents.getFreeBusy(as('slotlock_get_free_busy'), { resource_ids: ['phase-b-exit-20261108T142642Z-3444'], ...window });
+    await expect(byRef).rejects.toMatchObject({ code: 'resource_not_found', details: { candidate_1: expect.stringContaining('phase-b-exit') } });
+    // An id that names nothing (another tenant's, a deleted one) gets no candidates.
+    await expect(
+      agents.getFreeBusy(as('slotlock_get_free_busy'), { resource_ids: [randomUUID()], ...window }),
+    ).rejects.toSatisfy((error: { code: string; details?: unknown }) => error.code === 'resource_not_found' && error.details === undefined);
+  });
+
   it('takes a profile over the application API, and shows agents what they need to choose', async () => {
     const acme = tenant('api');
     const application = createSlotlockStoreApplicationBackend(store);

@@ -165,11 +165,20 @@ its own model.
   JSON object a line (the reply's text as it comes, each tool step as it starts and ends, then the
   turn as the page renders it), and Stop ends it. Without script, the form posts and the page
   shows the reply. Replies are Markdown, rendered escaped (links http(s) only).
-- **Conversations** are kept per member in `slotlock.assistant_conversations` for 2 hours after the
-  last message, then deleted: by `serve`'s maintenance, which sweeps every tenant's expired
-  conversations every quarter hour (a tenant only the dashboard serves included), by
-  `slotlock maintain`, and whenever the tenant's conversations are read (so on Workers too). They
-  are bounded in UTF-8 bytes; **New conversation** forgets one.
+- **Chats.** Each conversation is a chat a member keeps (`slotlock.assistant_chats`), titled by its
+  first message, at its own address (`<root>/assistant?c=<id>`), and listed beside the conversation
+  shown: most recent first, grouped by day, with a search box, and **Rename** and **Delete** behind
+  each one's menu. **New chat** starts another. The page opens on the chat used in the past two
+  hours, else on a new one. Chats are kept until the member deletes one, at most 100 per member
+  (past that, the least recently used goes), and are bounded in UTF-8 bytes. With
+  `conversationTtlMs`, a deployment gives them a lifetime instead: then they are deleted that long
+  after their last message, by `serve`'s maintenance (every quarter hour, every tenant), by
+  `slotlock maintain`, and whenever a member's chats are read (so on Workers too). Upgrading from
+  0.8 makes each member's conversation their first chat.
+- **What the model is told.** The workspace's resources agents can see (up to 50, by id, name,
+  reference, kind, location and time zone) come with every message, so the model matches a resource
+  the member names to its id without a lookup; it finds others with `slotlock_list_resources` and
+  `query`.
 - On Workers, the assistant's agent calls are capped at 24 a request and by `tenant_read` and
   `tenant_write` of `SLOTLOCK_LIMITS` in each isolate.
 - A provider's failure is shown as a plain message, never with the key or the provider's answer.

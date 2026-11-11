@@ -2,13 +2,18 @@
   {
     "name": "slotlock_list_resources",
     "title": "List calendar resources",
-    "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group's. With pool, only that pool's members, in the order slotlock_book_pool tries them.",
+    "description": "List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group's. With pool, only that pool's members, in the order slotlock_book_pool tries them. With query, the resources that best match what a person calls one, best first, at most limit and with no next_cursor: each word is looked for in the name, reference, labels, kind, location and description, ignoring case and accents, and forgiving a typo, a word cut short or words run together (\"mercedez\", \"merc 2025\" and \"mercedesbenz\" find \"Mercedes-Benz 2025\"); numbers match exactly. It is the way to find the id of a resource a person names, since other tools take ids only. When several match about equally, ask which one is meant. A resource that states no kind, labels or location is left out by those filters, so search without them before saying a resource does not exist.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "cursor": {
           "type": "string",
           "maxLength": 500
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         },
         "limit": {
           "default": 50,

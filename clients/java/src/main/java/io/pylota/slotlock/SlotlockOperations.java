@@ -12,7 +12,7 @@ public abstract class SlotlockOperations {
   /** Every operation, by name: its method, path, path parameters and query parameters. */
   static final Map<String, Operation> OPERATIONS =
       Map.ofEntries(
-          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "limit", "pool", "kind", "labels", "location", "group"))),
+          Map.entry("slotlock_list_resources", new Operation("GET", "/v1/resources", List.of(), List.of("cursor", "query", "limit", "pool", "kind", "labels", "location", "group"))),
           Map.entry("slotlock_create_resource", new Operation("POST", "/v1/resources", List.of(), List.of())),
           Map.entry("slotlock_get_free_busy", new Operation("GET", "/v1/free-busy", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end"))),
           Map.entry("slotlock_find_next_available", new Operation("GET", "/v1/next-available", List.of(), List.of("resource_ids", "location", "group", "labels", "kind", "pool", "start", "end", "duration_minutes"))),
@@ -162,17 +162,24 @@ public abstract class SlotlockOperations {
    * the pool it belongs to (a vehicle class, a room type). With kind, only resources of that
    * kind; with labels, only those with every label given; with location, only those there or at a
    * location in it; with group, only that group's. With pool, only that pool's members, in the
-   * order slotlock_book_pool tries them.
+   * order slotlock_book_pool tries them. With query, the resources that best match what a person
+   * calls one, best first, at most limit and with no next_cursor: each word is looked for in the
+   * name, reference, labels, kind, location and description, ignoring case and accents, and
+   * forgiving a typo, a word cut short or words run together ("mercedez", "merc 2025" and
+   * "mercedesbenz" find "Mercedes-Benz 2025"); numbers match exactly. It is the way to find the
+   * id of a resource a person names, since other tools take ids only. When several match about
+   * equally, ask which one is meant. A resource that states no kind, labels or location is left
+   * out by those filters, so search without them before saying a resource does not exist.
    *
-   * @param optional the optional arguments, or null: {@code cursor} (string), {@code limit}
-   * (integer), {@code pool} (string), {@code kind} (string), {@code labels} (list of string),
-   * {@code location} (string), {@code group} (string)
+   * @param optional the optional arguments, or null: {@code cursor} (string), {@code query}
+   * (string), {@code limit} (integer), {@code pool} (string), {@code kind} (string), {@code
+   * labels} (list of string), {@code location} (string), {@code group} (string)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> listResources(Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
-    putOptional(values, optional, Set.of("cursor", "limit", "pool", "kind", "labels", "location", "group"), "slotlock_list_resources");
+    putOptional(values, optional, Set.of("cursor", "query", "limit", "pool", "kind", "labels", "location", "group"), "slotlock_list_resources");
     return call("slotlock_list_resources", values);
   }
 
@@ -183,7 +190,14 @@ public abstract class SlotlockOperations {
    * the pool it belongs to (a vehicle class, a room type). With kind, only resources of that
    * kind; with labels, only those with every label given; with location, only those there or at a
    * location in it; with group, only that group's. With pool, only that pool's members, in the
-   * order slotlock_book_pool tries them.
+   * order slotlock_book_pool tries them. With query, the resources that best match what a person
+   * calls one, best first, at most limit and with no next_cursor: each word is looked for in the
+   * name, reference, labels, kind, location and description, ignoring case and accents, and
+   * forgiving a typo, a word cut short or words run together ("mercedez", "merc 2025" and
+   * "mercedesbenz" find "Mercedes-Benz 2025"); numbers match exactly. It is the way to find the
+   * id of a resource a person names, since other tools take ids only. When several match about
+   * equally, ask which one is meant. A resource that states no kind, labels or location is left
+   * out by those filters, so search without them before saying a resource does not exist.
    *
    * @return the response body
    * @throws SlotlockException when the server refuses the call

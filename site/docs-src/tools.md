@@ -95,7 +95,12 @@ instead of the reference, a `description`, its `kind` (`person`, `room`, `desk`,
 (`ev`, `wheelchair`, `projector`) and `attributes` you want back (a staff number, a plate, a floor
 plan link: text, numbers and booleans, 4 KiB at most). Set it when you create the resource, or with
 `PATCH /v1/resources/{id}` (`updateResourceProfile`); `slotlock_list_resources` shows agents the
-name, description, kind, capacity and labels, and narrows by `kind` and `labels`. None of it changes
+name, description, kind, capacity and labels, and narrows by `kind` and `labels`. With `query` it
+finds a resource by what a person calls it, best match first: each word is looked for in the name,
+reference, labels, kind, location and description, ignoring case and accents, and forgiving a typo, a
+word cut short or words run together (`mercedez`, `merc 2025` and `mercedesbenz` all find
+"Mercedes-Benz 2025"); numbers match exactly. Every other tool names a resource by its `id`, so an
+agent asked about one by name looks it up this way first. None of it changes
 how a resource is booked: a kind is a hint and a capacity is said, never enforced. The feed's
 `resource.updated` names the profile fields that changed (`profile_changed`), never what they say.
 
@@ -175,7 +180,7 @@ A refusal is a result the model can act on:
 | `forbidden` | `authorize` refused the call |
 | `rate_limited` | `consumeRateLimit` refused the call |
 | `quota_exceeded` | The tenant's plan's monthly quota is used up (`SLOTLOCK_QUOTAS=on`): `metric`, `quota`, `stop`, `used` and `resets_at` say which and until when |
-| `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller, or no such id: a resource id is the `id` `slotlock_list_resources` returns, not its `external_ref` |
+| `not_found`, `resource_not_found`, `event_not_found` | Not visible to this caller, or no such id: a resource id is the `id` `slotlock_list_resources` returns, not its `external_ref`. Given a name or reference instead of an id, `resource_not_found` names the likeliest resources in `details.candidate_1` to `candidate_3` (`<id> <name>`) |
 | `overlap` | The time is taken |
 | `revision_conflict`, `idempotency_conflict`, `event_cancelled` | Re-read, then retry with the current revision or a new key |
 | `owner_event_quota_exceeded`, `owner_command_quota_exceeded` | Per-caller quota reached (see [Operations](/docs/operations/)) |

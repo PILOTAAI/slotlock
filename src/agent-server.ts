@@ -133,6 +133,8 @@ export const SLOTLOCK_A2A_TASK_STATES = Object.freeze([
 
 const DATE_TIME = z.string().datetime({ offset: true });
 const RESOURCE_ID = z.string().trim().min(1).max(200);
+/** The longest resource search (resource-search.ts SLOTLOCK_RESOURCE_SEARCH_MAX; a test holds them equal). */
+export const SLOTLOCK_AGENT_RESOURCE_SEARCH_MAX = 200;
 const EVENT_ID = z.string().trim().min(1).max(500);
 const HOLD_ID = z.string().uuid();
 const POOL = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
@@ -1438,10 +1440,11 @@ const OPERATION_DEFINITIONS = [
     name: 'slotlock_list_resources',
     title: 'List calendar resources',
     description:
-      'List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group\'s. With pool, only that pool\'s members, in the order slotlock_book_pool tries them.',
+      'List resources visible to the authenticated tenant principal, with what each says about itself: its name (show it rather than the reference), description, kind, capacity and labels, where it is (location), the groups it is in (a team, a department), and the pool it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with labels, only those with every label given; with location, only those there or at a location in it; with group, only that group\'s. With pool, only that pool\'s members, in the order slotlock_book_pool tries them. With query, the resources that best match what a person calls one, best first, at most limit and with no next_cursor: each word is looked for in the name, reference, labels, kind, location and description, ignoring case and accents, and forgiving a typo, a word cut short or words run together ("mercedez", "merc 2025" and "mercedesbenz" find "Mercedes-Benz 2025"); numbers match exactly. It is the way to find the id of a resource a person names, since other tools take ids only. When several match about equally, ask which one is meant. A resource that states no kind, labels or location is left out by those filters, so search without them before saying a resource does not exist.',
     input: z
       .object({
         cursor: z.string().max(500).optional(),
+        query: z.string().trim().min(1).max(SLOTLOCK_AGENT_RESOURCE_SEARCH_MAX).optional(),
         limit: z.number().int().min(1).max(100).default(50),
         pool: POOL.optional(),
         kind: RESOURCE_KIND.optional(),
@@ -3096,6 +3099,7 @@ function parseSubscriptionFilter(
 /** Natural-language guidance `server/discover` gives the model on how to use these tools well. */
 const SLOTLOCK_MCP_INSTRUCTIONS = [
   'Slotlock is a tenant-isolated resource calendar (vehicles, rooms, equipment).',
+  'A resource is named in calls by its id (resource_id, resource_ids), never by its name or reference: find the id of one a person names with slotlock_list_resources and query (what they call it; typos and accents are forgiven). resource_not_found for something that is not an id names, in candidate_1 to candidate_3, the resources that best match it. A kind, label or location filter leaves out resources that do not state it, so search without one before saying a resource does not exist, and ask the person when several match equally.',
   'Check availability before booking: slotlock_get_free_busy returns busy intervals and slotlock_find_next_available the earliest free slot of a given length, and slotlock_find_available_slots up to 50 of them to offer a person a choice; an answer is certain only when coverage.certainty is "certain".',
   'slotlock_create_event needs an idempotency_key: retry with the same key and arguments, never a new key for the same booking. slotlock_update_event and slotlock_delete_event need the event revision you last read as expected_revision.',
   'Times are RFC 3339 with an offset; intervals are half-open [start, end).',

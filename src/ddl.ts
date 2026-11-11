@@ -334,6 +334,12 @@ export const SLOTLOCK_QUOTA_FUNCTIONS = Object.freeze([
 /** What a plan's monthly quotas count (quotas.ts): operations run and bookings made. */
 export const SLOTLOCK_QUOTA_METRICS = Object.freeze(['operations', 'bookings'] as const);
 
+/** The most conversations a member keeps with the dashboard assistant: past it, the least recent goes. */
+export const SLOTLOCK_ASSISTANT_MAX_CHATS = 100;
+
+/** How a conversation with the assistant is named: 16 URL-safe characters. */
+export const SLOTLOCK_ASSISTANT_CHAT_ID = /^[A-Za-z0-9_-]{16}$/;
+
 /** The shares of a quota, in percent, at which a tenant is told once a month (usage.threshold_reached). */
 export const SLOTLOCK_QUOTA_NOTICE_PERCENTS = Object.freeze([80, 100] as const);
 
@@ -2115,6 +2121,10 @@ BEGIN
   DELETE FROM slotlock.assistant_conversations WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'assistant_chats';
+  DELETE FROM slotlock.assistant_chats WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
   erased_table := 'assistant_settings';
   DELETE FROM slotlock.assistant_settings WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
@@ -2492,8 +2502,21 @@ BEGIN
        AND gone.expires_at <= now();
     GET DIAGNOSTICS step = ROW_COUNT;
     deleted := deleted + step;
-    SELECT min(live.expires_at) INTO upcoming FROM slotlock.assistant_conversations live
-     WHERE live.tenant_ref = due.tenant_ref;
+    DELETE FROM slotlock.assistant_chats gone
+     WHERE gone.tenant_ref = due.tenant_ref
+       AND (gone.member_ref, gone.chat_id) IN (
+         SELECT expired.member_ref, expired.chat_id FROM slotlock.assistant_chats expired
+          WHERE expired.tenant_ref = due.tenant_ref AND expired.expires_at <= now()
+          LIMIT greatest(max_rows - deleted, 0))
+       AND gone.expires_at <= now();
+    GET DIAGNOSTICS step = ROW_COUNT;
+    deleted := deleted + step;
+    SELECT least(
+             (SELECT min(live.expires_at) FROM slotlock.assistant_conversations live
+               WHERE live.tenant_ref = due.tenant_ref),
+             (SELECT min(chat.expires_at) FROM slotlock.assistant_chats chat
+               WHERE chat.tenant_ref = due.tenant_ref AND chat.expires_at IS NOT NULL))
+      INTO upcoming;
     IF upcoming IS NULL THEN
       DELETE FROM slotlock.assistant_tenants WHERE tenant_ref = due.tenant_ref;
     ELSE
@@ -3089,6 +3112,60 @@ CREATE TABLE IF NOT EXISTS slotlock.assistant_conversations (
 );
 CREATE INDEX IF NOT EXISTS slotlock_assistant_conversations_expiry_idx
   ON slotlock.assistant_conversations (tenant_ref, expires_at);
+
+-- A member's conversations with the dashboard assistant (its history), each with the writes it
+-- proposed. Kept until the member deletes one, or until expires_at where the deployment gives
+-- conversations a lifetime; at most ${SLOTLOCK_ASSISTANT_MAX_CHATS} a member, the least recent going first.
+CREATE TABLE IF NOT EXISTS slotlock.assistant_chats (
+  tenant_ref text NOT NULL,
+  member_ref text NOT NULL,
+  chat_id text NOT NULL,
+  title text NOT NULL,
+  messages jsonb NOT NULL DEFAULT '[]'::jsonb,
+  actions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz,
+  CONSTRAINT slotlock_assistant_chats_pkey PRIMARY KEY (tenant_ref, member_ref, chat_id),
+  CONSTRAINT slotlock_assistant_chats_identity_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND octet_length(member_ref) BETWEEN 1 AND 500
+    AND chat_id ~ '^[A-Za-z0-9_-]{16}$'
+  ),
+  CONSTRAINT slotlock_assistant_chats_title_valid CHECK (char_length(title) BETWEEN 1 AND 120),
+  CONSTRAINT slotlock_assistant_chats_messages_valid CHECK (
+    jsonb_typeof(messages) = 'array' AND octet_length(messages::text) <= 262144
+  ),
+  CONSTRAINT slotlock_assistant_chats_actions_valid CHECK (
+    jsonb_typeof(actions) = 'object' AND octet_length(actions::text) <= 131072
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_assistant_chats_recent_idx
+  ON slotlock.assistant_chats (tenant_ref, member_ref, updated_at DESC);
+CREATE INDEX IF NOT EXISTS slotlock_assistant_chats_expiry_idx
+  ON slotlock.assistant_chats (tenant_ref, expires_at) WHERE expires_at IS NOT NULL;
+
+-- The one conversation a member had before chats were kept (0.8 and earlier) becomes their first
+-- chat, titled by its first message, and leaves the old table: a later migration does not bring
+-- back a chat the member deleted. A server of 0.8 still running meanwhile keeps using the old table.
+WITH moved AS (
+  DELETE FROM slotlock.assistant_conversations old
+   WHERE old.expires_at > statement_timestamp()
+  RETURNING old.tenant_ref, old.member_ref, old.messages, old.actions, old.updated_at
+)
+INSERT INTO slotlock.assistant_chats AS chat
+  (tenant_ref, member_ref, chat_id, title, messages, actions, created_at, updated_at, expires_at)
+SELECT moved.tenant_ref, moved.member_ref,
+       pg_catalog.translate(pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+         moved.tenant_ref || pg_catalog.chr(10) || moved.member_ref, 'UTF8')), 'base64'), 16), '+/', '-_'),
+       coalesce(nullif(pg_catalog.left(pg_catalog.regexp_replace(pg_catalog.btrim(first_user.text), '\\s+', ' ', 'g'), 80), ''),
+                'Conversation'),
+       moved.messages, moved.actions, moved.updated_at, moved.updated_at, NULL
+  FROM moved
+  LEFT JOIN LATERAL (
+    SELECT entry ->> 'text' AS text FROM pg_catalog.jsonb_array_elements(moved.messages) AS entry
+     WHERE entry ->> 'role' = 'user' LIMIT 1
+  ) first_user ON true
+ON CONFLICT DO NOTHING;
 
 -- The tenant a reservation row belongs to: its own, or (a hold) its resource's.
 CREATE OR REPLACE FUNCTION slotlock.outbox_reservation_change()
@@ -6271,6 +6348,7 @@ export const SLOTLOCK_TENANT_TABLES = Object.freeze([
   'booking_rule_defaults',
   'assistant_settings',
   'assistant_conversations',
+  'assistant_chats',
   'locations',
   'resource_groups',
   'resource_group_members',
@@ -6427,6 +6505,8 @@ ALTER TABLE slotlock.assistant_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_settings FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.assistant_conversations FORCE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_chats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slotlock.assistant_chats FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.locations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.locations FORCE ROW LEVEL SECURITY;
 ALTER TABLE slotlock.resource_groups ENABLE ROW LEVEL SECURITY;
@@ -6487,6 +6567,7 @@ BEGIN
          'booking_rule_defaults',
          'assistant_settings',
          'assistant_conversations',
+         'assistant_chats',
          'locations',
          'resource_groups',
          'resource_group_members',
@@ -6744,6 +6825,16 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_policies
+     WHERE schemaname = 'slotlock' AND tablename = 'assistant_chats'
+       AND policyname = 'tenant_isolation_v1'
+  ) THEN
+    CREATE POLICY tenant_isolation_v1 ON slotlock.assistant_chats
+      USING (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''))
+      WITH CHECK (tenant_ref = NULLIF(current_setting('${tenantContextSetting}', true), ''));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
      WHERE schemaname = 'slotlock' AND tablename = 'locations'
        AND policyname = 'tenant_isolation_v1'
   ) THEN
@@ -6924,6 +7015,8 @@ COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_settings
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_conversations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
+COMMENT ON POLICY tenant_isolation_v1 ON slotlock.assistant_chats
+  IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.locations
   IS 'slotlock:tenant-context:${tenantContextSetting}';
 COMMENT ON POLICY tenant_isolation_v1 ON slotlock.resource_groups
@@ -6996,6 +7089,7 @@ WHERE schemaname = 'slotlock'
     'booking_rule_defaults',
     'assistant_settings',
     'assistant_conversations',
+    'assistant_chats',
     'locations',
     'resource_groups',
     'resource_group_members',

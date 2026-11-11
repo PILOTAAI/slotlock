@@ -1,5 +1,6 @@
 // The dashboard assistant without a database: the model is a real HTTP server on loopback, GitHub a
 // fake `fetch`.
+import { createRequire } from 'node:module';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   SlotlockAgentCalendarBackend,
@@ -37,6 +38,7 @@ import {
 import {
   type FakeModel,
   type FakeModelFormat,
+  type FakeModelRequest,
   startFakeModel,
   toolResultsSent,
   toolsOffered,
@@ -120,6 +122,12 @@ const noKeys: SlotlockApiKeyStore = {
 let backend: ReturnType<typeof fakeBackend>;
 let assistantStore: SlotlockAssistantStore;
 let reported: unknown[];
+
+/** A member's most recent conversation, as the store keeps it. */
+async function latestChat(tenantRef: string, memberRef: string) {
+  const [latest] = await assistantStore.listChats(tenantRef, memberRef);
+  return latest ? assistantStore.getChat(tenantRef, memberRef, latest.id) : null;
+}
 
 function dashboard(
   overrides: Partial<SlotlockDashboardOptions['assistant']> = {},
@@ -524,6 +532,230 @@ describe.each(['anthropic', 'openai'] as const)('the chat over %s', (format) => 
     expect(done.once).not.toBe(once);
     // Kept, as the form's way keeps it.
     expect(await page(target, alice)).toContain('<p>You have <strong>vehicle-1</strong>.</p>');
+  });
+
+  it('stops the turn when the stream is cancelled, though the request is never aborted, and settles the cancel once the turn is kept', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    let asked!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    model.script(async () => {
+      asked();
+      await held;
+      return { text: 'Too late.' };
+    });
+    try {
+      const shown = await page(target, alice);
+      const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+      const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+      // A Request made here has a signal nothing aborts, as on a runtime that does not abort it when
+      // the client goes: only the body's cancel can stop the turn.
+      const response = await target.fetch(
+        new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+          method: 'POST',
+          headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ csrf, once, message: 'What is free?' }).toString(),
+        }),
+      );
+      await reached;
+      await response.body?.cancel();
+      // By the time the cancel settles, the turn has stopped and is kept, with what it had.
+      const after = await page(target, alice);
+      expect(after).toContain('<div class="bubble">What is free?</div>');
+      expect(after).toContain('<li class="turn note">Stopped.</li>');
+      expect(after).not.toContain('Too late.');
+    } finally {
+      release();
+    }
+  });
+
+  it('tells the model the workspace\u2019s resources, with the ids tools take, leaving out private ones', async () => {
+    const fleet = [
+      { id: '11111111-1111-4111-8111-111111111111', externalRef: 'car-17', name: 'Mercedes-Benz 2025', kind: 'vehicle', timezone: 'Europe/London' },
+      { id: '22222222-2222-4222-8222-222222222222', externalRef: 'phase-b-exit-20261108T142642Z-3444', timezone: 'UTC' },
+      { id: '33333333-3333-4333-8333-333333333333', externalRef: 'owner-only', name: 'Private car', timezone: 'UTC', visibility: 'private' },
+    ];
+    const target = dashboard({}, { list: async () => fleet as never });
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Van 1.' });
+    await chat(target, alice, 'When is the Mercedes free?');
+    const request = model.requests.at(-1) as FakeModelRequest;
+    const system = String(
+      format === 'anthropic' ? request.body.system : (request.body.messages as { content: string }[])[0]?.content,
+    );
+    expect(system).toContain('{"id":"11111111-1111-4111-8111-111111111111","name":"Mercedes-Benz 2025","ref":"car-17","kind":"vehicle","timezone":"Europe/London"}');
+    expect(system).toContain('"ref":"phase-b-exit-20261108T142642Z-3444"');
+    expect(system).not.toContain('owner-only');
+    expect(system).toContain('Tools name a resource by its id');
+    // Past fifty, the rest are found by search.
+    const many = Array.from({ length: 60 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      externalRef: `desk-${String(index)}`,
+      timezone: 'UTC',
+    }));
+    const big = dashboard({}, { list: async () => many as never });
+    const bob = await signIn(big, 'alice');
+    await connect(big, bob, model, format);
+    await chat(big, bob, 'Any desk free?');
+    const second = model.requests.at(-1) as FakeModelRequest;
+    const listed = String(format === 'anthropic' ? second.body.system : (second.body.messages as { content: string }[])[0]?.content);
+    expect(listed).toContain('(50 of 60; find the others with slotlock_list_resources and query)');
+    expect(listed).toContain('desk-49');
+    expect(listed).not.toContain('desk-50');
+  });
+
+  it('sends a chip that asks through the box, so its reply streams, and only fills the box for one that writes', async () => {
+    const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
+      JSDOM: new (
+        html: string,
+        options: { url: string; runScripts: 'outside-only'; pretendToBeVisual: boolean },
+      ) => {
+        window: {
+          eval(code: string): void;
+          close(): void;
+          document: {
+            querySelectorAll(selector: string): Iterable<ChipButton>;
+            querySelector(selector: string): { value: string } | null;
+          };
+        };
+      };
+    };
+    type ChipButton = { value: string; hasAttribute(name: string): boolean; getAttribute(name: string): string | null; click(): void };
+    const target = dashboard({}, { list: async () => [{ id: RESOURCE.id, externalRef: 'Van 1', timezone: 'Europe/London' }] as never });
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const html = await page(target, alice);
+    const script = /<script src="([^"]*app\.js[^"]*)"/.exec(html)?.[1] as string;
+    const js = await (await get(target, script, alice)).text();
+    const dom = new JSDOM(html, { url: `${ORIGIN}/dashboard/assistant`, runScripts: 'outside-only', pretendToBeVisual: true });
+    const sent: { url: string; body: string }[] = [];
+    Object.assign(dom.window, {
+      TextDecoder,
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      fetch: async (url: string, init: { body: unknown }) => {
+        sent.push({ url: String(url), body: String(init.body) });
+        return new Response('{"t":"done","html":"","once":"a.b"}\n', { headers: { 'content-type': 'application/x-ndjson' } });
+      },
+    });
+    dom.window.eval(js);
+    const chips = [...dom.window.document.querySelectorAll('.chips button.chip')];
+    const asks = chips.find((chip) => !chip.hasAttribute('data-fill')) as ChipButton;
+    asks.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe('/dashboard/assistant/stream');
+    expect(new URLSearchParams(sent[0]?.body).get('message')).toBe(asks.value);
+    // A chip that writes fills the box and waits for the member.
+    const writes = chips.find((chip) => chip.hasAttribute('data-fill')) as ChipButton;
+    writes.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sent).toHaveLength(1);
+    expect(dom.window.document.querySelector('textarea')?.value).toBe(writes.getAttribute('data-fill'));
+    dom.window.close();
+  });
+
+  it('keeps each conversation as a chat: opened by its address, listed most recent first, and New chat starts another', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Van 1 is free.' });
+    const first = await chat(target, alice, 'Which vans are free tomorrow morning for the airport run?');
+    const firstUrl = first.headers.get('location') as string;
+    expect(firstUrl).toMatch(/^\/dashboard\/assistant\?c=[A-Za-z0-9_-]{16}#latest$/);
+    const firstId = /c=([A-Za-z0-9_-]{16})/.exec(firstUrl)?.[1] as string;
+    // A form with no chat continues the one the page opens; an empty one starts a new chat.
+    model.script({ text: 'Still free.' });
+    expect((await chat(target, alice, 'And after lunch?')).headers.get('location')).toBe(firstUrl);
+    model.script({ text: 'Room 2.' });
+    const second = await post(target, '/dashboard/assistant', { message: 'Book the boardroom', chat: '' }, alice);
+    const secondId = /c=([A-Za-z0-9_-]{16})/.exec(second.headers.get('location') as string)?.[1] as string;
+    expect(secondId).not.toBe(firstId);
+    const listed = await assistantStore.listChats('github-org:91', 'github:11');
+    expect(listed.map((chat) => [chat.id, chat.title])).toEqual([
+      [secondId, 'Book the boardroom'],
+      [firstId, 'Which vans are free tomorrow morning for the airport run?'],
+    ]);
+    // Each opens at its own address, with the others beside it; the page opens on the latest.
+    const opened = await (await get(target, `/dashboard/assistant?c=${firstId}`, alice)).text();
+    expect(opened).toContain('<h1>Which vans are free tomorrow morning for the airport run?</h1>');
+    expect(opened).toContain('And after lunch?');
+    expect(opened).not.toContain('Book the boardroom</div>');
+    expect(opened).toMatch(new RegExp(`<li class="chat-row current"><a class="chat-link" href="/dashboard/assistant\\?c=${firstId}" aria-current="page">`));
+    expect(opened).toContain('<h3 class="chat-group">Today</h3>');
+    expect(opened).toContain(`<input type="hidden" name="chat" value="${firstId}">`);
+    expect(await page(target, alice)).toContain('<h1>Book the boardroom</h1>');
+    const fresh = await (await get(target, '/dashboard/assistant?c=new', alice)).text();
+    expect(fresh).toContain('data-empty');
+    expect(fresh).toContain('<input type="hidden" name="chat" value="">');
+    // A chat that is not there (deleted, or another member's) opens a new one, saying so.
+    const missing = await get(target, '/dashboard/assistant?c=AAAAAAAAAAAAAAAA', alice);
+    expect(missing.status).toBe(404);
+    expect(await missing.text()).toContain('That chat is not here');
+    // On a narrow screen the list is a page of its own.
+    const list = await (await get(target, '/dashboard/assistant/chats', alice)).text();
+    expect(list).toContain('Which vans are free tomorrow morning for the airport run?');
+    expect(list).toContain('Book the boardroom');
+  });
+
+  it('renames and deletes a member\u2019s own chats, never another member\u2019s', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const bob = await signIn(target, 'bob');
+    model.script({ text: 'Fine.' });
+    const id = /c=([A-Za-z0-9_-]{16})/.exec((await chat(target, alice, 'Plan the week')).headers.get('location') as string)?.[1] as string;
+    // Another member of the same organization renames and deletes nothing of it.
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: 'Mine' }, bob)).status).toBe(404);
+    expect((await post(target, '/dashboard/assistant/delete', { chat: id }, bob)).status).toBe(303);
+    expect(await (await get(target, `/dashboard/assistant?c=${id}`, bob)).text()).not.toContain('Plan the week');
+    expect((await assistantStore.getChat('github-org:91', 'github:11', id))?.title).toBe('Plan the week');
+    // Its member does.
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: ' ' }, alice)).status).toBe(400);
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: '  Weekly   vans  ' }, alice)).headers.get('location')).toBe(
+      `/dashboard/assistant?c=${id}`,
+    );
+    expect((await assistantStore.getChat('github-org:91', 'github:11', id))?.title).toBe('Weekly vans');
+    expect((await post(target, '/dashboard/assistant/delete', { chat: id }, alice)).headers.get('location')).toBe('/dashboard/assistant?c=new');
+    expect(await assistantStore.getChat('github-org:91', 'github:11', id)).toBeNull();
+    expect(await (await get(target, '/dashboard/assistant?c=new', alice)).text()).toContain('No chats yet.');
+    // New conversation from a page of an earlier release starts a new chat, deleting nothing.
+    model.script({ text: 'Kept.' });
+    const kept = /c=([A-Za-z0-9_-]{16})/.exec((await chat(target, alice, 'Keep me')).headers.get('location') as string)?.[1] as string;
+    expect((await post(target, '/dashboard/assistant/reset', {}, alice)).headers.get('location')).toBe('/dashboard/assistant?c=new');
+    expect(await assistantStore.getChat('github-org:91', 'github:11', kept)).not.toBeNull();
+  });
+
+  it('tells a streaming page which chat its message went to, with its address and the list', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Done.' });
+    const shown = await (await get(target, '/dashboard/assistant?c=new', alice)).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ csrf, once, chat: '', message: 'Start a new plan' }).toString(),
+      }),
+    );
+    const events = (await response.text()).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+    const done = events.at(-1) as Record<string, string>;
+    expect(done.t).toBe('done');
+    expect(done.chat).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(done.title).toBe('Start a new plan');
+    expect(done.url).toBe(`/dashboard/assistant?c=${done.chat}`);
+    expect(done.chats).toContain('<aside class="chats" aria-label="Chats">');
+    expect(done.chats).toContain(`<li class="chat-row current"><a class="chat-link" href="/dashboard/assistant?c=${done.chat}" aria-current="page"><span class="chat-title">Start a new plan</span>`);
   });
 
   it('answers a refused stream with one error line and a fresh form value', async () => {
@@ -1343,7 +1575,7 @@ describe('security review fixes', () => {
     for (let turn = 0; turn < 25; turn += 1) {
       expect((await chat(target, bob, cjk.slice(0, 2_000))).status, `turn ${turn}`).toBe(303);
     }
-    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
+    const stored = await latestChat('github-org:91', 'github:12');
     expect(Buffer.byteLength(JSON.stringify(stored?.messages), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
   });
 
@@ -1410,7 +1642,7 @@ describe('re-review fixes', () => {
   });
   afterAll(() => model.close());
 
-  it('never puts back as pending a change approved, then reset, while a turn ran', async () => {
+  it('never puts back as pending a change approved while a turn ran, a New chat between them', async () => {
     const target = dashboard();
     await connect(target, await signIn(target, 'alice'), model, 'openai');
     const bob = await signIn(target, 'bob');
@@ -1421,15 +1653,16 @@ describe('re-review fixes', () => {
     await chat(target, bob, 'Cancel it');
     const actionId = /name="action" value="([^"]+)"/.exec(await page(target, bob))?.[1] as string;
     model.script(async () => {
-      // While this turn runs: the member approves the change, then starts a new conversation.
+      // While this turn runs: the member approves the change, then opens a new chat.
       expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(303);
       expect((await post(target, '/dashboard/assistant/reset', {}, bob)).status).toBe(303);
       return { text: 'Anything else?' };
     });
     expect((await chat(target, bob, 'And now?')).status).toBe(303);
     expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
-    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
-    expect(stored?.actions[actionId]).toBeUndefined();
+    // The turn kept its chat, and the change in it as it ran: done, never pending again.
+    const stored = await latestChat('github-org:91', 'github:12');
+    expect(stored?.actions[actionId]?.status).toBe('done');
     expect(await page(target, bob)).not.toContain('name="action"');
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(409);
     expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
@@ -1450,6 +1683,6 @@ describe('re-review fixes', () => {
       return { text: 'Anything else?' };
     });
     await chat(target, bob, 'And now?');
-    expect((await assistantStore.getConversation('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
+    expect((await latestChat('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
   });
 });

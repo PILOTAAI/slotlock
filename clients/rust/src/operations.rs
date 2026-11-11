@@ -13,7 +13,7 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         method: "GET",
         path: "/v1/resources",
         path_params: &[],
-        query: &["cursor", "limit", "pool", "kind", "labels", "location", "group"],
+        query: &["cursor", "query", "limit", "pool", "kind", "labels", "location", "group"],
     },
     Operation {
         name: "slotlock_create_resource",
@@ -841,6 +841,8 @@ pub(crate) const OPERATIONS: &[Operation] = &[
 pub struct ListResourcesInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2438,7 +2440,15 @@ impl Client {
     /// it belongs to (a vehicle class, a room type). With kind, only resources of that kind; with
     /// labels, only those with every label given; with location, only those there or at a
     /// location in it; with group, only that group's. With pool, only that pool's members, in the
-    /// order slotlock_book_pool tries them.
+    /// order slotlock_book_pool tries them. With query, the resources that best match what a
+    /// person calls one, best first, at most limit and with no next_cursor: each word is looked
+    /// for in the name, reference, labels, kind, location and description, ignoring case and
+    /// accents, and forgiving a typo, a word cut short or words run together ("mercedez", "merc
+    /// 2025" and "mercedesbenz" find "Mercedes-Benz 2025"); numbers match exactly. It is the way
+    /// to find the id of a resource a person names, since other tools take ids only. When several
+    /// match about equally, ask which one is meant. A resource that states no kind, labels or
+    /// location is left out by those filters, so search without them before saying a resource
+    /// does not exist.
     pub fn list_resources(&self, input: &ListResourcesInput) -> Result<Value, Error> {
         self.call("slotlock_list_resources", serde_json::to_value(input)?)
     }

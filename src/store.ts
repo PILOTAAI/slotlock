@@ -49,6 +49,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import ICAL from 'ical.js';
 import type { Sql, TransactionSql } from 'postgres';
 import {
+  SLOTLOCK_ASSISTANT_CHAT_ID,
+  SLOTLOCK_ASSISTANT_MAX_CHATS,
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_COVERAGE_CHANGE_RENAME_BATCH,
   SLOTLOCK_DEPLOYMENT_CHECKS,
@@ -3800,40 +3802,62 @@ export interface SlotlockStore extends SlotlockEventFeed {
    * True when it was replaced.
    */
   resealAssistantKey(params: { tenantRef: string; from: string; to: string }): Promise<boolean>;
-  /** A member's live assistant conversation, or null when none is (or it expired). */
-  getAssistantConversation(params: {
+  /**
+   * A member's conversations with the assistant, the most recent first (at most `limit`, default
+   * 100): what the Chats list shows. Expired ones are left out.
+   */
+  listAssistantChats(params: {
     tenantRef: string;
     memberRef: string;
-  }): Promise<SlotlockAssistantConversationRecord | null>;
+    limit?: number;
+  }): Promise<SlotlockAssistantChatSummary[]>;
+  /** One of a member's conversations, or null when there is none by that id (or it expired). */
+  getAssistantChat(params: {
+    tenantRef: string;
+    memberRef: string;
+    chatId: string;
+  }): Promise<SlotlockAssistantChatRecord | null>;
   /**
-   * Store a member's conversation for `ttlMs` (1 second to a day) from now, replacing its messages.
+   * Store one of a member's conversations, creating it (titled `title`) or replacing its messages.
    * Its actions become those stored already that `keep` names, in their stored state
    * (settleAssistantAction changes it), and the `added` ones not stored already: an action is never
-   * put back into a conversation that no longer has it. The tenant's expired conversations are
-   * deleted with it, and the tenant is listed for sweepAssistantConversations.
+   * put back into a conversation that no longer has it. It is kept until deleted, or for `ttlMs`
+   * (1 second to 3,650 days) from now when given, and then the tenant is listed for
+   * sweepAssistantConversations. The member keeps at most SLOTLOCK_ASSISTANT_MAX_CHATS: past it,
+   * the least recently used go.
    */
-  putAssistantConversation(params: {
+  putAssistantChat(params: {
     tenantRef: string;
     memberRef: string;
+    chatId: string;
+    title: string;
     messages: unknown[];
     added: Record<string, Record<string, unknown>>;
     keep: readonly string[];
-    ttlMs: number;
+    ttlMs: number | null;
   }): Promise<void>;
+  /** Give one of a member's conversations a new title (1-120 characters). False when there is none. */
+  renameAssistantChat(params: {
+    tenantRef: string;
+    memberRef: string;
+    chatId: string;
+    title: string;
+  }): Promise<boolean>;
   /**
-   * Change one proposed action, only while its `status` is `from`: its fields are merged with
-   * `patch`. The action as changed, or null when it is not in that state (or not there): of two
-   * racing approvals, one wins.
+   * Change one proposed action of a conversation, only while its `status` is `from`: its fields are
+   * merged with `patch`. The action as changed, or null when it is not in that state (or not
+   * there): of two racing approvals, one wins.
    */
   settleAssistantAction(params: {
     tenantRef: string;
     memberRef: string;
+    chatId: string;
     actionId: string;
     from: string;
     patch: Record<string, unknown>;
   }): Promise<Record<string, unknown> | null>;
-  /** Forget a member's conversation. False when there was none. */
-  deleteAssistantConversation(params: { tenantRef: string; memberRef: string }): Promise<boolean>;
+  /** Delete one of a member's conversations. False when there was none. */
+  deleteAssistantChat(params: { tenantRef: string; memberRef: string; chatId: string }): Promise<boolean>;
   /** Delete up to `limit` (default 1,000) of the tenant's expired assistant conversations: how many. */
   pruneAssistantConversations(params: { tenantRef: string; limit?: number }): Promise<number>;
   /**
@@ -3961,13 +3985,24 @@ export interface SlotlockAssistantSettingsRecord {
 }
 
 /** One member's live conversation with the dashboard assistant, as assistant.ts keeps it. */
-export interface SlotlockAssistantConversationRecord {
+/** One of a member's conversations with the assistant, as the Chats list shows it. */
+export interface SlotlockAssistantChatSummary {
+  /** 16 URL-safe characters. */
+  id: string;
+  title: string;
+  updatedAt: Date;
+}
+
+/** One of a member's conversations with the assistant, whole. */
+export interface SlotlockAssistantChatRecord extends SlotlockAssistantChatSummary {
   messages: unknown[];
   /** The writes it proposed, by id. */
   actions: Record<string, Record<string, unknown>>;
-  updatedAt: Date;
-  expiresAt: Date;
+  createdAt: Date;
+  /** When it is deleted unless used again; null when it is kept until the member deletes it. */
+  expiresAt: Date | null;
 }
+
 
 /** One entry of a tenant's waitlist (joinWaitlist). */
 export interface SlotlockWaitlistEntry {
@@ -4648,9 +4683,10 @@ export const SLOTLOCK_TENANT_WRITE_METHODS = Object.freeze([
   'putAssistantSettings',
   'deleteAssistantSettings',
   'resealAssistantKey',
-  'putAssistantConversation',
+  'putAssistantChat',
+  'renameAssistantChat',
   'settleAssistantAction',
-  'deleteAssistantConversation',
+  'deleteAssistantChat',
 ] as const satisfies readonly (keyof SlotlockStore)[]);
 
 function tenantSuspendedError(): Error & { code: 'tenant_suspended' } {
@@ -9385,48 +9421,84 @@ function buildSlotlockStore(
       return rows.length > 0;
     },
 
-    async getAssistantConversation(params) {
-      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return null;
+    async listAssistantChats(params) {
+      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return [];
+      const limit = params.limit ?? SLOTLOCK_ASSISTANT_MAX_CHATS;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > SLOTLOCK_ASSISTANT_MAX_CHATS) {
+        throw invalidIdentityError(`Slotlock assistant chat list limit must be 1-${String(SLOTLOCK_ASSISTANT_MAX_CHATS)}`);
+      }
+      const rows = await sql<{ chat_id: string; title: string; updated_at: Date }[]>`
+        SELECT chat_id, title, updated_at FROM slotlock.assistant_chats
+         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
+           AND (expires_at IS NULL OR expires_at > statement_timestamp())
+         ORDER BY updated_at DESC, chat_id
+         LIMIT ${limit}`;
+      return rows.map((row) => ({ id: row.chat_id, title: row.title, updatedAt: row.updated_at }));
+    },
+
+    async getAssistantChat(params) {
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidIdentity(params.memberRef) ||
+        !SLOTLOCK_ASSISTANT_CHAT_ID.test(params.chatId)
+      ) {
+        return null;
+      }
       const [row] = await sql<
         {
+          title: string;
           messages: unknown[];
           actions: Record<string, Record<string, unknown>>;
+          created_at: Date;
           updated_at: Date;
-          expires_at: Date;
+          expires_at: Date | null;
         }[]
       >`
-        SELECT messages, actions, updated_at, expires_at FROM slotlock.assistant_conversations
+        SELECT title, messages, actions, created_at, updated_at, expires_at FROM slotlock.assistant_chats
          WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
-           AND expires_at > statement_timestamp()`;
+           AND chat_id = ${params.chatId}
+           AND (expires_at IS NULL OR expires_at > statement_timestamp())`;
       if (!row) return null;
       return {
+        id: params.chatId,
+        title: row.title,
         messages: row.messages,
         actions: row.actions,
+        createdAt: row.created_at,
         updatedAt: row.updated_at,
         expiresAt: row.expires_at,
       };
     },
 
-    async putAssistantConversation(params) {
+    async putAssistantChat(params) {
       if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) {
         throw invalidIdentityError('Slotlock tenant and member references must be 1-500 UTF-8 bytes');
       }
-      if (!Number.isSafeInteger(params.ttlMs) || params.ttlMs < 1_000 || params.ttlMs > 86_400_000) {
-        throw invalidIdentityError('Slotlock assistant conversation ttlMs must be 1 second to a day');
+      if (!SLOTLOCK_ASSISTANT_CHAT_ID.test(params.chatId)) {
+        throw invalidIdentityError('Slotlock assistant chat id must be 16 URL-safe characters');
       }
+      const title = params.title.trim();
+      if ([...title].length < 1 || [...title].length > 120) {
+        throw invalidIdentityError('Slotlock assistant chat title must be 1-120 characters');
+      }
+      if (
+        params.ttlMs !== null &&
+        (!Number.isSafeInteger(params.ttlMs) || params.ttlMs < 1_000 || params.ttlMs > 3_650 * 86_400_000)
+      ) {
+        throw invalidIdentityError('Slotlock assistant conversation ttlMs must be 1 second to 3,650 days');
+      }
+      const ttlSeconds = params.ttlMs === null ? null : params.ttlMs / 1_000;
       const messages = sql.json(params.messages as never);
       const added = sql.json(params.added as never);
       const keep = [...params.keep];
       await sql`
-        DELETE FROM slotlock.assistant_conversations
-         WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()`;
-      await sql`
-        INSERT INTO slotlock.assistant_conversations AS stored
-          (tenant_ref, member_ref, messages, actions, updated_at, expires_at)
-        VALUES (${params.tenantRef}, ${params.memberRef}, ${messages}, ${added},
-                statement_timestamp(),
-                statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))
-        ON CONFLICT (tenant_ref, member_ref) DO UPDATE SET
+        INSERT INTO slotlock.assistant_chats AS stored
+          (tenant_ref, member_ref, chat_id, title, messages, actions, created_at, updated_at, expires_at)
+        VALUES (${params.tenantRef}, ${params.memberRef}, ${params.chatId}, ${title}, ${messages}, ${added},
+                statement_timestamp(), statement_timestamp(),
+                CASE WHEN ${ttlSeconds}::double precision IS NULL THEN NULL
+                     ELSE statement_timestamp() + make_interval(secs => ${ttlSeconds}::double precision) END)
+        ON CONFLICT (tenant_ref, member_ref, chat_id) DO UPDATE SET
           messages = EXCLUDED.messages,
           -- The stored ones kept, as they stand, then the new ones: never a settled one again.
           actions = (
@@ -9440,21 +9512,60 @@ function buildSlotlockStore(
           ),
           updated_at = EXCLUDED.updated_at,
           expires_at = EXCLUDED.expires_at`;
+      // The member keeps the most recent; past the limit, the least recently used go.
       await sql`
-        SELECT slotlock.register_assistant_tenant(
-          ${params.tenantRef}::text,
-          statement_timestamp() + make_interval(secs => ${params.ttlMs / 1_000}))`;
+        DELETE FROM slotlock.assistant_chats gone
+         WHERE gone.tenant_ref = ${params.tenantRef} AND gone.member_ref = ${params.memberRef}
+           AND gone.chat_id IN (
+             SELECT kept.chat_id FROM slotlock.assistant_chats kept
+              WHERE kept.tenant_ref = ${params.tenantRef} AND kept.member_ref = ${params.memberRef}
+              ORDER BY kept.updated_at DESC, kept.chat_id
+             OFFSET ${SLOTLOCK_ASSISTANT_MAX_CHATS})`;
+      if (ttlSeconds !== null) {
+        await sql`
+          SELECT slotlock.register_assistant_tenant(
+            ${params.tenantRef}::text,
+            statement_timestamp() + make_interval(secs => ${ttlSeconds}::double precision))`;
+      }
+    },
+
+    async renameAssistantChat(params) {
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidIdentity(params.memberRef) ||
+        !SLOTLOCK_ASSISTANT_CHAT_ID.test(params.chatId)
+      ) {
+        return false;
+      }
+      const title = params.title.trim();
+      if ([...title].length < 1 || [...title].length > 120) {
+        throw invalidIdentityError('Slotlock assistant chat title must be 1-120 characters');
+      }
+      const rows = await sql`
+        UPDATE slotlock.assistant_chats SET title = ${title}
+         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
+           AND chat_id = ${params.chatId}
+           AND (expires_at IS NULL OR expires_at > statement_timestamp())
+        RETURNING 1`;
+      return rows.length > 0;
     },
 
     async settleAssistantAction(params) {
-      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return null;
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidIdentity(params.memberRef) ||
+        !SLOTLOCK_ASSISTANT_CHAT_ID.test(params.chatId)
+      ) {
+        return null;
+      }
       const patch = sql.json(params.patch as never);
       const [row] = await sql<{ action: Record<string, unknown> }[]>`
-        UPDATE slotlock.assistant_conversations
+        UPDATE slotlock.assistant_chats
            SET actions = jsonb_set(actions, ARRAY[${params.actionId}::text],
                                    (actions -> ${params.actionId}::text) || ${patch}::jsonb)
          WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
-           AND expires_at > statement_timestamp()
+           AND chat_id = ${params.chatId}
+           AND (expires_at IS NULL OR expires_at > statement_timestamp())
            AND actions -> ${params.actionId}::text ->> 'status' = ${params.from}
         RETURNING actions -> ${params.actionId}::text AS action`;
       return row?.action ?? null;
@@ -9466,7 +9577,17 @@ function buildSlotlockStore(
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
         throw invalidIdentityError('Slotlock assistant prune limit must be 1-10,000');
       }
-      const rows = await sql`
+      // The conversations a deployment gave a lifetime, past it; and those 0.8 kept, past theirs.
+      const chats = await sql`
+        DELETE FROM slotlock.assistant_chats
+         WHERE tenant_ref = ${params.tenantRef}
+           AND (member_ref, chat_id) IN (
+             SELECT member_ref, chat_id FROM slotlock.assistant_chats
+              WHERE tenant_ref = ${params.tenantRef} AND expires_at <= statement_timestamp()
+              LIMIT ${limit})
+           AND expires_at <= statement_timestamp()
+        RETURNING 1`;
+      const old = await sql`
         DELETE FROM slotlock.assistant_conversations
          WHERE tenant_ref = ${params.tenantRef}
            AND member_ref IN (
@@ -9475,7 +9596,7 @@ function buildSlotlockStore(
               LIMIT ${limit})
            AND expires_at <= statement_timestamp()
         RETURNING 1`;
-      return rows.length;
+      return chats.length + old.length;
     },
 
     async sweepAssistantConversations(params) {
@@ -9488,11 +9609,18 @@ function buildSlotlockStore(
       return Number(row?.deleted ?? 0);
     },
 
-    async deleteAssistantConversation(params) {
-      if (!isValidIdentity(params.tenantRef) || !isValidIdentity(params.memberRef)) return false;
+    async deleteAssistantChat(params) {
+      if (
+        !isValidIdentity(params.tenantRef) ||
+        !isValidIdentity(params.memberRef) ||
+        !SLOTLOCK_ASSISTANT_CHAT_ID.test(params.chatId)
+      ) {
+        return false;
+      }
       const rows = await sql`
-        DELETE FROM slotlock.assistant_conversations
-         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef} RETURNING 1`;
+        DELETE FROM slotlock.assistant_chats
+         WHERE tenant_ref = ${params.tenantRef} AND member_ref = ${params.memberRef}
+           AND chat_id = ${params.chatId} RETURNING 1`;
       return rows.length > 0;
     },
 
