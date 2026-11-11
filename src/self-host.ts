@@ -95,6 +95,7 @@ import {
 import { closeSlotlockPartnerMonth, slotlockClientLabel, slotlockPreviousMonth } from './partner-billing.js';
 import { createSlotlockDashboardTeams, createSlotlockOrganizationCheck } from './teams.js';
 import { createSlotlockDashboardWorkspaces, createSlotlockWorkspaceCheck } from './workspaces.js';
+import { createSlotlockInvitationEmailSender } from './invitation-email.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT, reportSlotlockOverage, slotlockMonthOf } from './overage.js';
 import {
   type SlotlockOtlpConfig,
@@ -195,6 +196,9 @@ export const SLOTLOCK_ENVIRONMENT_VARIABLES = Object.freeze([
   'SLOTLOCK_DASHBOARD_NAME',
   'SLOTLOCK_DASHBOARD_TERMS_URL',
   'SLOTLOCK_DASHBOARD_PRIVACY_URL',
+  'SLOTLOCK_INVITATION_EMAIL',
+  'SLOTLOCK_INVITATION_EMAIL_KEY',
+  'SLOTLOCK_INVITATION_EMAIL_FROM',
   'HOST',
   'PORT',
 ] as const);
@@ -1317,6 +1321,13 @@ export async function startSlotlockServer(
               : {}),
             ...(config.dashboard.organizations === 'enabled' ? { teams: createSlotlockDashboardTeams(sql) } : {}),
             ...(config.dashboard.teamWorkspaces ? { teamWorkspaces: true } : {}),
+            ...(config.dashboard.invitationEmail
+              ? {
+                  invitations: createSlotlockInvitationEmailSender(config.dashboard.invitationEmail, {
+                    ...(config.dashboard.name ? { brandName: config.dashboard.name } : {}),
+                  }),
+                }
+              : {}),
             keys: createSlotlockApiKeyStore(sql),
             // Holiday calendars by address (RFC 0004 B1), never from a private address.
             resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: createSlotlockGuardedFetch() }),
@@ -2386,8 +2397,8 @@ async function maintainTenant(
       // Every tenant's expired assistant conversations, a tenant only the dashboard serves
       // included. Counted nowhere: the counts above are this tenant's.
       await store.sweepAssistantConversations();
-      // And finished team invitations, with the addresses they were sent to.
-      await store.sweepWorkspaceInvitations();
+      // And finished team invitations, with the addresses they were sent to, and ended sessions.
+      await store.sweepDashboardRecords();
       return sum;
     });
     return total ?? null;
@@ -2664,6 +2675,10 @@ Environment:
   SLOTLOCK_DASHBOARD_TERMS_URL   https URL of the terms people accept by signing in, linked on the
                                  sign-in page (none named without it)
   SLOTLOCK_DASHBOARD_PRIVACY_URL https URL of the privacy notice the sign-in page links
+  SLOTLOCK_INVITATION_EMAIL      resend or postmark: send team invitations by email (with team
+                                 workspaces; without it, the person inviting sends the link)
+  SLOTLOCK_INVITATION_EMAIL_KEY  Resend's API key, or Postmark's server token
+  SLOTLOCK_INVITATION_EMAIL_FROM The sender the provider verified: team@example.com or Name <...>
   HOST                           Listen address (default 127.0.0.1)
   PORT                           Listen port (default 8080)
 

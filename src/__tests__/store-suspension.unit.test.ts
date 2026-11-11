@@ -78,9 +78,10 @@ const UPKEEP = [
   // The audit log records what happened, refusals included: a suspension does not stop that.
   'recordAuditEvent',
   'pruneAuditEvents',
+  'verifyAuditChain',
   'sweepAssistantConversations',
-  // Deleting finished team invitations: no tenant's data, and nothing a suspension holds.
-  'sweepWorkspaceInvitations',
+  // Deleting finished team invitations and ended sessions: no tenant's data, nothing a suspension holds.
+  'sweepDashboardRecords',
   // Counting what was written already: a suspension stops new writes, not the count of old ones.
   'rollUpUsage',
 ];
