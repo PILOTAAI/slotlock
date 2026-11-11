@@ -44,8 +44,8 @@ interface Page {
   goto(url: string): Promise<unknown>;
   content(): Promise<string>;
   fill(selector: string, value: string): Promise<void>;
-  selectOption(selector: string, value: string): Promise<unknown>;
   click(selector: string): Promise<void>;
+  waitForSelector(selector: string): Promise<unknown>;
   textContent(selector: string): Promise<string | null>;
   screenshot(options: { path: string; fullPage: boolean }): Promise<unknown>;
   url(): string;
@@ -198,17 +198,21 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
     };
 
     try {
-      // 1. The owner connects the model in Settings and tests the connection.
+      // 1. The owner connects the model in Settings (Custom: the fake model is on this machine,
+      // as a self-hosted one would be) and tests the connection.
       const owner = await session('owner');
       await owner.page.goto(`${origin}/dashboard/settings`);
-      await owner.page.selectOption('select[name="provider"]', format);
-      await owner.page.fill('input[name="base_url"]', model.baseUrl);
-      await owner.page.fill('input[name="model"]', 'your-model');
-      await owner.page.fill('input[name="api_key"]', API_KEY);
-      await owner.page.click('#assistant button.primary');
-      expect(await owner.page.content()).toContain('set, ending in <code>tail</code>');
+      await owner.page.click('.tiles label:has(input[value="custom"])');
+      await owner.page.click(`.segmented label:has(input[value="${format}"])`);
+      await owner.page.fill('#base-url', model.baseUrl);
+      await owner.page.fill('#model', 'your-model');
+      await owner.page.fill('#api-key', API_KEY);
+      await owner.page.click('.provider-form button.primary');
+      const saved = await owner.page.content();
+      expect(saved).toContain('<strong>Custom</strong><code>your-model</code>');
+      expect(saved).toContain('<code>•••• tail</code>');
       model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] });
-      await owner.page.click('text=Test connection');
+      await owner.page.click('#assistant button:text-is("Test")');
       expect(await owner.page.content()).toContain('called a tool correctly');
       expect(model.requests.at(-1)?.headers[format === 'anthropic' ? 'x-api-key' : 'authorization']).toContain(API_KEY);
       await shot(owner.page, '1-settings');
@@ -233,10 +237,12 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
         },
       );
       await member.page.fill('textarea[name="message"]', `What's free tomorrow on van-${format}?`);
-      await member.page.click('.composer button');
+      await member.page.click('.composer button.send');
+      // With script the reply streams into the page; without, the form posts and the page reloads.
+      await member.page.waitForSelector(`.turn.bot:has-text("Tomorrow van-${format}")`);
       const answered = await member.page.content();
       expect(answered).toContain(`Tomorrow van-${format} is first free at ${at(8).replace('.000Z', '')}`);
-      expect(answered).toContain('Read: Find next available interval');
+      expect(answered).toContain('<summary>Found the next free time</summary>');
       await shot(member.page, '2-read');
 
       // 3. The member asks for a booking: a proposed change, approved, then on the overview.
@@ -252,19 +258,22 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
         { text: 'I proposed booking 10:00 to 11:00 for Ana. Approve it to book.' },
       );
       await member.page.fill('textarea[name="message"]', 'Book 10 to 11 for Ana pickup');
-      await member.page.click('.composer button');
+      await member.page.click('.composer button.send');
+      await member.page.waitForSelector('.change-buttons button.primary');
       const proposed = await member.page.content();
-      expect(proposed).toContain('Create resource event');
-      expect(proposed).toContain('Waiting for you');
-      expect(proposed).toContain(`van-${format}`);
+      // A card that leads with when and where, and a button that says what it does.
+      expect(proposed).toMatch(/<p class="change-title">[^<]*Ana pickup/);
+      expect(proposed).toContain(`<span title="${van.id}">van-${format}</span>`);
+      expect(await member.page.textContent('.change-buttons button.primary')).toBe('Book');
       await shot(member.page, '3-proposed');
       const before = await store.withTenant(fleetTenant, (tenant) =>
         tenant.listAgenda({ tenantRef: fleetTenant, window: { start: tomorrow, end: new Date(tomorrow.getTime() + DAY) }, limit: 10 }),
       );
       expect(before).toEqual([]);
       model.script({ text: 'Booked.' });
-      await member.page.click('.action-card button.primary');
-      expect(await member.page.textContent('.action-card .pill')).toBe('Done');
+      await member.page.click('.change-buttons button.primary');
+      await member.page.waitForSelector('.receipt.ok');
+      expect(await member.page.textContent('.receipt.ok .why')).toBe('Booked');
       await shot(member.page, '3-approved');
       await member.page.goto(`${origin}/dashboard`);
       const overview = await member.page.content();
@@ -281,7 +290,7 @@ describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real
       const outsider = await session('outsider');
       await outsider.page.goto(`${origin}/dashboard/assistant`);
       const theirs = await outsider.page.content();
-      expect(theirs).toContain('No model is connected');
+      expect(theirs).toContain('An admin of this organization connects a model in Settings.');
       expect(theirs).not.toContain('Ana');
       await outsider.page.goto(`${origin}/dashboard`);
       const theirOverview = await outsider.page.content();
