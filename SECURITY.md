@@ -197,11 +197,30 @@ the one before:
   needs a one-time code from `slotlock staff add` or `reset`. The database stores only the code's
   digest, and the code can be used once, for two days.
 
-The session is a signed `__Host-` cookie. It lasts 8 hours at most and ends after 30 minutes idle.
-Every POST checks its Origin and a token bound to the session. The console connects to the database
-as its own role (`SLOTLOCK_ADMIN_DATABASE_URL`), which can read no table. It can only run the admin
-functions, and each of those checks the staff member's role again and records the call in a
-hash-chained staff log. The log only grows: an erasure never removes it.
+The session lives in the database, and the browser holds only its token, in a signed `__Host-`
+cookie. It lasts 8 hours at most and ends after 30 minutes idle. Signing out ends it wherever the
+cookie went, and so do a passkey reset, a role change or a removal (`slotlock staff`). Every POST
+checks its Origin and a token bound to the session.
+
+The console connects to the database as its own role (`SLOTLOCK_ADMIN_DATABASE_URL`), which can read
+no table. It can only run the admin functions, each of which takes a session's token and never the
+name of a staff member:
+
+- the database opens a session only for a caller that shows the console's key, from `slotlock staff
+  console-key` (a Worker secret, of which the database keeps only the digest, where the console's
+  role cannot read it). So the database credential alone acts as no one;
+- a passkey challenge is kept on its session and used once, and only a passkey raises a session to
+  one that reaches data;
+- each function checks the staff member's role, and records the call in a hash-chained staff log.
+
+`slotlock migrate` refuses a console role that holds any right on a slotlock table, or a serving
+role that holds an admin function, through membership either way. The console checks its own role
+before it serves anything.
+
+The log only grows: an erasure never removes it. The console's role and the serving role can change
+nothing in it. The schema owner could, by turning its triggers off, but not without breaking the
+chain: the Staff log page and `slotlock staff verify-log` show its head, to record somewhere the
+owner cannot change.
 
 Staff are added, have their role changed and are removed only with the deployment role's
 credentials (`slotlock staff`), never from the console. The console shows account metadata: plan,
@@ -229,13 +248,20 @@ it through a GitHub App, "Slotlock CMS", installed on this repository only, whic
 reaches `main` only by a pull request that passes the same required checks as any other; the App
 has no bypass. Only an Owner publishes, and the console merges a pull request only:
 
-- at the commit the Owner saw;
-- when it changes nothing but blog files (posts, their images, redirects, the author list);
+- at the commit the Owner saw, and judged by what merging that exact commit brings;
+- when it changes nothing but that post's own files (its text and images; for a rename, the old
+  post's files, and redirects that lead only to the new one);
 - once its checks pass.
 
-The hourly workflow that publishes scheduled posts holds to the same rules, and acts only on a
+A post's one-line fields refuse line breaks, so no field can add a `Signed-off-by` line, and the
+merge message keeps only each commit's own author's sign-off. The hourly workflow that publishes
+scheduled posts holds to the same rules, reads every comment of a pull request, and acts only on a
 schedule the App itself wrote. The renderer escapes every character of a post, so a post cannot
 carry a script, a style or raw HTML. An image is accepted only as PNG, JPEG or WebP, by its bytes.
+
+A CMS pull request's preview is uploaded by `site-preview.yml`, which runs on `workflow_run` and so
+always as main has it: a pull request cannot change the workflow that holds the preview's
+Cloudflare token. It checks out main, takes the build only as files, and never runs them.
 
 Privacy requests are answered in the console too. A request is shown to come from the account's
 holder by a key they name with a word staff send back, made after the request, as the account (for
@@ -260,8 +286,8 @@ without any endpoint's address. A server records each account whose maintenance 
 error's class, code and first line, cut at its first quotation mark, where a value would start.
 
 The staff log, closed abuse cases and closed privacy requests are kept six years and then deleted.
-Until then, nothing in the staff log can be changed or deleted, by the console's role or by the
-schema owner.
+Until then, nothing in the staff log can be changed or deleted through the console or the serving
+role. The schema owner's rewrite shows in the chain, as above.
 
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.

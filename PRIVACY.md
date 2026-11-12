@@ -81,7 +81,9 @@ protection officer.
 | From 12 December 2026, what our staff show on your dashboard: announcements to every account or to your plan's accounts (planned maintenance, a change to Slotlock, an incident), and a notice to your account alone, with your account's id, the text, an optional link, when it shows and who wrote it | Our staff | A year after it ends or is ended, then deleted; a notice to your account alone, at once when your account is erased |
 | From 12 December 2026, a feature our staff turned on or off for your account (the assistant, or creating team workspaces), with your account's id, the reason and who did it | Our staff | Until they take it away, or your account is erased |
 | From 12 December 2026, when our hourly maintenance of your account last failed: your account's id, when it first and last failed, how many times, and the error's class, code and first line, cut at its first quotation mark. Never your calendar content | The service | Until maintenance runs for your account again, and at most 30 days after it last failed; at once when your account is erased |
-| From 12 December 2026, an erasure's receipt: the request, a digest of your account's id (SHA-256 with a secret of ours, so it names the account only to someone with our database who already knows its id), how many rows were erased, which of our staff asked, approved and erased, and when | The service | Six years, then deleted |
+| From 12 December 2026, an erasure's receipt: the request, a digest of your account's id (SHA-256 with a secret of ours), how many rows were erased, which of our staff asked, approved and erased, and when. The receipt itself names your account only by that digest; the staff log (above) keeps its own record of each step, with your account's id, for its six years | The service | Six years, then deleted |
+| From 12 December 2026, a payment of yours that failed, or a second subscription your account bought: your account's id, the Stripe invoice or subscription id, and the amount, currency, attempt count and next attempt Stripe reported. Never card or address details | Stripe, through its webhook | While your account exists |
+| From 12 December 2026, a plan or limits our staff gave your account until a date: the plan, the limits and allowances, the reason given, and which of our staff gave, approved or ended it | Our staff | While your account exists |
 
 The API server's logs record each call's operation and outcome, never its arguments or who made it.
 For each minute in which the server refused requests, they also record how many it refused (over a
@@ -129,6 +131,8 @@ their role again on every page.
 - **GitHub logins:** to show a login rather than a number, the console asks GitHub's public profile
   API which login an account id has, and keeps the answer in its memory for an hour. It stores no
   login.
+- **Stripe:** for an account that pays, the console reads its subscriptions and last invoices from
+  Stripe, with a key that can only read, and keeps what it read for an hour.
 - **What they record:** every sign-in, every account page opened and every action is in the staff
   log. An action on your account (a suspension and its end, a revoked key, ended sessions, a plan
   or limits given until a date, a notice sent to you, a feature turned on or off for you) also goes
@@ -158,7 +162,7 @@ their role again on every page.
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Learning which pages of the website people read, and how they find them | Page views on `slotlock.pylota.io`, counted without cookies (above) | (f) legitimate interests: improving the website, with no way to tell who you are |
-| Running the service day to day: support, billing, handling abuse reports, telling you about maintenance and changes, turning features on or off, finding failed maintenance, and recording what our staff do on accounts | Staff log, internal notes, abuse cases, announcements and notices, feature flags, maintenance failures | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
+| Running the service day to day: support, billing, handling abuse reports, telling you about maintenance and changes, turning features on or off, finding failed maintenance, and recording what our staff do on accounts | Staff log, internal notes, abuse cases, announcements and notices, feature flags, maintenance failures, billing alerts, plan overrides | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
 | Answering your privacy requests, and showing later that we did | Privacy requests, erasure receipts | (c) legal obligation: UK GDPR Articles 12 to 22, and 5(2), which asks us to be able to show it |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
 

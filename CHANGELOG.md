@@ -91,6 +91,34 @@ versioning.
   a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
   the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.
 
+### Security
+
+From an AI security pre-review of the admin console (RFC 0006, Part 7): not the independent review
+GOVERNANCE.md requires, which is still to come.
+
+- **Staff sessions live in the database.** Every admin function takes a session's token. The
+  database opens a session only for a caller that shows the console's key: `slotlock staff
+  console-key` prints it, the console's `SLOTLOCK_ADMIN_CONSOLE_KEY` holds it, and the database
+  keeps only its digest. Before this, the console's database credential alone could act as any
+  staff member. Signing out, `slotlock staff reset`, `role` and `remove` and a new key end a
+  member's sessions at once; a passkey challenge is used once, by its own session.
+- **`slotlock migrate` keeps the console and serving roles apart**: no table right for the console
+  role, no admin function for the serving role, through membership either way. The console checks
+  its role before it serves anything.
+- **The staff log refuses TRUNCATE**, and `slotlock staff verify-log` and the Staff log page check
+  its chain and show its head, to record elsewhere.
+- **The dashboard** keeps staff's flags and a suspension banner when a session falls back to a
+  person's own workspace, and the database refuses a new team to a suspended person, or one whose
+  account or plan has team creation off.
+- **CMS previews** upload from `site-preview.yml`, on `workflow_run`, so a pull request cannot
+  change the workflow that holds the preview's Cloudflare token. A CMS merge takes only the post's
+  own files, judged by the exact commit; one-line post fields refuse line breaks; the scheduled
+  job reads every comment.
+- Smaller: a suspension links only to an open case about that account; a link from elsewhere shows
+  no notice or login label; GitHub lookups time out; maintenance errors are cut at their first
+  quotation mark; `erase_tenant` takes staff notes; people a team's provider made are people to
+  staff; renaming a post back makes no redirect loop.
+
 ## 0.10.0 - 2026-11-11
 
 This release gives a workspace its people and an audit trail. It brings six roles read from the

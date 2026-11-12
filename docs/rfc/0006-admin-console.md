@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built and wait for their independent security review and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built; an AI security pre-review's findings are fixed (Part 7, after Phase 6). They wait for the independent security review, which must be a person's, and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -73,7 +73,7 @@ Every line was checked in the code; references are `file:line` on `main` at `230
 | **Support** | Whoever answers support@ | Find an account, see its plan, usage, keys and audit log; end sessions; revoke a key at the customer's request; suspend for abuse; write notes; start privacy requests |
 | **Billing** | Finance | Revenue, failed payments, duplicates, overrides up to 90 days, partner month close |
 | **Editor** | Anyone writing for the site | Write, preview and submit posts; see site and search numbers |
-| **Viewer** | Advisers, auditors | Read the home page, revenue and site numbers; no account detail |
+| **Viewer** | Advisers, auditors | Read the home page, the Billing page (revenue, payments and its alerts, which name accounts) and site numbers; no account's own page |
 
 Capabilities follow the dashboard's model (`src/workspace-roles.ts`): each route names the
 capability it needs, an unlisted route is refused, and sensitive capabilities need a fresh
@@ -305,7 +305,8 @@ A staff capability map like `src/workspace-roles.ts`:
 | Write posts | ✓ | | | ✓ | |
 | Publish posts | ✓ | | | | |
 | Site and search numbers | ✓ | | | ✓ | ✓ |
-| Announcements, feature flags | ✓ | | | | |
+| System and communications (read) | ✓ | ✓ | | | |
+| Announcements, feature flags, status page | ✓ | | | | |
 | Staff management | ✓ (four eyes) | | | | |
 
 ### 4.4 Data access
@@ -322,6 +323,12 @@ A staff capability map like `src/workspace-roles.ts`:
   - returns only the columns the console shows, and never booking content (titles, descriptions,
     attendees, contacts);
   - is paginated, and capped at 100 rows a call.
+- **Staff sessions** live in the database (`staff_sessions`), and every admin function takes a
+  session's token, never a staff member's name: the database says who acts. A session opens only
+  for a caller that shows the console's key (`slotlock staff console-key`; the database keeps its
+  digest where `slotlock_admin_app` cannot read it), is raised by a passkey against a challenge kept
+  on it and used once, and ends on sign-out, a reset, a role change, a removal, a new key, 30 idle
+  minutes or its end. This came from the security pre-review (Part 7, after Phase 6).
 - **New tables**: `staff_members`, `staff_passkeys`, `staff_sessions`, `staff_audit_events`,
   `account_directory`, `account_notes`, `tenant_plan_overrides`, `privacy_requests`,
   `erasure_receipts`, `abuse_cases`, `announcements`, `feature_flags`, `maintenance_runs`.
@@ -442,7 +449,7 @@ cards, eyebrow, title and lede):
 | A request skips Access | The Worker verifies the Access JWT on every request |
 | CSRF or replay | The dashboard's Origin check, CSRF token and single-use nonce |
 | XSS through a post | No raw HTML in Markdown; a strict CSP on the site and the console |
-| A leaked database credential | `slotlock_admin_app` can only call the admin functions, each of which checks the staff member and writes the log |
+| A leaked database credential | `slotlock_admin_app` can only call the admin functions; each takes a staff session's token, which the database opens only for the console's key (kept as a digest the role cannot read), so the credential alone acts as no one |
 | Bulk export of customer data | Lists capped at 100 rows a call; the account export only through a privacy request; CSV export of the directory for Owner and Billing only, and logged |
 | The CMS App's token | Scoped to one repository; it can open and merge pull requests, and the site's checks still run |
 
@@ -470,7 +477,7 @@ so the estimates below include them.
 
 | Phase | Scope | Done when | Estimate |
 | --- | --- | --- | --- |
-| **0. Owner settings** | Cloudflare Access application for `admin.slotlock.pylota.io` with GitHub; the "Slotlock CMS" GitHub App; a Hyperdrive configuration for `slotlock_admin_app`; DNS; the Worker's secrets; decisions E1 to E8 | Access blocks a non-staff GitHub account | An hour |
+| **0. Owner settings** | Cloudflare Access application for `admin.slotlock.pylota.io` with GitHub; the "Slotlock CMS" GitHub App; a Hyperdrive configuration for `slotlock_admin_app`; DNS; the Worker's secrets, the console's key (`slotlock staff console-key`) among them; decisions E1 to E8 | Access blocks a non-staff GitHub account | An hour |
 | **1. Foundation and directory** | `workers/admin` and `src/admin/`; staff tables, sign-in (Access JWT, GitHub, passkey), roles, staff log; `account_directory` and its backfill; M0 shell with ⌘K; M1 Home (numbers, health); M2 Accounts; M3 Account detail, read-only; M12 staff list | Support can find any account by login, key prefix or Stripe id and see its plan, usage, keys and audit log; every view is in the staff log | 1 to 2 weeks |
 | **2. Support actions** | Suspend and unsuspend with a reason and a customer message; revoke keys; end sessions; notes; abuse cases (M6); staff actions in the customer's audit log; CLI operator commands audited | A suspension made in the console shows in the customer's dashboard and audit log, and in the staff log | 1 week |
 | **3. Billing and usage** | Stripe reads (M4); failed and duplicate payments; `billing daily` and `overage report` on a schedule, shown on Home; plan overrides and temporary allowances (M5); partner month close | An override changes the account's limits at once and ends on its date; a failed payment appears on Home within the hour | 1 week |
@@ -662,13 +669,13 @@ sitemap entry, with the copy lint and the SEO check clean.
 - **Images.** PNG, JPEG or WebP, known by their first bytes, up to 1 MB, 20 a post, beside the post
   in `site/public/blog/<slug>/`. Alt text is required by the Markdown check.
 - **Publishing.** The console merges (squash) only:
-  - at the commit the Owner saw;
-  - a pull request that changes nothing but blog files (posts, their images, `_redirects`,
-    `authors.json`);
+  - at the commit the Owner saw, judged by what merging that exact commit brings;
+  - a pull request that changes nothing but that post's own files (its text and images; for a
+    rename, the old post's files and `_redirects` lines that lead only to the new one);
   - once the post is submitted, its checks on GitHub pass and the console's checks pass.
 
   A branch behind main is brought up to date first, and the Owner publishes once the checks pass
-  again. The merge message carries every `Signed-off-by` of the pull request and the Owner's.
+  again. The merge message carries each commit's own author's `Signed-off-by` and the Owner's.
 - **Scheduling.** A post with a later `publishAt` is scheduled: a label, and the App's comment
   naming the commit. `cms-schedule.yml` runs `scripts/cms-scheduled-merge.mjs` each hour as the
   App. It merges when the time has come, if the post's files are still that commit's (bringing in
@@ -677,13 +684,16 @@ sitemap entry, with the copy lint and the SEO check clean.
 - **Renaming and redirects.** A published post's address changes on its own pull request, which
   moves the post and its images and adds `301` lines for the page and its Markdown twin to
   `site/public/_redirects`, pointing older redirects at the new address.
-- **Preview deploys.** `site.yml` uploads a CMS pull request's build to the preview Worker
-  (`site/wrangler.preview.jsonc`) with `noindex` on every page. It checks out main for Wrangler and
-  never runs the pull request's code with the Cloudflare token.
+- **Preview deploys.** `site-preview.yml` uploads a CMS pull request's build to the preview Worker
+  (`site/wrangler.preview.jsonc`) with `noindex` on every page. It runs on `workflow_run`, so always
+  as main has it: a pull request cannot change the workflow that holds the Cloudflare token. It
+  checks out main for Wrangler and takes the build only as files.
 - **Owner settings (Phase 0).** The Slotlock CMS GitHub App (permissions in
   `workers/admin/wrangler.jsonc`), its key on the console's Worker and on the `cms` environment,
-  and the preview Worker with its `site-preview` environment. `scripts/configure-github.sh`
-  creates both environments; the App, its key and the Cloudflare token are set by hand.
+  and the preview Worker with its `site-preview` environment (limited to main, where
+  `workflow_run` runs). `CMS_APP_ID`, `CMS_APP_INSTALLATION` and `SITE_PREVIEW_HOST` are repository
+  variables, which a job's condition can read. `scripts/configure-github.sh` creates both
+  environments; the App, its key and the Cloudflare token are set by hand.
 
 Left for later phases:
 
@@ -803,6 +813,42 @@ Left for later:
   it runs with, which live on its server;
 - the comparison pages' "last checked" flags on Home (M8), and adding an author from the console,
   both still open from Phase 4.
+
+**Security pre-review (2026-11-12).** An AI review of Phases 1 to 6, by five reviewers, one per
+surface (the database, sign-in and sessions, the console's pages, the CMS and CI, the customer
+side), each given the code and not the author's conclusions. GOVERNANCE.md is clear that an
+automated or AI-generated review does not count as the independent review, so that review still
+has to happen, by a person, recorded on the pull request. What this one found is fixed, each with a
+test:
+
+| Finding | Severity | Fix |
+| --- | --- | --- |
+| The database trusted the staff member the console named, so the console's database credential alone could act as any Owner (four eyes alone, announcements, suspensions, adding a passkey) | High | Database sessions opened only with the console's key (4.4) |
+| Signing out or a reset ended nothing on the server: a copied cookie lasted up to 8 hours | Medium | The same sessions: ended in the database |
+| `migrate` accepted a console role with table rights, or membership between it and the serving role; the Worker never checked its role | Medium | Both refused, either way round; the console checks its role before serving |
+| The schema owner could TRUNCATE the staff log, and nothing checked the chain | Medium | TRUNCATE refused; the chain checked on the Staff log page and by `slotlock staff verify-log`, with its head to record elsewhere |
+| A dashboard session that fell back to the person's own workspace lost staff's flags and the suspension banner | Medium | That workspace read for itself; the assistant fails closed; `create_team` refuses too |
+| A CMS branch could change `site.yml` and read the preview's Cloudflare token | Medium | Previews from `site-preview.yml` on `workflow_run` |
+| A passkey challenge could be replayed, and served another session | Low | Kept on its session, used once |
+| A cross-site link could turn a full session back into a GitHub-only one | Low | A signed-in member goes home |
+| A suspension could be linked to any case | Low | Only an open case about that account, or about none |
+| A link could show a notice, or a login label, that no action made | Low | Shown only with the action's own sealed cookie, or GitHub's word |
+| GitHub profile lookups had no timeout and kept failures an hour | Low | Five seconds, no redirect, only "no such account" kept |
+| An Editor could forge `Signed-off-by` lines through a title | Low | One-line fields refuse line breaks; only each commit's author's sign-off kept |
+| The scheduled job read only 100 comments, and judged files by the head, not the commit | Low | Every comment read; the exact commit's files, the post's own only |
+| Renaming a post back made a redirect loop | Low | Such lines dropped |
+| Quote-stripping let values through into maintenance failures | Low | Cut at the first quotation mark |
+| Erasure outside the console kept staff notes; SSO people were not people to staff | Low | `erase_tenant` takes notes and unlinks cases; `sso:` is a person |
+| PRIVACY.md left out billing alerts, overrides and the Stripe cache, and overstated the receipt | Low | Rows added; the receipt's wording corrected |
+
+Not changed: the serving role's new functions take any tenant, as the existing serving functions do,
+so they add no power a compromised serving role lacks. And as Phase 4 decided, saving a post needs
+no recent passkey, so a long edit is never lost to the passkey step; publishing, renaming and
+discarding do.
+
+Deploying: this release's `slotlock serve` and Stripe webhook record maintenance failures and billing
+alerts as soon as they run, and PRIVACY.md's rows for them take effect on 12 December 2026, so this
+release goes out no earlier than that day.
 
 ## Part 8: Non-goals and risks
 
