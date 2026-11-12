@@ -4,7 +4,8 @@
 // this repository never holds a deploy token.
 // Config reference: https://developers.cloudflare.com/workers/wrangler/configuration/ (read 2026-10-18).
 //
-// Before the first deploy:
+// Before the first deploy (scripts/configure-admin-console.mjs does all of this but the GitHub OAuth
+// app, and writes this file with your values to wrangler.deploy.jsonc):
 //   - `slotlock migrate` with SLOTLOCK_ADMIN_DATABASE_URL set, so the console's own database role
 //     exists with its grants (the admin functions, and no table);
 //   - a Hyperdrive configuration with caching disabled that connects AS THAT ROLE, never as the

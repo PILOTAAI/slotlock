@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built; an AI security pre-review's findings are fixed (Part 7, after Phase 6). They wait for the independent security review, which must be a person's, and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built; an AI security pre-review's findings are fixed (Part 7, after Phase 6). They wait for the independent security review, which must be a person's, and the owner's Phase 0 settings, which `scripts/configure-admin-console.mjs` makes. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -542,7 +542,9 @@ What is left before the console goes live:
 
 - the owner's Phase 0 settings: the Access application, the console's own GitHub OAuth app, a
   Hyperdrive configuration for `slotlock_admin_app`, the Worker's secrets, and the first Owner from
-  `slotlock staff add`;
+  `slotlock staff add`. `scripts/configure-admin-console.mjs` makes them all but the OAuth app,
+  which GitHub has no API to create: `prepare` any time, and `go-live`, which deploys, from
+  12 December 2026;
 - PRIVACY.md (staff access, GitHub profile lookups, how long the staff log is kept), posted 30 days
   before it takes effect, as the notice itself promises;
 - the independent security review, recorded on the pull request.
@@ -693,7 +695,9 @@ sitemap entry, with the copy lint and the SEO check clean.
   and the preview Worker with its `site-preview` environment (limited to main, where
   `workflow_run` runs). `CMS_APP_ID`, `CMS_APP_INSTALLATION` and `SITE_PREVIEW_HOST` are repository
   variables, which a job's condition can read. `scripts/configure-github.sh` creates both
-  environments; the App, its key and the Cloudflare token are set by hand.
+  environments. `scripts/configure-admin-console.mjs go-live` creates the App, stores its key in the
+  Worker and the `cms` environment, and sets `CMS_APP_ID` and `CMS_APP_INSTALLATION`; `prepare` sets
+  `SITE_PREVIEW_HOST`. The preview Worker and its Cloudflare token are set by hand.
 
 Left for later phases:
 

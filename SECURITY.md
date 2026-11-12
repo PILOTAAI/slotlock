@@ -289,6 +289,15 @@ The staff log, closed abuse cases and closed privacy requests are kept six years
 Until then, nothing in the staff log can be changed or deleted through the console or the serving
 role. The schema owner's rewrite shows in the chain, as above.
 
+`scripts/configure-admin-console.mjs` sets the console up from the owner's machine. It hands every
+secret to Wrangler and gh on stdin, never as an argument or in a file, and prints none but one: the
+console role's database URL, once, when it creates that role, for the owner to keep with their
+release settings. PostgreSQL gets that role's password only as a SCRAM verifier, so no server log
+holds it. Cloudflare gets it in Hyperdrive's configuration, which never returns it. The script makes
+the Access policy from the addresses it is given, checks that the GitHub App it creates holds exactly
+the CMS's permissions on this repository alone, refuses to deploy before 12 December 2026, and never
+replaces a console key or session secret, nor re-adds a staff member, that is already there.
+
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
 
