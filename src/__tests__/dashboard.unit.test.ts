@@ -299,6 +299,12 @@ describe('dashboard routes and headers', () => {
     const jsPath = /src="(\/base\/dashboard\/app\.js\?v=[A-Za-z0-9_-]{12})"/.exec(html)?.[1];
     const css = await get(dashboard(), cssPath as string);
     expect(css.headers.get('content-type')).toBe('text/css; charset=utf-8');
+    // Settings take the page's width (no 640-pixel column), and fields have a colour of their own,
+    // so they stand apart from their card in either theme.
+    const styles = await css.clone().text();
+    expect(styles).not.toContain('minmax(0, 640px)');
+    expect(styles).toMatch(/\.settings-body \{[^}]*max-width: 1080px/);
+    expect(styles).toMatch(/--field: #ffffff;[\s\S]*--field: #18181d;/);
     expect(css.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     const script = await get(dashboard(), jsPath as string);
     expect(script.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
@@ -2820,6 +2826,10 @@ describe('resource detail, webhooks and the waitlist', () => {
     const { session } = await signIn(target);
     const page = await (await get(target, '/base/dashboard/settings/privacy', session)).text();
     expect(page).toContain('Export the workspace');
+    // Each is a card: what it is and what it is for, then its rows, then its action.
+    expect(page).toContain('<section class="set-card"><header class="panel-head"><h3>Workspace export</h3>');
+    expect(page).toContain('<div class="card-foot"><button type="submit" class="primary">Export the workspace</button></div>');
+    expect(page).toMatch(/<h3>A person’s data<\/h3>[\s\S]*<label class="row-label" for="person-value">Find by<\/label>/);
     expect(page).toContain(`/base/dashboard/settings/privacy/download?id=${ready.id}`);
     const token = await csrf(target, session);
     // Asked for, built elsewhere.

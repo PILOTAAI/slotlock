@@ -14,6 +14,17 @@ versioning.
   `_slotlock-challenge.example.com.example.com`), or the values found at that name when none is
   the one to publish, such as an old token or a value cut short. They are public DNS data, at
   most five of 120 characters.
+- **Settings are redesigned, after Vercel's, Supabase's and Intercom's.**
+  - Every section takes the page's width, up to 1,080 pixels, instead of a 640-pixel column that
+    left the right of the page empty.
+  - Each card can carry a header saying what it is for. Its rows put a label and hint beside the
+    control (two fifths to three fifths), and its action sits in its foot.
+  - Deleting a team and erasing a person are red-edged danger cards.
+  - Privacy's export and person finder, Identity's Add a domain and SCIM's Turn on SCIM are cards
+    like the rest.
+  - Fields have a colour of their own, so they stand apart from their card in dark mode too. A
+    hairline darkens on hover and the accent ring shows on focus, and selects have a drawn chevron.
+    Labels are the ink of the text they name.
 - **Docs: Slotlock Cloud's hosted page no longer offers single sign-on.** It is off on Cloud for now,
   so the sign-in page offers GitHub and Google, and Settings, Identity has no Single sign-on section.
   A deployment that sets `SLOTLOCK_TEAM_SSO=on` still has both.
