@@ -29,6 +29,7 @@ import {
 import type { SlotlockContentStep, SlotlockStaffRole } from '../staff-ddl.js';
 import { slotlockStaffMay } from '../staff-ddl.js';
 import {
+  type SlotlockCmsChange,
   type SlotlockCmsChecks,
   type SlotlockCmsFile,
   type SlotlockCmsGitHub,
@@ -37,6 +38,8 @@ import {
   slotlockSignOff,
 } from './github-app.js';
 import { Html, day, html, pageHead, pill, table, when } from './ui.js';
+
+export type { SlotlockCmsChange } from './github-app.js';
 
 export const SLOTLOCK_CMS_POSTS = 'site/content/blog';
 export const SLOTLOCK_CMS_IMAGES = 'site/public/blog';
@@ -56,16 +59,76 @@ const SITE_CACHE_MS = 60 * 60 * 1000;
 const CONTEXT_CACHE_MS = 2 * 60 * 1000;
 
 /**
- * The files a CMS pull request may change. Publishing refuses one that changes anything else, so
- * the App's merge cannot carry code, workflows or settings, whoever pushed to the branch.
+ * The files a CMS pull request may change at all: posts, their images and the redirects a rename
+ * writes. The author list is not among them: the console never writes it, so a change to it goes
+ * through an ordinary pull request.
  */
 export function slotlockCmsPathAllowed(path: string): boolean {
   return (
     /^site\/content\/blog\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\.md$/.test(path) ||
     /^site\/public\/blog\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\.(?:png|jpe?g|webp)$/.test(path) ||
-    path === SLOTLOCK_CMS_REDIRECTS ||
-    path === SLOTLOCK_CMS_AUTHORS
+    path === SLOTLOCK_CMS_REDIRECTS
   );
+}
+
+const CHANGE_POST = /^site\/content\/blog\/([a-z0-9]+(?:-[a-z0-9]+){0,15})\.md$/;
+const CHANGE_IMAGE = /^site\/public\/blog\/([a-z0-9]+(?:-[a-z0-9]+){0,15})\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\.(?:png|jpe?g|webp)$/;
+/** A redirect line: a site path, a post's address, and a redirect status. */
+const REDIRECT_LINE = /^(\/[^\s]{0,300}) (\/blog\/[a-z0-9]+(?:-[a-z0-9]+){0,15}(?:\/|\.md)) (30[1278])$/;
+
+/**
+ * Whether the console (or the hourly workflow) may merge what a cms/<slug> commit changes: its own
+ * post and that post's images, and nothing of another post but, for a rename, the old post's files
+ * going away with redirects from the old address to this one. Every redirect line it adds leads to
+ * this post, from the old address or from an address that led to the old one. scripts/
+ * cms-scheduled-merge.mjs applies the same rule (cmsChangeAllowed).
+ */
+export function slotlockCmsChangeAllowed(slug: string, files: readonly SlotlockCmsChange[]): boolean {
+  if (files.length === 0) return false;
+  let from: string | null = null;
+  let redirects: SlotlockCmsChange | null = null;
+  for (const file of files) {
+    for (const path of [file.path, ...(file.previous ? [file.previous] : [])]) {
+      if (path === SLOTLOCK_CMS_REDIRECTS) {
+        if (file.status !== 'modified' && file.status !== 'added') return false;
+        redirects = file;
+        continue;
+      }
+      const owner = CHANGE_POST.exec(path)?.[1] ?? CHANGE_IMAGE.exec(path)?.[1];
+      if (!owner) return false;
+      if (owner === slug) continue;
+      // Another post's file: only one going away in a rename, and only one other post.
+      const leaving = (file.status === 'removed' && path === file.path) || (file.status === 'renamed' && path === file.previous);
+      if (!leaving || (from !== null && from !== owner)) return false;
+      from = owner;
+    }
+  }
+  // Redirects only with a rename, and a rename always with its redirects.
+  if ((redirects === null) !== (from === null)) return false;
+  if (redirects === null || from === null) return true;
+  if (redirects.patch === null) return false;
+  const old = new Set([`/blog/${from}/`, `/blog/${from}.md`]);
+  const own = new Set([`/blog/${slug}/`, `/blog/${slug}.md`]);
+  const sources = new Set(old);
+  const added: [string, string][] = [];
+  for (const line of redirects.patch.split('\n')) {
+    if (line.startsWith('@@') || line.startsWith('+++') || line.startsWith('---') || line.startsWith(' ') || line.startsWith('\\') || line === '') continue;
+    const text = line.slice(1).trim();
+    if (line.startsWith('-')) {
+      // A line that led to the old post is rewritten to lead to this one, and one from this post's
+      // own address (a post renamed back, or into an address that redirected) goes; nothing else.
+      const found = REDIRECT_LINE.exec(text);
+      if (!found || !(old.has(found[2] as string) || own.has(found[1] as string))) return false;
+      if (old.has(found[2] as string)) sources.add(found[1] as string);
+      continue;
+    }
+    if (!line.startsWith('+')) return false;
+    const found = REDIRECT_LINE.exec(text);
+    if (!found) return false;
+    added.push([found[1] as string, found[2] as string]);
+  }
+  return added.length > 0 && added.every(([source, target]) =>
+    sources.has(source) && !own.has(source) && target === `/blog/${slug}${target.endsWith('.md') ? '.md' : '/'}`);
 }
 
 /** The comment the App leaves when an Owner schedules a post: the commit it may merge, and when. */
@@ -99,15 +162,21 @@ export function slotlockImageType(bytes: Uint8Array): 'png' | 'jpg' | 'webp' | n
   return null;
 }
 
-/** Add a slug change to _redirects: the page and its Markdown twin, and any redirect that led to the old page now leads to the new one. */
+/**
+ * Add a slug change to _redirects: the page and its Markdown twin, and any redirect that led to the
+ * old page now leads to the new one. A line that would lead an address to itself, or away from the
+ * new page's own addresses (a post renamed back), is dropped, so no redirect loops.
+ */
 export function slotlockRedirectsWith(text: string, from: string, to: string): string {
   const lines = text.replace(/\r\n?/g, '\n').replace(/\n*$/, '').split('\n').filter((line, index, all) => !(all.length === 1 && line === ''));
-  const moved = lines.map((line) => {
+  const own = new Set([`/blog/${to}/`, `/blog/${to}.md`]);
+  const moved = lines.flatMap((line) => {
     const parts = line.trim().split(/\s+/);
-    if (line.trim().startsWith('#') || parts.length < 2) return line;
+    if (line.trim().startsWith('#') || parts.length < 2) return [line];
     if (parts[1] === `/blog/${from}/`) parts[1] = `/blog/${to}/`;
     if (parts[1] === `/blog/${from}.md`) parts[1] = `/blog/${to}.md`;
-    return parts.join(' ');
+    if (parts[0] === parts[1] || own.has(parts[0] as string)) return [];
+    return [parts.join(' ')];
   });
   moved.push(`/blog/${from}/ /blog/${to}/ 301`, `/blog/${from}.md /blog/${to}.md 301`);
   return `${moved.join('\n')}\n`;
@@ -134,7 +203,7 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   slug_taken: { kind: 'warn', text: 'There is a post or a draft at that address already. Choose another.' },
   rename_draft: { kind: 'warn', text: 'Only a published post with no open draft is renamed here. Discard or publish the draft first.' },
   changed: { kind: 'warn', text: 'The pull request changed since you opened the page. Look at it again, then publish.' },
-  not_content: { kind: 'warn', text: 'That pull request changes files outside the blog, so the console does not merge it. Review and merge it on GitHub.' },
+  not_content: { kind: 'warn', text: 'That pull request changes more than this post: files outside the blog, another post, or redirects a rename did not write. The console does not merge it; review and merge it on GitHub.' },
   not_submitted: { kind: 'warn', text: 'It is still a draft. Submit it for review first.' },
   checks_pending: { kind: 'warn', text: 'Its checks on GitHub have not all finished. Publish when they pass.' },
   checks_failing: { kind: 'warn', text: 'A check failed, on GitHub or in the console. Fix the post, then publish.' },
@@ -402,10 +471,18 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       else descriptions[other] = read.front.description;
     }
     const { post, broken } = tryParse(snap.files[0] ?? null, slug);
-    const [images, schedule] = await Promise.all([
+    const [images, schedule, changes] = await Promise.all([
       github.listDirectory(`${SLOTLOCK_CMS_IMAGES}/${slug}`, ref),
       pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? github.appComments(pull.number).then(slotlockScheduleOf) : Promise.resolve(null),
+      pull ? github.commitFiles(pull.headSha).catch(() => null) : Promise.resolve(null),
     ]);
+    // A post this pull request takes away (a rename's old address) is no other post once it merges:
+    // its description is not one the post must differ from.
+    for (const change of changes ?? []) {
+      const gone = change.status === 'removed' ? change.path : change.status === 'renamed' ? change.previous : null;
+      const other = gone ? /^site\/content\/blog\/([a-z0-9]+(?:-[a-z0-9]+){0,15})\.md$/.exec(gone)?.[1] : undefined;
+      if (other) delete descriptions[other];
+    }
     const context: PostContext = { authors: parseAuthors(snap.files[1] ?? null), descriptions, images: images.filter((name) => IMAGE_FILE.test(name)) };
     contexts.set(slug, { value: context, until: now() + CONTEXT_CACHE_MS });
     if (contexts.size > 200) contexts.delete(contexts.keys().next().value as string);
@@ -925,8 +1002,10 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     const state = await postState(slug);
     const pull = state.pull;
     if (!pull || !SHA.test(sha) || pull.headSha !== sha) return back(context, `/content/${slug}`, 'changed', false);
-    const files = await github.pullFiles(pull.number);
-    if (!files || files.length === 0 || !files.every(slotlockCmsPathAllowed)) return back(context, `/content/${slug}`, 'not_content', false);
+    // What merging exactly this commit brings: its own post and images, or a rename's (never the
+    // files of whatever the branch holds a moment later).
+    const files = await github.commitFiles(sha);
+    if (!files || !slotlockCmsChangeAllowed(slug, files)) return back(context, `/content/${slug}`, 'not_content', false);
     if (!state.post || state.post.front.status !== 'published') return back(context, `/content/${slug}`, 'not_submitted', false);
     const onGithub = await github.checks(sha);
     if (onGithub === 'pending' || onGithub === 'none') return back(context, `/content/${slug}`, 'checks_pending', false);

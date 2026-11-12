@@ -377,6 +377,15 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect(refused.headers.get('location')).toBe(`/content/${other}?error=not_content`);
     expect(pullOf(other)?.merged).toBe(false);
     expect(repo.text('main', 'src/index.ts')).toBe('export {};\n');
+    // Nor one that changes another post: an Owner publishing this post would carry that change too.
+    const third = 'third-post';
+    expect((await form(editor, '/content/new', { ...postFields(third), intent: 'submit' })).headers.get('location')).toBe(`/content/${third}?done=submitted`);
+    const existing = repo.text('main', `site/content/blog/${EXISTING}.md`) ?? '';
+    repo.pushToBranch(`cms/${third}`, { [`site/content/blog/${EXISTING}.md`]: existing.replace(/\n$/, ' Edited.\n') }, 'Edit another post');
+    const another = await form(ownerBrowser, `/content/${third}/publish`, { sha: headOf(third) }, `/content/${third}`);
+    expect(another.headers.get('location')).toBe(`/content/${third}?error=not_content`);
+    expect(pullOf(third)?.merged).toBe(false);
+    expect(repo.text('main', `site/content/blog/${EXISTING}.md`)).toBe(existing);
   });
 
   it('schedules a post with a later date, and the hourly workflow publishes it when that comes', async () => {
@@ -392,6 +401,8 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect(await (await ownerBrowser.request('/content')).text()).toContain('2026-11-14 09:00 UTC');
     expect(await log('github:1001')).toContain(`content.scheduled post:${later}`);
 
+    // Others' comments before the App's (anyone may comment on a public repository) do not hide it.
+    pull?.comments.splice(0, 0, ...Array.from({ length: 150 }, (_, index) => ({ body: `Looks good ${index}`, app: false })));
     const run = (when: string) =>
       mergeDuePosts({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch, now: () => Date.parse(when) });
     expect(await run('2026-11-14T08:00:00Z')).toEqual([{ number: pull?.number, slug: later, outcome: 'waiting for 2026-11-14T09:00Z' }]);
@@ -458,6 +469,20 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect([...repo.pulls.values()].find((pull) => pull.branch === `cms/${to}`)?.state).toBe('closed');
     expect(repo.text('main', `site/content/blog/${SLUG}.md`)).not.toBeNull();
     expect(await log('github:1001')).toEqual(expect.arrayContaining([`content.renamed post:${SLUG}`, `content.discarded post:${to}`]));
+  });
+
+  it('publishes a rename: what merging its exact commit brings is the move and its redirects', async () => {
+    const to = 'calendars-agents-share';
+    expect((await form(ownerBrowser, `/content/${SLUG}/rename`, { to }, `/content/${SLUG}`)).headers.get('location')).toBe(`/content/${to}?done=renamed`);
+    const head = headOf(to);
+    // The old post is no other post once the rename merges: its description does not fail the check.
+    const published = await form(ownerBrowser, `/content/${to}/publish`, { sha: head }, `/content/${to}`);
+    expect(published.headers.get('location')).toBe(`/content/${to}?done=published`);
+    expect(repo.compared).toContain(head);
+    expect(repo.text('main', `site/content/blog/${SLUG}.md`)).toBeNull();
+    expect(repo.bytes('main', `site/public/blog/${to}/van.png`)).not.toBeNull();
+    expect(parsePost(repo.text('main', `site/content/blog/${to}.md`) ?? '', to).front.status).toBe('published');
+    expect(repo.text('main', 'site/public/_redirects')).toContain(`/blog/${SLUG}/ /blog/${to}/ 301\n/blog/${SLUG}.md /blog/${to}.md 301\n`);
   });
 
   it('says what to set when the CMS App is not configured', async () => {

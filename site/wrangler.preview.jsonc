@@ -1,5 +1,5 @@
 // The site's preview Worker (RFC 0006, 4.5): each CMS pull request's build is uploaded to it as a
-// version with the preview alias pr-<number> (site.yml, the preview job), so the whole site with the
+// version with the preview alias pr-<number> (.github/workflows/site-preview.yml), so the whole site with the
 // draft post is at https://pr-<number>-slotlock-site-preview.<your-subdomain>.workers.dev. It has no
 // route and no workers.dev address of its own, and every preview page says noindex.
 //

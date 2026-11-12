@@ -82,16 +82,22 @@ export interface SlotlockCmsGitHub {
   pullState(number: number): Promise<{ headSha: string; mergeable: string; open: boolean }>;
   /** Merge main into the pull request's branch, if its head is still this commit. */
   updateBranch(number: number, expectedHead: string): Promise<boolean>;
-  /** The paths a pull request changes (both sides of a rename); null when there are too many to list. */
-  pullFiles(number: number): Promise<string[] | null>;
-  /** The Signed-off-by lines of a pull request's commits, each once. */
+  /**
+   * What merging exactly this commit into main brings (compare main...sha): each file with its
+   * status, its old path for a rename, and its diff. Null when there are too many to list.
+   */
+  commitFiles(sha: string): Promise<SlotlockCmsChange[] | null>;
+  /**
+   * The Signed-off-by lines of a pull request's commits, each once: only a commit's own author's
+   * (its email), so a line written into a message for someone else is not carried into main.
+   */
   signOffs(number: number): Promise<string[]>;
   /** How a commit fares: every check passed, one failed, some running, or none at all. */
   checks(sha: string): Promise<SlotlockCmsChecks>;
   addLabel(number: number, label: string): Promise<void>;
   removeLabel(number: number, label: string): Promise<void>;
   comment(number: number, body: string): Promise<void>;
-  /** The bodies of the comments this App made on a pull request, oldest first. */
+  /** The bodies of the comments this App made on a pull request, oldest first, from every page. */
   appComments(number: number): Promise<string[]>;
   /** Close a pull request and delete its branch. */
   close(number: number, branch: string): Promise<void>;
@@ -113,6 +119,17 @@ export interface SlotlockCmsGitHub {
   updateStatusIssue(input: { number: number; body: string; close: boolean }): Promise<boolean>;
   /** The last runs of one of the repository's workflows on main (deploys and the site's checks). */
   workflowRuns(workflow: string, limit?: number): Promise<SlotlockWorkflowRun[]>;
+}
+
+/** A file a commit changes against main, as GitHub's compare API lists it. */
+export interface SlotlockCmsChange {
+  path: string;
+  /** For a rename, where it was. */
+  previous: string | null;
+  /** added, removed, modified, renamed … */
+  status: string;
+  /** The unified diff, which the redirects' check reads; null when GitHub gave none. */
+  patch: string | null;
 }
 
 /** An incident on the status page. */
@@ -206,6 +223,9 @@ function pemBytes(pem: string): { der: Uint8Array<ArrayBuffer>; pkcs1: boolean }
   der.set(bytes);
   return { der, pkcs1: Boolean(match[1]) };
 }
+
+/** Pages of a pull request's comments read at most, a hundred each. */
+const COMMENT_PAGES = 30;
 
 const HEADERS = {
   Accept: 'application/vnd.github+json',
@@ -480,25 +500,32 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
       return status === 202;
     },
 
-    async pullFiles(number) {
-      const paths: string[] = [];
-      for (let page = 1; page <= 3; page += 1) {
-        const { body } = await call<{ filename?: unknown; previous_filename?: unknown }[]>('GET', `${repo}/pulls/${number}/files?per_page=100&page=${page}`);
-        for (const file of body ?? []) {
-          if (typeof file.filename === 'string') paths.push(file.filename);
-          if (typeof file.previous_filename === 'string') paths.push(file.previous_filename);
-        }
-        if ((body ?? []).length < 100) return paths;
-      }
-      return null;
+    async commitFiles(sha) {
+      if (!SHA.test(sha)) throw new SlotlockCmsError('A commit is 40 hex characters', 400);
+      const { body } = await call<{ files?: { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown }[] }>(
+        'GET', `${repo}/compare/main...${sha}`,
+      );
+      const files = body?.files ?? [];
+      // GitHub lists at most 300 files of a comparison: more cannot be checked, so none is merged.
+      if (files.length >= 300) return null;
+      return files.flatMap((file) => (typeof file.filename === 'string'
+        ? [{
+            path: file.filename,
+            previous: typeof file.previous_filename === 'string' ? file.previous_filename : null,
+            status: typeof file.status === 'string' ? file.status : 'modified',
+            patch: typeof file.patch === 'string' ? file.patch : null,
+          }]
+        : []));
     },
 
     async signOffs(number) {
-      const { body } = await call<{ commit?: { message?: unknown } }[]>('GET', `${repo}/pulls/${number}/commits?per_page=100`);
+      const { body } = await call<{ commit?: { message?: unknown; author?: { email?: unknown } | null } }[]>('GET', `${repo}/pulls/${number}/commits?per_page=100`);
       const lines = new Set<string>();
       for (const item of body ?? []) {
+        const email = String(item.commit?.author?.email ?? '').toLowerCase();
         for (const line of String(item.commit?.message ?? '').split('\n')) {
-          if (/^Signed-off-by: [^<>\n]{1,100} <[^<>\s]{3,200}>$/.test(line.trim())) lines.add(line.trim());
+          const found = /^Signed-off-by: [^<>\n]{1,100} <([^<>\s]{3,200})>$/.exec(line.trim());
+          if (found && email !== '' && (found[1] as string).toLowerCase() === email) lines.add(line.trim());
         }
       }
       return [...lines];
@@ -527,10 +554,19 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     },
 
     async appComments(number) {
-      const { body } = await call<{ body?: unknown; performed_via_github_app?: { id?: unknown } | null }[]>('GET', `${repo}/issues/${number}/comments?per_page=100`);
-      return (body ?? [])
-        .filter((item) => String(item.performed_via_github_app?.id ?? '') === options.appId && typeof item.body === 'string')
-        .map((item) => item.body as string);
+      // Every page, oldest first, so the App's latest comment is read however many others came before.
+      const bodies: string[] = [];
+      for (let page = 1; page <= COMMENT_PAGES; page += 1) {
+        const { body } = await call<{ body?: unknown; performed_via_github_app?: { id?: unknown } | null }[]>(
+          'GET', `${repo}/issues/${number}/comments?per_page=100&page=${page}`,
+        );
+        for (const item of body ?? []) {
+          if (String(item.performed_via_github_app?.id ?? '') === options.appId && typeof item.body === 'string') bodies.push(item.body);
+        }
+        if ((body ?? []).length < 100) return bodies;
+      }
+      // Past the cap, the latest comments are unread: no schedule is trusted from what was.
+      throw new SlotlockCmsError(`The pull request has more than ${COMMENT_PAGES * 100} comments`, 502);
     },
 
     async close(number, branch) {

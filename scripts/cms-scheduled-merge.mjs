@@ -5,7 +5,9 @@
 //   - the App's own latest schedule comment names a commit, and every file the pull request
 //     changes is the same at its head as at that commit (bringing in main is fine; a change to the
 //     post, or a label someone else added, merges nothing);
-//   - it changes nothing but blog files (the console's rule, src/admin/cms.ts);
+//   - what merging that exact commit brings (compare main...sha) is its own post and images, or a
+//     rename's: the old post's files going and redirects to this one (the console's rule,
+//     slotlockCmsChangeAllowed in src/admin/cms.ts);
 //   - it is up to date with main, as main's ruleset asks (if not, it is updated, and a later run
 //     merges it once its checks pass again);
 //   - the post is submitted (status: published) and every check on its head passed.
@@ -22,14 +24,82 @@ const LABEL = 'cms:scheduled';
 const BRANCH = /^cms\/([a-z0-9]+(?:-[a-z0-9]+){0,15})$/;
 const SHA = /^[0-9a-f]{40}$/;
 
+const REDIRECTS = 'site/public/_redirects';
+/** Pages of a pull request's comments read at most, a hundred each. */
+const COMMENT_PAGES = 30;
+
 /** The files a CMS pull request may change: the same rule as slotlockCmsPathAllowed in src/admin/cms.ts. */
 export function cmsPathAllowed(path) {
   return (
     /^site\/content\/blog\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\.md$/.test(path) ||
     /^site\/public\/blog\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\.(?:png|jpe?g|webp)$/.test(path) ||
-    path === 'site/public/_redirects' ||
-    path === 'site/src/data/authors.json'
+    path === REDIRECTS
   );
+}
+
+const CHANGE_POST = /^site\/content\/blog\/([a-z0-9]+(?:-[a-z0-9]+){0,15})\.md$/;
+const CHANGE_IMAGE = /^site\/public\/blog\/([a-z0-9]+(?:-[a-z0-9]+){0,15})\/[a-z0-9]+(?:-[a-z0-9]+){0,15}\.(?:png|jpe?g|webp)$/;
+/** A redirect line: a site path, a post's address, and a redirect status. */
+const REDIRECT_LINE = /^(\/[^\s]{0,300}) (\/blog\/[a-z0-9]+(?:-[a-z0-9]+){0,15}(?:\/|\.md)) (30[1278])$/;
+
+/**
+ * Whether a cms/<slug> commit's changes may be merged: the same rule as slotlockCmsChangeAllowed in
+ * src/admin/cms.ts. `files` are { path, previous, status, patch } as GitHub's compare API lists them.
+ */
+export function cmsChangeAllowed(slug, files) {
+  if (files.length === 0) return false;
+  let from = null;
+  let redirects = null;
+  for (const file of files) {
+    for (const path of [file.path, ...(file.previous ? [file.previous] : [])]) {
+      if (path === REDIRECTS) {
+        if (file.status !== 'modified' && file.status !== 'added') return false;
+        redirects = file;
+        continue;
+      }
+      const owner = CHANGE_POST.exec(path)?.[1] ?? CHANGE_IMAGE.exec(path)?.[1];
+      if (!owner) return false;
+      if (owner === slug) continue;
+      const leaving = (file.status === 'removed' && path === file.path) || (file.status === 'renamed' && path === file.previous);
+      if (!leaving || (from !== null && from !== owner)) return false;
+      from = owner;
+    }
+  }
+  if ((redirects === null) !== (from === null)) return false;
+  if (redirects === null || from === null) return true;
+  if (redirects.patch === null || redirects.patch === undefined) return false;
+  const old = new Set([`/blog/${from}/`, `/blog/${from}.md`]);
+  const own = new Set([`/blog/${slug}/`, `/blog/${slug}.md`]);
+  const sources = new Set(old);
+  const added = [];
+  for (const line of String(redirects.patch).split('\n')) {
+    if (line.startsWith('@@') || line.startsWith('+++') || line.startsWith('---') || line.startsWith(' ') || line.startsWith('\\') || line === '') continue;
+    const text = line.slice(1).trim();
+    if (line.startsWith('-')) {
+      const found = REDIRECT_LINE.exec(text);
+      if (!found || !(old.has(found[2]) || own.has(found[1]))) return false;
+      if (old.has(found[2])) sources.add(found[1]);
+      continue;
+    }
+    if (!line.startsWith('+')) return false;
+    const found = REDIRECT_LINE.exec(text);
+    if (!found) return false;
+    added.push([found[1], found[2]]);
+  }
+  return added.length > 0 && added.every(([source, target]) => sources.has(source) && !own.has(source) && target === `/blog/${slug}${target.endsWith('.md') ? '.md' : '/'}`);
+}
+
+/** The Signed-off-by lines of commits, each once, keeping only each commit's own author's. */
+export function signOffsOf(commits) {
+  const lines = new Set();
+  for (const item of commits ?? []) {
+    const email = String(item.commit?.author?.email ?? '').toLowerCase();
+    for (const line of String(item.commit?.message ?? '').split('\n')) {
+      const found = /^Signed-off-by: [^<>\n]{1,100} <([^<>\s]{3,200})>$/.exec(line.trim());
+      if (found && email !== '' && found[1].toLowerCase() === email) lines.add(line.trim());
+    }
+  }
+  return [...lines];
 }
 
 /** The App's latest schedule comment, as slotlockScheduleOf in src/admin/cms.ts reads it. */
@@ -88,8 +158,24 @@ export async function mergeDuePosts({ appId, installationId, privateKey, reposit
     const number = pull.number;
     const sha = pull.head?.sha ?? '';
     const note = (outcome) => results.push({ number, slug, outcome });
-    const { body: comments } = await call('GET', `${repo}/issues/${number}/comments?per_page=100`);
-    const schedule = scheduleOf((comments ?? []).filter((c) => String(c.performed_via_github_app?.id ?? '') === String(appId)).map((c) => String(c.body ?? '')));
+    // Every page of comments, so the App's latest one is read however many others came first.
+    const bodies = [];
+    let complete = false;
+    for (let page = 1; page <= COMMENT_PAGES; page += 1) {
+      const { body: comments } = await call('GET', `${repo}/issues/${number}/comments?per_page=100&page=${page}`);
+      for (const c of comments ?? []) {
+        if (String(c.performed_via_github_app?.id ?? '') === String(appId)) bodies.push(String(c.body ?? ''));
+      }
+      if ((comments ?? []).length < 100) {
+        complete = true;
+        break;
+      }
+    }
+    if (!complete) {
+      note('left alone: too many comments to find its schedule');
+      continue;
+    }
+    const schedule = scheduleOf(bodies);
     const unschedule = async (why) => {
       await call('DELETE', `${repo}/issues/${number}/labels/${encodeURIComponent(LABEL)}`, undefined, [404]);
       await call('POST', `${repo}/issues/${number}/comments`, {
@@ -105,16 +191,19 @@ export async function mergeDuePosts({ appId, installationId, privateKey, reposit
       note(`waiting for ${schedule.at}`);
       continue;
     }
-    const files = [];
-    for (let page = 1; page <= 3; page += 1) {
-      const { body } = await call('GET', `${repo}/pulls/${number}/files?per_page=100&page=${page}`);
-      for (const file of body ?? []) files.push(file.filename, ...(file.previous_filename ? [file.previous_filename] : []));
-      if ((body ?? []).length < 100) break;
-    }
-    if (files.length === 0 || files.length >= 300 || !files.every(cmsPathAllowed)) {
-      note('left alone: it changes files outside the blog');
+    // What merging exactly this commit brings, the commit the merge below is pinned to.
+    const { body: compared } = await call('GET', `${repo}/compare/main...${sha}`);
+    const changes = (compared?.files ?? []).map((file) => ({
+      path: String(file.filename ?? ''),
+      previous: typeof file.previous_filename === 'string' ? file.previous_filename : null,
+      status: String(file.status ?? 'modified'),
+      patch: typeof file.patch === 'string' ? file.patch : null,
+    }));
+    if (changes.length >= 300 || !cmsChangeAllowed(slug, changes)) {
+      note('left alone: it changes more than its own post');
       continue;
     }
+    const files = changes.flatMap((file) => [file.path, ...(file.previous ? [file.previous] : [])]);
     // A head that is not the scheduled commit is accepted only when it brought in main and nothing
     // else: every file the pull request changes is the same as in the commit the Owner scheduled.
     if (schedule.sha !== sha) {
@@ -164,12 +253,7 @@ export async function mergeDuePosts({ appId, installationId, privateKey, reposit
       continue;
     }
     const { body: commits } = await call('GET', `${repo}/pulls/${number}/commits?per_page=100`);
-    const signOffs = new Set();
-    for (const item of commits ?? []) {
-      for (const line of String(item.commit?.message ?? '').split('\n')) {
-        if (/^Signed-off-by: [^<>\n]{1,100} <[^<>\s]{3,200}>$/.test(line.trim())) signOffs.add(line.trim());
-      }
-    }
+    const signOffs = signOffsOf(commits);
     const { status, body: merged } = await call(
       'PUT',
       `${repo}/pulls/${number}/merge`,

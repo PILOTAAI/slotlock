@@ -66,7 +66,11 @@ const IMAGE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+){0,15}$/;
 /** Where a post's own images live, in the repository and on the site. */
 export const postImagePath = (slug: string) => `/blog/${slug}/`;
 const IMAGE_FILE = /^[a-z0-9]+(?:-[a-z0-9]+){0,15}\.(?:png|jpe?g|webp)$/;
-const LINK = /^(?:\/[^\s<>"']*|#[A-Za-z0-9_-]+|https:\/\/[^\s<>"']+)$/;
+/** A link a post may make: a site path, an anchor, or an https address. Authors' URLs keep to it too. */
+export const POST_LINK = /^(?:\/[^\s<>"']*|#[A-Za-z0-9_-]+|https:\/\/[^\s<>"']+)$/;
+const LINK = POST_LINK;
+/** A field on one line: no control character (a newline above all), nor a line or paragraph separator. */
+const NOT_ONE_LINE = /[\p{Cc}\u2028\u2029]/u;
 const FACT = /\{\{facts\.([A-Za-z][A-Za-z0-9]{0,63})\}\}/g;
 
 const SCALARS = ['title', 'seoTitle', 'description', 'date', 'updated', 'author', 'image', 'imageAlt', 'eyebrow', 'status', 'publishAt'] as const;
@@ -154,6 +158,20 @@ export function parsePost(source: string, slug: string): ParsedPost {
   };
   for (const key of ['seoTitle', 'updated', 'eyebrow', 'publishAt'] as const) {
     if (scalars[key] !== undefined) front[key] = scalars[key];
+  }
+  // Every field but the body is one line: a newline in a title would reach the commit message the
+  // console writes, and a page's head, as more than the title.
+  const oneLine: [string, string][] = [
+    ['title', front.title], ['seoTitle', front.seoTitle ?? ''], ['description', front.description],
+    ['author', front.author], ['imageAlt', front.imageAlt], ['eyebrow', front.eyebrow ?? ''],
+    ...front.tags.map((tag): [string, string] => ['tags', tag]),
+    ...front.related.flatMap((link): [string, string][] => [['related', link.label], ['related', link.href]]),
+  ];
+  for (const [key, value] of oneLine) {
+    if (NOT_ONE_LINE.test(value)) throw new PostFormatError(`${key} holds a line break or another control character`);
+  }
+  for (const link of front.related) {
+    if (!LINK.test(link.href)) throw new PostFormatError(`related "${link.label}" links to "${link.href}": a /path, a #anchor or an https:// address`);
   }
   if (!DATE.test(front.date)) throw new PostFormatError('date is YYYY-MM-DD');
   if (front.updated !== undefined && !DATE.test(front.updated)) throw new PostFormatError('updated is YYYY-MM-DD');

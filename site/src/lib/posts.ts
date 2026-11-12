@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import authorsJson from '../data/authors.json';
 import facts from '../generated/facts.json';
-import { type ParsedPost, type PostAuthor, parsePost, renderPostBody } from './post-format';
+import { POST_LINK, type ParsedPost, type PostAuthor, parsePost, renderPostBody } from './post-format';
 
 export interface Post extends ParsedPost {
   /** The body as HTML, escaped throughout: set into the page as it is. */
@@ -14,6 +14,13 @@ export interface Post extends ParsedPost {
 }
 
 export const AUTHORS = authorsJson as Record<string, PostAuthor>;
+// An author's URL becomes a link on every post of theirs: it keeps to the posts' own link rule, so
+// nothing but a site path or an https address reaches an href.
+for (const [key, author] of Object.entries(AUTHORS)) {
+  if (typeof author.url !== 'string' || !POST_LINK.test(author.url)) {
+    throw new Error(`src/data/authors.json: ${key}'s url is not a /path or an https:// address`);
+  }
+}
 const DIRECTORY = join(process.cwd(), 'content', 'blog');
 
 function load(): Post[] {

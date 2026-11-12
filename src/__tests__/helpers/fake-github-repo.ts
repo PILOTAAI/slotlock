@@ -54,6 +54,8 @@ export interface FakeGithubRepo {
   openPull(branch: string, title: string, fork?: string): FakePull;
   /** The last squash merge's title and message. */
   merges: { title: string; message: string; number: number }[];
+  /** The commits a compare/main...<sha> was asked for, in order. */
+  compared: string[];
   /** Issues, numbered after the pull requests: the status page's incidents (labelled status) and others. */
   issues: Map<number, FakeIssue>;
   /** Open an issue as a person (or the status probe) would, outside the console. */
@@ -171,6 +173,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       pulls.set(pull.number, pull);
       return pull;
     },
+    compared: [],
     issues: new Map(),
     openIssue(title, labels) {
       // Issues and pull requests share their numbers, as on GitHub.
@@ -255,6 +258,37 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
     if (!path.startsWith(prefix)) return reply({ message: 'Not Found' }, 404);
     const rest = path.slice(prefix.length);
     let match: RegExpExecArray | null;
+
+    // compare/main...<sha>: what merging that commit brings, against its merge base with main, with
+    // each file's status and, for text, a diff of the lines that went and came.
+    if ((match = /^\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(rest)) && method === 'GET') {
+      const head = match[1] as string;
+      if (!commits.has(head)) return reply({ message: 'Not Found' }, 404);
+      const onMain = ancestors(refs.get('main') as string);
+      const queue = [head];
+      let base: string | null = null;
+      while (queue.length && !base) {
+        const next = queue.shift() as string;
+        if (onMain.has(next)) base = next;
+        else queue.push(...(commits.get(next)?.parents ?? []));
+      }
+      const before = commits.get(base ?? '')?.tree ?? new Map<string, string>();
+      const after = commits.get(head)?.tree ?? new Map<string, string>();
+      const text = (sha: string | undefined) => (sha ? new TextDecoder().decode(blobs.get(sha)) : '');
+      const files = [...new Set([...before.keys(), ...after.keys()])].sort().flatMap((file) => {
+        if (before.get(file) === after.get(file)) return [];
+        const status = !before.has(file) ? 'added' : !after.has(file) ? 'removed' : 'modified';
+        const binary = /\.(?:png|jpe?g|webp)$/.test(file);
+        const was = text(before.get(file)).split('\n').filter(Boolean);
+        const now = text(after.get(file)).split('\n').filter(Boolean);
+        const patch = binary
+          ? undefined
+          : ['@@ -1 +1 @@', ...was.filter((line) => !now.includes(line)).map((line) => `-${line}`), ...now.filter((line) => !was.includes(line)).map((line) => `+${line}`)].join('\n');
+        return [{ filename: file, status, ...(patch === undefined ? {} : { patch }) }];
+      });
+      fake.compared.push(head);
+      return reply({ status: 'ahead', merge_base_commit: { sha: base }, files });
+    }
 
     if ((match = /^\/git\/ref\/heads\/(.+)$/.exec(rest)) && method === 'GET') {
       const sha = refs.get(decodeURIComponent(match[1] as string));
@@ -379,12 +413,12 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
         return reply(page === 1 ? diff(pull).map((filename) => ({ filename })) : []);
       }
       if (onPull[1] === 'pulls' && sub === '/commits' && method === 'GET') {
-        const out: { sha: string; commit: { message: string } }[] = [];
+        const out: { sha: string; commit: { message: string; author: { name: string; email: string } | null } }[] = [];
         const mainCommits = ancestors(pull.base);
         let at = refs.get(pull.branch);
         while (at && !mainCommits.has(at)) {
           const commit = commits.get(at) as Commit;
-          out.unshift({ sha: at, commit: { message: commit.message } });
+          out.unshift({ sha: at, commit: { message: commit.message, author: commit.author } });
           at = commit.parents[0];
         }
         return reply(out);
@@ -438,7 +472,10 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
         return reply({ id: pull.comments.length }, 201);
       }
       if (onPull[1] === 'issues' && sub === '/comments' && method === 'GET') {
-        return reply(pull.comments.map((comment) => ({
+        // Oldest first, a page at a time, as GitHub lists them.
+        const size = Number(target.searchParams.get('per_page') ?? '30');
+        const page = Number(target.searchParams.get('page') ?? '1');
+        return reply(pull.comments.slice((page - 1) * size, page * size).map((comment) => ({
           body: comment.body,
           performed_via_github_app: comment.app ? { id: Number(FAKE_APP_ID) } : null,
         })));
