@@ -451,6 +451,16 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     const dry = await runScript(['go-live', '--dry-run'], run.env);
     expect(dry.code).toBe(0);
     expect(dry.output).toContain('go-live is refused until 2026-12-12 (today is 2026-12-11). From then it would:');
+    // What to have ready, and what each step does, as a real run would do it.
+    expect(dry.output).toContain(`${WEB}/organizations/PILOTAAI/settings/applications/new,\n  with the callback https://${HOSTNAME}/callback.`);
+    expect(dry.output).toContain('It answers 503 to everyone until step 2 is done.');
+    for (const name of ['SESSION_SECRET', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'CONSOLE_KEY', 'STRIPE_KEY']) {
+      expect(dry.output).toContain(`SLOTLOCK_ADMIN_${name} `);
+    }
+    expect(dry.output).toContain('3. unless the repository variable CMS_APP_ID is set: create the "PILOTAAI Slotlock CMS" GitHub App');
+    expect(dry.output).toContain('4. add as Owners those of ada who are not staff yet (each must be a GitHub user)');
+    expect(dry.output).toContain('Erasing an account needs a second Owner to approve');
+    expect([run.read('gh.log'), run.read('cli.log'), run.read('wrangler.log')]).toEqual([null, null, null]);
   });
 
   it('goes live: deploys, sets the missing secrets on stdin, and adds only new Owners', async () => {
