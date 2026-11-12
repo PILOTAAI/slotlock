@@ -21,6 +21,31 @@ versioning.
   client that confirms destructive calls, Claude among them, now asks a person before either, as it
   already did for `slotlock_cancel` and `slotlock_delete_event`. `slotlock_release_slots` stays
   non-destructive: it lets go of the caller's own holds, which lapse within minutes anyway.
+- **Team invitations by email are designed, with a formal subject.** The subject reads "Invitation
+  to join {team} on Slotlock" instead of starting with the inviter's address. The message is laid
+  out as mail clients render it: a card with the team, role, who invited and when the link expires,
+  one Accept invitation button, the link again as text, a preheader, and dark colours where the
+  client honours them. It still links nowhere but the invitation and loads no image, and its text
+  part says the same.
+- **The invitation page is one card, as signing in is**, in every state: the team, role and who
+  invited in a list, then Continue with GitHub and Continue with Google at full width. They had sat
+  off centre in a class meant for table cells. A used, expired or withdrawn invitation says so in its
+  heading, without repeating it in a notice.
+- **Single sign-on's page leads somewhere.** Its field takes the card's width, it keeps the address
+  typed, and an address no team signs in with is answered by its domain ("Single sign-on isn't set up
+  for example.co.uk"), never by whether a team holds it, beside Continue with Google and Continue
+  with GitHub and how an Owner sets single sign-on up. A team's own page says which provider it
+  continues to.
+- **Members is a list with the page's width.** Settings kept every section in a 640-pixel column, so
+  the members tables scrolled sideways and cut off Send again. Members and the audit log now take the
+  width; each person is a row with their initial, name, details (joined, what they reach, how they
+  joined), role and actions, and invitations and requests to join are rows the same way. On the Free
+  plan the page says how many of the team's 3 places are used, open invitations included, with
+  Upgrade.
+- **Docs: Slotlock Cloud signs in with GitHub or Google**, and the hosted page says what each reads.
+  Its plans table gives a team workspace's people (up to 3 on Free, no limit on Team), and Team is
+  described as a team workspace's plan. The Terms (updated 12 November 2026) and the privacy notice
+  name Google sign-in as offered.
 
 ## 0.10.0 - 2026-11-11
 

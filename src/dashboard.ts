@@ -1846,6 +1846,7 @@ const ICONS = Object.freeze({
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
   check: icon('<path d="M5 12l5 5L20 7"/>'),
+  chevron: icon('<path d="M9 6l6 6-6 6"/>'),
   approvals: icon('<circle cx="12" cy="12" r="8"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'),
   signOut: icon('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
   plus: icon('<path d="M12 5v14M5 12h14"/>'),
@@ -3504,7 +3505,9 @@ ${
           : html``
       }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}${await sessionsList(session)}`;
     }
-    const content = html`${pageHead('Settings')}<div class="settings">${nav}<div class="settings-body">${body}</div></div>`;
+    // People and the audit log are lists that need the width; the other sections are forms.
+    const wide = shown === 'members' || shown === 'audit';
+    const content = html`${pageHead('Settings')}<div class="settings${wide ? ' has-lists' : ''}">${nav}<div class="settings-body">${body}</div></div>`;
     return respond(status, layout('Settings', content, session, 'settings'));
   }
 
@@ -6824,19 +6827,30 @@ ${
     const invite = !manage
       ? html``
       : full
-        ? html`<p class="seats">${String(seats)} of ${String(cap)} people.${plans && can(session, 'usage.read') ? html` <a href="${root}/plan">Upgrade</a>` : html``}</p>`
-        : html`<form class="invite" method="post" action="${root}/members/invite">${hidden()}<label for="invite-email">Email</label><input id="invite-email" name="email" type="email" maxlength="254" autocomplete="off" required${shown ? html`` : html` autofocus`}><label class="visually-hidden" for="invite-role">Role</label><select id="invite-role" name="role">${roleOptions('member')}</select><button class="primary" type="submit">Invite</button></form>`;
+        ? html``
+        : html`<form class="invite-card" method="post" action="${root}/members/invite">${hidden()}<label for="invite-email">Invite by email</label><div class="invite-row"><input id="invite-email" name="email" type="email" maxlength="254" autocomplete="off" placeholder="name@company.com" required${shown ? html`` : html` autofocus`}><label class="visually-hidden" for="invite-role">Role</label><select id="invite-role" name="role">${roleOptions('member')}</select><button class="primary" type="submit">Invite</button></div><p class="fine">${
+          options.invitations ? 'They get an email with a link' : 'You get a link to send them'
+        } that works once, for that address, for ${String(INVITATION_DAYS)} days.</p></form>`;
+    // The Free plan's limit, where the people are: a team on Free has 3, open invitations included.
+    const planNote =
+      cap === null
+        ? html``
+        : html`<p class="plan-note${full ? ' full' : ''}"><span><strong>${String(seats)} of ${String(cap)} people</strong> on the Free plan, open invitations included.${
+            full ? ' Upgrade to invite more.' : ''
+          }</span>${plans && can(session, 'usage.read') ? html`<a class="button" href="${root}/plan">Upgrade</a>` : html``}</p>`;
     const link = shown
       ? html`<div class="set-card"><div class="row"><span class="row-label">Link for ${shown.to}</span><div class="row-value">${copyField('invite-link', shown.link)}</div></div></div><p class="fine">It works once, for that address, until ${formatDate(shown.expiresAt)}. It is not shown again.</p>`
       : html``;
     const pendingRows = invitations.map((invitation) => {
       const expired = invitation.expiresAt.getTime() <= now();
       const to = invitation.email ?? `@${invitation.githubLogin ?? 'GitHub account'}`;
-      return html`<tr><td data-label="Invited" class="strong">${to}</td><td data-label="Role">${SLOTLOCK_WORKSPACE_ROLE_NAMES[invitation.role]}</td><td data-label="By">${invitation.inviterDisplay}</td><td data-label="Expires">${expired ? html`<span class="pill revoked">Expired</span>` : formatDate(invitation.expiresAt)}</td><td class="actions">${
+      return html`<li class="person"><span class="avatar invited" aria-hidden="true">${initialOf(to)}</span><div class="who"><span class="name">${to}</span><span class="meta">Invited by ${invitation.inviterDisplay} · ${
+        expired ? html`<span class="pill revoked">Expired</span>` : html`Expires ${formatDate(invitation.expiresAt)}`
+      }</span></div><div class="role"><span class="role-name">${SLOTLOCK_WORKSPACE_ROLE_NAMES[invitation.role]}</span></div><div class="person-actions">${
         slotlockRoleMayGrant(mine, invitation.role)
           ? html`<form class="inline" method="post" action="${root}/members/resend">${hidden()}<input type="hidden" name="id" value="${invitation.id}"><button type="submit">Send again<span class="visually-hidden"> to ${to}</span></button></form><form class="inline" method="post" action="${root}/members/revoke">${hidden()}<input type="hidden" name="id" value="${invitation.id}"><button class="danger" type="submit">Revoke<span class="visually-hidden"> the invitation to ${to}</span></button></form>`
           : html``
-      }</td></tr>`;
+      }</div></li>`;
     });
     const memberRows = members.map((member, index) => {
       const name = memberName(member);
@@ -6846,38 +6860,43 @@ ${
         ? html`<form class="inline" method="post" action="${root}/members/role">${hidden()}<input type="hidden" name="person" value="${member.person}"><label class="visually-hidden" for="role-${String(index)}">Role for ${name}</label><select id="role-${String(index)}" name="role">${roleOptions(member.role)}</select><button type="submit">Save<span class="visually-hidden"> the role for ${name}</span></button></form>`
         : html`${SLOTLOCK_WORKSPACE_ROLE_NAMES[member.role]}`;
       let action = html``;
+      const onlyOwner = self && member.role === 'owner' && owners <= 1;
       if (self) {
-        action =
-          member.role === 'owner' && owners <= 1
-            ? html`<span class="muted">You’re the only owner. Make someone else an owner before leaving.</span>`
+        action = onlyOwner
+            ? html``
             : html`<details class="act danger"><summary>Leave</summary><div class="pop"><p>You lose access to ${team} at once. Keys you created keep working until an owner or admin revokes them.</p><form method="post" action="${root}/members/leave">${hidden()}<button class="danger" type="submit">Leave ${team}</button></form></div></details>`;
       } else if (changeable) {
         action = html`${member.role !== 'owner' && places ? limitForm(member.person, name, index, limited.get(member.person) ?? null, places[0], places[1], hidden) : html``}<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
       }
       const reach = member.role === 'owner' ? undefined : limited.get(member.person);
       const via = viaDomain.get(member.person);
-      return html`<tr><td data-label="Member" class="strong">${name}${self ? html` <span class="muted">(you)</span>` : html``}${
-        via ? html` <span class="muted">via ${via.domain}${via.status === 'verified' ? '' : ', no longer verified'}</span>` : html``
-      }</td><td data-label="Role">${role}</td><td data-label="Reaches">${reach ? scopeWords(reach) : 'All'}</td><td data-label="Joined">${formatDate(member.joinedAt)}</td><td class="actions">${action}</td></tr>`;
+      const meta = [
+        `Joined ${formatDate(member.joinedAt)}`,
+        reach ? `Reaches ${scopeWords(reach)}` : 'Reaches all',
+        ...(via ? [`via ${via.domain}${via.status === 'verified' ? '' : ', no longer verified'}`] : []),
+        ...(onlyOwner ? ['The only owner, so can’t leave'] : []),
+      ].join(' · ');
+      return html`<li class="person"><span class="avatar" aria-hidden="true">${initialOf(name)}</span><div class="who"><span class="name">${name}${self ? html`<span class="tag">You</span>` : html``}</span><span class="meta">${meta}</span></div><div class="role">${
+        changeable ? role : html`<span class="role-name">${role}</span>`
+      }</div><div class="person-actions">${action}</div></li>`;
     });
     // Requests to join through a verified domain: approved as Viewer, Member or Developer.
     const joinRoles = (['viewer', 'member', 'developer'] as const).filter((role) => slotlockRoleMayGrant(mine, role));
     const requestRows = requests.map((request, index) => {
       const name = request.display ?? request.email;
-      return html`<tr><td data-label="Asked" class="strong">${name}${request.display ? html` <span class="muted">${request.email}</span>` : html``} <span class="muted">${JOIN_EVIDENCE_WORDS[request.evidence]}</span></td><td data-label="Asked on">${formatDate(request.createdAt)}</td><td class="actions"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
+      return html`<li class="person"><span class="avatar invited" aria-hidden="true">${initialOf(name)}</span><div class="who"><span class="name">${name}</span><span class="meta">${request.display ? `${request.email} · ` : ''}${JOIN_EVIDENCE_WORDS[request.evidence]} · Asked ${formatDate(request.createdAt)}</span></div><div class="person-actions spans"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
         (role) => html`<option value="${role}"${role === 'member' ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
-      )}</select><button class="primary" type="submit" name="decision" value="approve">Approve<span class="visually-hidden"> ${name}</span></button><button type="submit" name="decision" value="decline">Decline<span class="visually-hidden"> ${name}</span></button></form></td></tr>`;
+      )}</select><button class="primary" type="submit" name="decision" value="approve">Approve<span class="visually-hidden"> ${name}</span></button><button type="submit" name="decision" value="decline">Decline<span class="visually-hidden"> ${name}</span></button></form></div></li>`;
     });
-    return html`${noticeOf(notice, status)}<h2>Members · ${String(cap === null ? members.length : seats)}${cap === null ? '' : ` of ${String(cap)}`}</h2>${invite}${link}${
-      requestRows.length > 0
-        ? html`<h3>Asking to join</h3><div class="table"><table><thead><tr><th>Asked</th><th>Asked on</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${requestRows}</tbody></table></div>`
-        : html``
-    }${
-      pendingRows.length > 0
-        ? html`<h3>Pending</h3><div class="table"><table><thead><tr><th>Invited</th><th>Role</th><th>By</th><th>Expires</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
-        : html``
-    }<div class="table"><table><thead><tr><th>Member</th><th>Role</th><th>Reaches</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${memberRows}</tbody></table></div>`;
+    const list = (title: string, rows: readonly Html[]) =>
+      html`<section class="people-block"><h3 class="list-head">${title}<span class="count">${String(rows.length)}</span></h3><ul class="people">${rows}</ul></section>`;
+    return html`${noticeOf(notice, status)}<div class="section-head"><h2>Members</h2><p class="fine">Who works in ${team}, and what each of them can do.</p></div>${planNote}${invite}${link}${
+      requestRows.length > 0 ? list('Asking to join', requestRows) : html``
+    }${pendingRows.length > 0 ? list('Invitations', pendingRows) : html``}${list('People', memberRows)}`;
   }
+
+  /** The letter a person's row shows for them: the first letter or digit of their name or address. */
+  const initialOf = (name: string) => (/[\p{L}\p{N}]/u.exec(name)?.[0] ?? '?').toUpperCase();
 
   /** What a limited member reaches, in words. */
   const scopeWords = (scope: SlotlockResourceScope) =>
@@ -8214,16 +8233,34 @@ ${
       const route = await ssoStore.route(team !== '' ? { handle: team } : domain !== null ? { domain } : {});
       if (route) {
         const provider = new URL(route.authorizationEndpoint).host;
-        const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Sign in to ${route.name}</h1><form method="post" action="${root}/sso/start"><input type="hidden" name="team" value="${route.handle}"><button class="primary wide" type="submit">Continue to ${provider}</button></form><p class="fine"><a href="${root}">Other ways to sign in</a></p></section>`;
+        const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Sign in to ${route.name}</h1><p class="lead">${route.name} signs in through its identity provider, ${provider}.</p><form class="auth-form" method="post" action="${root}/sso/start"><input type="hidden" name="team" value="${route.handle}"><button class="primary wide" type="submit">Continue to ${provider}</button></form>${authLinks([['Other ways to sign in', root]])}</section>`;
         return respond(200, layout('Single sign-on', content, null));
       }
     }
     const asked = team !== '' || email !== '';
-    const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Single sign-on</h1>${
-      asked ? html`<p class="notice" role="alert">No team signs in that way. Check the address, or ask your team’s owner.</p>` : html``
-    }<form method="get" action="${root}/sso"><label for="sso-email">Work email</label><input id="sso-email" name="email" type="email" maxlength="254" autocomplete="email" required><button class="primary wide" type="submit">Continue</button></form><p class="fine"><a href="${root}">Other ways to sign in</a></p></section>`;
+    // What was asked, said back, with the way forward: an address's domain, never whether a team
+    // holds it (the route answers the same for a domain no team claimed and one without single sign-on).
+    const domain = email === '' ? null : slotlockEmailDomain(email);
+    const why = !asked
+      ? html``
+      : team !== ''
+        ? html`<p class="notice" role="alert">No team signs in with single sign-on at that link. Ask your team’s owner for it, or sign in another way.</p>`
+        : domain === null
+          ? html`<p class="notice" role="alert">That doesn’t look like an email address. Check it and try again.</p>`
+          : html`<p class="notice" role="alert">Single sign-on isn’t set up for ${domain}. Check the address, or sign in another way below.</p>`;
+    const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Single sign-on</h1><p class="lead">Enter your work email to continue to your team’s identity provider.</p>${why}<form class="auth-form" method="get" action="${root}/sso"><label for="sso-email">Work email</label><input id="sso-email" name="email" type="email" maxlength="254" autocomplete="email" placeholder="you@company.com" value="${team === '' ? email.slice(0, 254) : ''}" required><button class="primary wide" type="submit">Continue</button></form><div class="or" role="separator"><span>or</span></div>${
+      google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
+    }<a class="button wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
+      asked
+        ? html`<p class="fine">Setting this up for your team? An Owner verifies the domain and connects the provider in Settings, Identity, then tests it and turns it on.</p>`
+        : html``
+    }</section>`;
     return respond(asked ? 404 : 200, layout('Single sign-on', content, null));
   }
+
+  /** A signed-out card's links to other pages, as rows with a chevron. */
+  const authLinks = (links: readonly (readonly [string, string])[]) =>
+    html`<nav class="auth-links" aria-label="More">${links.map(([label, href]) => html`<a href="${href}">${label}${ICONS.chevron}</a>`)}</nav>`;
 
   /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
   async function deliverInvitation(session: Session, to: string, role: SlotlockWorkspaceRole, link: string, expiresAt: Date): Promise<boolean> {
@@ -8474,50 +8511,76 @@ ${
   async function invitePage(session: Session | null, raw: string | null, status = 200, notice?: string, checked = false): Promise<Response> {
     const preview = raw && teamStore ? await teamStore.preview(tokenDigest(raw)) : null;
     const headers = { 'Referrer-Policy': 'no-referrer' };
+    // Every state in one card, as signing in is: centred in the dashboard for someone signed in.
+    const card = (title: Html | string, inner: Html, said = notice) => {
+      const section = html`<section class="sign-in invite"><span class="sign-in-mark">${ICONS.mark}</span><h1>${title}</h1>${noticeOf(said, status)}${inner}</section>`;
+      return session ? html`<div class="auth-center">${section}</div>` : section;
+    };
     if (!preview) {
-      const content = html`${noticeOf(notice, status)}${pageHead('Invitation')}<p>This invitation link can’t be used here. Open the link you were sent again, in this browser.</p>`;
+      const content = card(
+        'Invitation',
+        html`<p class="lead">This invitation link can’t be used here. Open the link you were sent again, in this browser.</p>${authLinks([[`Go to ${brandName}`, root]])}`,
+      );
       return respond(status === 200 ? 404 : status, layout('Invitation', content, session), headers);
     }
     const name = preview.workspaceName;
     const role = SLOTLOCK_WORKSPACE_ROLE_NAMES[preview.role];
     const forWhom = preview.email !== null ? maskedEmail(preview.email) : `@${preview.githubLogin ?? 'a GitHub account'}`;
-    let body: Html;
+    const invited = html`<span class="soft">You’re invited.</span>Join ${name}`;
+    const details = html`<dl class="invite-facts"><div><dt>Team</dt><dd>${name}</dd></div><div><dt>Role</dt><dd>${role}</dd></div><div><dt>Invited by</dt><dd>${preview.inviterDisplay}</dd></div><div><dt>For</dt><dd>${forWhom}</dd></div></dl>`;
+    const hidden = (signed: Session) =>
+      html`<input type="hidden" name="csrf" value="${csrfToken(signed)}"><input type="hidden" name="once" value="${formNonce(signed)}">`;
+    let content: Html;
     if (preview.state !== 'pending') {
-      body = html`<p>${
+      const [title, lead] =
         preview.state === 'expired'
-          ? `This invitation expired. Ask ${preview.inviterDisplay} to send it again.`
+          ? ['This invitation expired', `Ask ${preview.inviterDisplay} to send it again.`]
           : preview.state === 'revoked'
-            ? 'This invitation was withdrawn.'
-            : 'This invitation was already used.'
-      }</p>`;
+            ? ['This invitation was withdrawn', `Ask ${preview.inviterDisplay} for a new one if you still need to join ${name}.`]
+            : ['This invitation was already used', `Sign in to open ${name}.`];
+      content = card(title, html`<p class="lead">${lead}</p>${authLinks([[`Go to ${brandName}`, root]])}`, undefined);
     } else if (!session) {
       const then = new URLSearchParams({ then: '/invite' }).toString();
       // An invitation by email asks GitHub for the person's verified addresses on the way in.
       const github = preview.email !== null ? `${then}&email=1` : then;
-      body = html`<p>${preview.inviterDisplay} invited ${forWhom} as ${role}.</p><p class="actions"><a class="button primary" href="${root}/sign-in?${github}">${ICONS.github}Continue with GitHub</a>${
-        google && preview.email !== null
-          ? html` <a class="button" href="${root}/sign-in?with=google&amp;${then}">${ICONS.google}Continue with Google</a>`
-          : html``
-      }</p>`;
+      content = card(
+        invited,
+        html`<p class="lead">${preview.inviterDisplay} invited you to join ${name} on ${brandName}.</p>${details}<a class="button primary wide" href="${root}/sign-in?${github}">${ICONS.github}Continue with GitHub</a>${
+          google && preview.email !== null
+            ? html`<a class="button wide" href="${root}/sign-in?with=google&amp;${then}">${ICONS.google}Continue with Google</a>`
+            : html``
+        }<p class="fine">Sign in as ${forWhom} to accept. The link works once.</p>`,
+      );
     } else if ((teamListOf.get(session) ?? []).some((ws) => ws.tenantRef === preview.tenantRef)) {
-      body = html`<p>You’re already a member of ${name}.</p><form method="post" action="${root}/organization"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="organization" value="${preview.tenantRef}"><button class="primary" type="submit">Open ${name}</button></form>`;
+      content = card(
+        `You’re already in ${name}`,
+        html`<p class="lead">You’re a member of ${name} already.</p><form class="auth-form" method="post" action="${root}/organization">${hidden(session)}<input type="hidden" name="organization" value="${preview.tenantRef}"><button class="primary wide" type="submit">Open ${name}</button></form>`,
+      );
     } else {
       const person = personOf(session);
       const bound =
         (preview.githubRef !== null && preview.githubRef === person) ||
         (preview.email !== null && verifiedEmails(session).includes(preview.email));
       if (bound) {
-        body = html`<p>${preview.inviterDisplay} invited you as ${role}.</p><form method="post" action="${root}/invite/accept"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><button class="primary" type="submit">Join as ${shownAs(session)}</button></form>`;
+        content = card(
+          invited,
+          html`<p class="lead">${preview.inviterDisplay} invited you to join ${name} on ${brandName}.</p>${details}<form class="auth-form" method="post" action="${root}/invite/accept">${hidden(session)}<button class="primary wide" type="submit">Join as ${shownAs(session)}</button></form>`,
+        );
       } else if (preview.email !== null && session.idp !== 'google') {
         // A GitHub account shows its addresses only when asked: once, for this invitation.
-        body = html`<p>${preview.inviterDisplay} invited ${forWhom} as ${role}.${
-          checked ? html` None of the addresses GitHub verified for ${shownAs(session)} is it.` : html``
-        }</p><p class="actions"><a class="button primary" href="${root}/sign-in?then=%2Finvite&amp;email=1">${ICONS.github}Confirm the address with GitHub</a></p>`;
+        content = card(
+          invited,
+          html`<p class="lead">${preview.inviterDisplay} invited ${forWhom}. Confirm it’s an address GitHub verified for ${shownAs(session)}.${
+            checked ? html` None of the addresses GitHub verified for ${shownAs(session)} is it.` : html``
+          }</p>${details}<a class="button primary wide" href="${root}/sign-in?then=%2Finvite&amp;email=1">${ICONS.github}Confirm the address with GitHub</a>`,
+        );
       } else {
-        body = html`<p>This invitation is for ${forWhom}, and you’re signed in as ${shownAs(session)}. Sign out, then open the link again and sign in as that account.</p>`;
+        content = card(
+          `Join ${name}`,
+          html`<p class="lead">This invitation is for ${forWhom}, and you’re signed in as ${shownAs(session)}.</p><p class="fine">Sign out, then open the link again and sign in as that account.</p>`,
+        );
       }
     }
-    const content = html`${noticeOf(notice, status)}${pageHead(`Join ${name}`)}${body}`;
     return respond(status, layout(`Join ${name}`, content, session), headers);
   }
 
@@ -10191,9 +10254,29 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 .sign-in { width: 100%; max-width: 400px; padding: var(--space-8); border: 1px solid var(--line); border-radius: 16px; background: var(--surface); display: grid; gap: var(--space-3); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 24px 48px -24px rgba(0, 0, 0, 0.12); }
 .sign-in-mark { display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: var(--space-2); border-radius: var(--radius-lg); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); }
 .sign-in-mark .mark { width: 24px; height: 22px; }
-.sign-in h1 { font-size: 20px; }
+.sign-in h1 { font-size: 22px; line-height: 1.25; letter-spacing: -0.02em; }
+.sign-in h1 .soft { display: block; color: var(--ink-3); }
 .sign-in p { margin: 0; }
+.sign-in .lead { margin-top: calc(-1 * var(--space-1)); color: var(--ink-2); font-size: var(--text-md); line-height: 1.5; }
+.sign-in .notice { margin: var(--space-1) 0 0; }
 .sign-in .button { margin-top: var(--space-3); }
+.auth-form { display: grid; gap: var(--space-2); margin-top: var(--space-2); }
+.auth-form input:not([type="hidden"]) { width: 100%; height: 42px; }
+.auth-form .wide { margin-top: var(--space-2); }
+.or { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: var(--space-3); margin-top: var(--space-2); color: var(--ink-3); font-size: var(--text-sm); }
+.or::before, .or::after { content: ""; height: 1px; background: var(--line); }
+.or + .button { margin-top: var(--space-2); }
+.sign-in .button.wide + .button.wide { margin-top: 0; }
+.auth-links { display: grid; margin-top: var(--space-3); border-top: 1px solid var(--line-soft); }
+.auth-links a { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: 44px; border-bottom: 1px solid var(--line-soft); color: var(--ink); font-size: var(--text-md); text-decoration: none; }
+.auth-links a:hover { color: var(--accent); }
+.auth-links .icon { color: var(--ink-3); }
+.invite-facts { margin: var(--space-2) 0 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
+.invite-facts div { display: flex; justify-content: space-between; gap: var(--space-4); padding: 10px 14px; border-top: 1px solid var(--line-soft); font-size: var(--text-sm); }
+.invite-facts div:first-child { border-top: 0; }
+.invite-facts dt { color: var(--ink-3); }
+.invite-facts dd { margin: 0; min-width: 0; color: var(--ink); font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.auth-center { display: grid; place-items: start center; padding-top: 4vh; }
 .bare-main > .notice { max-width: 480px; }
 
 /* Assistant */

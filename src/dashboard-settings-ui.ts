@@ -10,6 +10,43 @@ export const SLOTLOCK_SETTINGS_CSS = `
 .subnav .nav-dot { width: 6px; height: 6px; border-radius: 50%; margin-left: auto; background: var(--good); }
 .settings-body { display: grid; gap: var(--space-6); min-width: 0; }
 .settings-body > .notice { margin: 0; }
+/* Lists (members, the audit log) take the width: a name, its details, a role and actions in a row. */
+.settings.has-lists { grid-template-columns: 176px minmax(0, 1fr); }
+.settings.has-lists .settings-body { max-width: 920px; }
+.section-head { display: grid; gap: 4px; }
+.section-head h2, .section-head .fine { margin: 0; }
+.plan-note { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin: 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 14px; color: var(--ink-2); }
+.plan-note strong { color: var(--ink); font-weight: 600; }
+.plan-note.full { border-color: color-mix(in srgb, var(--warn, #b45309) 40%, var(--line)); }
+.plan-note .button { flex: none; height: 32px; }
+.invite-card { display: grid; gap: var(--space-2); margin: 0; padding: 16px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.invite-card > label { margin: 0; color: var(--ink); }
+.invite-row { display: flex; gap: var(--space-2); }
+.invite-row input { flex: 1 1 auto; min-width: 0; }
+.invite-row select { flex: none; width: auto; }
+.invite-row button { flex: none; }
+.invite-card .fine { margin: 0; }
+.people-block { display: grid; gap: var(--space-2); }
+.list-head { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-3); }
+.list-head .count { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--radius-full); background: var(--sunken); font-size: 12px; color: var(--ink-2); }
+.people { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.person { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3) var(--space-4); min-height: 64px; padding: 12px 16px; border-top: 1px solid var(--line-soft); }
+.person:first-child { border-top: 0; }
+.avatar { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.avatar.invited { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--ink-3); }
+.who { display: grid; gap: 2px; min-width: 0; }
+.who .name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 14px; font-weight: 500; color: var(--ink); overflow-wrap: anywhere; }
+.who .meta { font-size: 13px; color: var(--ink-3); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.tag { display: inline-flex; align-items: center; flex: none; height: 18px; padding: 0 6px; border-radius: var(--radius-full); background: var(--sunken); font-size: 11px; font-weight: 500; color: var(--ink-2); }
+.person .role form.inline { display: flex; gap: 6px; align-items: center; }
+.person .role select { width: auto; height: 32px; }
+.person .role button { height: 32px; }
+.role-name { font-size: 13px; color: var(--ink-2); }
+.person-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.person-actions.spans { grid-column: 3 / -1; }
+.person-actions form.inline { display: flex; gap: 6px; align-items: center; }
+.person-actions select { width: auto; height: 32px; }
+.person-actions button { height: 32px; }
 .card-head { margin: 0 0 calc(var(--space-2) - var(--space-6)); font-size: 13px; font-weight: 600; color: var(--ink-3); }
 .set-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin: 0; }
 .row { display: grid; grid-template-columns: minmax(120px, 160px) minmax(0, 1fr); gap: var(--space-4); align-items: center; min-height: 56px; padding: 12px 20px; border-top: 1px solid var(--line-soft); }
@@ -70,6 +107,12 @@ export const SLOTLOCK_SETTINGS_CSS = `
   .subnav a { height: 40px; border-radius: 0; flex: none; }
   .subnav a[aria-current="page"] { background: none; box-shadow: inset 0 -2px 0 var(--accent); }
   .row { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); padding: 12px 16px; }
+  .settings.has-lists { grid-template-columns: minmax(0, 1fr); }
+  .person { grid-template-columns: 32px minmax(0, 1fr); }
+  .person .role, .person-actions, .person-actions.spans { grid-column: 2; justify-content: flex-start; flex-wrap: wrap; }
+  .invite-row { flex-wrap: wrap; }
+  .invite-row input { flex-basis: 100%; }
+  .plan-note { flex-direction: column; align-items: flex-start; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .status-head { grid-template-columns: 32px minmax(0, 1fr) auto; padding: 14px 16px; }
   .status-head form { grid-column: 1 / -1; }

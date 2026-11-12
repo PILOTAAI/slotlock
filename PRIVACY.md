@@ -3,8 +3,8 @@
 Last updated: 12 November 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
-(MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub account can
-sign in. It does not cover Slotlock you run yourself: the open-source package sends nothing to us,
+(MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub or Google
+account can sign in. It does not cover Slotlock you run yourself: the open-source package sends nothing to us,
 and whoever runs it is responsible for the data in it. It does not cover the Pylota app or
 pylota.io, which have their own notices.
 
@@ -33,7 +33,7 @@ protection officer.
 | --- | --- | --- |
 | Your GitHub user id, which names your account (`github:<id>`) | GitHub, when you sign in to the dashboard | While your account exists |
 | Your GitHub login | GitHub, when you sign in | Only in your session cookie, never in the database, unless team workspaces are offered (below) |
-| Once Google sign-in is offered, if you use it: your Google account's id, which names your account (`google:<id>`), and its email address once Google has verified it | Google, when you sign in | The id while your account exists; the email only in your session cookie, never in the database, unless team workspaces are offered (below) |
+| If you sign in with Google: your Google account's id, which names your account (`google:<id>`), and its email address once Google has verified it | Google, when you sign in | The id while your account exists; the email only in your session cookie, never in the database, unless team workspaces are offered (below) |
 | Once teams are offered: the GitHub organizations you are an owner or member of (up to 20: their ids, logins and your role) | GitHub, when you sign in | Only in your session cookie, never in the database |
 | Once teams are offered: each organization turned on for Slotlock, by its GitHub id and login, whether it is on, and the GitHub user id of the owner who last turned it on or off, and when | An owner of the organization, on the Teams page | Until the organization's account is erased |
 | When you last signed in to the dashboard, and the number your sessions carry so that **Sign out everywhere** can end them all | The service, when you sign in | While your account exists |
@@ -88,7 +88,7 @@ whether or not its keys are in use.
 Sign-in asks GitHub for no permissions beyond your public profile; once teams are offered, it also
 asks to read which organizations you belong to (`read:org`), so you can work in the ones turned on.
 GitHub's token is used once, to read your user id and login (and those organizations), and is then
-dropped. Once Google sign-in is offered, signing in with Google asks only for your account's id and
+dropped. Signing in with Google asks only for your account's id and
 email address (`openid email`); Google's tokens are not kept. The dashboard sets two cookies, both needed for
 sign-in to work: `__Host-slotlock-oauth` for the ten minutes a sign-in takes, and
 `__Host-slotlock-session` for your session. Both are secure, HTTP-only and limited to the dashboard's

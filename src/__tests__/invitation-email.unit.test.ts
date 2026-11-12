@@ -17,17 +17,28 @@ const invitation = {
 describe('invitation email', () => {
   it('says who invited whom to what, until when, in text and HTML alike, and nothing else', () => {
     const message = slotlockInvitationEmail(invitation, 'Slotlock');
-    expect(message.subject).toBe('@ada invited you to Acme <Rentals> on Slotlock');
+    // A formal subject that names the team, not the inviter's address (the owner's ask, 2026-11-12).
+    expect(message.subject).toBe('Invitation to join Acme <Rentals> on Slotlock');
     expect(message.text).toBe(
-      '@ada invited you to join Acme <Rentals> on Slotlock as Member.\n\n' +
-        `Join: ${invitation.link}\n\n` +
-        'The link works once, for this address, until 2026-11-18 10:30 UTC. If you did not expect it, ignore this email: nothing happens unless you use the link.\n',
+      'Invitation to join Acme <Rentals> on Slotlock\n\n' +
+        '@ada invited you to join Acme <Rentals> on Slotlock as Member.\n\n' +
+        `Accept the invitation: ${invitation.link}\n\n` +
+        'Team: Acme <Rentals>\nRole: Member\nInvited by: @ada\nExpires: 2026-11-18 10:30 UTC\n\n' +
+        'The link works once, for this address. If you weren’t expecting this invitation, you can ignore this email: nothing happens unless you use the link.\n',
     );
-    // The HTML escapes what people typed, and links nowhere but the invitation.
+    // The HTML escapes what people typed, and links nowhere but the invitation: one button, the
+    // address again as text for a client that drops it, and no image to fetch.
     expect(message.html).toContain('Acme &#60;Rentals&#62;');
     expect(message.html).not.toContain('<Rentals>');
     expect([...message.html.matchAll(/href="([^"]+)"/g)].map(([, href]) => href)).toEqual([invitation.link]);
-    expect(message.html).toContain('until 2026-11-18 10:30 UTC');
+    expect(message.html).toContain('>Accept invitation</a>');
+    expect(message.html.split(invitation.link)).toHaveLength(3);
+    expect(message.html).not.toMatch(/<img|url\(|@import/i);
+    expect(message.html).toContain('2026-11-18 10:30 UTC');
+    // What the inbox shows beside the subject, and dark colours where the client honours them.
+    expect(message.html).toMatch(/<div style="display:none;[^"]*">@ada invited you to join Acme &#60;Rentals&#62; on Slotlock as Member\.<\/div>/);
+    expect(message.html).toContain('<meta name="color-scheme" content="light dark">');
+    expect(message.html).toContain('@media (prefers-color-scheme: dark)');
   });
 
   it('sends through Resend with a key that names no address', async () => {
@@ -43,7 +54,7 @@ describe('invitation email', () => {
     // Resend refuses a request with no User-Agent (403), and a Worker's fetch adds none.
     expect(headers['user-agent']).toMatch(/^Slotlock /);
     const body = JSON.parse(String(init.body));
-    expect(body).toMatchObject({ from: 'Slotlock <team@slotlock.example>', to: ['desk@clinic.example'], subject: '@ada invited you to Acme <Rentals> on Slotlock' });
+    expect(body).toMatchObject({ from: 'Slotlock <team@slotlock.example>', to: ['desk@clinic.example'], subject: 'Invitation to join Acme <Rentals> on Slotlock' });
     expect(body.text).toContain(invitation.link);
     expect(body.html).toContain('Join Acme &#60;Rentals&#62;');
   });

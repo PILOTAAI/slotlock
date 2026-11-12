@@ -1,6 +1,6 @@
 # Terms of Service for hosted Slotlock
 
-Last updated: 10 November 2026.
+Last updated: 12 November 2026.
 
 These terms are an agreement between you and TREFT LTD, trading as Pylota (company number 16211391,
 registered office 20 Wenlock Road, London, England, N1 7GU), for hosted Slotlock: the API at
@@ -61,8 +61,8 @@ it yourself, and nothing here limits your rights under that licence.
 
 ## Your account
 
-- Any GitHub account can sign in. Your account is your GitHub user, and it holds one Slotlock
-  account; keep that GitHub account secure.
+- Any GitHub or Google account can sign in. Your account is that GitHub user or Google account, and
+  it holds one Slotlock account; keep that account secure.
 - You are responsible for the API keys you create and for everything done with them. Give each
   agent its own key with the narrowest scope it needs, and revoke a key you no longer trust.
 - You must follow the [Acceptable Use Policy](ACCEPTABLE-USE.md), which is part of these terms.

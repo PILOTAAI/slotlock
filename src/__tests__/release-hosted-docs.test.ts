@@ -241,8 +241,8 @@ describe('the hosted service page', () => {
     expect(text).toContain('`https://app.slotlock.pylota.io/dashboard`');
     expect(text).toContain('no service level agreement');
     expect(text).toContain('Writes take effect at once.');
-    // Sign-up is open to any GitHub account, and self-hosting stays a supported path.
-    expect(text).toContain('Any GitHub account can sign in.');
+    // Sign-up is open to any GitHub or Google account, and self-hosting stays a supported path.
+    expect(text).toContain('Any GitHub or Google account can sign in.');
     expect(text).toContain('Self-hosting stays fully supported');
     for (const file of ['docs/hosted/README.md', 'site/docs-src/hosted.md', 'README.md', 'SECURITY.md']) {
       expect(flat(read(file)), file).not.toMatch(/is not open|do not answer|only supported path/);

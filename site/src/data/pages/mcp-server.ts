@@ -44,7 +44,7 @@ export const mcpServerPage: MarketingPage = {
       id: 'connect',
       topic: 'Connect',
       heading: { soft: 'One line in Claude Code.', strong: 'One block in Cursor.' },
-      lede: 'Sign in with GitHub, create an API key in the dashboard, and point your client at Slotlock Cloud. A self-hosted server works the same way at its own address.',
+      lede: 'Sign in with GitHub or Google, create an API key in the dashboard, and point your client at Slotlock Cloud. A self-hosted server works the same way at its own address.',
       blocks: [
         { kind: 'code', caption: 'Claude Code', code: developers.cloudMcpAdd },
         { kind: 'code', caption: 'Cursor (~/.cursor/mcp.json)', code: cursorConfig },
