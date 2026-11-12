@@ -1,6 +1,6 @@
 # Privacy notice for hosted Slotlock
 
-Last updated: 11 November 2026.
+Last updated: 12 November 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub account can
@@ -41,7 +41,7 @@ protection officer.
 | Once teams are offered: your membership of each organization or team workspace (your role in it, whether it is active, where it came from, and when it began and last changed) | GitHub, when you sign in, an invitation you accept, or the workspace's owners and admins | Until the workspace's account or yours is erased; an ended membership is kept so that being added back restores your role |
 | Once team workspaces are offered: your GitHub login, or your Google account's email once Google has verified it, to show you to the members of your team workspaces | GitHub or Google, when you sign in | While your account exists, replaced at each sign-in |
 | Once team workspaces are offered: each team workspace's name and handle, when it was created, and the account that created it | The person who creates it | Until the team's account is erased; the creator's account id until that account is erased |
-| Once team workspaces are offered: invitations to a team workspace: the email address invited, the role offered, who invited and when, when it expires, and a SHA-256 digest of the link's token (never the link itself) | A member of the team who invites you | Until 30 days after it is accepted, withdrawn or expires, then deleted; at once when the team's account, or the inviter's or accepter's, is erased |
+| Once team workspaces are offered: invitations to a team workspace: the email address invited, the role offered, who invited and when, when it expires, and a SHA-256 digest of the link's token (never the link itself) | A member of the team who invites you | Until 30 days after it is accepted, withdrawn or expires, then deleted; at once when the team's account, or the inviter's or accepter's, is erased. The email that carries an invitation is kept by Resend for 30 days (Who else processes it) |
 | Once team workspaces are offered, to accept an invitation sent to an email address while signed in with GitHub: the addresses GitHub has verified for your account, read once, of which only the invited one is kept | GitHub, when you confirm the address | Only in your session cookie, never in the database, until you join |
 | Once verified domains are offered: a team's claim on a domain: the domain, its DNS verification token, who added it and when, and each check's result (the DNS answer, which is public) | A team's owner; public DNS | Until 90 days after the claim ends (released, lapsed, or never verified); its record in the audit log as that log keeps it; at once when the team is erased. Erasing the person who added it removes their name from it |
 | Once verified domains are offered, to find or join a team at your domain: your verified address there, how it was verified (a Google Workspace account, or Google or GitHub), and your request to join (the team, when, and who decided) | You, and Google or GitHub, which verified the address | The address in your session cookie only while you look; a request until 30 days after it is decided or expires, then deleted; at once when you or the team are erased |
@@ -108,7 +108,7 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 | --- | --- | --- |
 | Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, contacts, busy time, payments for holds, reminder records, webhooks, history, write records, exports, sessions, assistant settings | (b) contract: the Terms of Service |
 | Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
-| Team workspaces: showing members to each other, and inviting a person a member names | Login or verified email, memberships, invitations | (b) contract for members; (f) legitimate interests for an invitation: a member asked for it, it holds an address and a role only, and it is deleted 30 days after it ends |
+| Team workspaces: showing members to each other, and inviting a person a member names | Login or verified email, memberships, invitations | (b) contract for members; (f) legitimate interests for an invitation: a member asked for it, it holds an address and a role only, and it is deleted 30 days after it ends; the email that carries it says only who invited, to which team, in which role, with the link, and Resend deletes it 30 days after it is sent |
 | Verified domains: proving a team holds its domain, and letting the people at it ask to join | Domain claims, verified addresses, requests to join | (b) contract for the team's members; (f) legitimate interests for a request: the person asked to join, it holds the address they chose to use, and it is deleted 30 days after it is decided |
 | Single sign-on: signing a team's members in through the team's own identity provider, as the team chose | Connection settings, identities at the provider, sign-in records | (b) contract with the team, which chose its provider; (f) legitimate interests for its members: the team requires it of them, and Slotlock keeps only the identifiers that sign them in |
 | Measuring use: counting what each account uses (operations, bookings, holds, webhook deliveries, assistant messages, resources), to show you your usage and to apply your plan's allowances | Account, usage counts | (b) contract: the Terms of Service |
@@ -130,7 +130,7 @@ not use your data for marketing, and we do not use your calendar content to trai
 | Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it serves the website and counts its visits (Web Analytics); it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
 | GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock | United States |
 | Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
-| Once invitations are sent by email: the email provider we use for them, Resend or Postmark | Sends each team invitation: the invited address, the team's name, who invited and the link | The United States |
+| Resend | Since 12 November 2026, sends each team invitation by email: the invited address, the team's name, who invited, the role offered and the link. It keeps each message, link included, for 30 days and then deletes it; erasing an account here does not reach that copy | The United States |
 | Stripe (the Stripe company named on your invoice) | Sells the Developer plan as merchant of record: takes the payment, calculates and pays sales tax or VAT, and issues invoices. We send it your account's id (`github:<id>`) with each purchase; Stripe is a separate controller of the purchase and keeps its records under [its own privacy policy](https://stripe.com/privacy) | Ireland, the United States and its other locations |
 
 Our uptime monitor, healthchecks.io, receives only whether the service is up, how many errors it
@@ -157,8 +157,11 @@ process connection details and dashboard requests outside the United Kingdom, in
 United States; Cloudflare's data processing agreement relies on its certification under the Data
 Privacy Framework for transfers to the United States. Google Workspace, which holds the email you
 send us, can also process it outside the United Kingdom; Google's data processing terms provide the
-safeguards for those transfers. Stripe receives your account's id with each purchase, including in
-the United States, under the safeguards in its own terms. Write to us for a copy of the safeguards.
+safeguards for those transfers. Resend, which sends team invitations, holds them in the United
+States; its data processing agreement relies on its certification under the Data Privacy Framework,
+with the UK Extension, and on the standard contractual clauses with the UK Addendum. Stripe receives
+your account's id with each purchase, including in the United States, under the safeguards in its
+own terms. Write to us for a copy of the safeguards.
 
 ## Security
 
