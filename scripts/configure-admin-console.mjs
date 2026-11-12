@@ -144,11 +144,19 @@ function need(name, what) {
   return value;
 }
 
+const HYPERDRIVE_ID = /^[0-9a-f]{32}$/;
+const AUDIENCE = /^[0-9a-f]{16,128}$/;
+const GITHUB_ID = /^[1-9][0-9]{0,15}$/;
 const HOST = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/** The example config's own hostnames, never a deployment's. */
+function isExampleHost(host) {
+  return host === 'example.com' || host.endsWith('.example.com');
+}
 
 function readHost(name, value) {
   const host = value.toLowerCase();
-  if (!HOST.test(host) || host.endsWith('.example.com') || host === 'example.com') {
+  if (!HOST.test(host) || isExampleHost(host)) {
     throw new Failure(`${name} must be a hostname, such as admin.slotlock.pylota.io.`);
   }
   return host;
@@ -435,7 +443,7 @@ async function ensureHyperdrive(account, role) {
       caching: { disabled: true },
     });
   }
-  if (typeof config?.id !== 'string' || config.origin?.user !== role.name || config.caching?.disabled !== true) {
+  if (!HYPERDRIVE_ID.test(config?.id ?? '') || config.origin?.user !== role.name || config.caching?.disabled !== true) {
     throw new Failure(
       `Hyperdrive answered without connecting as ${role.name} with caching disabled: check ${HYPERDRIVE_NAME} in the Cloudflare dashboard.`,
     );
@@ -455,7 +463,7 @@ async function ensureAccess(account, hostname, emails) {
   );
   const existing = (apps ?? []).find((app) => String(app.domain).toLowerCase() === hostname);
   if (existing) {
-    if (!/^[0-9a-f]{16,128}$/.test(existing.aud ?? '')) {
+    if (!AUDIENCE.test(existing.aud ?? '')) {
       throw new Failure(`The Access application for ${hostname} has no Audience tag the console can check.`);
     }
     return { teamDomain, aud: existing.aud, created: false };
@@ -479,7 +487,7 @@ async function ensureAccess(account, hostname, emails) {
     app_launcher_visible: false,
     policies: [{ id: policy.id, precedence: 1 }],
   });
-  if (!/^[0-9a-f]{16,128}$/.test(app?.aud ?? '')) {
+  if (!AUDIENCE.test(app?.aud ?? '')) {
     throw new Failure(`Cloudflare created the Access application for ${hostname} without an Audience tag.`);
   }
   // Without its policy, Access lets no one in: safe, but the console would be unusable.
@@ -496,8 +504,31 @@ function repositoryVariable(name) {
   return ghGet(`repos/${OWNER}/${REPO}/actions/variables/${name}`)?.value || undefined;
 }
 
+/**
+ * What Cloudflare and GitHub answered, checked against the shape each value has before any of it
+ * goes in the file: a value of any other shape stops the script.
+ */
+function checkValues(values) {
+  const shapes = [
+    ['the hostname', values.hostname, HOST, false],
+    ["Hyperdrive's configuration id", values.hyperdrive, HYPERDRIVE_ID, false],
+    ["Access's team domain", values.teamDomain, HOST, false],
+    ["the Access application's Audience tag", values.aud, AUDIENCE, false],
+    ["the CMS App's id", values.cmsAppId, GITHUB_ID, true],
+    ["the CMS App's installation id", values.cmsInstallation, GITHUB_ID, true],
+    ['the site preview host', values.previewHost, HOST, true],
+  ];
+  for (const [what, value, shape, optional] of shapes) {
+    if (optional && (value === undefined || value === '')) continue;
+    if (typeof value !== 'string' || !shape.test(value) || isExampleHost(value)) {
+      throw new Failure(`${what} is not what one looks like, so ${configPath} was not written.`);
+    }
+  }
+}
+
 /** wrangler.jsonc with this deployment's values: each placeholder must be found exactly once. */
 function writeConfig(values) {
+  checkValues(values);
   let text = readFileSync(template, 'utf8');
   const set = (pattern, replacement, what) => {
     const matches = text.match(new RegExp(pattern.source, 'g')) ?? [];
@@ -543,12 +574,11 @@ function readConfig() {
     previewHost: value('SLOTLOCK_ADMIN_PREVIEW_HOST'),
   };
   const placeholder =
-    !config.hyperdrive ||
-    config.hyperdrive.startsWith('set-this') ||
-    !/^[0-9a-f]{16,128}$/.test(config.aud) ||
-    !config.teamDomain ||
+    !HYPERDRIVE_ID.test(config.hyperdrive) ||
+    !AUDIENCE.test(config.aud) ||
+    !HOST.test(config.teamDomain) ||
     config.hostname === 'unset.invalid' ||
-    config.hostname.endsWith('example.com');
+    isExampleHost(config.hostname);
   if (placeholder) throw new Failure(`${configPath} still has placeholders: run prepare again.`);
   return config;
 }

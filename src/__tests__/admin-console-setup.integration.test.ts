@@ -57,7 +57,7 @@ interface CloudflareRequest {
 }
 
 /** The stand-in Cloudflare API: Hyperdrive and Access, recording every request and its body. */
-async function cloudflareApi() {
+async function cloudflareApi(answers: { hyperdriveId?: string } = {}) {
   const requests: CloudflareRequest[] = [];
   const state = {
     hyperdrive: [] as Record<string, unknown>[],
@@ -85,7 +85,7 @@ async function cloudflareApi() {
       };
       if (route === `GET ${base}/hyperdrive/configs`) return answer(200, state.hyperdrive.map(shown));
       if (route === `POST ${base}/hyperdrive/configs`) {
-        const config = { id: `hd${state.hyperdrive.length + 1}${'0'.repeat(28)}`, ...body };
+        const config = { id: answers.hyperdriveId ?? `${state.hyperdrive.length + 1}`.padStart(32, 'd'), ...body };
         state.hyperdrive.push(config);
         return answer(200, shown(config));
       }
@@ -244,7 +244,7 @@ interface Setup {
   read: (name: string) => string | null;
 }
 
-async function setup(env: Record<string, string> = {}): Promise<Setup> {
+async function setup(env: Record<string, string> = {}, answers: { hyperdriveId?: string } = {}): Promise<Setup> {
   const dir = mkdtempSync(join(tmpdir(), 'slotlock-admin-setup-'));
   scratch.push(dir);
   const bin = join(dir, 'bin');
@@ -253,7 +253,7 @@ async function setup(env: Record<string, string> = {}): Promise<Setup> {
   writeFileSync(join(bin, 'gh'), gh, { mode: 0o755 });
   writeFileSync(join(dir, 'wrangler'), wrangler, { mode: 0o755 });
   writeFileSync(join(dir, 'slotlock'), cli, { mode: 0o755 });
-  const cloudflare = await cloudflareApi();
+  const cloudflare = await cloudflareApi(answers);
   const config = join(dir, 'wrangler.deploy.jsonc');
   const role = `slotlock_admin_t${randomBytes(4).toString('hex')}`;
   roles.push(role);
@@ -308,7 +308,7 @@ async function runScript(args: string[], env: Record<string, string>) {
 function writePrepared(config: string, cms: { id?: string; installation?: string } = {}) {
   const text = readFileSync(join(root, 'workers', 'admin', 'wrangler.jsonc'), 'utf8')
     .replace('"pattern": "admin.example.com"', `"pattern": "${HOSTNAME}"`)
-    .replace('"id": "set-this-to-the-admin-hyperdrive-configuration-id"', '"id": "hd1"')
+    .replace('"id": "set-this-to-the-admin-hyperdrive-configuration-id"', `"id": "${'1'.padStart(32, 'd')}"`)
     .replace('"SLOTLOCK_ADMIN_PUBLIC_URL": "https://admin.example.com"', `"SLOTLOCK_ADMIN_PUBLIC_URL": "https://${HOSTNAME}"`)
     .replace('"SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "example.cloudflareaccess.com"', '"SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "slotlock.cloudflareaccess.com"')
     .replace('"SLOTLOCK_ADMIN_ACCESS_AUD": "set-this-to-the-access-application-aud"', `"SLOTLOCK_ADMIN_ACCESS_AUD": "${AUD}"`)
@@ -364,7 +364,7 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     // The config has this deployment's values and no placeholder or secret.
     const config = readFileSync(run.config, 'utf8');
     expect(config).toContain(`"pattern": "${HOSTNAME}"`);
-    expect(config).toContain(`"id": "hd1${'0'.repeat(28)}"`);
+    expect(config).toContain(`"id": "${'1'.padStart(32, 'd')}"`);
     expect(config).toContain(`"SLOTLOCK_ADMIN_PUBLIC_URL": "https://${HOSTNAME}"`);
     expect(config).toContain('"SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "slotlock.cloudflareaccess.com"');
     expect(config).toContain(`"SLOTLOCK_ADMIN_ACCESS_AUD": "${AUD}"`);
@@ -411,6 +411,15 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     const found = await sql`SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${run.env.SLOTLOCK_ADMIN_ROLE as string}`;
     await sql.end();
     expect(found).toHaveLength(0);
+  });
+
+  it('writes no config from an answer of the wrong shape', async () => {
+    // A quote would end the JSON string it goes in; a value of any other shape stops the script.
+    const run = await setup({}, { hyperdriveId: 'deadbeef", "injected": "x' });
+    const result = await runScript(['prepare'], run.env);
+    expect(result.code).toBe(1);
+    expect(result.output).toMatch(/Hyperdrive answered without connecting as|Hyperdrive's configuration id is not what one looks like/);
+    expect(existsSync(run.config)).toBe(false);
   });
 
   it('refuses go-live before 12 December 2026, touching nothing', async () => {
