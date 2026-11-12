@@ -15,6 +15,11 @@
 # Secrets, on the `site` environment:
 #   CLOUDFLARE_API_TOKEN   Account: Workers Scripts: Edit; Zone (pylota.io only): Workers Routes: Edit, DNS: Edit
 #   CLOUDFLARE_ACCOUNT_ID  the Cloudflare account that holds the pylota.io zone
+#
+# Preview deploys (RFC 0006, 4.5): the build of a pull request from a cms/ branch, which the admin
+# console's CMS opens, goes to the preview Worker from site-preview.yml, a workflow_run workflow that
+# always runs as main has it. No job here holds a token for a pull request: a pull_request job runs
+# this file as the pull request has it, so anything it holds, the pull request could take.
 name: Site
 
 on:
@@ -94,6 +99,18 @@ jobs:
       # Wrangler is a dev dependency and only the deploy job needs it.
       - name: Install
         run: npm ci --omit=dev --no-audit --no-fund
+      # A post written in the admin console (RFC 0006, 4.5) has no link-preview image yet: draw any
+      # missing ones from the posts' frontmatter before the build, so nobody commits one by hand.
+      # Playwright is installed only when an image is missing, and is not a site dependency.
+      - name: Draw missing link-preview images
+        run: |
+          missing=$(npm run --silent og -- --missing --list)
+          if [ -n "$missing" ]; then
+            echo "Drawing: $missing"
+            npm install --no-save --no-audit --no-fund playwright@1.63.0
+            npx playwright install --with-deps chromium
+            npm run --silent og -- --missing
+          fi
       - name: Build (syncs docs and facts from the repository, then pins the CSP)
         run: npm run build
         env:

@@ -263,6 +263,45 @@ export function slotlockPlanOfSubscription(
   }
 }
 
+/**
+ * Record what needs a person for the admin console (RFC 0006, M4): a failed payment, a duplicate
+ * subscription, or a payment that recovered (which resolves the account's open payment alerts).
+ * A schema or grants from before this release record nothing, as before.
+ */
+async function noteBillingEvent(
+  sql: SlotlockSql,
+  happened: 'payment_failed' | 'duplicate_subscription' | 'payment_recovered',
+  tenantRef: string,
+  stripeObject: string,
+  detail: Record<string, string | number | null> = {},
+): Promise<void> {
+  try {
+    await sql`SELECT slotlock.note_billing_event(${happened}, ${tenantRef}, ${stripeObject}, ${sql.json(detail)})`;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === '42883' || code === '42501') return;
+    throw error;
+  }
+}
+
+/** The few fields of a failed invoice the console shows: never card or address data. */
+function failedInvoiceOf(event: unknown): { id: string; detail: Record<string, string | number | null> } | null {
+  const object = (event as { data?: { object?: Record<string, unknown> } })?.data?.object;
+  if (!object || object.object !== 'invoice' || typeof object.id !== 'string' || !/^in_[A-Za-z0-9]{1,250}$/.test(object.id)) {
+    return null;
+  }
+  const number = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  return {
+    id: object.id,
+    detail: {
+      amount_due: number(object.amount_due),
+      currency: typeof object.currency === 'string' && /^[a-z]{3}$/.test(object.currency) ? object.currency : null,
+      attempt_count: number(object.attempt_count),
+      next_payment_attempt: number(object.next_payment_attempt),
+    },
+  };
+}
+
 /** The subscription a webhook event is about, if any. */
 function subscriptionOf(event: unknown): string | null {
   const object = (event as { data?: { object?: Record<string, unknown> } })?.data?.object;
@@ -332,7 +371,10 @@ export async function handleSlotlockStripeWebhook(
       if (other) chosen = other;
     } else if (named && named !== subscription.id) {
       const previous = await deps.stripe.subscription(named).catch(() => null);
-      if (previous && slotlockSubscriptionIsLive(previous)) deps.onDuplicate?.([previous.id, subscription.id]);
+      if (previous && slotlockSubscriptionIsLive(previous)) {
+        deps.onDuplicate?.([previous.id, subscription.id]);
+        await noteBillingEvent(deps.sql, 'duplicate_subscription', tenantRef, subscription.id, { first: previous.id });
+      }
     }
     const { plan, status } = deps.stripe.planOf?.(chosen) ?? slotlockPlanOfSubscription(chosen);
     const customer = typeof chosen.customer === 'string' ? chosen.customer : chosen.customer.id;
@@ -345,6 +387,15 @@ export async function handleSlotlockStripeWebhook(
       stripeSubscription: plan === 'free' ? null : chosen.id,
       currentPeriodEnd: plan === 'free' || !end ? null : new Date(end * 1000),
     });
+    // For the people who run the service (RFC 0006, M4): a payment that failed, or one that
+    // recovered, which closes the account's open payment alerts.
+    const type = (event as { type?: unknown }).type;
+    const failed = type === 'invoice.payment_failed' ? failedInvoiceOf(event) : null;
+    if (failed) {
+      await noteBillingEvent(deps.sql, 'payment_failed', tenantRef, failed.id, { ...failed.detail, subscription: chosen.id });
+    } else if (status === 'active') {
+      await noteBillingEvent(deps.sql, 'payment_recovered', tenantRef, chosen.id);
+    }
     return text(200, 'Updated.');
   } catch (error) {
     deps.onError?.(error);

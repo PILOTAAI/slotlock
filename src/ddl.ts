@@ -9,6 +9,12 @@
 // pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
 // transaction: under autocommit the pin ends with its own statement.
 import {
+  SLOTLOCK_STAFF_DDL,
+  SLOTLOCK_STAFF_OPERATOR_FUNCTIONS,
+  SLOTLOCK_STAFF_SERVING_FUNCTIONS,
+  SLOTLOCK_STAFF_TABLES,
+} from './staff-ddl.js';
+import {
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
   SLOTLOCK_MAX_LOCATION_DEPTH,
   SLOTLOCK_MAX_LOCATIONS,
@@ -364,6 +370,10 @@ export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'tenant_plans',
   'plan_defaults',
+  // A plan or limits staff gave an account until a date (RFC 0006, M5), and what Stripe told the
+  // webhook needs a person (failed payments, duplicate subscriptions).
+  'tenant_plan_overrides',
+  'billing_alerts',
   'usage_daily',
   'usage_flushes',
   'usage_cursors',
@@ -404,6 +414,11 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.reset_test_tenant(text)',
   'slotlock.prune_changes(text, integer, integer)',
   'slotlock.erase_subject_changes(text, text, text, text)',
+  'slotlock.tenant_suspension_notice(text)',
+  'slotlock.note_billing_event(text, text, text, jsonb)',
+  // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
+  // 0006, M10 and M11; staff-ddl.ts).
+  ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -466,6 +481,8 @@ export const SLOTLOCK_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.suspend_tenant(text, text)',
   'slotlock.unsuspend_tenant(text)',
   'slotlock.set_plan_default(text, integer, integer, integer, timestamptz)',
+  // Adding, changing and removing the admin console's staff (staff-ddl.ts, `slotlock staff …`).
+  ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS,
 ] as const);
 
 /** Every SECURITY DEFINER function the serving role may execute, by signature. */
@@ -520,6 +537,8 @@ export const SLOTLOCK_DEFINER_TABLES = Object.freeze([
   ...SLOTLOCK_DASHBOARD_TABLES,
   ...SLOTLOCK_SCHEMA_TABLES,
   ...SLOTLOCK_TENANT_ADMIN_TABLES,
+  // The admin console's staff, passkeys and staff log, reached only through SLOTLOCK_ADMIN_FUNCTIONS.
+  ...SLOTLOCK_STAFF_TABLES,
 ]);
 
 /**
@@ -1538,6 +1557,13 @@ BEGIN
   END IF;
   -- A person a team's identity provider made (sso:) creates no team: their organization holds them.
   IF requested_person ~ '^sso:' THEN
+    RETURN QUERY SELECT NULL::text, 'not_allowed'::text;
+    RETURN;
+  END IF;
+  -- Nor one whose own account staff suspended, or for which (or for whose plan) they turned
+  -- creating teams off (RFC 0006, M11): the dashboard says so too, and this holds whatever it does.
+  IF slotlock.tenant_suspended(requested_person)
+     OR (slotlock.tenant_dashboard_notices(requested_person) -> 'features' ->> 'team_workspaces') = 'false' THEN
     RETURN QUERY SELECT NULL::text, 'not_allowed'::text;
     RETURN;
   END IF;
@@ -2677,6 +2703,101 @@ AS $slotlock_tenant_suspended$
 $slotlock_tenant_suspended$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[0]} FROM PUBLIC;
 
+-- Who suspended a tenant (a staff member, a deployment-role command, or nobody recorded), and what
+-- staff told it (RFC 0006): a message its dashboard shows on every page while the suspension lasts.
+ALTER TABLE slotlock.tenant_suspensions ADD COLUMN IF NOT EXISTS customer_message text;
+ALTER TABLE slotlock.tenant_suspensions ADD COLUMN IF NOT EXISTS suspended_by text;
+DO $slotlock_tenant_suspensions_message$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.tenant_suspensions'::regclass
+       AND conname = 'slotlock_tenant_suspensions_message_valid'
+  ) THEN
+    ALTER TABLE slotlock.tenant_suspensions ADD CONSTRAINT slotlock_tenant_suspensions_message_valid CHECK (
+      (customer_message IS NULL OR (char_length(customer_message) BETWEEN 1 AND 500
+                                    AND customer_message !~ '[[:cntrl:]]'))
+      AND (suspended_by IS NULL OR octet_length(suspended_by) BETWEEN 1 AND 100));
+  END IF;
+END
+$slotlock_tenant_suspensions_message$;
+
+-- A suspended tenant's notice for its dashboard: since when, and the message staff left (null for
+-- none). One row while it is suspended (its own suspension, its live tenant's, or its partner's),
+-- none otherwise. Never the internal reason.
+CREATE OR REPLACE FUNCTION slotlock.tenant_suspension_notice(requested_tenant_ref text)
+RETURNS TABLE (suspended_at timestamptz, message text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_suspension_notice$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  SELECT held.suspended_at, held.customer_message FROM slotlock.tenant_suspensions held
+   WHERE held.tenant_ref IN (requested_tenant_ref, regexp_replace(requested_tenant_ref, '~test$', ''))
+   ORDER BY held.tenant_ref = requested_tenant_ref DESC
+   LIMIT 1;
+  IF NOT FOUND AND slotlock.partner_tenant_blocked(requested_tenant_ref) THEN
+    RETURN QUERY SELECT NULL::timestamptz, NULL::text;
+  END IF;
+END
+$slotlock_tenant_suspension_notice$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[23]} FROM PUBLIC;
+
+-- What the Stripe webhook saw that needs a person (RFC 0006, M4): a payment that failed, and a
+-- second subscription bought by the same account (for a refund). One row per Stripe object, so a
+-- retried delivery adds nothing; resolved by staff, or by Stripe when the account's subscription is
+-- paid again.
+CREATE TABLE IF NOT EXISTS slotlock.billing_alerts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  kind text NOT NULL,
+  tenant_ref text NOT NULL,
+  stripe_ref text NOT NULL,
+  detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  resolved_at timestamptz,
+  resolved_by text,
+  CONSTRAINT slotlock_billing_alerts_valid CHECK (
+    kind IN ('payment_failed', 'duplicate_subscription')
+    AND octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND stripe_ref ~ '^(in|sub)_[A-Za-z0-9]{1,250}$'
+    AND jsonb_typeof(detail) = 'object' AND pg_column_size(detail) <= 2048
+    AND (resolved_at IS NULL) = (resolved_by IS NULL)
+    AND (resolved_by IS NULL OR octet_length(resolved_by) BETWEEN 1 AND 100)
+  ),
+  CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, stripe_ref)
+);
+CREATE INDEX IF NOT EXISTS slotlock_billing_alerts_open_idx
+  ON slotlock.billing_alerts (created_at DESC) WHERE resolved_at IS NULL;
+ALTER TABLE slotlock.billing_alerts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.billing_alerts FROM PUBLIC;
+
+-- The webhook's record (the serving role's): payment_failed and duplicate_subscription open an
+-- alert once per Stripe object; payment_recovered resolves the account's open payment alerts.
+-- Detail is a few fields the webhook chose (amounts, attempt counts), never card data.
+CREATE OR REPLACE FUNCTION slotlock.note_billing_event(happened text, requested_tenant_ref text, stripe_object text, extra jsonb)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_note_billing_event$
+BEGIN
+  IF happened = 'payment_recovered' THEN
+    UPDATE slotlock.billing_alerts open
+       SET resolved_at = statement_timestamp(), resolved_by = 'stripe'
+     WHERE open.tenant_ref = requested_tenant_ref AND open.kind = 'payment_failed' AND open.resolved_at IS NULL;
+    RETURN;
+  END IF;
+  INSERT INTO slotlock.billing_alerts (kind, tenant_ref, stripe_ref, detail)
+  VALUES (happened, requested_tenant_ref, stripe_object, coalesce(extra, '{}'::jsonb))
+  ON CONFLICT ON CONSTRAINT slotlock_billing_alerts_once DO NOTHING;
+END
+$slotlock_note_billing_event$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[24]} FROM PUBLIC;
+
 -- A hosted tenant's plan (plans.ts): the limits it buys, set from its Stripe subscription. A tenant
 -- with no row is on the deployment's default plan (plan_defaults) once that applies, and otherwise
 -- has no plan limits; self-hosted Slotlock writes neither.
@@ -2759,7 +2880,54 @@ CREATE TABLE IF NOT EXISTS slotlock.plan_defaults (
 ALTER TABLE slotlock.plan_defaults ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.plan_defaults FROM PUBLIC;
 
--- The tenant's own plan, or the default once it applies; no row when neither does.
+-- A plan, limits or quotas staff gave an account until a date (RFC 0006, M3 and M5): taken over
+-- what its subscription or the default gives, wherever the plan is read (tenant_plan below), from
+-- the moment it is approved until it ends or is ended. Limits are always all three, so an override
+-- alone (no plan row, no default) still says what the account may hold; quotas are all three or
+-- none. One longer than 90 days waits for a second Owner (approved_at); the console ends the one
+-- in force when another is approved for the same account.
+CREATE TABLE IF NOT EXISTS slotlock.tenant_plan_overrides (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_ref text NOT NULL,
+  plan text,
+  max_resources integer NOT NULL,
+  max_api_keys integer NOT NULL,
+  max_webhook_endpoints integer NOT NULL,
+  quota_operations bigint,
+  quota_bookings bigint,
+  quota_stop_percent integer,
+  starts_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  ends_at timestamptz NOT NULL,
+  reason text NOT NULL,
+  created_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  approved_by text,
+  approved_at timestamptz,
+  ended_by text,
+  ended_at timestamptz,
+  CONSTRAINT slotlock_tenant_plan_overrides_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500 AND tenant_ref !~ '~test$'
+    AND (plan IS NULL OR plan IN ('free', 'developer', 'team'))
+    AND max_resources BETWEEN 1 AND 100000
+    AND max_api_keys BETWEEN 1 AND ${SLOTLOCK_API_KEY_ACTIVE_LIMIT}
+    AND max_webhook_endpoints BETWEEN 1 AND 1000
+    AND ((quota_operations IS NULL AND quota_bookings IS NULL AND quota_stop_percent IS NULL)
+         OR (quota_operations BETWEEN 1 AND 1000000000000 AND quota_bookings BETWEEN 1 AND 1000000000000
+             AND quota_stop_percent BETWEEN 100 AND 1000))
+    AND ends_at > starts_at AND ends_at <= starts_at + interval '400 days'
+    AND octet_length(reason) BETWEEN 1 AND 200 AND reason !~ '[[:cntrl:]]'
+    AND octet_length(created_by) BETWEEN 1 AND 100
+    AND (approved_by IS NULL) = (approved_at IS NULL)
+    AND (ended_by IS NULL) = (ended_at IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_tenant_plan_overrides_tenant_idx
+  ON slotlock.tenant_plan_overrides (tenant_ref, id DESC);
+ALTER TABLE slotlock.tenant_plan_overrides ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.tenant_plan_overrides FROM PUBLIC;
+
+-- The tenant's own plan, or the default once it applies, with an override staff gave it on top;
+-- no row when none of them does.
 CREATE OR REPLACE FUNCTION slotlock.tenant_plan(requested_tenant_ref text)
 RETURNS TABLE (
   plan text, status text, max_resources integer, max_api_keys integer,
@@ -2775,20 +2943,39 @@ AS $slotlock_tenant_plan$
   WITH live AS (
     SELECT regexp_replace(requested_tenant_ref, '~test$', '') AS tenant_ref,
            requested_tenant_ref ~ '~test$' AS test
+  ),
+  base AS (
+    SELECT current.plan, current.status, current.max_resources, current.max_api_keys,
+           current.max_webhook_endpoints,
+           CASE WHEN live.test THEN NULL ELSE current.stripe_customer END AS stripe_customer,
+           CASE WHEN live.test THEN NULL ELSE current.stripe_subscription END AS stripe_subscription,
+           CASE WHEN live.test THEN NULL ELSE current.current_period_end END AS current_period_end
+      FROM live JOIN slotlock.tenant_plans current ON current.tenant_ref = live.tenant_ref
+    UNION ALL
+    SELECT fallback.plan, 'active', fallback.max_resources, fallback.max_api_keys,
+           fallback.max_webhook_endpoints, NULL, NULL, NULL
+      FROM live, slotlock.plan_defaults fallback
+     WHERE fallback.applies_from <= statement_timestamp()
+       AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current
+                        WHERE current.tenant_ref = live.tenant_ref)
+  ),
+  granted AS (
+    SELECT given.plan, given.max_resources, given.max_api_keys, given.max_webhook_endpoints
+      FROM live JOIN slotlock.tenant_plan_overrides given ON given.tenant_ref = live.tenant_ref
+     WHERE given.approved_at IS NOT NULL AND given.ended_at IS NULL
+       AND given.starts_at <= statement_timestamp() AND given.ends_at > statement_timestamp()
+     ORDER BY given.id DESC
+     LIMIT 1
   )
-  SELECT current.plan, current.status, current.max_resources, current.max_api_keys,
-         current.max_webhook_endpoints,
-         CASE WHEN live.test THEN NULL ELSE current.stripe_customer END,
-         CASE WHEN live.test THEN NULL ELSE current.stripe_subscription END,
-         CASE WHEN live.test THEN NULL ELSE current.current_period_end END
-    FROM live JOIN slotlock.tenant_plans current ON current.tenant_ref = live.tenant_ref
-  UNION ALL
-  SELECT fallback.plan, 'active', fallback.max_resources, fallback.max_api_keys,
-         fallback.max_webhook_endpoints, NULL, NULL, NULL
-    FROM live, slotlock.plan_defaults fallback
-   WHERE fallback.applies_from <= statement_timestamp()
-     AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current
-                      WHERE current.tenant_ref = live.tenant_ref);
+  -- An override's plan keeps the account on it whatever its billing says; its limits replace the
+  -- plan's. Billing's own fields stay as Stripe set them.
+  SELECT coalesce(granted.plan, base.plan, 'free'),
+         CASE WHEN granted.plan IS NOT NULL THEN 'active' ELSE coalesce(base.status, 'active') END,
+         coalesce(granted.max_resources, base.max_resources),
+         coalesce(granted.max_api_keys, base.max_api_keys),
+         coalesce(granted.max_webhook_endpoints, base.max_webhook_endpoints),
+         base.stripe_customer, base.stripe_subscription, base.current_period_end
+    FROM base FULL JOIN granted ON true;
 $slotlock_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[10]} FROM PUBLIC;
 
@@ -2817,10 +3004,22 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_tenant_plan_quotas$
-  SELECT given.plan, own.quota_operations, own.quota_bookings, own.quota_stop_percent
+  -- An override's quotas, when it gives them, replace the account's own and the plan's.
+  SELECT given.plan, coalesce(granted.quota_operations, own.quota_operations),
+         coalesce(granted.quota_bookings, own.quota_bookings),
+         coalesce(granted.quota_stop_percent, own.quota_stop_percent)
     FROM slotlock.tenant_plan(requested_tenant_ref) given
     LEFT JOIN slotlock.tenant_plans own
-           ON own.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '');
+           ON own.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '')
+    LEFT JOIN LATERAL (
+      SELECT override.quota_operations, override.quota_bookings, override.quota_stop_percent
+        FROM slotlock.tenant_plan_overrides override
+       WHERE override.tenant_ref = regexp_replace(requested_tenant_ref, '~test$', '')
+         AND override.approved_at IS NOT NULL AND override.ended_at IS NULL
+         AND override.starts_at <= statement_timestamp() AND override.ends_at > statement_timestamp()
+       ORDER BY override.id DESC
+       LIMIT 1
+    ) granted ON true;
 $slotlock_tenant_plan_quotas$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[19]} FROM PUBLIC;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[12]} FROM PUBLIC;
@@ -3572,6 +3771,36 @@ BEGIN
   DELETE FROM slotlock.tenant_plans WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  erased_table := 'tenant_plan_overrides';
+  DELETE FROM slotlock.tenant_plan_overrides WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'billing_alerts';
+  DELETE FROM slotlock.billing_alerts WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- What staff kept for it (RFC 0006, M10 and M11): notices to it, its feature flags, and a
+  -- maintenance failure. The staff log keeps that they were made.
+  erased_table := 'announcements';
+  DELETE FROM slotlock.announcements WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'feature_flags';
+  DELETE FROM slotlock.feature_flags WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'maintenance_failures';
+  DELETE FROM slotlock.maintenance_failures WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- Staff's internal notes about it go with it, however it is erased; its abuse cases stay, no
+  -- longer linked to it (PRIVACY.md).
+  erased_table := 'account_notes';
+  DELETE FROM slotlock.account_notes WHERE account_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  UPDATE slotlock.abuse_cases SET account_ref = NULL, updated_at = statement_timestamp()
+   WHERE account_ref = requested_tenant_ref;
   -- A partner's account: what it used in months its partner has not closed is kept for billing
   -- first (by the partner's account reference only), then its partner's record of it goes too.
   INSERT INTO slotlock.partner_erased_usage AS kept (partner_id, account, plan, month, metric, count)
@@ -8296,7 +8525,7 @@ CREATE INDEX IF NOT EXISTS slotlock_calendar_event_occurrences_resource_time_idx
   ON slotlock.calendar_event_occurrences (tenant_ref, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS slotlock_reservations_calendar_event_idx
   ON slotlock.reservations (calendar_event_id) WHERE calendar_event_id IS NOT NULL;
-${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_IDENTITY_DDL}${SLOTLOCK_SSO_DDL}${SLOTLOCK_SCIM_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${DEPLOYMENT_RECORD_VERSION}`;
+${SLOTLOCK_OUTBOX_DDL}${SLOTLOCK_API_KEYS_DDL}${SLOTLOCK_PARTNER_DDL}${SLOTLOCK_DASHBOARD_DDL}${SLOTLOCK_IDENTITY_DDL}${SLOTLOCK_SSO_DDL}${SLOTLOCK_SCIM_DDL}${SLOTLOCK_TENANT_ADMIN_DDL}${SLOTLOCK_STAFF_DDL}${DEPLOYMENT_RECORD_VERSION}`;
 
 /**
  * Whether the outbox row `row` (a coverage change) is in this release's shape: named by a source_id

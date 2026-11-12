@@ -218,6 +218,8 @@ const expectedFiles = new Set([
   'holiday-import.d.ts',
   'self-host.js',
   'self-host.d.ts',
+  'staff-ddl.js',
+  'staff-ddl.d.ts',
   'store.js',
   'store.d.ts',
   'sync.js',

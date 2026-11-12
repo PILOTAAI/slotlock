@@ -420,6 +420,20 @@ configure_environments() {
   # change already went through a pull request into main.
   configure_environment site '[]' branch main
   configure_site_secrets
+
+  # cms: cms-schedule.yml's hourly job, on main, which publishes the blog posts an Owner scheduled
+  # in the admin console (RFC 0006, 4.5). It holds the Slotlock CMS App's private key (CMS_APP_KEY,
+  # set by hand; the repository variables CMS_APP_ID and CMS_APP_INSTALLATION, also by hand, turn
+  # the job on, since a job's `if` reads no environment's variables). No reviewer: one would hold
+  # every hourly run, and an Owner already published the post.
+  configure_environment cms '[]' branch main
+
+  # site-preview: site-preview.yml, a workflow_run workflow that uploads a CMS pull request's build to
+  # the preview Worker. A workflow_run job runs on main, as main has the workflow, so it is limited to
+  # main: no pull request's version of a workflow can reach it. It holds a Cloudflare token (set by
+  # hand; the repository variable SITE_PREVIEW_HOST turns previews on) and never runs the pull
+  # request's code.
+  configure_environment site-preview '[]' branch main
 }
 
 # The deploy key tag-release.yml pushes release tags with: a tag pushed with GITHUB_TOKEN starts no

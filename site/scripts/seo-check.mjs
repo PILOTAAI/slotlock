@@ -37,6 +37,9 @@ const TYPES = new Set([
   'ListItem',
   'TechArticle',
   'BlogPosting',
+  'FAQPage',
+  'Question',
+  'Answer',
 ]);
 
 const problems = [];

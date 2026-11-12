@@ -13,7 +13,11 @@ site/
   src/data/pages/*.ts     every page outside the docs for one search intent (pricing, MCP server,
                           booking API, open source, about, use cases, comparisons), as data that
                           src/components/marketing/Page.astro and its Markdown twin both render
-  src/data/blog.ts        the blog's posts, as data, for /blog/, /blog/<slug>.md and /blog/rss.xml
+  content/blog/<slug>.md  the blog's posts: frontmatter and a strict Markdown subset, written here or in
+                          the admin console (RFC 0006); src/lib/post-format.ts renders them for
+                          /blog/, /blog/<slug>.md and /blog/rss.xml, and the console's preview
+  src/data/authors.json   who a post can name as its author (Person or Organization, structured data)
+  public/blog/<slug>/     a post's own images
   src/layouts/Marketing.astro   the header, footer and head of every page outside the docs
   src/lib/seo.ts          titles, canonicals, Open Graph and the JSON-LD graph (SeoHead.astro)
   src/data/llms.mjs       what llms.txt tells agents beyond the page list (the repository tests read it)
@@ -25,7 +29,9 @@ site/
   src/styles/tokens.mjs   colour tokens (Pylota's, after PR #505), light and dark
   src/styles/docs.css     the docs theme on those tokens
   scripts/sync-content.mjs  builds docs pages and src/generated/facts.json from README, SPEC,
-                            SECURITY, CHANGELOG and src/*.ts; fails if a fact moved
+                            SECURITY, CHANGELOG and src/*.ts; fails if a fact moved. It also writes
+                            public/facts.json, the short facts a post names as {{facts.name}}, which
+                            the admin console's preview reads from the live site
   scripts/tool-schemas.mjs  reads each tool's Zod input and output schemas and example from
                             src/agent-server.ts as text (the site has no package dependencies)
   scripts/tools-page.mjs  renders /docs/tools/ from those schemas and scripts/tool-notes.mjs
@@ -34,17 +40,20 @@ site/
   scripts/postbuild.mjs   pins the CSP in dist/_headers to the hashes of Starlight's inline code
   scripts/seo-check.mjs   titles, descriptions, canonicals, images, JSON-LD and the sitemap of
                           every built page (docs/rfc/0005-search.md)
-  scripts/og-images.mjs   draws public/og/*.png, the touch icon and the logo with Chromium
+  scripts/og-images.mjs   draws public/og/*.png with Chromium (the icons are the design system's files)
                           (`npm run og`; the PNGs are committed)
   scripts/contrast.mjs    WCAG AA check of every text/background pair, both themes
   scripts/copy-lint.mjs   Pylota's voice rules (no em dash, no filler words) and the word count
   scripts/subset-fonts.sh rebuilds public/fonts from the OFL sources
   public/_headers         CSP, HSTS, caching, Markdown content types
+  public/_redirects       old addresses of renamed posts (the console adds them)
+  wrangler.preview.jsonc  the preview Worker each CMS pull request's build goes to, as
+                          https://pr-<number>-<host>/ (site.yml, the preview job)
 ```
 
 Tool names and schemas, versions, limits, the exclusion constraint and the README quick start are
 read from the repository on every build, so the site cannot claim something the code does not do. Generated files
-(`src/content/docs/`, `src/generated/`, `public/schema/`) are git-ignored.
+(`src/content/docs/`, `src/generated/`, `public/schema/`, `public/facts.json`) are git-ignored.
 
 ## Work on it
 

@@ -1,13 +1,20 @@
-// Draws the link-preview images (public/og/*.png, 1200 × 630), the touch icon
-// (public/apple-touch-icon.png, 180 × 180) and the logo for structured data
-// (public/brand/slotlock-512.png) with Chromium, from the logo in src/components/Lockup.astro, the
-// colour tokens and the self-hosted fonts. The PNGs are committed, like public/fonts; run this after
-// changing a title below, then `npm run build && npm run check:seo`, which fails on a page whose
-// og:image is missing or the wrong size.
+// Draws the link-preview images (public/og/*.png, 1200 × 630) with Chromium, from the logo in
+// src/components/Lockup.astro (its light-surface inks), the colour tokens and the self-hosted fonts.
+// A blog post's image comes from its file's frontmatter (content/blog/<slug>.md: title, image and
+// eyebrow), so a post written in the admin console needs nobody to draw it: the site's CI runs
+// `node scripts/og-images.mjs --missing`, which draws only images that do not exist yet, before it
+// builds. The others are committed, like public/fonts; run this after changing a title below or the
+// logo, then `npm run build && npm run check:seo`, which fails on a page whose og:image is missing or
+// the wrong size.
+//
+//   node scripts/og-images.mjs --missing --list   prints the images missing, one per line, and exits The touch icon (public/apple-touch-icon.png, 180 × 180), the logo for structured data
+// (public/brand/slotlock-512.png) and public/favicon.svg are the Slotlock design system's own icon
+// files (Icons: apple-touch-icon-180, slotlock-icon-ink-512w, favicon), copied, never redrawn.
 //
 //   node scripts/og-images.mjs            needs Playwright and Chromium (not a site dependency:
 //                                         `npx -y playwright@1 install chromium` once, or set
 //                                         PLAYWRIGHT_CHROMIUM to a Chromium binary)
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -17,6 +24,40 @@ import { light } from '../src/styles/tokens.mjs';
 
 const SITE = new URL('../', import.meta.url);
 const at = (path) => fileURLToPath(new URL(path, SITE));
+
+/** A value of a post's frontmatter: the text after `key: `, JSON-unquoted when quoted. */
+function frontValue(front, key) {
+  const raw = new RegExp(`^${key}: (.+)$`, 'm').exec(front)?.[1]?.trim();
+  if (raw === undefined) return undefined;
+  if (raw.startsWith('"')) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
+/** Each published post's image, from its frontmatter (site/src/lib/post-format.ts reads the same). */
+function postImages() {
+  const directory = fileURLToPath(new URL('content/blog/', SITE));
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((file) => file.endsWith('.md'))
+    .sort()
+    .map((file) => {
+      const front = readFileSync(join(directory, file), 'utf8').split(/^---$/m)[1] ?? '';
+      return {
+        name: frontValue(front, 'image') ?? `blog-${file.slice(0, -3)}`,
+        eyebrow: frontValue(front, 'eyebrow') ?? 'Blog',
+        title: frontValue(front, 'title') ?? file.slice(0, -3),
+        status: frontValue(front, 'status') ?? 'draft',
+      };
+    })
+    .filter((image) => image.status === 'published')
+    .map(({ status: _, ...image }) => image);
+}
 
 /** One image per page, or per kind of page. `name` is the file in public/og/. */
 export const IMAGES = [
@@ -45,10 +86,7 @@ export const IMAGES = [
   { name: 'compare-nylas', eyebrow: 'Compare', title: 'Slotlock and Nylas' },
   { name: 'compare-google-calendar-api', eyebrow: 'Compare', title: 'Slotlock and the Google Calendar API' },
   { name: 'blog', eyebrow: 'Blog', title: 'Notes on booking, calendars and AI agents' },
-  { name: 'blog-postgresql-exclusion-constraint', eyebrow: 'Blog', title: 'Preventing double bookings with a PostgreSQL exclusion constraint' },
-  { name: 'blog-why-ai-agents-double-book', eyebrow: 'Blog', title: 'Why AI agents double-book, and what the calendar has to do' },
-  { name: 'blog-holds', eyebrow: 'Blog', title: 'Holds: keep a slot while a person decides' },
-  { name: 'blog-pylota', eyebrow: 'Case study', title: 'How Pylota checks every car rental booking with Slotlock' },
+  ...postImages(),
 ];
 
 const escape = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -72,9 +110,11 @@ function card(svg, { eyebrow, title }) {
   html, body { width: 1200px; height: 630px; }
   body { background: ${light.canvas}; color: ${light.ink}; font-family: 'Inter', sans-serif;
     display: flex; flex-direction: column; justify-content: space-between; padding: 72px 80px; }
-  .lockup__logo { height: 44px; width: auto; align-self: flex-start; }
-  .lockup__ink { fill: ${light.ink}; }
-  .lockup__slot { fill: #FF5B2E; }
+  .lockup__logo { height: 48px; width: auto; align-self: flex-start; }
+  .lockup__shackle { fill: none; stroke: #0a0b0d; stroke-width: 7; }
+  .lockup__body, .lockup__word { fill: #0a0b0d; }
+  .lockup__cut { display: none; }
+  .lockup__slot { fill: #d9ff43; }
   .eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 24px; letter-spacing: 0.08em;
     text-transform: uppercase; color: ${light['ink-3']}; margin-bottom: 22px; }
   h1 { font-family: 'Inter Tight', 'Inter', sans-serif; font-weight: 400; font-size: 68px;
@@ -89,18 +129,17 @@ function card(svg, { eyebrow, title }) {
   </body></html>`;
 }
 
-/** The padlock alone (the first two paths of the logo), centred on paper. */
-function icon(svg, size) {
-  const paths = [...svg.matchAll(/<path class="lockup__(?:ink|slot)"[^>]*><\/path>/g)].slice(0, 2).map((m) => m[0]);
-  return `<!doctype html><html><head><style>
-  * { margin: 0; } html, body { width: ${size}px; height: ${size}px; background: ${light.canvas}; }
-  body { display: flex; align-items: center; justify-content: center; }
-  svg { width: ${Math.round(size * 0.62)}px; height: auto; }
-  .lockup__ink { fill: ${light.ink}; } .lockup__slot { fill: #FF5B2E; }
-  </style></head><body><svg viewBox="-2 -2 89.32 81.12">${paths.join('')}</svg></body></html>`;
-}
-
 async function main() {
+  const missingOnly = process.argv.includes('--missing');
+  const wanted = missingOnly ? IMAGES.filter((image) => !existsSync(at(`public/og/${image.name}.png`))) : IMAGES;
+  if (process.argv.includes('--list')) {
+    for (const image of wanted) console.log(image.name);
+    return;
+  }
+  if (missingOnly && wanted.length === 0) {
+    console.log('og-images: none missing');
+    return;
+  }
   const require = createRequire(import.meta.url);
   let playwright;
   try {
@@ -124,12 +163,10 @@ async function main() {
     await writeFile(at(path), await page.screenshot({ type: 'png' }));
     await page.close();
   };
-  for (const image of IMAGES) await shoot(card(svg, image), 1200, 630, `public/og/${image.name}.png`);
-  await shoot(icon(svg, 180), 180, 180, 'public/apple-touch-icon.png');
-  await shoot(icon(svg, 512), 512, 512, 'public/brand/slotlock-512.png');
+  for (const image of wanted) await shoot(card(svg, image), 1200, 630, `public/og/${image.name}.png`);
   await browser.close();
   await rm(scratch, { recursive: true, force: true });
-  console.log(`og-images: ${IMAGES.length} previews, the touch icon and the 512 px logo`);
+  console.log(`og-images: ${wanted.length} previews`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

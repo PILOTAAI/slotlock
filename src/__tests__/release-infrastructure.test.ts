@@ -186,7 +186,8 @@ describe('Compose quickstart', () => {
     );
     expect(passed, 'canary: the service environment was found').toContain('DATABASE_URL');
     // The owner's URL belongs to the one-off migrate service; HOST and PORT are the image's own.
-    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'HOST', 'PORT']);
+    // The admin console's URL is for migrate alone, on a deployment that runs the console (RFC 0006).
+    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'SLOTLOCK_ADMIN_DATABASE_URL', 'HOST', 'PORT']);
     const missing = SLOTLOCK_ENVIRONMENT_VARIABLES.filter(
       (name) => !owned.has(name) && !passed.has(name),
     );
@@ -758,8 +759,50 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     for (const name of ['npm', 'ghcr', 'mcp-registry']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
     }
-    for (const name of ['release-tag', 'release-app', 'site']) {
+    for (const name of ['release-tag', 'release-app', 'site', 'cms', 'site-preview']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([]);
+    }
+    // The CMS's environments (RFC 0006, 4.5): the App's key on main only, and the preview token on
+    // main only too, where site-preview.yml's workflow_run job runs as main has it.
+    const policy = (name: string) =>
+      requests.find(
+        (request) =>
+          request.method === 'POST' && request.path === `repos/PILOTAAI/slotlock/environments/${name}/deployment-branch-policies`,
+      )?.body;
+    expect(policy('cms')).toEqual({ name: 'main', type: 'branch' });
+    expect(policy('site-preview')).toEqual({ name: 'main', type: 'branch' });
+  });
+
+  // A pull_request job runs the workflow as the pull request has it: no such job may hold a secret
+  // or enter an environment. The CMS's previews come from a workflow_run workflow, which runs as main
+  // has it, and reads the run's pull request, branch and repository from GitHub's event, through the
+  // environment only, never interpolated into a shell line.
+  it('keeps every token out of pull_request jobs, and builds CMS previews from main\'s workflow', () => {
+    const site = read('.github/workflows/site.yml');
+    expect(site).not.toMatch(/\n  preview:\n/);
+    expect(site).not.toContain('environment:\n      name: site-preview');
+    expect(site).not.toContain('pull_request.number');
+    const preview = read('.github/workflows/site-preview.yml');
+    expect(preview).toMatch(/^on:\n  workflow_run:\n    workflows: \[Site\]\n    types: \[completed\]\n/m);
+    expect(preview).not.toMatch(/^\s*(pull_request|pull_request_target|push):/m);
+    expect(preview).toMatch(/^permissions: \{\}$/m);
+    for (const condition of [
+      "github.event.workflow_run.event == 'pull_request'",
+      "github.event.workflow_run.conclusion == 'success'",
+      'github.event.workflow_run.head_repository.full_name == github.repository',
+      "startsWith(github.event.workflow_run.head_branch, 'cms/')",
+      "vars.SITE_PREVIEW_HOST != ''",
+    ]) expect(preview).toContain(condition);
+    // The checkout is main's; the build comes only as the run's artifact.
+    expect(preview).toContain('ref: ${{ github.event.repository.default_branch }}');
+    expect(preview).toContain('run-id: ${{ github.event.workflow_run.id }}');
+    expect(preview).not.toMatch(/ref: \$\{\{ github\.event\.workflow_run\.head|github\.head_ref/);
+    // No value of the event is interpolated into a shell line: the branch name is the pusher's to choose.
+    const find = preview.slice(preview.indexOf('- name: Find the pull request'), preview.indexOf('- uses: actions/checkout'));
+    expect(find.slice(find.indexOf('run: |'))).not.toContain('${{');
+    expect(find).toContain('HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}');
+    for (const line of preview.split('\n').filter((text) => /^\s*run: /.test(text))) {
+      expect(line).not.toContain('${{ github.event');
     }
   });
 

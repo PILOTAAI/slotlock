@@ -10,6 +10,7 @@ import Icon from '../components/landing/Icon.astro';
 import Lockup from '../components/Lockup.astro';
 import SeoHead from '../components/seo/SeoHead.astro';
 import { footer, nav, signIn } from '../data/landing';
+import { navCurrent } from '../lib/nav';
 import type { Seo } from '../lib/seo';
 
 interface Props {
@@ -56,7 +57,7 @@ const here = Astro.url.pathname;
           <Lockup />
         </a>
         <nav class="site-nav" aria-label="Main">
-          {nav.map((item) => <a href={item.href} aria-current={here === item.href ? 'page' : undefined}>{item.label}</a>)}
+          {nav.map((item) => <a href={item.href} aria-current={navCurrent(here, item.href)}>{item.label}</a>)}
         </nav>
         <a class="site-header__sign-in" href={signIn.href}>{signIn.label}</a>
         <a class="btn btn--primary" href={signIn.href}>{signIn.start}</a>
@@ -66,7 +67,7 @@ const here = Astro.url.pathname;
             <span class="sr-only">Menu</span>
           </summary>
           <nav class="menu__panel" aria-label="Menu">
-            {nav.map((item) => <a href={item.href}>{item.label}</a>)}
+            {nav.map((item) => <a href={item.href} aria-current={navCurrent(here, item.href)}>{item.label}</a>)}
             <a href={signIn.href}>{signIn.label}</a>
           </nav>
         </details>

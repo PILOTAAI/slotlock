@@ -1,29 +1,81 @@
-/* The Slotlock logo (src/components/Lockup.astro), on the landing page and in the docs header.
-   Ink #111110 on paper, paper #F6F4EE on ink (both through currentColor, so the theme's ink
-   decides), and the slot in Signal #FF5B2E in either. It settles in on load, and the slot slides
-   into the lock on hover, unless motion is reduced. */
+/* The Slotlock logo (src/components/Lockup.astro), on the landing page and in the docs header, in
+   the design system's inks (Logos, 2026-11-11). On a light surface: lock and wordmark ink #0a0b0d,
+   the slot lime #d9ff43. On a dark one: the lock lime with the slot cut out, the wordmark paper
+   #f4f3ee. Lime never sits on a light surface: it is 1.2:1 there. The dark rules follow the
+   site's theme the way docs.css does: Starlight's data-theme, else the system preference. It
+   settles in on load, and the slot drops into the lock on hover, unless motion is reduced. */
 
 .lockup {
   display: inline-flex;
   align-items: center;
-  --logo-signal: #FF5B2E;
+  --logo-lock: #0a0b0d;
+  --logo-word: #0a0b0d;
+  --logo-slot: #d9ff43;
+}
+
+:root[data-theme='dark'] .lockup {
+  --logo-lock: #d9ff43;
+  --logo-word: #f4f3ee;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .lockup {
+    --logo-lock: #d9ff43;
+    --logo-word: #f4f3ee;
+  }
 }
 
 .lockup__logo {
   display: block;
-  height: 20px;
+  height: 22px;
   width: auto;
-  aspect-ratio: 439.95 / 78.34;
+  aspect-ratio: 280.14 / 55.5;
   flex: none;
   overflow: visible;
 }
 
-.lockup__ink {
-  fill: currentColor;
+.lockup__shackle {
+  fill: none;
+  stroke: var(--logo-lock);
+  stroke-width: 7;
+}
+
+.lockup__body,
+.lockup__cut {
+  fill: var(--logo-lock);
 }
 
 .lockup__slot {
-  fill: var(--logo-signal);
+  fill: var(--logo-slot);
+}
+
+.lockup__word {
+  fill: var(--logo-word);
+}
+
+/* Light: a solid body with the lime slot on it. Dark: the body with the slot cut out. */
+.lockup__cut {
+  display: none;
+}
+
+:root[data-theme='dark'] .lockup__body,
+:root[data-theme='dark'] .lockup__slot {
+  display: none;
+}
+
+:root[data-theme='dark'] .lockup__cut {
+  display: inline;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .lockup__body,
+  :root:not([data-theme='light']) .lockup__slot {
+    display: none;
+  }
+
+  :root:not([data-theme='light']) .lockup__cut {
+    display: inline;
+  }
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -50,7 +102,7 @@
 
 @keyframes lockup-slot {
   from {
-    transform: translateX(-12px);
+    transform: translateY(-6px);
     opacity: 0;
   }
   to {

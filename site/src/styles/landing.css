@@ -217,6 +217,13 @@ svg {
   background: var(--line-2);
 }
 
+/* Where you are: the current page, or the section it is in (src/lib/nav.ts). */
+.site-nav a[aria-current] {
+  color: var(--ink);
+  font-weight: 500;
+  background: var(--line);
+}
+
 .site-header .btn {
   min-height: 36px;
   padding: 0 16px;
@@ -269,6 +276,11 @@ svg {
 
 .menu__panel a:hover {
   background: var(--line-2);
+}
+
+.menu__panel a[aria-current] {
+  font-weight: 600;
+  background: var(--line);
 }
 
 @media (max-width: 767px) {

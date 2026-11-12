@@ -31,7 +31,14 @@ import {
   slotlockRoleCan,
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
-import type { SlotlockDashboardWorkspaces, SlotlockTeamRefusal, SlotlockTeamWorkspace } from './workspaces.js';
+import type { SlotlockAnnouncementKind } from './staff-ddl.js';
+import type {
+  SlotlockDashboardNotices,
+  SlotlockDashboardWorkspaces,
+  SlotlockSuspensionNotice,
+  SlotlockTeamRefusal,
+  SlotlockTeamWorkspace,
+} from './workspaces.js';
 import { SLOTLOCK_DOMAIN_RECORD_LABEL, type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
 import {
   SLOTLOCK_GOOGLE_ISSUERS,
@@ -498,6 +505,23 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'sso.signed_in': 'signed in with single sign-on',
   'sso.linked': 'linked a single sign-on account',
   'authz.denied': 'was refused',
+  'staff.account_suspended': 'suspended the account',
+  'staff.account_unsuspended': "lifted the account's suspension",
+  'staff.key_revoked': 'revoked an API key',
+  'staff.sessions_ended': 'signed a person out',
+  'staff.plan_overridden': "changed the account's plan or limits until a date",
+  'staff.plan_override_ended': "ended a change to the account's plan or limits",
+  'staff.notice_sent': 'sent the account a notice',
+  'staff.feature_changed': 'turned a feature on or off for the account',
+});
+/** What the Teams page says where staff turned off creating teams for the person's account (M11). */
+const TEAM_CREATION_OFF = 'Creating team workspaces is turned off for your account, or it is suspended. Teams you are in work as before.';
+/** How a dashboard's banner names an announcement's kind (RFC 0006, M10). */
+const ANNOUNCEMENT_LABELS: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
+  maintenance: 'Planned maintenance',
+  change: 'A change to Slotlock',
+  incident: 'Incident',
+  notice: 'Notice',
 });
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
@@ -511,6 +535,10 @@ const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = O
   ]],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
+  ['Slotlock staff', [
+    'staff.account_suspended', 'staff.account_unsuspended', 'staff.key_revoked', 'staff.sessions_ended',
+    'staff.plan_overridden', 'staff.plan_override_ended', 'staff.notice_sent', 'staff.feature_changed',
+  ]],
   ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
 ]);
 const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
@@ -1831,8 +1859,9 @@ const icon = (paths: string) =>
   );
 const ICONS = Object.freeze({
   mark: new Html(
-    // The Slotlock mark: a padlock whose body holds one booked slot (the site's logo, without the wordmark).
-    '<svg class="mark" viewBox="0 0 85.32 77.12" aria-hidden="true" focusable="false"><path class="mark-ink" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"></path><path class="mark-slot" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"></path></svg>',
+    // The Slotlock mark (the design system's lock, without the wordmark): ink with a lime slot on a
+    // light surface, lime with the slot cut out on a dark one.
+    '<svg class="mark" viewBox="0 0 48 55.5" aria-hidden="true" focusable="false"><g transform="translate(-8 -4.5)"><path class="mark-shackle" d="M20 30V20a12 12 0 0 1 24 0V30"></path><rect class="mark-body" x="8" y="28" width="48" height="32" rx="9"></rect><path class="mark-cut" fill-rule="evenodd" d="M17 28h30a9 9 0 0 1 9 9v14a9 9 0 0 1-9 9H17a9 9 0 0 1-9-9V37a9 9 0 0 1 9-9ZM32 37a3 3 0 0 0-3 3v9a3 3 0 0 0 6 0v-9a3 3 0 0 0-3-3Z"></path><rect class="mark-slot" x="29" y="37" width="6" height="15" rx="3"></rect></g></svg>',
   ),
   overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
   resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
@@ -2351,6 +2380,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const teamListOf = new WeakMap<Session, readonly SlotlockTeamWorkspace[]>();
   /** When the session's team, being deleted, goes. */
   const deletingOf = new WeakMap<Session, Date>();
+  /** The workspace's suspension notice, read with its standing: shown on every page while it lasts. */
+  const suspendedOf = new WeakMap<Session, SlotlockSuspensionNotice>();
+  /**
+   * What staff put in front of the workspace (RFC 0006, M10 and M11), read with its standing: the
+   * announcements shown on every page, and the features turned on or off for it.
+   */
+  const noticesOf = new WeakMap<Session, SlotlockDashboardNotices>();
   /** The locations and groups each session's member is limited to (RFC 0004 D1), read with their standing. */
   const scopes = new WeakMap<Session, SlotlockResourceScope>();
   const brandName = options.name ?? 'Slotlock';
@@ -2493,14 +2529,18 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const person = personOf(session);
-    const [standing, listed, alive, deleting, scope] = await Promise.all([
+    const [standing, listed, alive, deleting, scope, suspension, notices] = await Promise.all([
       workspaces.standing(tenantOf(session), person, session.sid),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
       workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
       teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
       workspaces.scope && sharedWorkspace(session) ? workspaces.scope(tenantOf(session), person) : Promise.resolve(null),
+      workspaces.suspension ? workspaces.suspension(tenantOf(session)) : Promise.resolve(null),
+      workspaces.notices ? workspaces.notices(tenantOf(session)) : Promise.resolve(null),
     ]);
     if (deleting) deletingOf.set(session, deleting);
+    if (suspension) suspendedOf.set(session, suspension);
+    if (notices) noticesOf.set(session, notices);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
     // from before this store, or of a person erased since (no record, no epoch) never passes; nor
     // one the person signed out from another device.
@@ -2525,6 +2565,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     if (enabled) enabledOf.set(personal, enabled);
     teamListOf.set(personal, listed);
     roles.set(personal, 'owner');
+    // The person's own workspace, read for itself: its suspension and what staff turned on or off
+    // apply here as they would after a switch (RFC 0006, M11).
+    const own = tenantOf(personal);
+    const [ownSuspension, ownNotices] = await Promise.all([
+      workspaces.suspension ? workspaces.suspension(own) : Promise.resolve(null),
+      workspaces.notices ? workspaces.notices(own) : Promise.resolve(null),
+    ]);
+    if (ownSuspension) suspendedOf.set(personal, ownSuspension);
+    if (ownNotices) noticesOf.set(personal, ownNotices);
     setSlotlockDashboardRequestScope(null);
     return personal;
   }
@@ -2682,7 +2731,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     | 'settings';
   // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
   // request: on Workers the adapter exists only inside one.
-  const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
+  const nav = (session: Session): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
     { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
     ...(options.resources.waitlist
@@ -2695,7 +2744,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ...(options.resources.webhooks
       ? [{ section: 'webhooks' as const, label: 'Webhooks', path: '/webhooks', icon: ICONS.webhooks }]
       : []),
-    ...(assistantStore()
+    ...(assistantStore(session)
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
     ...(plans ? [{ section: 'plan' as const, label: 'Usage', path: '/plan', icon: ICONS.plan }] : []),
@@ -2742,7 +2791,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <link rel="stylesheet" href="${root}/style.css?v=${ASSET_VERSIONS.css}">
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
 </head>`;
-    const brand = html`<a class="brand" href="${root}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
+    // Named by its label too: on a phone the name is hidden and the mark alone shows.
+    const brand = html`<a class="brand" href="${root}" aria-label="${brandName}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
     const skip = html`<a class="skip" href="#main">Skip to content</a>`;
     // Copy buttons say what they did here, for screen readers (app.js).
     const live = html`<p class="visually-hidden" id="live" aria-live="polite"></p>`;
@@ -2756,7 +2806,7 @@ ${live}
 </body>
 </html>`;
     }
-    const links = nav()
+    const links = nav(session)
       .filter((item) => reaches(session, item.path || '/'))
       .map(
       (item) =>
@@ -2776,6 +2826,12 @@ ${skip}
         ? html`<p class="test-banner">Test environment: its own resources, keys, webhooks and history, on your plan's limits and never billed. Its keys start <code>slk_test_</code>.</p>`
         : html``
     }${
+      suspendedOf.has(session)
+        ? html`<p class="test-banner suspended-banner" role="status"><strong>This account is suspended.</strong> Its data can be seen, not changed, and its API keys are refused.${
+            suspendedOf.get(session)?.message ? html` ${brandName} says: ${suspendedOf.get(session)?.message ?? ''}` : html``
+          }</p>`
+        : html``
+    }${announcementBanners(session)}${
       deletingOf.has(session)
         ? html`<p class="test-banner deleting-banner">This team is deleted on ${formatDate(deletingOf.get(session) as Date)}; its keys are refused.${
             can(session, 'workspace.own') ? html` <a href="${root}/settings/team">Keep it</a>` : html``
@@ -2790,6 +2846,19 @@ ${live}
 
   // A notice is an alert only when the page answers with an error: a done or saved message is a
   // status, so success is never painted in the error colour.
+  /**
+   * The announcements running for the session's workspace (RFC 0006, M10): one line each, above
+   * every page, with a link to more where staff gave one.
+   */
+  const announcementBanners = (session: Session): Html => {
+    const shown = noticesOf.get(session)?.announcements ?? [];
+    return html`${shown.map(
+      (announcement) =>
+        html`<p class="test-banner announcement-banner announcement-${announcement.kind}" role="status"><strong>${ANNOUNCEMENT_LABELS[announcement.kind]}.</strong> ${announcement.message}${
+          announcement.link ? html` <a href="${announcement.link}" rel="noopener noreferrer">More about this</a>` : html``
+        }</p>`,
+    )}`;
+  };
   const noticeOf = (notice?: string | Html, status = 200) =>
     notice
       ? status >= 400
@@ -3049,7 +3118,7 @@ ${
     const tenantRef = tenantOf(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const assistant = assistantStore();
+    const assistant = assistantStore(session);
     // A member limited to some resources sees theirs: no keys, plan or setup, which are the workspace's.
     const limited = scopes.has(session);
     const [keys, resources, agenda, changes, approvals, waitlist, model] = await Promise.all([
@@ -3437,7 +3506,7 @@ ${
     query?: URLSearchParams,
     found?: PersonFound,
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     // Members are a team workspace's: its people come from invitations, not from GitHub.
     const sections = SETTINGS_SECTIONS.filter(
       (entry) =>
@@ -4257,9 +4326,17 @@ ${
   // ---- The assistant ----
 
   const assistantOptions = options.assistant;
-  /** The assistant's records, when the assistant is on and the adapter keeps them. Per request (Workers). */
-  const assistantStore = (): SlotlockAssistantStore | undefined =>
-    assistantOptions ? options.resources.assistant : undefined;
+  /**
+   * The assistant's records, when the assistant is on and the adapter keeps them, and staff have not
+   * turned it off for the workspace's plan or account (RFC 0006, M11). Per request (Workers).
+   */
+  const assistantStore = (session: Session): SlotlockAssistantStore | undefined => {
+    if (!assistantOptions) return undefined;
+    const notices = noticesOf.get(session);
+    // Where staff can turn it off, a session whose workspace was not read for that gets none.
+    if (!notices && options.workspaces?.notices) return undefined;
+    return notices?.features.assistant === false ? undefined : options.resources.assistant;
+  };
   const privateUrls = assistantOptions?.privateUrls === true;
   const assistantFetch =
     assistantOptions?.fetch ?? createSlotlockGuardedFetch({ allowPrivateNetworks: privateUrls });
@@ -4486,7 +4563,7 @@ ${
   async function assistantModel(
     session: Session,
   ): Promise<{ model: SlotlockAssistantModel } | { problem: string } | null> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     const settings = store ? await store.getSettings(tenantOf(session)) : null;
     if (!settings || !assistantOptions) return null;
     if (namesOwnHost(settings.baseUrl)) return { problem: OWN_HOST_REFUSAL };
@@ -4838,7 +4915,7 @@ ${
     notice?: string,
     requested?: string,
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const tenantRef = tenantOf(session);
     const member = personOf(session);
@@ -4910,7 +4987,7 @@ ${
 
   /** The member's conversations on a page of their own: the Chats list where the page is narrow. */
   async function chatsPage(session: Session): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const chats = await store.listChats(tenantOf(session), personOf(session));
     const content = html`<div class="chats-page">${pageHead('Chats', html`<a class="button ghost" href="${chatUrl(null)}">${ASSISTANT_ICONS.plus}New chat</a>`)}${chatsPanel(session, chats, null)}</div>`;
@@ -4943,7 +5020,7 @@ ${
     notice: string | undefined,
     draft?: AssistantDraft,
   ): Promise<Html> {
-    const store = assistantStore() as SlotlockAssistantStore;
+    const store = assistantStore(session) as SlotlockAssistantStore;
     const settings = await store.getSettings(tenantOf(session));
     const token = csrfToken(session);
     const hidden = () =>
@@ -5028,7 +5105,7 @@ ${
     settingsPage(session, 403, 'Only an owner or an admin of this workspace can change the assistant.');
 
   async function saveAssistantSettings(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     const { provider, baseUrl: givenUrl } = formEndpoint(form);
@@ -5084,7 +5161,7 @@ ${
    * provider and URL. Saves nothing; counted as a message to the assistant.
    */
   async function loadAssistantModels(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
@@ -5151,7 +5228,7 @@ ${
   }
 
   async function removeAssistantSettings(session: Session): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     await store.deleteSettings(tenantOf(session), personOf(session));
@@ -5162,7 +5239,7 @@ ${
     page(session, 429, 'You have sent the assistant a lot in the last minute. Wait a moment and try again.');
 
   async function testAssistant(session: Session): Promise<Response> {
-    if (!assistantStore()) return notFound(session);
+    if (!assistantStore(session)) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
       return tooManyMessages(session, settingsPage);
@@ -5202,7 +5279,7 @@ ${
     form: URLSearchParams,
     hooks: { onEvent?: (event: SlotlockAssistantTurnEvent) => void; signal?: AbortSignal } = {},
   ): Promise<AssistantRun> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return { ok: false, status: 404, message: 'Nothing is here.' };
     const text = (form.get('message') ?? '').trim();
     if (text === '' || text.length > SLOTLOCK_ASSISTANT_MAX_MESSAGE) {
@@ -5421,7 +5498,7 @@ ${
           Object.keys(run.actions).length > 0
             ? await resourceLookups(tenantOf(session))
             : { names: new Map<string, string>(), zones: new Map<string, string>() };
-        const chats = await assistantStore()?.listChats(tenantOf(session), personOf(session));
+        const chats = await assistantStore(session)?.listChats(tenantOf(session), personOf(session));
         write({
           t: 'done',
           html: assistantItems(session, turn, run.actions, lookups.names, lookups.zones, run.chatId).join(''),
@@ -5460,7 +5537,7 @@ ${
     form: URLSearchParams,
     decision: 'approve' | 'dismiss',
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     const id = form.get('action') ?? '';
     const chatId = await chatOfForm(store, session, form, true);
@@ -5527,13 +5604,13 @@ ${
 
   /** A new conversation: the others are kept, in Chats. (A form of an earlier release posts here.) */
   async function resetAssistant(session: Session): Promise<Response> {
-    if (!assistantStore()) return notFound(session);
+    if (!assistantStore(session)) return notFound(session);
     return redirect(303, chatUrl(null));
   }
 
   /** Give one of the member's conversations a title of their own. */
   async function renameChat(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const chatId = chatOf(form.get('chat'));
     const title = (form.get('title') ?? '').replace(/\s+/gu, ' ').trim();
@@ -5548,7 +5625,7 @@ ${
 
   /** Delete one of the member's conversations, at once and for good. */
   async function deleteChat(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const chatId = chatOf(form.get('chat'));
     if (chatId) await store.deleteChat(tenantOf(session), personOf(session), chatId);
@@ -6095,7 +6172,10 @@ ${
     if (route.startsWith('/closures') && options.resources.hours) return { path: '/closures', page: closuresPage };
     if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
     if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
-    if (route.startsWith('/assistant') && assistantStore()) return { path: '/assistant', page: assistantPage };
+    // The page itself answers a workspace whose assistant staff turned off (assistantStore).
+    if (route.startsWith('/assistant') && assistantOptions && options.resources.assistant) {
+      return { path: '/assistant', page: assistantPage };
+    }
     if ((route === '/teams/delete' || route === '/teams/restore') && teamStore) {
       return { path: '/settings/team', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'team') };
     }
@@ -6677,9 +6757,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   async function teamWorkspacesSection(session: Session, checked = false): Promise<Html> {
     if (!teamStore) return html``;
     const listed = teamListOf.get(session) ?? [];
-    const [offered, atDomain] = await Promise.all([
+    const [offered, atDomain, mayCreate] = await Promise.all([
       teamStore.pendingFor(personOf(session), verifiedEmails(session)),
       domainTeamsSection(session, checked),
+      teamCreationOn(session),
     ]);
     const token = csrfToken(session);
     const hidden = () =>
@@ -6704,7 +6785,23 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Team</th><th>Handle</th><th>You are</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``
-    }<form class="create-team" method="post" action="${root}/teams/create">${hidden()}<label for="team-name">Name</label><input id="team-name" name="name" maxlength="80" autocomplete="organization" required><button class="primary" type="submit">Create team</button></form></section>`;
+    }${
+      mayCreate
+        ? html`<form class="create-team" method="post" action="${root}/teams/create">${hidden()}<label for="team-name">Name</label><input id="team-name" name="name" maxlength="80" autocomplete="organization" required><button class="primary" type="submit">Create team</button></form>`
+        : html`<p class="muted">${TEAM_CREATION_OFF}</p>`
+    }</section>`;
+  }
+
+  /**
+   * Whether the person may create a team workspace: on unless staff turned it off for their own
+   * account's plan or the account (RFC 0006, M11). Teams they are in are not affected.
+   */
+  async function teamCreationOn(session: Session): Promise<boolean> {
+    const own = personOf(session);
+    const notices =
+      (tenantOf(session) === own ? noticesOf.get(session) : undefined) ??
+      (await (workspaces?.notices?.(own) ?? Promise.resolve(undefined)));
+    return notices?.features.team_workspaces !== false;
   }
 
   /** GitHub organizations turned on for Slotlock (organizations: 'enabled'). */
@@ -6763,6 +6860,7 @@ ${
   async function createTeam(session: Session, form: URLSearchParams): Promise<Response> {
     if (!teamStore) return nothingHere(session);
     if (session.idp === 'sso' || session.sc !== undefined) return teamsPage(session, 403, 'Sign in with GitHub or Google to create a team.');
+    if (!(await teamCreationOn(session))) return teamsPage(session, 403, TEAM_CREATION_OFF);
     const name = (form.get('name') ?? '').trim();
     if (name.length === 0 || name.length > 80 || /\p{Cc}/u.test(name)) {
       return teamsPage(session, 400, TEAM_REFUSALS.invalid_name.text);
@@ -6778,6 +6876,9 @@ ${
     for (let attempt = 0; attempt < 4 && 'refusal' in made && made.refusal === 'handle_taken'; attempt += 1) {
       made = await teamStore.create(person, name, teamHandleFrom(name, attempt), cap);
     }
+    // The database refuses too, while staff have creating teams off or the person's own account
+    // is suspended: say which, not a role refusal.
+    if ('refusal' in made && made.refusal === 'not_allowed') return teamsPage(session, 403, TEAM_CREATION_OFF);
     if ('refusal' in made) return teamsPage(session, TEAM_REFUSALS[made.refusal].status, TEAM_REFUSALS[made.refusal].text);
     await audit(
       session,
@@ -6932,6 +7033,11 @@ ${
   function actorName(event: SlotlockAuditEvent, session: Session, names: ReadonlyMap<string, string>): string {
     if (event.actorType === 'api_key') return `API key ${event.actorRef.replace(/^api_key:/, '').slice(0, 8)}`;
     if (event.actorType === 'assistant') return 'The assistant';
+    // What the people who run the service did (RFC 0006, E8): slotlock-staff:<role>.
+    const staff = /^slotlock-staff:(owner|support|billing|editor|viewer|operator)$/.exec(event.actorRef);
+    if (event.actorType === 'system' && staff) {
+      return `${brandName} staff (${staff[1] === 'operator' ? 'operator' : `${(staff[1] as string).slice(0, 1).toUpperCase()}${(staff[1] as string).slice(1)}`})`;
+    }
     if (event.actorType !== 'person') return 'Slotlock';
     if (event.actorRef === personOf(session)) return 'You';
     return (
@@ -6982,7 +7088,9 @@ ${
     const hidden = html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
     const rows = exports.map(
       (made) =>
-        html`<tr><td data-label="Asked for">${formatDate(made.createdAt)}</td><td data-label="State">${
+        html`<tr><td data-label="Asked for">${formatDate(made.createdAt)}${
+          made.requestedBy?.startsWith('privacy:') ? html` <span class="muted">by Slotlock, for your privacy request</span>` : html``
+        }</td><td data-label="State">${
           made.status === 'ready'
             ? html`<span class="pill active">Ready</span>`
             : made.status === 'pending'
@@ -6992,7 +7100,7 @@ ${
           made.status === 'ready' ? html`<a class="button" href="${root}/settings/privacy/download?id=${made.id}">Download</a> ` : html``
         }<form method="post" action="${root}/settings/privacy/export/delete">${hidden}<input type="hidden" name="id" value="${made.id}"><button type="submit">Delete</button></form></td></tr>`,
     );
-    const exportCard = html`<section class="set-card"><header class="panel-head"><h3>Workspace export</h3><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted.</p></header>${
+    const exportCard = html`<section class="set-card"><header class="panel-head"><h3>Workspace export</h3><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted; one Slotlock makes for your privacy request, for a week.</p></header>${
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Asked for</th><th>State</th><th>Rows</th><th>Deleted</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``
@@ -9962,7 +10070,8 @@ const DASHBOARD_CSS = `:root {
   --button: #18181b; --button-ink: #ffffff; --button-hover: #2e2e33;
   --good: #11764c; --good-wash: #e9f6ef; --bad: #c42b1c; --bad-ink: #ffffff; --bad-wash: #fdeeec; --bad-line: #f5c9c3;
   --warn: #8a5300; --warn-wash: #fff5e1; --warn-line: #f3dcae;
-  --brand: #ff5b2e;
+  /* The logo's inks (the Slotlock design system): ink lock and lime slot here, lime lock in the dark. */
+  --logo-lock: #0a0b0d; --logo-slot: #d9ff43;
   --pop-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 12px 32px -8px rgba(24, 24, 27, 0.18);
   --field: #ffffff; --field-line: #d4d4d8; --field-line-hover: #a1a1aa; --field-shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
   --card-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
@@ -9970,6 +10079,7 @@ const DASHBOARD_CSS = `:root {
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    --logo-lock: #d9ff43;
     --canvas: #0b0b0d; --surface: #111114; --surface-2: #141418; --sunken: #18181c; --hover: #1c1c21;
     --line: #26262c; --line-strong: #34343b; --line-soft: #1d1d22;
     --ink: #ededf0; --ink-2: #b4b4bc; --ink-3: #8e8e98;
@@ -9993,9 +10103,15 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .icon .fill { fill: currentColor; stroke: none; }
-.mark { width: 20px; height: 18px; flex: none; }
-.mark-ink { fill: currentColor; }
-.mark-slot { fill: var(--brand); }
+.mark { width: 17px; height: 20px; flex: none; }
+.mark-shackle { fill: none; stroke: var(--logo-lock); stroke-width: 7; }
+.mark-body, .mark-cut { fill: var(--logo-lock); }
+.mark-slot { fill: var(--logo-slot); }
+.mark-cut { display: none; }
+@media (prefers-color-scheme: dark) {
+  .mark-body, .mark-slot { display: none; }
+  .mark-cut { display: inline; }
+}
 .skip { position: absolute; left: var(--space-3); top: -48px; z-index: 10; padding: var(--space-2) var(--space-3); border-radius: var(--radius); background: var(--button); color: var(--button-ink); font-weight: 600; }
 .skip:focus { top: var(--space-3); text-decoration: none; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -10183,6 +10299,11 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .pop textarea { width: 100%; }
 /* A team being deleted */
 .deleting-banner { background: var(--bad-soft, var(--surface-2)); }
+.suspended-banner { background: var(--bad-soft, var(--surface-2)); }
+.announcement-banner { border-style: solid; border-color: var(--line-strong); background: var(--accent-wash); color: var(--ink); }
+.announcement-banner strong { color: var(--ink); }
+.announcement-banner a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.announcement-incident { border-color: var(--warn-line); background: var(--warn-wash); }
 /* Sessions (Settings, Account) */
 h2.sessions-head { margin-top: var(--space-6); }
 /* Audit log */
@@ -10314,7 +10435,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 .bare-main { display: grid; place-items: start center; padding: 10vh var(--space-4) var(--space-12); }
 .sign-in { width: 100%; max-width: 400px; padding: var(--space-8); border: 1px solid var(--line); border-radius: 16px; background: var(--surface); display: grid; gap: var(--space-3); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 24px 48px -24px rgba(0, 0, 0, 0.12); }
 .sign-in-mark { display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: var(--space-2); border-radius: var(--radius-lg); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); }
-.sign-in-mark .mark { width: 24px; height: 22px; }
+.sign-in-mark .mark { width: 21px; height: 24px; }
 .sign-in h1 { font-size: 22px; line-height: 1.25; letter-spacing: -0.02em; }
 .sign-in h1 .soft { display: block; color: var(--ink-3); }
 .sign-in p { margin: 0; }

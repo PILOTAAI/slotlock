@@ -352,9 +352,91 @@ export interface SlotlockMaintenanceSchedulerOptions {
    * or its promise rejects with, is ignored.
    */
   onError?: (error: unknown) => void;
+  /**
+   * Where passes are recorded for the admin console (RFC 0006, M11;
+   * createSlotlockMaintenanceRecord): each tenant whose pass failed or ran, and once an hour that
+   * passes ran, their counts. Not awaited; what it throws goes to onError.
+   */
+  record?: SlotlockMaintenanceRecord;
+  /** How often the counts are recorded, at least a minute. Default an hour. */
+  recordEveryMs?: number;
+}
+
+/** What maintenance tells the admin console (RFC 0006, M11): never a tenant's data. */
+export interface SlotlockMaintenanceRecord {
+  /** The tenant's pass failed, with what failed (slotlockMaintenanceError). */
+  failed(tenantRef: string, error: SlotlockMaintenanceError): Promise<void>;
+  /** The tenant's pass ran: a failure recorded for it is cleared. */
+  ran(tenantRef: string): Promise<void>;
+  /** The passes since `startedAt`, counted, never naming a tenant. */
+  round(round: SlotlockMaintenanceRound): Promise<void>;
+}
+
+/** A failed pass as the console shows it: the error's class, code and message, never data. */
+export interface SlotlockMaintenanceError {
+  name: string;
+  code: string | null;
+  message: string | null;
+}
+
+/** Passes one server ran in a while: how many, how many failed, and what they did, summed. */
+export interface SlotlockMaintenanceRound {
+  startedAt: Date;
+  passes: number;
+  failed: number;
+  totals: Omit<SlotlockMaintenanceResult, 'capped' | 'rollPending'>;
+}
+
+/**
+ * What a failed pass records: the error's class and code as they are, and the first line of its
+ * message up to its first quotation mark (where a message would start to carry a value), cut to
+ * 200 characters. An apostrophe inside a word is not a quotation mark.
+ */
+export function slotlockMaintenanceError(error: unknown): SlotlockMaintenanceError {
+  if (!(error instanceof Error)) return { name: 'Error', code: null, message: null };
+  const name = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : 'Error';
+  const raw = (error as { code?: unknown }).code;
+  const code = typeof raw === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(raw) ? raw : null;
+  // The first line, cut before any pattern runs; one scan for the first mark, however many there are.
+  const end = error.message.search(/[\r\n]/);
+  const first = (end === -1 ? error.message : error.message.slice(0, end)).slice(0, 2000);
+  const quote = first.search(/["`“”«»„]|(?<!\p{L})['‘’]|['‘’](?!\p{L})/u);
+  const line = (quote === -1 ? first : `${first.slice(0, quote).trimEnd()} …`)
+    .replace(/[\p{Cc}\p{Cf}]/gu, '')
+    .trim();
+  const characters = [...line];
+  const message = characters.length > 200 ? `${characters.slice(0, 199).join('')}…` : line;
+  return { name, code, message: message.length > 0 && message !== '…' ? message : null };
+}
+
+/**
+ * The record a server keeps through the serving role's functions (slotlock.note_maintenance_*).
+ * On a schema from before them, nothing is recorded and nothing fails.
+ */
+export function createSlotlockMaintenanceRecord(sql: Sql): SlotlockMaintenanceRecord {
+  const tolerate = (error: unknown) => {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === '42883' || code === '42501') return;
+    throw error;
+  };
+  return {
+    async failed(tenantRef, error) {
+      await sql`SELECT slotlock.note_maintenance_failure(${tenantRef}::text, ${error.name}::text,
+                  ${error.code}::text, ${error.message}::text)`.catch(tolerate);
+    },
+    async ran(tenantRef) {
+      await sql`SELECT slotlock.note_maintenance_recovered(${tenantRef}::text)`.catch(tolerate);
+    },
+    async round(round) {
+      const summary = { passes: round.passes, failed: round.failed, ...round.totals };
+      await sql`SELECT slotlock.note_maintenance_round(${round.startedAt}::timestamptz, ${round.failed > 0}::boolean,
+                  ${sql.json(summary)}::jsonb)`.catch(tolerate);
+    },
+  };
 }
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 
 export function startSlotlockMaintenance(
   options: SlotlockMaintenanceSchedulerOptions,
@@ -362,6 +444,10 @@ export function startSlotlockMaintenance(
   const { intervalMs } = options;
   if (!(Number.isSafeInteger(intervalMs) && intervalMs >= 1_000 && intervalMs <= DAY_MS)) {
     throw new RangeError('intervalMs must be from one second to one day');
+  }
+  const recordEveryMs = options.recordEveryMs ?? HOUR_MS;
+  if (!(Number.isSafeInteger(recordEveryMs) && recordEveryMs >= 60_000)) {
+    throw new RangeError('recordEveryMs must be at least a minute');
   }
   const maxTenants = options.maxTenants ?? 10_000;
   /** Configured tenants, never forgotten: tenant reference to when its last pass finished (0: never). */
@@ -373,6 +459,43 @@ export function startSlotlockMaintenance(
   const queued = new Set<string>();
   const controller = new AbortController();
   let working: Promise<void> | null = null;
+
+  /** The passes since the last record (RFC 0006, M11). */
+  const emptyTotals = (): SlotlockMaintenanceRound['totals'] => ({
+    extended: 0, conflicts: 0, refused: 0, pruned: 0, zoneShifts: 0, staleSources: 0, noShows: 0,
+    waitlistOffers: 0, approvalsExpired: 0, bookingsCompleted: 0, remindersDue: 0, holidayCalendarsImported: 0,
+  });
+  let round: SlotlockMaintenanceRound = { startedAt: new Date(), passes: 0, failed: 0, totals: emptyTotals() };
+  const tally = (result: SlotlockMaintenanceResult | null) => {
+    if (!result) {
+      round.failed += 1;
+      return;
+    }
+    round.passes += 1;
+    for (const key of Object.keys(round.totals) as (keyof SlotlockMaintenanceRound['totals'])[]) {
+      round.totals[key] += result[key];
+    }
+  };
+  /** Record the round once it is old enough (or at once, `force`), when any pass ran in it. */
+  const flushRound = (force = false) => {
+    if (!options.record || (!force && Date.now() - round.startedAt.getTime() < recordEveryMs)) return;
+    const done = round;
+    round = { startedAt: new Date(), passes: 0, failed: 0, totals: emptyTotals() };
+    if (done.passes + done.failed === 0) return;
+    return recordWith((record) => record.round(done));
+  };
+  /** A record call: not awaited by the pass; what it throws goes to onError. */
+  const recordWith = (call: (record: SlotlockMaintenanceRecord) => Promise<void>): Promise<void> | undefined => {
+    const record = options.record;
+    if (!record) return undefined;
+    return (async () => call(record))().catch((error: unknown) => {
+      try {
+        ignoreRejection(options.onError?.(error));
+      } catch {
+        // Reporting must never stop maintenance.
+      }
+    });
+  };
 
   const lastPass = (tenantRef: string) => pinned.get(tenantRef) ?? served.get(tenantRef);
   const recordPass = (tenantRef: string, finishedAt: number) => {
@@ -403,6 +526,8 @@ export function startSlotlockMaintenance(
           );
           recordPass(tenantRef, Date.now());
           if (result) {
+            tally(result);
+            void recordWith((record) => record.ran(tenantRef));
             try {
               ignoreRejection(options.onPass?.(result));
             } catch {
@@ -418,6 +543,8 @@ export function startSlotlockMaintenance(
         } catch (error) {
           if (controller.signal.aborted) return;
           recordPass(tenantRef, Date.now());
+          tally(null);
+          void recordWith((record) => record.failed(tenantRef, slotlockMaintenanceError(error)));
           try {
             ignoreRejection(options.onError?.(error));
           } catch {
@@ -475,6 +602,7 @@ export function startSlotlockMaintenance(
     }
     discover();
     sweep();
+    void flushRound();
   };
 
   const timer = setInterval(tick, Math.min(intervalMs, 60_000));
@@ -502,6 +630,8 @@ export function startSlotlockMaintenance(
       queue.length = 0;
       queued.clear();
       await working;
+      // What ran since the last record is not lost with the server.
+      await flushRound(true);
     },
   };
 }

@@ -165,6 +165,25 @@ export function breadcrumb(items: { name: string; path: string }[]) {
   };
 }
 
+/** Copy with its [links](/path) and `code` marks as plain text, for structured data. */
+const plain = (text: string) => text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/`/g, '');
+
+/**
+ * Questions and answers as FAQPage data. Google shows FAQ results only for some government and
+ * health sites since 2023, but Bing and AI answer engines read the pairs.
+ */
+export function faqPage(items: { q: string; a: string }[], path = '/') {
+  return {
+    '@type': 'FAQPage',
+    '@id': `${absolute(path)}#faq`,
+    mainEntity: items.map((item) => ({
+      '@type': 'Question',
+      name: item.q,
+      acceptedAnswer: { '@type': 'Answer', text: plain(item.a) },
+    })),
+  };
+}
+
 /** A page's JSON-LD as one graph, with the site and its publisher. */
 export function graph(...nodes: object[]) {
   return { '@context': 'https://schema.org', '@graph': [organization, website, ...nodes] };

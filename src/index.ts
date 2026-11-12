@@ -254,12 +254,17 @@ export type {
   SlotlockApplicationOperationDefinition,
 } from './application-api.js';
 export {
+  createSlotlockMaintenanceRecord,
   maintainSlotlockTenant,
+  slotlockMaintenanceError,
   startSlotlockMaintenance,
   withSlotlockMaintenanceLock,
 } from './maintenance.js';
 export type {
+  SlotlockMaintenanceError,
+  SlotlockMaintenanceRecord,
   SlotlockMaintenanceResult,
+  SlotlockMaintenanceRound,
   SlotlockMaintenanceScheduler,
   SlotlockMaintenanceSchedulerOptions,
 } from './maintenance.js';
@@ -339,6 +344,9 @@ export type {
   SlotlockWorkspaceTeams,
   SlotlockDashboardSession,
   SlotlockDashboardSessions,
+  SlotlockSuspensionNotice,
+  SlotlockAnnouncement,
+  SlotlockDashboardNotices,
 } from './workspaces.js';
 export {
   SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,

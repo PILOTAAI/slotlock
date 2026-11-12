@@ -1,6 +1,6 @@
 // Each post as Markdown: /blog/<slug>.md. public/_headers names the HTML page as its canonical.
 import type { APIRoute, GetStaticPaths } from 'astro';
-import { type Post, POSTS } from '../../data/blog';
+import { type Post, POSTS } from '../../lib/posts';
 import { postMarkdown } from '../../lib/blog';
 
 export const getStaticPaths = (() =>

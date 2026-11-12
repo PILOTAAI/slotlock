@@ -9,101 +9,14 @@
 // 1,200, and the count includes the footer and the words drawn inside the product pictures. RFC 0005
 // (docs/rfc/0005-search.md) added a topic label to each heading and the new pages to the footer,
 // about 30 words; depth belongs on the pages outside the docs, each checked here too, at least
-// MIN_PAGE_WORDS of prose so none is thin.
+// MIN_PAGE_WORDS of prose so none is thin. The FAQ is counted apart, against FAQ_WORD_LIMIT.
 //
 //   npm run check:copy        run after `npm run build`; exits 1 on any finding
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-const BANNED_WORDS = [
-  'leverage',
-  'leverages',
-  'leveraged',
-  'leveraging',
-  'delve',
-  'delves',
-  'delved',
-  'delving',
-  'utilize',
-  'utilise',
-  'utilizes',
-  'utilises',
-  'utilized',
-  'utilised',
-  'utilizing',
-  'utilising',
-  'facilitate',
-  'facilitates',
-  'facilitated',
-  'facilitating',
-  'streamline',
-  'streamlines',
-  'streamlined',
-  'streamlining',
-  'elevate',
-  'elevates',
-  'elevated',
-  'elevating',
-  'supercharge',
-  'supercharges',
-  'supercharged',
-  'supercharging',
-  'unleash',
-  'unleashes',
-  'unleashed',
-  'unleashing',
-  'revolutionize',
-  'revolutionise',
-  'revolutionizes',
-  'revolutionises',
-  'revolutionizing',
-  'revolutionising',
-  'empower',
-  'empowers',
-  'empowered',
-  'empowering',
-  'empowerment',
-  'embark',
-  'embarks',
-  'embarked',
-  'embarking',
-  'seamless',
-  'seamlessly',
-  'robust',
-  'cutting-edge',
-  'state-of-the-art',
-  'best-in-class',
-  'world-class',
-  'realm',
-  'tapestry',
-  'testament',
-  'ever-evolving',
-  'game-changer',
-  'game changer',
-  'game-changing',
-  'paradigm',
-  'transformative',
-  'synergy',
-  'holistic',
-  'myriad',
-  'plethora',
-  'meticulous',
-  'meticulously',
-];
+import { BANNED_WORDS, EMPTY_PHRASES } from '../src/data/copy-rules.mjs';
 
-const EMPTY_PHRASES = [
-  "it's important to note",
-  'it is important to note',
-  "it's worth noting",
-  'it is worth noting',
-  'at the end of the day',
-  'when it comes to',
-  'in the world of',
-  "in today's fast-paced world",
-  'needless to say',
-  'it goes without saying',
-  'the fact of the matter is',
-];
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const alternation = (terms) =>
@@ -203,6 +116,8 @@ PAGES.push(...MARKETING);
 // code (SQL, shell), so they are linted as built HTML above, where <pre> and <code> are skipped.
 const LANDING_SOURCES = ['../src/data/landing.ts'];
 const WORD_LIMIT = 1350;
+/** The FAQ has its own budget: its answers are what people search for, so they may run longer. */
+const FAQ_WORD_LIMIT = 550;
 const MIN_PAGE_WORDS = 400;
 
 let failures = 0;
@@ -232,7 +147,9 @@ for (const source of LANDING_SOURCES) {
 }
 
 const landing = await readFile(new URL('index.html', DIST), 'utf8');
-const main = /<main[\s\S]*?<\/main>/.exec(landing)?.[0] ?? '';
+const fullMain = /<main[\s\S]*?<\/main>/.exec(landing)?.[0] ?? '';
+const faqSection = /<section[^>]*\bid="faq"[\s\S]*?<\/section>/.exec(fullMain)?.[0] ?? '';
+const main = fullMain.replace(faqSection, ' ');
 const footer = /<footer[\s\S]*?<\/footer>/.exec(landing)?.[0] ?? '';
 const words = (text) => (text.match(/[\p{L}\p{N}][\p{L}\p{N}'’.:/_-]*/gu) ?? []).length;
 const prose = words(visibleProse(`${main}${footer}`));
@@ -243,9 +160,18 @@ const withCode = words(
     .replace(/&(#?\w+);/g, ' '),
 );
 const labels = [...main.matchAll(/aria-label="([^"]*)"/g)].map((m) => m[1]).join(' ');
+const faqWords = words(visibleProse(faqSection));
 console.log(
-  `Landing page words: ${prose} of visible prose (code samples excluded), ${withCode} including code samples; scene descriptions for screen readers add ${words(labels)}.`,
+  `Landing page words: ${prose} of visible prose (code samples excluded) and ${faqWords} in the FAQ, ${withCode} including code samples; scene descriptions for screen readers add ${words(labels)}.`,
 );
+if (!faqSection) {
+  failures += 1;
+  console.log('index.html: no section with id="faq" to count.');
+}
+if (faqWords > FAQ_WORD_LIMIT) {
+  failures += 1;
+  console.log(`index.html: the FAQ has ${faqWords} words, over its limit of ${FAQ_WORD_LIMIT}.`);
+}
 if (prose > WORD_LIMIT) {
   failures += 1;
   console.log(`index.html: ${prose} words of visible prose, over the limit of ${WORD_LIMIT}.`);

@@ -173,7 +173,9 @@ STRIPE_SECRET_KEY=sk_live_… slotlock partner close stackapi              # las
   last month for every active partner once the month has been over for 6 hours, reports overage
   when `SLOTLOCK_OVERAGE` is on, and lists the last week's reconciliation mismatches, exiting 1
   when anything waits or differs. For example, `15 7 * * * slotlock billing daily` with
-  `SLOTLOCK_MIGRATE_DATABASE_URL` and `STRIPE_SECRET_KEY` set.
+  `SLOTLOCK_MIGRATE_DATABASE_URL` and `STRIPE_SECRET_KEY` set. Each run, and each `slotlock overage
+  report`, is recorded (`slotlock.maintenance_runs`, the newest 400 of each) with what it printed,
+  for the admin console.
 - `/metrics` counts authenticated requests by the integrator their `Slotlock-Client` field names
   (`slotlock_requests_by_client_total`): the names in `SLOTLOCK_KNOWN_CLIENTS`, else `other`, or
   `none` without the field.

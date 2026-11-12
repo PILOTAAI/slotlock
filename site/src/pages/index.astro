@@ -5,7 +5,7 @@ import HeroScene from '../components/landing/HeroScene.astro';
 import Icon from '../components/landing/Icon.astro';
 import Rich from '../components/landing/Rich.astro';
 import Marketing from '../layouts/Marketing.astro';
-import { graph, ogImage, softwareApplication, softwareSourceCode, webPage, type Seo } from '../lib/seo';
+import { faqPage, graph, ogImage, softwareApplication, softwareSourceCode, webPage, type Seo } from '../lib/seo';
 import {
   CLOUD_API_URL,
   closing,
@@ -90,6 +90,7 @@ const seo: Seo = {
       webPage({ title: meta.title, description: meta.description, path: '/' }),
       softwareApplication(meta.description),
       softwareSourceCode,
+      faqPage(faq.items),
     ),
   ],
 };

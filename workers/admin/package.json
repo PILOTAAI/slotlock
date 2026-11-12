@@ -1,0 +1,22 @@
+{
+  "name": "slotlock-admin-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Slotlock admin console as a Cloudflare Worker.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "check": "wrangler deploy --dry-run --outdir dist",
+    "dev": "wrangler dev --port 8789",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  },
+  "overrides": {
+    "undici@7.29.1": "7.30.1"
+  }
+}

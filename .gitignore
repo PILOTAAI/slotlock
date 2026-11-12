@@ -10,6 +10,12 @@ site/.astro/
 workers/dashboard/node_modules
 workers/dashboard/.dev.vars
 workers/dashboard/dist/
+workers/admin/node_modules
+workers/admin/.dev.vars
+workers/admin/dist/
+# This deployment's console config, which scripts/configure-admin-console.mjs writes. It holds
+# no secret, but its ids are this account's, not the example's.
+workers/admin/wrangler.deploy.jsonc
 # Language clients' build output
 clients/rust/target/
 clients/java/build/
