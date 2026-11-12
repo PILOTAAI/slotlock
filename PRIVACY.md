@@ -2,6 +2,10 @@
 
 Last updated: 12 November 2026.
 
+What it says about our staff console, and about the privacy requests our staff handle there (in
+"What we hold", "How our staff see your account", "Why we use it, and our lawful basis" and "Your
+rights"), takes effect on 12 December 2026.
+
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub or Google
 account can sign in. It does not cover Slotlock you run yourself: the open-source package sends nothing to us,
@@ -59,7 +63,7 @@ protection officer.
 | Webhooks: each endpoint's address, its signing secret, the change types it receives, and its delivery state and last error | You | While your account exists, or until you delete the endpoint |
 | Activity history: each change to your resources, holds, bookings, events, coverage and waitlist, with ids, times, references, which key or GitHub user made it and through which interface. It never holds titles, descriptions or attendees | The service | 30 days on the Free plan, 90 days on Developer and 400 days on Team. The server cannot change or delete an entry: entries go only when that time has passed, when you erase a person from them (their references are then replaced), or when your account is erased |
 | A record of each event write, so a retried request returns the first result | The service | 30 days |
-| Exports of your account that you ask for: a copy of everything in it at one moment, each table's rows without secrets | You, through the API | 24 hours after it is ready (or after you asked, if it never is), then deleted; at once when you delete it or your account is erased |
+| Exports of your account that you ask for: a copy of everything in it at one moment, each table's rows without secrets | You, through the API or the dashboard; or our staff, for your privacy request | 24 hours after it is ready (or after you asked, if it never is), 7 days for one made for your privacy request, then deleted; at once when you delete it or your account is erased |
 | The references of cancelled bookings, so a delayed retry never books one again; an agent's cancelled events | The service | Booking references until your account is erased; an agent's cancelled events 30 days after cancellation |
 | Records of finished sign-ins, signed-out sessions and sent dashboard forms, as digests | The service | Until they expire, within 12 hours, and are then deleted as new ones are written |
 | Your dashboard session, in a cookie | The service | 12 hours |
@@ -71,6 +75,16 @@ protection officer.
 | Connection details at our server: IP address, time, path and user agent of each API request, in the log of the proxy in front of it | Your client, through Cloudflare | One file of at most 10 MB, overwritten as it fills |
 | The API server's own logs | The service | See below |
 | Backups of the whole database, encrypted | The service | About five weeks: four weekly full backups and the changes between them |
+| From 12 December 2026, the staff log: each time one of our staff signs in to the staff console, opens an account's page, or acts on an account, with your account's id and the reason given, never your calendar content | The service | Six years, then deleted. It is kept when your account is erased |
+| From 12 December 2026, our staff's internal notes about your account | Our staff | Until your account is erased |
+| From 12 December 2026, abuse cases: a report to abuse@ or what our staff saw, the section of the Acceptable Use Policy, the evidence, what was done and how it ended, with your account's id | A reporter, our staff | Six years after the case is closed, then deleted. Once your account is erased, a case stays without its link to your account |
+| From 12 December 2026, your privacy requests: your account's id, what you asked for, when it arrived, where it is in our privacy mailbox, the word we sent you, the key that showed it was you, and which of our staff handled each step. Never your email address, which stays in the mailbox (below) | You, our staff | Six years after the request is closed, then deleted. Once your account is erased, the request keeps only a digest of its id |
+| From 12 December 2026, what our staff show on your dashboard: announcements to every account or to your plan's accounts (planned maintenance, a change to Slotlock, an incident), and a notice to your account alone, with your account's id, the text, an optional link, when it shows and who wrote it | Our staff | A year after it ends or is ended, then deleted; a notice to your account alone, at once when your account is erased |
+| From 12 December 2026, a feature our staff turned on or off for your account (the assistant, or creating team workspaces), with your account's id, the reason and who did it | Our staff | Until they take it away, or your account is erased |
+| From 12 December 2026, when our hourly maintenance of your account last failed: your account's id, when it first and last failed, how many times, and the error's class, code and first line, cut at its first quotation mark. Never your calendar content | The service | Until maintenance runs for your account again, and at most 30 days after it last failed; at once when your account is erased |
+| From 12 December 2026, an erasure's receipt: the request, a digest of your account's id (SHA-256 with a secret of ours), how many rows were erased, which of our staff asked, approved and erased, and when. The receipt itself names your account only by that digest; the staff log (above) keeps its own record of each step, with your account's id, for its six years | The service | Six years, then deleted |
+| From 12 December 2026, a payment of yours that failed, or a second subscription your account bought: your account's id, the Stripe invoice or subscription id, and the amount, currency, attempt count and next attempt Stripe reported. Never card or address details | Stripe, through its webhook | While your account exists |
+| From 12 December 2026, a plan or limits our staff gave your account until a date: the plan, the limits and allowances, the reason given, and which of our staff gave, approved or ended it | Our staff | While your account exists |
 
 The API server's logs record each call's operation and outcome, never its arguments or who made it.
 For each minute in which the server refused requests, they also record how many it refused (over a
@@ -97,10 +111,44 @@ own site. We use no analytics or advertising cookies, so there is nothing to con
 The website at `https://slotlock.pylota.io` counts visits with Cloudflare Web Analytics. It sets no
 cookie and stores nothing in your browser; it records the page, the site that linked to it, the
 browser, the country and how long the page took to load, and we see only totals. We use the totals
-to learn which pages people read and how they find them.
+to learn which pages people read and how they find them. From 12 December 2026 our staff console
+also reads, from Google Search Console and Bing Webmaster Tools, how often each page of the website
+and each search showed in their results and was clicked: totals by page and by search, never who
+searched.
 
 If you write to us at support@, abuse@ or privacy@pylota.io, we keep what you send and our reply in
 our mailboxes, hosted by Google Workspace, for two years and then delete them.
+
+## How our staff see your account
+
+From 12 December 2026, the people who run hosted Slotlock use a staff console of our own. Each of
+them signs in through Cloudflare Access, with GitHub, and with a passkey, and our database checks
+their role again on every page.
+
+- **What they see:** your account's id, plan and its status, usage counts, the names, prefixes and
+  dates of your keys, when your dashboard sessions began and were last used, and your audit log.
+  Never your calendar content: no staff page shows a booking's or an event's title, description,
+  attendees or contacts.
+- **GitHub logins:** to show a login rather than a number, the console asks GitHub's public profile
+  API which login an account id has, and keeps the answer in its memory for an hour. It stores no
+  login.
+- **Stripe:** for an account that pays, the console reads its subscriptions and last invoices from
+  Stripe, with a key that can only read, and keeps what it read for an hour.
+- **What they record:** every sign-in, every account page opened and every action is in the staff
+  log. An action on your account (a suspension and its end, a revoked key, ended sessions, a plan
+  or limits given until a date, a notice sent to you, a feature turned on or off for you) also goes
+  into your account's own audit log, as "Slotlock staff" with the reason given, so you can see it.
+- **What they tell you:** a line above every page of your dashboard, for planned maintenance, a
+  change to Slotlock, an incident, or a notice to your account alone; and incidents on the status
+  page, which are public GitHub issues labelled `status`. Never marketing, and never by email from
+  the console.
+- **How the service runs:** they see when maintenance of an account failed (as "What we hold"
+  says), and how many webhook endpoints are failing across all accounts, as counts: no endpoint's
+  address and no delivery's content.
+- **Your privacy requests** are handled there: we check it is you as "Your rights" says, make your
+  export for you, and erase your account in fixed steps, with a second member of staff approving
+  each erasure. An export made for you waits on your dashboard's Privacy page for 7 days; staff see
+  how many rows of each table it holds, never the rows.
 
 ## Why we use it, and our lawful basis
 
@@ -115,6 +163,8 @@ our mailboxes, hosted by Google Workspace, for two years and then delete them.
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Learning which pages of the website people read, and how they find them | Page views on `slotlock.pylota.io`, counted without cookies (above) | (f) legitimate interests: improving the website, with no way to tell who you are |
+| Running the service day to day: support, billing, handling abuse reports, telling you about maintenance and changes, turning features on or off, finding failed maintenance, and recording what our staff do on accounts | Staff log, internal notes, abuse cases, announcements and notices, feature flags, maintenance failures, billing alerts, plan overrides | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
+| Answering your privacy requests, and showing later that we did | Privacy requests, erasure receipts | (c) legal obligation: UK GDPR Articles 12 to 22, and 5(2), which asks us to be able to show it |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
 
 You do not have to give us any of this, but without a GitHub sign-in we cannot create an account,
@@ -127,8 +177,8 @@ not use your data for marketing, and we do not use your calendar content to trai
 | Recipient | What for | Where |
 | --- | --- | --- |
 | OVHcloud | The server and database that hold all of the data above, and our log store | Its London (UK1) region, United Kingdom |
-| Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it serves the website and counts its visits (Web Analytics); it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2) | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
-| GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock | United States |
+| Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it serves the website and counts its visits (Web Analytics); it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2). From 12 December 2026 it also runs our staff console and checks who may reach it (Cloudflare Access): that is our staff's sign-in, not yours | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
+| GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock. From 12 December 2026 our staff console also reads public GitHub profiles, to show a login for an account id | United States |
 | Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
 | Resend | Since 12 November 2026, sends each team invitation by email: the invited address, the team's name, who invited, the role offered and the link. It keeps each message, link included, for 30 days and then deletes it; erasing an account here does not reach that copy | The United States |
 | Stripe (the Stripe company named on your invoice) | Sells the Developer plan as merchant of record: takes the payment, calculates and pays sales tax or VAT, and issues invoices. We send it your account's id (`github:<id>`) with each purchase; Stripe is a separate controller of the purchase and keeps its records under [its own privacy policy](https://stripe.com/privacy) | Ireland, the United States and its other locations |
@@ -176,16 +226,21 @@ You can ask us for a copy of your data, to correct it, to erase it, to restrict 
 use it, and to have it in a portable form. Much of it you can read, change, export and delete
 yourself through the API and the dashboard, and you can revoke keys yourself in the dashboard at any
 time. `POST /v1/tenant/exports` makes a copy of everything in your account, read at one moment, as
-JSON objects table by table, for you to download within 24 hours.
+JSON objects table by table, for you to download within 24 hours. If you ask us for a copy instead,
+we check it is you as below and make the same copy, which waits on your dashboard's Privacy page for
+7 days.
 
 To erase your account and everything in it, write to [privacy@pylota.io](mailto:privacy@pylota.io)
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
-that word as its name, which shows us the account is yours. We then erase every resource, booking,
+that word as its name (for a team or an organization, as one of its Owners), which shows us the
+account is yours. We then erase every resource, booking,
 event, hold, payment record, waitlist entry, contact, busy period, webhook, export, history entry, assistant
-setting, plan, usage count and key in the account, in one step, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
+setting, plan, usage count and key in the account, and in its test environment, in one step, with
+our internal notes about it, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
-lines until they age out as described above; and backups, until they are replaced within about five
-weeks. A Developer plan is cancelled before the account is erased; Stripe keeps its own records of the
+lines until they age out as described above; the staff log's record of what our staff did, an
+abuse case without its link to your account, and the erasure's receipt, for six years; and backups,
+until they are replaced within about five weeks. A Developer plan is cancelled before the account is erased; Stripe keeps its own records of the
 purchase, as its privacy policy says.
 
 We answer every request within one month.
