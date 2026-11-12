@@ -1,7 +1,7 @@
 ---
 title: Dashboard
 seoTitle: 'Slotlock dashboard: resources, hours, API keys and teams'
-description: Let people sign in with GitHub and manage their own resources, bookable hours and API keys, alone or as an organization, with an optional assistant.
+description: Let people sign in with GitHub or Google and manage their own resources, bookable hours and API keys, alone or as an organization, with an optional assistant.
 sidebar:
   label: Dashboard
 ---
@@ -214,7 +214,7 @@ provider over OpenID Connect: Okta, Microsoft Entra ID, Google Workspace or any 
 it up on Settings, Identity. A provider that speaks only SAML cannot be connected.
 
 - **Connect**: the provider, its issuer URL (for Entra, the tenant's ID: one tenant, never
-  `common`), the client ID and secret of an app registered there with the redirect URI the page
+  `common`; Google Workspace needs neither), the client ID and secret of an app registered there with the redirect URI the page
   shows (one per team). Slotlock reads the issuer's discovery document, which must name that exact
   issuer, over https on a public host name only. The secret is sealed with AES-256-GCM and shown
   as its last four characters.
