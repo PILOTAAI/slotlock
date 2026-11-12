@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 to 4 are built and wait for their independent security review and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 to 5 are built and wait for their independent security review and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -690,6 +690,54 @@ Left for later phases:
 - search clicks per post on the list (M9, Phase 6);
 - the comparison pages' "last checked" flags on Home (M8);
 - adding an author from the console: `authors.json` is edited in a pull request for now.
+
+**Where Phase 5 stands.** Privacy requests are built and tested. Its done-when holds, end to end
+against PostgreSQL: an export made for a request opens, every part reads, and it holds every table
+of `SLOTLOCK_TENANT_EXPORT_TABLES` with as many rows as the account keeps; an erasure leaves a
+receipt and no row of the account, or of its test environment, in any table with a tenant column.
+
+- **The roles.** `privacy.act` (the Owner and Support) logs, verifies, exports and closes a request;
+  `privacy.erase` (the Owner) asks for, approves and carries out an erasure, as 4.3 says.
+- **The queue (M7).** Each request records the account, what it asks for, whom it concerns, the day
+  it arrived, its due date a month later, and where it is in the privacy mailbox. The database
+  refuses an `@` in its text, so the queue never holds an email address. Home lists those due
+  within a week or overdue.
+- **Verification**, as PRIVACY.md already promised: staff send back a word, and the account holder
+  makes an API key with it as its name. The console checks the key was made after the request, by
+  the person the account is, or, for a team or an organization, by one of its Owners.
+- **Export.** A verified access or export request starts the account's own export, built by the next
+  maintenance pass and kept 7 days instead of one. Its holder downloads it from their dashboard's
+  Privacy page; the account's audit log records that staff asked for it (E8). Staff see its counts
+  by table, never its rows.
+
+  This replaces the zip in R2 behind a 7-day link that M7 proposed. That design needed a new
+  bucket, credentials for it, and a link anyone holding it could open, sent by email. The holder's
+  own dashboard needs their sign-in, and reuses the export path RFC 0004 D3 already built and tested.
+- **Erasure**, in an order the database enforces:
+  1. no live Stripe subscription: asking, approving and erasing each refuse while the account's plan
+     still has one, and `erase_tenant` refuses too;
+  2. a second Owner approves, never the one who asked;
+  3. erase: everything the account keeps (`erase_tenant`), its `~test` environment, its internal
+     notes and the console's cached Stripe reads. Its abuse cases stay, no longer linked to it;
+  4. the receipt, in the same transaction: the request, a SHA-256 digest of the account's reference
+     with a secret of the deployment (`privacy_keys`), the rows erased, who asked, approved and
+     erased, and when. Every privacy request then names the account only by that digest. Staff
+     find a receipt later by the reference, which the lookup does not record.
+- **A request about an account's customer** is passed on to the account holder, who answers it
+  with their dashboard's Privacy page or the subject API.
+- **Retention.** The staff log, closed abuse cases and closed privacy requests with their receipts
+  are deleted six years on, a hundred at a time, as staff use the console. Until then the staff log
+  still refuses any change or deletion. This settles what Phase 2 left open for notes and cases.
+- **PRIVACY.md** now says what staff see, the GitHub profile lookups, the staff log's retention,
+  notes, cases, privacy requests and receipts, and the roles of Cloudflare Access and GitHub, taking
+  effect 30 days after it was posted.
+
+Left for later phases:
+
+- staff running a subject export or erasure for an account holder who asks: the holder does it
+  from their dashboard today;
+- restriction and objection have no steps of their own: they are logged as "other" and answered
+  from the mailbox.
 
 ## Part 8: Non-goals and risks
 

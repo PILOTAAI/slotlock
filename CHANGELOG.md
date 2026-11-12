@@ -6,7 +6,8 @@ versioning.
 ## Unreleased
 
 The admin console for the people who run Slotlock Cloud ([RFC 0006](docs/rfc/0006-admin-console.md)),
-not yet live: its staff and sign-in, support actions, billing and usage, and a CMS for the blog.
+not yet live: its staff and sign-in, support actions, billing and usage, a CMS for the blog, and
+privacy requests.
 
 ### Added
 
@@ -46,6 +47,17 @@ not yet live: its staff and sign-in, support actions, billing and usage, and a C
     `cms-schedule.yml` publishes it each hour. A renamed post gets redirects from its old address.
   - **Previews.** A CMS pull request gets a preview deploy of the whole site, marked `noindex`.
   - **The live site publishes `/facts.json`**, the short facts a post may name, for the preview.
+- **Privacy requests in the admin console** (RFC 0006, Phase 5):
+  - **A queue** of requests to see, take away, correct or erase data, each due a month after it
+    arrived and flagged on Home in its last week. It keeps no email address.
+  - **Verification** as PRIVACY.md describes it: a key the account holder names with the word staff
+    send back, made after the request, as the account or one of its Owners.
+  - **Exports**: the account's own export, made for the request and kept 7 days on its holder's
+    dashboard (`SLOTLOCK_PRIVACY_EXPORT_DAYS`); staff see its counts, never its rows.
+  - **Erasure** in fixed steps: Stripe cancelled first, a second Owner approves, then the account,
+    its test environment and notes go, and a receipt with a salted digest of the account stays.
+  - **Retention**: the staff log, closed abuse cases and closed privacy requests are deleted after
+    six years (`SLOTLOCK_STAFF_RECORD_YEARS`).
 
 ### Changed
 

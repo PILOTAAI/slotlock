@@ -237,6 +237,19 @@ The hourly workflow that publishes scheduled posts holds to the same rules, and 
 schedule the App itself wrote. The renderer escapes every character of a post, so a post cannot
 carry a script, a style or raw HTML. An image is accepted only as PNG, JPEG or WebP, by its bytes.
 
+Privacy requests are answered in the console too. A request is shown to come from the account's
+holder by a key they name with a word staff send back, made after the request, as the account (for
+a team or an organization, as one of its Owners). An export made for one waits on the holder's own
+dashboard, behind their sign-in; staff see its counts by table, never its rows, and no link to it
+is ever emailed. An erasure goes in fixed steps, each checked by the database: the Stripe
+subscription cancelled, a second Owner's approval (the one who asked cannot give it), then the
+erasure and its receipt in one transaction. The queue keeps no email address: the database refuses
+an `@` in a request's text.
+
+The staff log, closed abuse cases and closed privacy requests are kept six years and then deleted.
+Until then, nothing in the staff log can be changed or deleted, by the console's role or by the
+schema owner.
+
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
 
