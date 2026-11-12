@@ -596,14 +596,27 @@ async function prepare(options) {
   const previewInput = optional('SLOTLOCK_ADMIN_SITE_PREVIEW_HOST');
   const previewHost = previewInput ? readHost('SLOTLOCK_ADMIN_SITE_PREVIEW_HOST', previewInput) : undefined;
 
+  // Refused before anything, dry run included: Cloudflare cannot connect to this machine.
+  const given = optional('SLOTLOCK_ADMIN_DATABASE_URL');
+  const roleUrl = given ? readDatabaseUrl('SLOTLOCK_ADMIN_DATABASE_URL', given) : ownerUrl;
+  const address = originAddress(roleUrl);
+
   if (options.dryRun) {
-    const role = optional('SLOTLOCK_ADMIN_DATABASE_URL') ? 'the role SLOTLOCK_ADMIN_DATABASE_URL names' : `${process.env.SLOTLOCK_ADMIN_ROLE?.trim() || DEFAULT_ROLE}, created with a random password unless it exists`;
+    const roleName = given
+      ? decodeURIComponent(roleUrl.username)
+      : process.env.SLOTLOCK_ADMIN_ROLE?.trim() || DEFAULT_ROLE;
+    const database = decodeURIComponent(roleUrl.pathname.replace(/^\//, '')) || 'postgres';
     console.log(
       [
         'prepare would:',
-        `  1. use ${role} as the console's database role, and run slotlock migrate to grant it the admin functions`,
-        `  2. create or update the Hyperdrive configuration ${HYPERDRIVE_NAME}: that role, caching disabled`,
-        `  3. create the Access application ${ACCESS_APP_NAME} for ${hostname} unless one exists, letting in ${emails.length} address${emails.length === 1 ? '' : 'es'}`,
+        given
+          ? `  1. use the role ${roleName} that SLOTLOCK_ADMIN_DATABASE_URL names as the console's database role`
+          : `  1. create the role ${roleName} as the console's database role, with a random password, and show its URL once.\n     If ${roleName} exists already, it stops instead: set SLOTLOCK_ADMIN_DATABASE_URL to that role's URL.`,
+        `     Then run slotlock migrate, which grants ${roleName} the admin functions and no table.`,
+        `  2. create or update the Hyperdrive configuration ${HYPERDRIVE_NAME}: ${roleName} at ${address.host}:${address.port}, database ${database}, caching disabled`,
+        `  3. create the Access application "${ACCESS_APP_NAME}" for ${hostname}, letting in only:`,
+        ...emails.map((email) => `       ${email}`),
+        '     An Access application already there for that hostname is kept as it is, with its own policies.',
         previewHost ? `  4. set the repository variable SITE_PREVIEW_HOST to ${previewHost}` : '  4. leave SITE_PREVIEW_HOST as it is',
         `  5. write ${configPath}`,
         'Nothing was changed.',
@@ -613,8 +626,6 @@ async function prepare(options) {
   }
 
   checkTools();
-  // Refused before anything changes: Cloudflare cannot connect to this machine.
-  originAddress(readDatabaseUrl('the database URL', optional('SLOTLOCK_ADMIN_DATABASE_URL') ?? ownerUrl.toString()));
   console.log(`1. The console's database role`);
   const role = await consoleRole(ownerUrl);
   console.log(role.created ? `   Created ${role.name}.` : `   Using ${role.name}.`);

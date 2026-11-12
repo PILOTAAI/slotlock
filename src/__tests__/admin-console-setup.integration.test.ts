@@ -395,17 +395,36 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
 
   it('changes nothing on --dry-run, and refuses a database only this machine can reach', async () => {
     const run = await setup();
+    const role = run.env.SLOTLOCK_ADMIN_ROLE as string;
+    const database = new URL(url as string).pathname.slice(1);
     const dry = await runScript(['prepare', '--dry-run'], run.env);
     expect(dry.code, dry.output).toBe(0);
-    expect(dry.output).toContain('prepare would:');
+    // It says what a real run would do, as a real run would do it.
+    expect(dry.output).toContain(`1. create the role ${role} as the console's database role, with a random password`);
+    expect(dry.output).toContain(`If ${role} exists already, it stops instead: set SLOTLOCK_ADMIN_DATABASE_URL`);
+    expect(dry.output).toContain(`2. create or update the Hyperdrive configuration slotlock-admin: ${role} at db.slotlock.test:6543, database ${database}, caching disabled`);
+    expect(dry.output).toContain(`for ${HOSTNAME}, letting in only:\n       ada@pylota.test\n       grace@pylota.test\n`);
+    expect(dry.output).toContain('4. set the repository variable SITE_PREVIEW_HOST to slotlock-site-preview.team.workers.dev');
     expect(dry.output).toContain('Nothing was changed.');
     expect(run.cloudflare.requests).toEqual([]);
     expect([run.read('gh.log'), run.read('cli.log'), run.read('wrangler.log')]).toEqual([null, null, null]);
     expect(existsSync(run.config)).toBe(false);
 
-    const local = await runScript(['prepare'], { ...run.env, SLOTLOCK_ADMIN_DATABASE_HOST: '' });
-    expect(local.code).toBe(1);
-    expect(local.output).toContain('Hyperdrive cannot reach');
+    // A role the owner gives is used as it is, under its own name.
+    const given = new URL(url as string);
+    given.username = 'console_given';
+    given.password = 'not-used-on-a-dry-run';
+    const named = await runScript(['prepare', '--dry-run'], { ...run.env, SLOTLOCK_ADMIN_DATABASE_URL: given.toString() });
+    expect(named.code, named.output).toBe(0);
+    expect(named.output).toContain('1. use the role console_given that SLOTLOCK_ADMIN_DATABASE_URL names');
+    expect(named.output).not.toContain('not-used-on-a-dry-run');
+
+    // An address only this machine reaches is refused on a dry run too, before anything else.
+    for (const args of [['prepare', '--dry-run'], ['prepare']]) {
+      const local = await runScript(args, { ...run.env, SLOTLOCK_ADMIN_DATABASE_HOST: '' });
+      expect(local.code).toBe(1);
+      expect(local.output).toContain('Hyperdrive cannot reach');
+    }
     expect(run.cloudflare.requests).toEqual([]);
     const sql = postgres(url as string, { max: 1, onnotice: () => {} });
     const found = await sql`SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${run.env.SLOTLOCK_ADMIN_ROLE as string}`;
