@@ -74,10 +74,11 @@ versioning.
 - **`scripts/configure-admin-console.mjs` sets the admin console up** (RFC 0006, Phase 0). `prepare`
   creates the console's database role and runs `slotlock migrate`, then a Hyperdrive configuration
   as that role, an Access application with a policy for the given addresses, and the Worker's
-  config. `go-live`, refused before 12 December 2026, deploys the Worker, sets the secrets it lacks
-  on stdin, creates the Slotlock CMS GitHub App and stores its key, and adds the first Owners. Each
-  is safe to run again, and `--dry-run` changes nothing. The release app and the CMS App share one
-  manifest flow (`scripts/github-app-manifest.mjs`).
+  config, with Cloudflare Web Analytics for the Site and search page when given its site tag.
+  `go-live`, refused before 12 December 2026, deploys the Worker, sets the secrets it lacks on
+  stdin (Web Analytics' read-only token among them), creates the Slotlock CMS GitHub App and stores
+  its key, and adds the first Owners. Each is safe to run again, and `--dry-run` changes nothing.
+  The release app and the CMS App share one manifest flow (`scripts/github-app-manifest.mjs`).
 
 ### Changed
 

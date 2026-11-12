@@ -544,9 +544,10 @@ What is left before the console goes live:
   Hyperdrive configuration for `slotlock_admin_app`, the Worker's secrets, and the first Owner from
   `slotlock staff add`. `scripts/configure-admin-console.mjs` makes them all but the OAuth app,
   which GitHub has no API to create: `prepare` any time, and `go-live`, which deploys, from
-  12 December 2026;
-- PRIVACY.md (staff access, GitHub profile lookups, how long the staff log is kept), posted 30 days
-  before it takes effect, as the notice itself promises;
+  12 December 2026. It also sets up Web Analytics for the Site and search page, given its site tag;
+  the Search Console and Bing keys stay by hand;
+- PRIVACY.md (staff access, GitHub profile lookups, how long the staff log is kept): published on
+  12 November 2026, 30 days before it takes effect, as the notice itself promises;
 - the independent security review, recorded on the pull request.
 
 SECURITY.md already describes the console.

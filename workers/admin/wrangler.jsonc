@@ -97,7 +97,8 @@
     "SLOTLOCK_ADMIN_PREVIEW_HOST": "",
     // Optional, for the Site page (M9): the Search Console property (sc-domain:<domain>, or the
     // https:// URL prefix it was added as), the site as Bing Webmaster Tools has it, and the
-    // Cloudflare account id and Web Analytics site tag (32 hex characters each).
+    // Cloudflare account id and Web Analytics site tag (32 hex characters each). The setup script's
+    // prepare fills the last two from SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE.
     "SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY": "sc-domain:slotlock.pylota.io",
     "SLOTLOCK_ADMIN_BING_SITE": "https://slotlock.pylota.io/",
     "SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT": "",

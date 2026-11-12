@@ -15,7 +15,9 @@ const url = process.env.DATABASE_URL?.trim();
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'scripts', 'configure-admin-console.mjs');
 const WEB = 'https://github.test';
-const ACCOUNT = 'acc0123';
+const ACCOUNT = '0a'.repeat(16);
+const SITE_TAG = '5e'.repeat(16);
+const ANALYTICS_TOKEN = `cf-analytics-${randomBytes(16).toString('hex')}`;
 const TOKEN = 'cf-test-token';
 const AUD = 'ab'.repeat(32);
 const HOSTNAME = 'admin.slotlock.test';
@@ -305,7 +307,7 @@ async function runScript(args: string[], env: Record<string, string>) {
 }
 
 /** The deploy config prepare would have written, for go-live alone. */
-function writePrepared(config: string, cms: { id?: string; installation?: string } = {}) {
+function writePrepared(config: string, cms: { id?: string; installation?: string } = {}, analytics = false) {
   const text = readFileSync(join(root, 'workers', 'admin', 'wrangler.jsonc'), 'utf8')
     .replace('"pattern": "admin.example.com"', `"pattern": "${HOSTNAME}"`)
     .replace('"id": "set-this-to-the-admin-hyperdrive-configuration-id"', `"id": "${'1'.padStart(32, 'd')}"`)
@@ -313,14 +315,16 @@ function writePrepared(config: string, cms: { id?: string; installation?: string
     .replace('"SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "example.cloudflareaccess.com"', '"SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "slotlock.cloudflareaccess.com"')
     .replace('"SLOTLOCK_ADMIN_ACCESS_AUD": "set-this-to-the-access-application-aud"', `"SLOTLOCK_ADMIN_ACCESS_AUD": "${AUD}"`)
     .replace('"SLOTLOCK_ADMIN_CMS_APP_ID": ""', `"SLOTLOCK_ADMIN_CMS_APP_ID": "${cms.id ?? ''}"`)
-    .replace('"SLOTLOCK_ADMIN_CMS_INSTALLATION": ""', `"SLOTLOCK_ADMIN_CMS_INSTALLATION": "${cms.installation ?? ''}"`);
+    .replace('"SLOTLOCK_ADMIN_CMS_INSTALLATION": ""', `"SLOTLOCK_ADMIN_CMS_INSTALLATION": "${cms.installation ?? ''}"`)
+    .replace('"SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT": ""', `"SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT": "${analytics ? ACCOUNT : ''}"`)
+    .replace('"SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": ""', `"SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": "${analytics ? SITE_TAG : ''}"`);
   writeFileSync(config, text);
 }
 
 describe.skipIf(!url)('configure-admin-console.mjs', () => {
   it('prepares the role, Hyperdrive, Access and the config, and shows the role password only once', async () => {
     const run = await setup();
-    const first = await runScript(['prepare'], run.env);
+    const first = await runScript(['prepare'], { ...run.env, SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE: SITE_TAG.toUpperCase() });
     expect(first.code, first.output).toBe(0);
     const role = run.env.SLOTLOCK_ADMIN_ROLE as string;
 
@@ -369,11 +373,16 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(config).toContain('"SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "slotlock.cloudflareaccess.com"');
     expect(config).toContain(`"SLOTLOCK_ADMIN_ACCESS_AUD": "${AUD}"`);
     expect(config).toContain('"SLOTLOCK_ADMIN_PREVIEW_HOST": "slotlock-site-preview.team.workers.dev"');
+    // Web Analytics: the site tag given, in the account the console runs in.
+    expect(config).toContain(`"SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": "${SITE_TAG}"`);
+    expect(config).toContain(`"SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT": "${ACCOUNT}"`);
+    expect(first.output).toContain(`Web Analytics: the site tag ${SITE_TAG}, in the account ${ACCOUNT}. go-live asks for its token.`);
     expect(config).not.toMatch(/set-this|example\.com/);
     expect(config).not.toContain(password);
     expect(run.read('var-SITE_PREVIEW_HOST')).toBe('slotlock-site-preview.team.workers.dev');
 
-    // Again with the role's URL: Hyperdrive updated, Access kept, nothing created, no password shown.
+    // Again with the role's URL and no site tag: Hyperdrive updated, Access and Web Analytics kept,
+    // nothing created, no password shown.
     const before = run.cloudflare.requests.length;
     const second = await runScript(['prepare'], { ...run.env, SLOTLOCK_ADMIN_DATABASE_URL: shown });
     expect(second.code, second.output).toBe(0);
@@ -405,7 +414,16 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(dry.output).toContain(`2. create or update the Hyperdrive configuration slotlock-admin: ${role} at db.slotlock.test:6543, database ${database}, caching disabled`);
     expect(dry.output).toContain(`for ${HOSTNAME}, letting in only:\n       ada@pylota.test\n       grace@pylota.test\n`);
     expect(dry.output).toContain('4. set the repository variable SITE_PREVIEW_HOST to slotlock-site-preview.team.workers.dev');
+    expect(dry.output).toContain('without Web Analytics (set SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE to add it)');
     expect(dry.output).toContain('Nothing was changed.');
+    const otherAccount = 'b7'.repeat(16);
+    const analytics = await runScript(['prepare', '--dry-run'], {
+      ...run.env,
+      SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE: SITE_TAG,
+      SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT: otherAccount,
+    });
+    expect(analytics.code, analytics.output).toBe(0);
+    expect(analytics.output).toContain(`with Web Analytics for the site tag ${SITE_TAG} in the account ${otherAccount}\n`);
     expect(run.cloudflare.requests).toEqual([]);
     expect([run.read('gh.log'), run.read('cli.log'), run.read('wrangler.log')]).toEqual([null, null, null]);
     expect(existsSync(run.config)).toBe(false);
@@ -439,6 +457,20 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(result.code).toBe(1);
     expect(result.output).toMatch(/Hyperdrive answered without connecting as|Hyperdrive's configuration id is not what one looks like/);
     expect(existsSync(run.config)).toBe(false);
+
+    const analytics = await setup();
+    const quoted = await runScript(['prepare'], { ...analytics.env, SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE: `${SITE_TAG}", "x": "` });
+    expect(quoted.code).toBe(1);
+    expect(quoted.output).toContain('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE must be the site tag: 32 hex characters.');
+    const account = await runScript(['prepare', '--dry-run'], {
+      ...analytics.env,
+      SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE: SITE_TAG,
+      SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT: 'acc0123',
+    });
+    expect(account.code).toBe(1);
+    expect(account.output).toContain('The Web Analytics account (SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT, or CLOUDFLARE_ACCOUNT_ID) must be 32 hex characters.');
+    expect(analytics.cloudflare.requests).toEqual([]);
+    expect(existsSync(analytics.config)).toBe(false);
   });
 
   it('refuses go-live before 12 December 2026, touching nothing', async () => {
@@ -460,6 +492,11 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(dry.output).toContain('3. unless the repository variable CMS_APP_ID is set: create the "PILOTAAI Slotlock CMS" GitHub App');
     expect(dry.output).toContain('4. add as Owners those of ada who are not staff yet (each must be a GitHub user)');
     expect(dry.output).toContain('Erasing an account needs a second Owner to approve');
+    expect(dry.output).not.toContain('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN');
+    writePrepared(run.config, {}, true);
+    const withAnalytics = await runScript(['go-live', '--dry-run'], run.env);
+    expect(withAnalytics.code).toBe(0);
+    expect(withAnalytics.output).toContain('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN      a token with Account Analytics Read, for Web Analytics');
     expect([run.read('gh.log'), run.read('cli.log'), run.read('wrangler.log')]).toEqual([null, null, null]);
   });
 
@@ -469,9 +506,10 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
       SLOTLOCK_ADMIN_OWNERS: 'ada,grace',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_ID: 'Ov23liConsoleTest',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET: CLIENT_SECRET,
+      SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN: ANALYTICS_TOKEN,
       STUB_STAFF: JSON.stringify([{ staff_ref: 'github:101', role: 'owner', status: 'active' }]),
     });
-    writePrepared(run.config);
+    writePrepared(run.config, {}, true);
     writeFileSync(join(run.stub, 'var-CMS_APP_ID'), '4242');
     writeFileSync(join(run.stub, 'var-CMS_APP_INSTALLATION'), '7777');
     const live = await runScript(['go-live'], run.env);
@@ -479,6 +517,7 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
 
     const secrets = JSON.parse(run.read('worker-secrets.json') ?? '{}') as Record<string, string>;
     expect(Object.keys(secrets).sort()).toEqual([
+      'SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN',
       'SLOTLOCK_ADMIN_CONSOLE_KEY',
       'SLOTLOCK_ADMIN_GITHUB_CLIENT_ID',
       'SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET',
@@ -487,8 +526,9 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(secrets.SLOTLOCK_ADMIN_CONSOLE_KEY).toBe(CONSOLE_KEY);
     expect(secrets.SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET).toBe(CLIENT_SECRET);
     expect(secrets.SLOTLOCK_ADMIN_SESSION_SECRET).toMatch(/^[0-9a-f]{64}$/);
+    expect(secrets.SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN).toBe(ANALYTICS_TOKEN);
     // No secret in the output or in any command's arguments.
-    for (const value of [CONSOLE_KEY, CLIENT_SECRET, secrets.SLOTLOCK_ADMIN_SESSION_SECRET as string]) {
+    for (const value of [CONSOLE_KEY, CLIENT_SECRET, ANALYTICS_TOKEN, secrets.SLOTLOCK_ADMIN_SESSION_SECRET as string]) {
       expect(live.output).not.toContain(value);
       expect(`${run.read('wrangler.log')}${run.read('cli.log')}${run.read('gh.log')}`).not.toContain(value);
     }
@@ -503,7 +543,10 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
       ].join('\n'),
     );
     expect(readFileSync(run.config, 'utf8')).toContain('"SLOTLOCK_ADMIN_CMS_APP_ID": "4242"');
+    // Rewriting the config for the CMS App kept Web Analytics.
+    expect(readFileSync(run.config, 'utf8')).toContain(`"SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": "${SITE_TAG}"`);
     expect(live.output).toContain('The console has no key for it');
+    expect(live.output).not.toContain('Web Analytics on that page');
     // ada is staff already; grace is added, and her code is shown for her.
     expect(run.read('cli.log')).toBe('staff console-key\nstaff list\nstaff add github:102 owner\n');
     expect(live.output).toContain('ada is staff already.');
@@ -546,6 +589,9 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
 
     const secrets = JSON.parse(run.read('worker-secrets.json') ?? '{}') as Record<string, string>;
     expect(secrets.SLOTLOCK_ADMIN_CMS_APP_KEY).toBe(privateKey);
+    // No site tag, so no Web Analytics token was asked for, and the closing note says how to add it.
+    expect(secrets).not.toHaveProperty('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN');
+    expect(live.output()).toContain('Web Analytics on that page: run prepare again with SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE');
     expect(run.read('gh-secret-CMS_APP_KEY')).toBe(privateKey);
     expect([run.read('var-CMS_APP_ID'), run.read('var-CMS_APP_INSTALLATION')]).toEqual(['4242', '7777']);
     const calls = run.read('gh.log') ?? '';

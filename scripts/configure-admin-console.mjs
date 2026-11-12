@@ -43,11 +43,18 @@
 //   SLOTLOCK_ADMIN_SITE_PREVIEW_HOST  prepare, optional: the site preview Worker's host
 //                              (slotlock-site-preview.<subdomain>.workers.dev), for
 //                              SITE_PREVIEW_HOST and the editor's preview links
+//   SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE  prepare, optional: the website's Cloudflare Web Analytics
+//                              site tag (32 hex characters), for the Site and search page
+//   SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT  prepare, optional: the account that site tag is in, when it
+//                              is not CLOUDFLARE_ACCOUNT_ID. A later prepare without these two keeps
+//                              what the config already has
 //   SLOTLOCK_ADMIN_OWNERS      go-live: the first Owners' GitHub logins, comma-separated (two, so
 //                              erasure can be approved)
-//   SLOTLOCK_ADMIN_GITHUB_CLIENT_ID, SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET, SLOTLOCK_ADMIN_STRIPE_KEY
+//   SLOTLOCK_ADMIN_GITHUB_CLIENT_ID, SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET, SLOTLOCK_ADMIN_STRIPE_KEY,
+//   SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN
 //                              go-live: read from the environment when set, else asked for without
-//                              echo (the Stripe key may be left out)
+//                              echo. The Stripe key and the Web Analytics token (Account Analytics
+//                              Read, asked for only when a site tag is set) may be left out
 // It also needs gh logged in as an owner of PILOTAAI, `npm ci` in workers/admin (Wrangler) and
 // `npm run build` here (the slotlock CLI). For tests: SLOTLOCK_CLI, SLOTLOCK_WRANGLER,
 // SLOTLOCK_CLOUDFLARE_API_URL, SLOTLOCK_ADMIN_CONFIG, SLOTLOCK_ADMIN_ROLE,
@@ -147,6 +154,8 @@ function need(name, what) {
 const HYPERDRIVE_ID = /^[0-9a-f]{32}$/;
 const AUDIENCE = /^[0-9a-f]{16,128}$/;
 const GITHUB_ID = /^[1-9][0-9]{0,15}$/;
+/** A Cloudflare account id or a Web Analytics site tag. */
+const HEX32 = /^[0-9a-f]{32}$/;
 const HOST = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
 /** The example config's own hostnames, never a deployment's. */
@@ -517,7 +526,12 @@ function checkValues(values) {
     ["the CMS App's id", values.cmsAppId, GITHUB_ID, true],
     ["the CMS App's installation id", values.cmsInstallation, GITHUB_ID, true],
     ['the site preview host', values.previewHost, HOST, true],
+    ['the Web Analytics site tag', values.analyticsSite, HEX32, true],
+    ["the Web Analytics site's account", values.analyticsAccount, HEX32, true],
   ];
+  if (Boolean(values.analyticsSite) !== Boolean(values.analyticsAccount)) {
+    throw new Failure(`Web Analytics needs both its site tag and its account, so ${configPath} was not written.`);
+  }
   for (const [what, value, shape, optional] of shapes) {
     if (optional && (value === undefined || value === '')) continue;
     if (typeof value !== 'string' || !shape.test(value) || isExampleHost(value)) {
@@ -549,10 +563,33 @@ function writeConfig(values) {
   variable('SLOTLOCK_ADMIN_CMS_APP_ID', values.cmsAppId ?? '');
   variable('SLOTLOCK_ADMIN_CMS_INSTALLATION', values.cmsInstallation ?? '');
   variable('SLOTLOCK_ADMIN_PREVIEW_HOST', values.previewHost ?? '');
+  variable('SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT', values.analyticsAccount ?? '');
+  variable('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE', values.analyticsSite ?? '');
   const header =
     '// Written by scripts/configure-admin-console.mjs from wrangler.jsonc, for this deployment. It\n' +
     '// holds no secret; run `configure-admin-console.mjs prepare` again to write it afresh.\n';
   writeFileSync(configPath, header + text);
+}
+
+/**
+ * Web Analytics for the Site and search page: the site tag given, in the account given or the one the
+ * console runs in; or, when none is given, what the config already has, so a later prepare keeps it.
+ */
+function webAnalytics(account) {
+  const site = optional('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE')?.toLowerCase();
+  if (site) {
+    const inAccount = (optional('SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT') ?? account).toLowerCase();
+    if (!HEX32.test(site)) throw new Failure('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE must be the site tag: 32 hex characters.');
+    if (!HEX32.test(inAccount)) {
+      throw new Failure('The Web Analytics account (SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT, or CLOUDFLARE_ACCOUNT_ID) must be 32 hex characters.');
+    }
+    return { site, account: inAccount, kept: false };
+  }
+  if (!existsSync(configPath)) return { site: undefined, account: undefined, kept: false };
+  const text = readFileSync(configPath, 'utf8');
+  const value = (name) => new RegExp(`"${name}": "([0-9a-f]{32})"`).exec(text)?.[1];
+  const kept = { site: value('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE'), account: value('SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT') };
+  return kept.site && kept.account ? { ...kept, kept: true } : { site: undefined, account: undefined, kept: false };
 }
 
 /** The values a written config holds, to deploy with or to rewrite. */
@@ -572,6 +609,8 @@ function readConfig() {
     cmsAppId: value('SLOTLOCK_ADMIN_CMS_APP_ID'),
     cmsInstallation: value('SLOTLOCK_ADMIN_CMS_INSTALLATION'),
     previewHost: value('SLOTLOCK_ADMIN_PREVIEW_HOST'),
+    analyticsAccount: value('SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT'),
+    analyticsSite: value('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE'),
   };
   const placeholder =
     !HYPERDRIVE_ID.test(config.hyperdrive) ||
@@ -595,6 +634,7 @@ async function prepare(options) {
   need('CLOUDFLARE_API_TOKEN', 'a Cloudflare API token (see the top of this script)');
   const previewInput = optional('SLOTLOCK_ADMIN_SITE_PREVIEW_HOST');
   const previewHost = previewInput ? readHost('SLOTLOCK_ADMIN_SITE_PREVIEW_HOST', previewInput) : undefined;
+  const analytics = webAnalytics(account);
 
   // Refused before anything, dry run included: Cloudflare cannot connect to this machine.
   const given = optional('SLOTLOCK_ADMIN_DATABASE_URL');
@@ -619,6 +659,9 @@ async function prepare(options) {
         '     An Access application already there for that hostname is kept as it is, with its own policies.',
         previewHost ? `  4. set the repository variable SITE_PREVIEW_HOST to ${previewHost}` : '  4. leave SITE_PREVIEW_HOST as it is',
         `  5. write ${configPath}`,
+        analytics.site
+          ? `     with Web Analytics for the site tag ${analytics.site} in the account ${analytics.account}${analytics.kept ? ' (kept from the config already there)' : ''}`
+          : '     without Web Analytics (set SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE to add it)',
         'Nothing was changed.',
       ].join('\n'),
     );
@@ -661,11 +704,16 @@ async function prepare(options) {
     previewHost: previewHost ?? repositoryVariable('SITE_PREVIEW_HOST'),
     cmsAppId: repositoryVariable('CMS_APP_ID'),
     cmsInstallation: repositoryVariable('CMS_APP_INSTALLATION'),
+    analyticsSite: analytics.site,
+    analyticsAccount: analytics.account,
   };
 
   console.log('5. The Worker\'s configuration');
   writeConfig(values);
   console.log(`   Wrote ${configPath}.`);
+  if (analytics.site) {
+    console.log(`   Web Analytics: the site tag ${analytics.site}, in the account ${analytics.account}. go-live asks for its token.`);
+  }
 
   console.log(`\nPrepared. Nothing serves yet: "go-live" deploys the console, from ${GO_LIVE}.`);
   if (role.created) {
@@ -745,6 +793,9 @@ async function goLive(options) {
         '       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET  asked for without echo, or taken from that variable',
         '       SLOTLOCK_ADMIN_CONSOLE_KEY           from slotlock staff console-key, as the schema owner',
         '       SLOTLOCK_ADMIN_STRIPE_KEY            a restricted Stripe key, if you give one',
+        ...(config.analyticsSite
+          ? ['       SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN      a token with Account Analytics Read, for Web Analytics, if you give one']
+          : []),
         `  3. unless the repository variable CMS_APP_ID is set: create the "${CMS_APP_NAME}" GitHub App`,
         `     (you click Create, then Install, on ${OWNER}/${REPO} only), store its key in the Worker and the`,
         `     ${CMS_ENVIRONMENT} environment, set CMS_APP_ID and CMS_APP_INSTALLATION, and deploy again`,
@@ -826,6 +877,17 @@ async function goLive(options) {
     }
     if (stripe) secrets.SLOTLOCK_ADMIN_STRIPE_KEY = stripe;
   }
+  if (config.analyticsSite && !present.has('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN')) {
+    const token = await secret(
+      'SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN',
+      '   A Cloudflare API token with Account Analytics Read and nothing else, for Web Analytics, or Enter for none: ',
+      { optional: true },
+    );
+    if (token && !/^[A-Za-z0-9_-]{20,200}$/.test(token)) {
+      throw new Failure('That is not a Cloudflare API token. Nothing was set.');
+    }
+    if (token) secrets.SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN = token;
+  }
   const names = Object.keys(secrets);
   if (names.length > 0) {
     wrangler(['secret', 'bulk', '--config', configPath], { input: JSON.stringify(secrets), capture: true });
@@ -899,7 +961,10 @@ async function goLive(options) {
   console.log(
     [
       'Still yours to do, when you want them:',
-      '  - the Site and search page: SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY, SLOTLOCK_ADMIN_BING_KEY and SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN (workers/admin/wrangler.jsonc says what each is);',
+      '  - the Site and search page: SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY and SLOTLOCK_ADMIN_BING_KEY (workers/admin/wrangler.jsonc says what each is);',
+      ...(config.analyticsSite
+        ? []
+        : ['  - Web Analytics on that page: run prepare again with SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE, then go-live for its token;']),
       '  - CMS previews: deploy site/wrangler.preview.jsonc once, and give the site-preview environment its Cloudflare token;',
       '  - record the staff log\'s head now and then (slotlock staff verify-log).',
     ].join('\n'),
