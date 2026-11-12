@@ -1853,7 +1853,9 @@ const OPERATION_DEFINITIONS = [
           boundedEventSpan(value.starts_at, value.ends_at),
       ),
     output: z.object({ event: EVENT, replayed: z.boolean() }).strict(),
-    risk: { readOnly: false, destructive: false, idempotent: true },
+    // It overwrites the event's time, title or attendees: a client that confirms destructive calls
+    // asks a person first (MCP's destructiveHint; reversible is not additive).
+    risk: { readOnly: false, destructive: true, idempotent: true },
     invoke: 'updateEvent',
     example: {
       event_id: EXAMPLE_EVENT_ID,
@@ -2014,6 +2016,8 @@ const OPERATION_DEFINITIONS = [
       'Release one of your holds, and the rest of its group, at once instead of letting them expire. `released` is false when it was already gone.',
     input: z.object({ hold_id: HOLD_ID }).strict(),
     output: z.object({ released: z.boolean() }).strict(),
+    // It lets go of the caller's own holds, which lapse on their own within minutes and are never a
+    // booking: nothing a person decided is lost, so it is not destructive.
     risk: { readOnly: false, destructive: false, idempotent: true },
     invoke: releaseSlots,
     example: { hold_id: '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d' },
@@ -2055,7 +2059,8 @@ const OPERATION_DEFINITIONS = [
       .strict()
       .refine((value) => boundedEventSpan(value.starts_at, value.ends_at)),
     output: z.object({ event: EVENT, replayed: z.boolean() }).strict(),
-    risk: { readOnly: false, destructive: false, idempotent: true },
+    // It moves a booking off the time it had, which another caller may take at once.
+    risk: { readOnly: false, destructive: true, idempotent: true },
     invoke: reschedule,
     example: {
       event_id: EXAMPLE_EVENT_ID,
