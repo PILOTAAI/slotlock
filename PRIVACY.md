@@ -2,8 +2,9 @@
 
 Last updated: 12 November 2026.
 
-What it says about our staff console (in "What we hold" and "How our staff see your account") takes
-effect on 12 December 2026.
+What it says about our staff console, and about the privacy requests our staff handle there (in
+"What we hold", "How our staff see your account", "Why we use it, and our lawful basis" and "Your
+rights"), takes effect on 12 December 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub or Google
