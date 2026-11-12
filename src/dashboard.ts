@@ -6991,7 +6991,9 @@ ${
     const hidden = html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
     const rows = exports.map(
       (made) =>
-        html`<tr><td data-label="Asked for">${formatDate(made.createdAt)}</td><td data-label="State">${
+        html`<tr><td data-label="Asked for">${formatDate(made.createdAt)}${
+          made.requestedBy?.startsWith('privacy:') ? html` <span class="muted">by Slotlock, for your privacy request</span>` : html``
+        }</td><td data-label="State">${
           made.status === 'ready'
             ? html`<span class="pill active">Ready</span>`
             : made.status === 'pending'
@@ -7001,7 +7003,7 @@ ${
           made.status === 'ready' ? html`<a class="button" href="${root}/settings/privacy/download?id=${made.id}">Download</a> ` : html``
         }<form method="post" action="${root}/settings/privacy/export/delete">${hidden}<input type="hidden" name="id" value="${made.id}"><button type="submit">Delete</button></form></td></tr>`,
     );
-    const exportCard = html`<h2>Everything</h2><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted.</p><form method="post" action="${root}/settings/privacy/export">${hidden}<button type="submit" class="primary">Export the workspace</button></form>${
+    const exportCard = html`<h2>Everything</h2><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted; one Slotlock makes for your privacy request, for a week.</p><form method="post" action="${root}/settings/privacy/export">${hidden}<button type="submit" class="primary">Export the workspace</button></form>${
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Asked for</th><th>State</th><th>Rows</th><th>Deleted</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``

@@ -29,16 +29,18 @@ export type SlotlockStaffRole = (typeof SLOTLOCK_STAFF_ROLES)[number];
  * - `plans.approve` asks for an override longer than 90 days, and approves another Owner's (four
  *   eyes);
  * - `content.write` writes blog posts in the CMS and submits them for review;
- * - `content.publish` publishes or schedules a submitted post (E5: Owner only).
+ * - `content.publish` publishes or schedules a submitted post (E5: Owner only);
+ * - `privacy.act` logs a privacy request, verifies who sent it, starts an export and closes it;
+ * - `privacy.erase` asks for, approves (four eyes) and carries out an account's erasure.
  * The database checks the same map (slotlock.staff_require), so the console and the database cannot
  * disagree.
  */
 export const SLOTLOCK_STAFF_CAPABILITIES = Object.freeze({
   owner: [
     'home', 'accounts.read', 'accounts.act', 'safety.act', 'billing.read', 'billing.act', 'plans.approve',
-    'content.write', 'content.publish', 'staff.read', 'staff.log',
+    'content.write', 'content.publish', 'privacy.act', 'privacy.erase', 'staff.read', 'staff.log',
   ],
-  support: ['home', 'accounts.read', 'accounts.act', 'safety.act'],
+  support: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'privacy.act'],
   billing: ['home', 'accounts.read', 'billing.read', 'billing.act'],
   editor: ['home', 'content.write'],
   viewer: ['home', 'billing.read'],
@@ -72,6 +74,22 @@ export const SLOTLOCK_OVERRIDE_SOLO_DAYS = 90;
 export const SLOTLOCK_MAINTENANCE_JOBS = Object.freeze(['billing_daily', 'overage_report'] as const);
 /** How long a cached provider read (Stripe) is kept, in seconds (RFC 0006, 4.6). */
 export const SLOTLOCK_ADMIN_CACHE_SECONDS = 3600;
+/** What a privacy request asks for (RFC 0006, M7). */
+export const SLOTLOCK_PRIVACY_KINDS = Object.freeze(['access', 'export', 'correction', 'erasure', 'other'] as const);
+/**
+ * Whom it concerns: the account holder, whose data Slotlock controls, or one of the account's own
+ * customers, whose controller is the account holder (the request is passed on to them).
+ */
+export const SLOTLOCK_PRIVACY_CONCERNS = Object.freeze(['account', 'customer'] as const);
+/** How a privacy request ends. */
+export const SLOTLOCK_PRIVACY_OUTCOMES = Object.freeze(['done', 'refused', 'withdrawn', 'passed_on'] as const);
+/** Days an export made for a privacy request is kept once ready (an account's own: a day). */
+export const SLOTLOCK_PRIVACY_EXPORT_DAYS = 7;
+/**
+ * Years the staff log, closed abuse cases and closed privacy requests with their erasure receipts
+ * are kept, then deleted: the UK's limitation period for most claims.
+ */
+export const SLOTLOCK_STAFF_RECORD_YEARS = 6;
 /** A blog post's slug, as site/src/lib/post-format.ts reads it (POST_SLUG). */
 export const SLOTLOCK_POST_SLUG_PATTERN = '^[a-z0-9]+(?:-[a-z0-9]+){0,15}$';
 /**
@@ -92,6 +110,9 @@ export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'abuse_cases',
   'maintenance_runs',
   'admin_cache',
+  'privacy_requests',
+  'privacy_erasure_receipts',
+  'privacy_keys',
 ] as const);
 
 /** The SECURITY DEFINER functions the console's role executes, and nothing else. */
@@ -134,6 +155,16 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_cache_read(text, text)',
   'slotlock.admin_cache_write(text, text, jsonb)',
   'slotlock.admin_content_record(text, text, text, jsonb)',
+  'slotlock.admin_privacy_open(text, text, text, text, date, text)',
+  'slotlock.admin_privacy_requests(text, boolean, bigint, integer)',
+  'slotlock.admin_privacy_request(text, bigint)',
+  'slotlock.admin_privacy_verify(text, bigint)',
+  'slotlock.admin_privacy_export(text, bigint)',
+  'slotlock.admin_privacy_erasure_ask(text, bigint)',
+  'slotlock.admin_privacy_erasure_approve(text, bigint)',
+  'slotlock.admin_privacy_erase(text, bigint)',
+  'slotlock.admin_privacy_close(text, bigint, text, text)',
+  'slotlock.admin_privacy_receipts(text, text)',
 ] as const);
 
 /** Functions only the deployment role runs (`slotlock staff …`): granted to no role. */
@@ -155,6 +186,8 @@ const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_reason_valid(text)',
   'slotlock.staff_customer_audit(text, text, text, text, text, text)',
   'slotlock.staff_cache_capability(text)',
+  'slotlock.staff_records_prune()',
+  'slotlock.privacy_digest(text)',
 ] as const;
 
 const roleList = SLOTLOCK_STAFF_ROLES.map((role) => `'${role}'`).join(', ');
@@ -1137,6 +1170,546 @@ END
 $slotlock_admin_content_record$;
 `;
 
+const privacyKinds = SLOTLOCK_PRIVACY_KINDS.map((value) => `'${value}'`).join(', ');
+const privacyConcerns = SLOTLOCK_PRIVACY_CONCERNS.map((value) => `'${value}'`).join(', ');
+const privacyOutcomes = SLOTLOCK_PRIVACY_OUTCOMES.map((value) => `'${value}'`).join(', ');
+/** Free text the privacy queue keeps: one line, no control characters, and no email address. */
+const privacyText = (column: string) => `char_length(${column}) BETWEEN 1 AND 200 AND ${column} !~ '[[:cntrl:]@]'`;
+
+/**
+ * Phase 5 (RFC 0006, M7): privacy requests. A request about an account holder is answered here:
+ * verified by a key named with the word the request was sent, then an export to their dashboard, or
+ * an erasure in an order that cannot change (Stripe first, a second Owner approves, erase, a
+ * receipt). One about an account's own customers is passed on to the account holder. The queue
+ * keeps no email address: a request is found by where it is in the privacy mailbox.
+ */
+const STAFF_PRIVACY_DDL = `
+CREATE TABLE IF NOT EXISTS slotlock.privacy_requests (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- The account; null once it is erased, when only its digest (privacy_digest) is kept.
+  account_ref text,
+  account_digest text NOT NULL,
+  kind text NOT NULL,
+  concerns text NOT NULL,
+  received_on date NOT NULL,
+  -- One month to answer (UK GDPR, Article 12(3)).
+  due_on date GENERATED ALWAYS AS ((received_on + interval '1 month')::date) STORED,
+  -- Where the request is: the privacy mailbox thread's subject or id, never an address.
+  reference text NOT NULL,
+  -- The word sent back; a key with it as its name, made after the request, shows the account is theirs.
+  verification_word text NOT NULL,
+  verified_by text,
+  verified_at timestamptz,
+  verified_key text,
+  export_id uuid,
+  erasure_asked_by text,
+  erasure_asked_at timestamptz,
+  erasure_approved_by text,
+  erasure_approved_at timestamptz,
+  status text NOT NULL DEFAULT 'open',
+  outcome text,
+  opened_by text NOT NULL,
+  opened_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  closed_by text,
+  closed_at timestamptz,
+  CONSTRAINT slotlock_privacy_requests_valid CHECK (
+    (account_ref IS NULL OR octet_length(account_ref) BETWEEN 1 AND 500)
+    AND (account_ref IS NOT NULL OR status <> 'open')
+    AND account_digest ~ '^[0-9a-f]{64}$'
+    AND kind IN (${privacyKinds}) AND concerns IN (${privacyConcerns})
+    AND ${privacyText('reference')}
+    AND verification_word ~ '^slotlock-[0-9a-f]{10}$'
+    AND (verified_at IS NULL) = (verified_by IS NULL)
+    AND (verified_key IS NULL OR verified_key ~ '^slk_(test_)?[0-9A-Za-z]{8}$')
+    AND (export_id IS NULL OR (concerns = 'account' AND kind IN ('access', 'export')))
+    AND (erasure_asked_at IS NULL) = (erasure_asked_by IS NULL)
+    AND (erasure_approved_at IS NULL) = (erasure_approved_by IS NULL)
+    AND (erasure_asked_at IS NULL OR (concerns = 'account' AND kind = 'erasure'))
+    AND (erasure_approved_at IS NULL OR (erasure_asked_at IS NOT NULL AND erasure_approved_by <> erasure_asked_by))
+    AND status IN ('open', ${privacyOutcomes})
+    AND (status = 'open') = (closed_at IS NULL)
+    AND (closed_at IS NULL) = (closed_by IS NULL)
+    AND (outcome IS NULL OR (${privacyText('outcome')}))
+    AND opened_by ~ '${STAFF_ACTOR_PATTERN}'
+    AND (verified_by IS NULL OR verified_by ~ '${STAFF_ACTOR_PATTERN}')
+    AND (closed_by IS NULL OR closed_by ~ '${STAFF_ACTOR_PATTERN}')
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_privacy_requests_open_idx ON slotlock.privacy_requests (due_on, id) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS slotlock_privacy_requests_account_idx ON slotlock.privacy_requests (account_ref) WHERE account_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS slotlock_privacy_requests_closed_idx ON slotlock.privacy_requests (closed_at) WHERE closed_at IS NOT NULL;
+ALTER TABLE slotlock.privacy_requests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.privacy_requests FROM PUBLIC;
+
+-- An erasure's receipt (RFC 0006, M7, step 4): the request, the erased account's digest, how many
+-- rows went, and who asked, approved and erased. No personal data of the account; it outlives it.
+CREATE TABLE IF NOT EXISTS slotlock.privacy_erasure_receipts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  request_id bigint NOT NULL UNIQUE REFERENCES slotlock.privacy_requests (id) ON DELETE CASCADE,
+  account_digest text NOT NULL,
+  rows_erased bigint NOT NULL,
+  asked_by text NOT NULL,
+  approved_by text NOT NULL,
+  erased_by text NOT NULL,
+  erased_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_privacy_erasure_receipts_valid CHECK (
+    account_digest ~ '^[0-9a-f]{64}$' AND rows_erased >= 0 AND approved_by <> asked_by
+    AND asked_by ~ '${STAFF_ACTOR_PATTERN}' AND approved_by ~ '${STAFF_ACTOR_PATTERN}'
+    AND erased_by ~ '${STAFF_ACTOR_PATTERN}'
+  )
+);
+ALTER TABLE slotlock.privacy_erasure_receipts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.privacy_erasure_receipts FROM PUBLIC;
+
+-- This deployment's secret for privacy_digest, made once: an erased account's digest cannot be
+-- worked out from a guessed reference by anyone without the database.
+CREATE TABLE IF NOT EXISTS slotlock.privacy_keys (
+  singleton boolean PRIMARY KEY DEFAULT true,
+  salt text NOT NULL,
+  CONSTRAINT slotlock_privacy_keys_valid CHECK (singleton AND salt ~ '^[0-9a-f]{64}$')
+);
+ALTER TABLE slotlock.privacy_keys ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.privacy_keys FROM PUBLIC;
+INSERT INTO slotlock.privacy_keys (salt)
+SELECT replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '')
+ WHERE NOT EXISTS (SELECT 1 FROM slotlock.privacy_keys);
+
+CREATE INDEX IF NOT EXISTS slotlock_staff_audit_events_occurred_idx ON slotlock.staff_audit_events (occurred_at);
+CREATE INDEX IF NOT EXISTS slotlock_abuse_cases_closed_idx ON slotlock.abuse_cases (closed_at) WHERE status = 'closed';
+
+-- An account's digest: SHA-256 of this deployment's secret and its reference.
+CREATE OR REPLACE FUNCTION slotlock.privacy_digest(account text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_privacy_digest$
+  SELECT encode(sha256(convert_to(secret.salt || ':' || account, 'UTF8')), 'hex')
+    FROM slotlock.privacy_keys secret WHERE secret.singleton;
+$slotlock_privacy_digest$;
+
+-- Log a privacy request (privacy.act): the account, what it asks for, whom it concerns, the day it
+-- arrived and where it is in the mailbox. Its word to send back is made here. The request's id.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_open(actor text, account text, request_kind text,
+  request_concerns text, received date, request_reference text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_open$
+DECLARE
+  added bigint;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  PERFORM slotlock.staff_account_known(account);
+  IF received IS NULL OR received > ${today} OR received < ${today} - 366 THEN
+    RAISE EXCEPTION 'privacy_received' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO slotlock.privacy_requests (account_ref, account_digest, kind, concerns, received_on, reference,
+                                         verification_word, opened_by)
+  VALUES (account, slotlock.privacy_digest(account), request_kind, request_concerns, received, request_reference,
+          'slotlock-' || left(md5(gen_random_uuid()::text), 10), actor)
+  RETURNING id INTO added;
+  PERFORM slotlock.staff_log(actor, 'privacy.opened', account, 'privacy:' || added, NULL,
+    jsonb_build_object('kind', request_kind, 'concerns', request_concerns));
+  RETURN added;
+EXCEPTION WHEN check_violation OR not_null_violation THEN
+  RAISE EXCEPTION 'privacy_request_invalid' USING ERRCODE = '22023';
+END
+$slotlock_admin_privacy_open$;
+
+-- The queue (privacy.act): open requests by due date, or every request, newest first.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_requests(actor text, open_only boolean, before bigint, page_limit integer)
+RETURNS TABLE (id bigint, account_ref text, kind text, concerns text, received_on date, due_on date,
+               status text, verified boolean, exporting boolean, erasure_asked boolean, erasure_approved boolean,
+               opened_by text, opened_at timestamptz, closed_at timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_requests$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  PERFORM slotlock.staff_log(actor, 'privacy.listed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT asked.id, asked.account_ref, asked.kind, asked.concerns, asked.received_on, asked.due_on, asked.status,
+         asked.verified_at IS NOT NULL, asked.export_id IS NOT NULL, asked.erasure_asked_at IS NOT NULL,
+         asked.erasure_approved_at IS NOT NULL, asked.opened_by, asked.opened_at, asked.closed_at
+    FROM slotlock.privacy_requests asked
+   WHERE (NOT coalesce(open_only, false) OR asked.status = 'open')
+     AND (before IS NULL OR asked.id < before)
+   ORDER BY CASE WHEN coalesce(open_only, false) THEN asked.due_on END, asked.id DESC
+   LIMIT LEAST(GREATEST(coalesce(page_limit, ${SLOTLOCK_ADMIN_PAGE_LIMIT}), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
+END
+$slotlock_admin_privacy_requests$;
+
+-- One request (privacy.act), with what its steps need: the key that would verify it, the export
+-- made for it (its counts by table, never its rows), the account's plan and Stripe ids, and the
+-- receipt once erased. Null when there is no such request.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_request(actor text, request_id bigint)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_request$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+  account text;
+  previous text := current_setting('slotlock.tenant_ref', true);
+  made jsonb;
+  plan jsonb;
+  proof jsonb;
+  receipt jsonb;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  SELECT * INTO asked FROM slotlock.privacy_requests found WHERE found.id = request_id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+  account := asked.account_ref;
+  IF account IS NOT NULL THEN
+    SELECT jsonb_build_object('plan', held.plan, 'status', held.status, 'stripe_customer', held.stripe_customer,
+                              'stripe_subscription', held.stripe_subscription,
+                              'live', held.stripe_subscription IS NOT NULL)
+      INTO plan FROM slotlock.tenant_plans held WHERE held.tenant_ref = account;
+    SELECT jsonb_build_object('prefix', key.prefix, 'created_by', key.created_by, 'created_at', key.created_at)
+      INTO proof FROM slotlock.api_keys key
+     WHERE key.tenant_ref = account AND key.name = asked.verification_word AND key.revoked_at IS NULL
+     ORDER BY key.created_at DESC LIMIT 1;
+    PERFORM set_config('slotlock.tenant_ref', account, true);
+    SELECT jsonb_build_object('id', made_export.id, 'status', made_export.status, 'created_at', made_export.created_at,
+                              'finished_at', made_export.finished_at, 'expires_at', made_export.expires_at,
+                              'rows', made_export.row_count, 'tables', made_export.tables, 'error', made_export.error)
+      INTO made FROM slotlock.tenant_exports made_export
+     WHERE made_export.id = asked.export_id AND made_export.tenant_ref = account;
+    PERFORM set_config('slotlock.tenant_ref', coalesce(previous, ''), true);
+  END IF;
+  SELECT jsonb_build_object('rows', kept.rows_erased, 'asked_by', kept.asked_by, 'approved_by', kept.approved_by,
+                            'erased_by', kept.erased_by, 'erased_at', kept.erased_at, 'digest', kept.account_digest)
+    INTO receipt FROM slotlock.privacy_erasure_receipts kept WHERE kept.request_id = asked.id;
+  PERFORM slotlock.staff_log(actor, 'privacy.viewed', account, 'privacy:' || asked.id, NULL, '{}'::jsonb);
+  RETURN (to_jsonb(asked) - 'account_digest')
+    || jsonb_build_object('export', made, 'plan', plan, 'proof', proof, 'receipt', receipt,
+                          'export_kept', CASE WHEN asked.export_id IS NULL THEN NULL ELSE made IS NOT NULL END);
+END
+$slotlock_admin_privacy_request$;
+
+-- Verify a request about an account (privacy.act): it is theirs when the account has a key, made
+-- since the request was logged and not revoked, named with the request's word, made by the
+-- person the account is or, for a team or an organization, by one of its Owners.
+-- 'verified', 'not_found' (no such key yet) or 'closed'.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_verify(actor text, request_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_verify$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+  proved text;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
+  IF NOT FOUND OR asked.status <> 'open' THEN
+    RETURN 'closed';
+  END IF;
+  IF asked.verified_at IS NOT NULL THEN
+    RETURN 'verified';
+  END IF;
+  SELECT key.prefix INTO proved FROM slotlock.api_keys key
+   WHERE key.tenant_ref = asked.account_ref AND key.name = asked.verification_word AND key.revoked_at IS NULL
+     AND key.created_at >= asked.opened_at
+     AND CASE
+           WHEN asked.account_ref ~ '^(github|google):' THEN key.created_by = asked.account_ref
+           WHEN asked.account_ref ~ '^(team|github-org):' THEN EXISTS (
+             SELECT 1 FROM slotlock.workspace_memberships member
+              WHERE member.tenant_ref = asked.account_ref AND member.person_ref = key.created_by
+                AND member.role = 'owner' AND member.status = 'active')
+           ELSE key.created_by IS NOT NULL
+         END
+   ORDER BY key.created_at DESC LIMIT 1;
+  IF proved IS NULL THEN
+    PERFORM slotlock.staff_log(actor, 'privacy.verification_failed', asked.account_ref, 'privacy:' || asked.id,
+      NULL, '{}'::jsonb);
+    RETURN 'not_found';
+  END IF;
+  UPDATE slotlock.privacy_requests waiting
+     SET verified_by = actor, verified_at = statement_timestamp(), verified_key = proved
+   WHERE waiting.id = asked.id;
+  PERFORM slotlock.staff_log(actor, 'privacy.verified', asked.account_ref, 'privacy:' || asked.id, NULL,
+    jsonb_build_object('key', proved));
+  RETURN 'verified';
+END
+$slotlock_admin_privacy_verify$;
+
+-- Start the export a verified access or export request asks for (privacy.act): the account's own
+-- export, built by the next maintenance pass and kept ${SLOTLOCK_PRIVACY_EXPORT_DAYS} days once ready, which its holder
+-- downloads from their dashboard's Privacy page. Staff never see its rows. Recorded in the
+-- account's audit log as Slotlock staff (E8). 'started', 'in_progress' (one is being built),
+-- 'limit' (five are kept), 'not_verified', 'not_export' or 'closed'.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_export(actor text, request_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_export$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+  account text;
+  previous text := current_setting('slotlock.tenant_ref', true);
+  pending integer;
+  kept integer;
+  made uuid;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
+  IF NOT FOUND OR asked.status <> 'open' THEN
+    RETURN 'closed';
+  END IF;
+  IF asked.concerns <> 'account' OR asked.kind NOT IN ('access', 'export') THEN
+    RETURN 'not_export';
+  END IF;
+  IF asked.verified_at IS NULL THEN
+    RETURN 'not_verified';
+  END IF;
+  account := asked.account_ref;
+  -- The lock createTenantExport takes, so two exports are never asked for at once.
+  PERFORM pg_advisory_xact_lock(hashtextextended('[' || to_json(account)::text || ',"tenant-export"]', 0));
+  PERFORM set_config('slotlock.tenant_ref', account, true);
+  SELECT count(*) FILTER (WHERE made_export.status = 'pending'), count(*) INTO pending, kept
+    FROM slotlock.tenant_exports made_export
+   WHERE made_export.tenant_ref = account AND made_export.expires_at > statement_timestamp();
+  -- Five kept at most (SLOTLOCK_MAX_TENANT_EXPORTS).
+  IF pending = 0 AND kept < 5 THEN
+    INSERT INTO slotlock.tenant_exports (tenant_ref, requested_by, expires_at)
+    VALUES (account, 'privacy:' || asked.id, statement_timestamp() + make_interval(days => ${SLOTLOCK_PRIVACY_EXPORT_DAYS}))
+    RETURNING tenant_exports.id INTO made;
+  END IF;
+  PERFORM set_config('slotlock.tenant_ref', coalesce(previous, ''), true);
+  IF made IS NULL THEN
+    PERFORM slotlock.staff_log(actor, 'privacy.export_refused', account, 'privacy:' || asked.id, NULL,
+      jsonb_build_object('pending', pending, 'kept', kept));
+    RETURN CASE WHEN pending > 0 THEN 'in_progress' ELSE 'limit' END;
+  END IF;
+  -- Maintenance visits the accounts it knows; this one may have had nothing to visit for.
+  INSERT INTO slotlock.maintenance_tenants (tenant_ref) VALUES (account) ON CONFLICT DO NOTHING;
+  UPDATE slotlock.privacy_requests waiting SET export_id = made WHERE waiting.id = asked.id;
+  PERFORM slotlock.staff_customer_audit(actor, account, 'export.created', 'export', made::text,
+    'Asked for in a privacy request');
+  PERFORM slotlock.staff_log(actor, 'privacy.export_started', account, 'privacy:' || asked.id, NULL,
+    jsonb_build_object('export', made));
+  RETURN 'started';
+END
+$slotlock_admin_privacy_export$;
+
+-- Ask for a verified erasure (privacy.erase), the first of the two Owners it needs, once the
+-- account's Stripe subscription is cancelled. 'asked', 'asked_already', 'subscription_live',
+-- 'not_verified', 'not_erasure' or 'closed'.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_erasure_ask(actor text, request_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_erasure_ask$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.erase');
+  SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
+  IF NOT FOUND OR asked.status <> 'open' THEN
+    RETURN 'closed';
+  END IF;
+  IF asked.concerns <> 'account' OR asked.kind <> 'erasure' THEN
+    RETURN 'not_erasure';
+  END IF;
+  IF asked.verified_at IS NULL THEN
+    RETURN 'not_verified';
+  END IF;
+  IF asked.erasure_asked_at IS NOT NULL THEN
+    RETURN 'asked_already';
+  END IF;
+  -- Step 1 comes first: the Stripe subscription is cancelled before an erasure is asked for.
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_plans held
+              WHERE held.tenant_ref = asked.account_ref AND held.stripe_subscription IS NOT NULL) THEN
+    PERFORM slotlock.staff_log(actor, 'privacy.erasure_refused', asked.account_ref, 'privacy:' || asked.id,
+      'the Stripe subscription is live', '{}'::jsonb);
+    RETURN 'subscription_live';
+  END IF;
+  UPDATE slotlock.privacy_requests waiting
+     SET erasure_asked_by = actor, erasure_asked_at = statement_timestamp()
+   WHERE waiting.id = asked.id;
+  PERFORM slotlock.staff_log(actor, 'privacy.erasure_asked', asked.account_ref, 'privacy:' || asked.id, NULL,
+    '{}'::jsonb);
+  RETURN 'asked';
+END
+$slotlock_admin_privacy_erasure_ask$;
+
+-- Approve an erasure another Owner asked for (privacy.erase; four eyes): the one who asked cannot,
+-- and not while a Stripe subscription is live. 'approved', 'own', 'subscription_live',
+-- 'approved_already', 'not_asked' or 'closed'.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_erasure_approve(actor text, request_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_erasure_approve$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.erase');
+  SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
+  IF NOT FOUND OR asked.status <> 'open' THEN
+    RETURN 'closed';
+  END IF;
+  IF asked.erasure_asked_at IS NULL THEN
+    RETURN 'not_asked';
+  END IF;
+  IF asked.erasure_approved_at IS NOT NULL THEN
+    RETURN 'approved_already';
+  END IF;
+  IF asked.erasure_asked_by = actor THEN
+    PERFORM slotlock.staff_log(actor, 'privacy.erasure_approval_refused', asked.account_ref, 'privacy:' || asked.id,
+      'the Owner who asked cannot approve', '{}'::jsonb);
+    RETURN 'own';
+  END IF;
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_plans held
+              WHERE held.tenant_ref = asked.account_ref AND held.stripe_subscription IS NOT NULL) THEN
+    PERFORM slotlock.staff_log(actor, 'privacy.erasure_refused', asked.account_ref, 'privacy:' || asked.id,
+      'the Stripe subscription is live', '{}'::jsonb);
+    RETURN 'subscription_live';
+  END IF;
+  UPDATE slotlock.privacy_requests waiting
+     SET erasure_approved_by = actor, erasure_approved_at = statement_timestamp()
+   WHERE waiting.id = asked.id;
+  PERFORM slotlock.staff_log(actor, 'privacy.erasure_approved', asked.account_ref, 'privacy:' || asked.id, NULL,
+    jsonb_build_object('asked_by', asked.erasure_asked_by));
+  RETURN 'approved';
+END
+$slotlock_admin_privacy_erasure_approve$;
+
+-- Erase the account an approved erasure request is about (privacy.erase), in the order that cannot
+-- change: no live Stripe subscription, a second Owner's approval, then everything the account
+-- keeps (slotlock.erase_tenant, with its test environment), its internal notes, its link from abuse
+-- cases, what the console cached about it, and its reference on every privacy request, all in one
+-- transaction with the receipt. 'erased', 'subscription_live', 'not_approved', 'not_verified',
+-- 'not_erasure' or 'closed'.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_erase(actor text, request_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_erase$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+  customer text;
+  gone bigint := 0;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.erase');
+  SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
+  IF NOT FOUND OR asked.status <> 'open' THEN
+    RETURN 'closed';
+  END IF;
+  IF asked.concerns <> 'account' OR asked.kind <> 'erasure' THEN
+    RETURN 'not_erasure';
+  END IF;
+  IF asked.verified_at IS NULL THEN
+    RETURN 'not_verified';
+  END IF;
+  IF asked.erasure_approved_at IS NULL THEN
+    RETURN 'not_approved';
+  END IF;
+  -- 1. Stripe first, checked again: the subscription is cancelled in Stripe, whose webhook takes it
+  -- off the plan, before anything goes (erase_tenant refuses an account that still has one).
+  IF EXISTS (SELECT 1 FROM slotlock.tenant_plans held
+              WHERE held.tenant_ref IN (asked.account_ref, asked.account_ref || '~test')
+                AND held.stripe_subscription IS NOT NULL) THEN
+    PERFORM slotlock.staff_log(actor, 'privacy.erasure_refused', asked.account_ref, 'privacy:' || asked.id,
+      'the Stripe subscription is live', '{}'::jsonb);
+    RETURN 'subscription_live';
+  END IF;
+  SELECT held.stripe_customer INTO customer FROM slotlock.tenant_plans held WHERE held.tenant_ref = asked.account_ref;
+  -- 3. Erase: the account, and its test environment when it has one.
+  SELECT gone + coalesce(sum(erased.erased_rows), 0) INTO gone FROM slotlock.erase_tenant(asked.account_ref) erased;
+  IF asked.account_ref !~ '~test$' AND octet_length(asked.account_ref) <= 495 THEN
+    SELECT gone + coalesce(sum(erased.erased_rows), 0) INTO gone
+      FROM slotlock.erase_tenant(asked.account_ref || '~test') erased;
+  END IF;
+  DELETE FROM slotlock.account_notes note WHERE note.account_ref IN (asked.account_ref, asked.account_ref || '~test');
+  UPDATE slotlock.abuse_cases linked SET account_ref = NULL, updated_at = statement_timestamp()
+   WHERE linked.account_ref IN (asked.account_ref, asked.account_ref || '~test');
+  DELETE FROM slotlock.admin_cache kept
+   WHERE customer IS NOT NULL AND kept.key = 'account:stripe:' || customer;
+  -- 4. The receipt, and the account's reference out of every privacy request.
+  INSERT INTO slotlock.privacy_erasure_receipts (request_id, account_digest, rows_erased, asked_by, approved_by, erased_by)
+  VALUES (asked.id, asked.account_digest, gone, asked.erasure_asked_by, asked.erasure_approved_by, actor);
+  UPDATE slotlock.privacy_requests other
+     SET account_ref = NULL,
+         status = CASE WHEN other.status = 'open' THEN 'done' ELSE other.status END,
+         outcome = CASE WHEN other.id = asked.id THEN 'Erased' ELSE coalesce(other.outcome, 'The account was erased') END,
+         closed_by = coalesce(other.closed_by, actor),
+         closed_at = coalesce(other.closed_at, statement_timestamp())
+   WHERE other.account_ref = asked.account_ref;
+  PERFORM slotlock.staff_log(actor, 'privacy.erased', asked.account_ref, 'privacy:' || asked.id, NULL,
+    jsonb_build_object('rows', gone, 'asked_by', asked.erasure_asked_by, 'approved_by', asked.erasure_approved_by));
+  RETURN 'erased';
+END
+$slotlock_admin_privacy_erase$;
+
+-- Close a request (privacy.act) as done, refused, withdrawn, or passed on to the account holder (one
+-- about their customer), with what was done in words. An erasure request is done only by erasing.
+-- False when it was closed already.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_close(actor text, request_id bigint, new_status text, why text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_close$
+DECLARE
+  asked slotlock.privacy_requests%ROWTYPE;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
+  IF NOT FOUND OR asked.status <> 'open' THEN
+    RETURN false;
+  END IF;
+  IF new_status IS NULL OR new_status NOT IN (${privacyOutcomes})
+     OR (new_status = 'done' AND asked.concerns = 'account' AND asked.kind = 'erasure')
+     OR (new_status = 'passed_on' AND asked.concerns <> 'customer') THEN
+    RAISE EXCEPTION 'privacy_close_invalid' USING ERRCODE = '22023';
+  END IF;
+  UPDATE slotlock.privacy_requests waiting
+     SET status = new_status, outcome = why, closed_by = actor, closed_at = statement_timestamp()
+   WHERE waiting.id = asked.id;
+  PERFORM slotlock.staff_log(actor, 'privacy.closed', asked.account_ref, 'privacy:' || asked.id, why,
+    jsonb_build_object('status', new_status));
+  RETURN true;
+EXCEPTION WHEN check_violation THEN
+  RAISE EXCEPTION 'privacy_close_invalid' USING ERRCODE = '22023';
+END
+$slotlock_admin_privacy_close$;
+
+-- Whether an account was erased (privacy.act): the receipts whose digest is the given reference's,
+-- for when someone asks. The reference itself is not recorded.
+CREATE OR REPLACE FUNCTION slotlock.admin_privacy_receipts(actor text, account text)
+RETURNS TABLE (request_id bigint, erased_at timestamptz, rows_erased bigint, asked_by text, approved_by text, erased_by text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_privacy_receipts$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  IF account IS NULL OR octet_length(account) NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION 'admin_account_unknown' USING ERRCODE = '22023';
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'privacy.receipts_checked', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN QUERY
+  SELECT kept.request_id, kept.erased_at, kept.rows_erased, kept.asked_by, kept.approved_by, kept.erased_by
+    FROM slotlock.privacy_erasure_receipts kept
+   WHERE kept.account_digest = slotlock.privacy_digest(account)
+   ORDER BY kept.erased_at DESC;
+END
+$slotlock_admin_privacy_receipts$;
+`;
+
 export const SLOTLOCK_STAFF_DDL = `
 -- Staff (RFC 0006): who may use the admin console, as which role. Added, changed and removed only
 -- by the deployment role (slotlock.staff_add and the others below), never by the console.
@@ -1267,6 +1840,10 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_refuse_staff_audit_change$
 BEGIN
+  -- Only an event past its ${SLOTLOCK_STAFF_RECORD_YEARS} years goes (staff_records_prune); nothing is ever changed.
+  IF TG_OP = 'DELETE' AND OLD.occurred_at < statement_timestamp() - interval '${SLOTLOCK_STAFF_RECORD_YEARS} years' THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'the staff audit log only grows' USING ERRCODE = '42501';
 END
 $slotlock_refuse_staff_audit_change$;
@@ -1274,15 +1851,42 @@ DROP TRIGGER IF EXISTS slotlock_staff_audit_events_frozen ON slotlock.staff_audi
 CREATE TRIGGER slotlock_staff_audit_events_frozen BEFORE UPDATE OR DELETE ON slotlock.staff_audit_events
   FOR EACH ROW EXECUTE FUNCTION slotlock.refuse_staff_audit_change();
 
+-- What the staff keep past their time goes, a little at a time, as staff use the console: events in
+-- the staff log, closed abuse cases, and closed privacy requests with their erasure receipts, each
+-- ${SLOTLOCK_STAFF_RECORD_YEARS} years after it happened or closed. The log's chain is then checked from the oldest
+-- event kept.
+CREATE OR REPLACE FUNCTION slotlock.staff_records_prune()
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_records_prune$
+DECLARE
+  cutoff timestamptz := statement_timestamp() - interval '${SLOTLOCK_STAFF_RECORD_YEARS} years';
+BEGIN
+  DELETE FROM slotlock.staff_audit_events old
+   WHERE old.chain_index IN (SELECT kept.chain_index FROM slotlock.staff_audit_events kept
+                              WHERE kept.occurred_at < cutoff ORDER BY kept.chain_index LIMIT 100);
+  DELETE FROM slotlock.abuse_cases old
+   WHERE old.id IN (SELECT kept.id FROM slotlock.abuse_cases kept
+                     WHERE kept.status = 'closed' AND kept.closed_at < cutoff ORDER BY kept.id LIMIT 100);
+  DELETE FROM slotlock.privacy_requests old
+   WHERE old.id IN (SELECT kept.id FROM slotlock.privacy_requests kept
+                     WHERE kept.closed_at < cutoff ORDER BY kept.id LIMIT 100);
+END
+$slotlock_staff_records_prune$;
+
 -- Add one event to the staff log. Called inside the functions below, in their transaction, so an
 -- action and its record commit together or not at all.
 CREATE OR REPLACE FUNCTION slotlock.staff_log(actor text, happened text, account text, detail text, why text, extra jsonb)
 RETURNS void
-LANGUAGE sql
+LANGUAGE plpgsql
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_staff_log$
+BEGIN
+  PERFORM slotlock.staff_records_prune();
   INSERT INTO slotlock.staff_audit_events (staff_ref, action, account_ref, target, reason, metadata)
   VALUES (actor, happened, account, detail, why, coalesce(extra, '{}'::jsonb));
+END
 $slotlock_staff_log$;
 
 -- The caller's role when it may use the capability; otherwise an error (42501), so nothing after
@@ -1431,6 +2035,9 @@ BEGIN
     'signups', (SELECT coalesce(jsonb_agg(jsonb_build_object('day', day, 'count', added) ORDER BY day), '[]'::jsonb) FROM signups),
     'staff', (SELECT count(*) FROM slotlock.staff_members member WHERE member.status = 'active'),
     'cases_open', (SELECT count(*) FROM slotlock.abuse_cases opened WHERE opened.status = 'open'),
+    'privacy_open', (SELECT count(*) FROM slotlock.privacy_requests asked WHERE asked.status = 'open'),
+    'privacy_due_soon', (SELECT count(*) FROM slotlock.privacy_requests asked
+                          WHERE asked.status = 'open' AND asked.due_on <= ${today} + 7),
     'billing_alerts_open', (SELECT count(*) FROM slotlock.billing_alerts open WHERE open.resolved_at IS NULL),
     'overrides_pending', (SELECT count(*) FROM slotlock.tenant_plan_overrides given
                            WHERE given.approved_at IS NULL AND given.ended_at IS NULL
@@ -1890,6 +2497,7 @@ $slotlock_staff_remove$;
 ${STAFF_SUPPORT_DDL}
 ${STAFF_BILLING_DDL}
 ${STAFF_CONTENT_DDL}
+${STAFF_PRIVACY_DDL}
 ${[...STAFF_HELPER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS]
   .map((signature) => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`)
   .join('\n')}

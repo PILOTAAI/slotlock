@@ -3,6 +3,7 @@
 // PostgreSQL (staff.integration.test.ts).
 import { describe, expect, it } from 'vitest';
 import { POST_SLUG } from '../../site/src/lib/post-format.js';
+import { SLOTLOCK_MAX_TENANT_EXPORTS } from '../store.js';
 import {
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_DEFINER_FUNCTIONS,
@@ -125,6 +126,30 @@ describe('the admin console schema', () => {
     // The CMS (Phase 4): the Owner and an Editor write posts; only the Owner publishes them (E5).
     expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'content.write'))).toEqual(['owner', 'editor']);
     expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'content.publish'))).toEqual(['owner']);
+  });
+
+  it('gives privacy requests to the Owner and Support, and an erasure to Owners only', () => {
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'privacy.act'))).toEqual(['owner', 'support']);
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'privacy.erase'))).toEqual(['owner']);
+  });
+
+  it('erases only in the checklist’s order, and keeps no account reference in a receipt', () => {
+    const body = functions.find((f) => f.name === 'slotlock.admin_privacy_erase')?.body ?? '';
+    const steps = [
+      "PERFORM slotlock.staff_require(actor, 'privacy.erase')",
+      'asked.verified_at IS NULL',
+      'asked.erasure_approved_at IS NULL',
+      'held.stripe_subscription IS NOT NULL',
+      'slotlock.erase_tenant(asked.account_ref)',
+      'INSERT INTO slotlock.privacy_erasure_receipts',
+      'UPDATE slotlock.privacy_requests other',
+    ].map((step) => body.indexOf(step));
+    for (const [index, at] of steps.entries()) expect(at, String(index)).toBeGreaterThan(index === 0 ? -1 : (steps[index - 1] as number));
+    const receipts = /CREATE TABLE IF NOT EXISTS slotlock\.privacy_erasure_receipts \(([\s\S]*?)\n\);/.exec(SLOTLOCK_STAFF_DDL)?.[1] ?? '';
+    expect(receipts).toContain('account_digest');
+    expect(receipts).not.toMatch(/\baccount_ref\b/);
+    // The export limit is the store's (createTenantExport).
+    expect(functions.find((f) => f.name === 'slotlock.admin_privacy_export')?.body).toContain(`kept < ${SLOTLOCK_MAX_TENANT_EXPORTS}`);
   });
 
   it('records a CMS step only for its role, and names the post by a slug the site reads', () => {

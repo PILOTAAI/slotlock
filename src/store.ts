@@ -69,7 +69,7 @@ import {
   slotlockCoverageChangeRenameSql,
   slotlockTenantLockKey,
 } from './ddl.js';
-import { createSlotlockAdminRoleGrantsDdl } from './staff-ddl.js';
+import { SLOTLOCK_PRIVACY_EXPORT_DAYS, createSlotlockAdminRoleGrantsDdl } from './staff-ddl.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import {
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
@@ -7679,7 +7679,10 @@ function buildSlotlockStore(
         const [row] = await tx<TenantExportRow[]>`
           UPDATE slotlock.tenant_exports
              SET status = 'ready', finished_at = statement_timestamp(),
-                 expires_at = statement_timestamp() + make_interval(hours => ${SLOTLOCK_TENANT_EXPORT_HOURS}),
+                 -- One staff made for a privacy request (admin_privacy_export) is kept a week.
+                 expires_at = statement_timestamp() + CASE
+                   WHEN requested_by LIKE 'privacy:%' THEN make_interval(days => ${SLOTLOCK_PRIVACY_EXPORT_DAYS})
+                   ELSE make_interval(hours => ${SLOTLOCK_TENANT_EXPORT_HOURS}) END,
                  parts = ${part}, row_count = ${totals.rows}, bytes = ${totals.bytes},
                  tables = ${tx.json(totals.tables as never)}
            WHERE id = ${exportId} AND tenant_ref = ${tenantRef}

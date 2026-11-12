@@ -369,6 +369,15 @@ pre.pop{max-height:320px;overflow:auto;font-size:12px}
 .tabs{display:flex;gap:4px;margin:0 0 12px}.tab{padding:6px 12px;border-radius:8px;color:var(--ink-2);text-decoration:none;font-weight:500}
 .tab[aria-current]{background:var(--paper);color:var(--ink);border:1px solid var(--line)}
 .sub-inline{color:var(--ink-3);font-size:13px}
+.steps{list-style:none;margin:0 0 20px;padding:0;display:grid;gap:12px}
+.step{display:grid;grid-template-columns:28px minmax(0,1fr);gap:12px;padding:14px 16px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius)}
+.step h3{margin:2px 0 6px;font-size:14px;font-weight:600}.step p{margin:0 0 8px;color:var(--ink-2)}.step p:last-child,.step form:last-child{margin-bottom:0}
+.step-mark{display:grid;place-items:center;width:28px;height:28px;border-radius:999px;border:1px solid var(--line);font:600 13px var(--mono);color:var(--ink-2)}
+.step.done .step-mark{background:var(--good-soft);border-color:var(--good);color:var(--good)}
+.word code{font-size:15px;padding:4px 8px;border-radius:8px;background:var(--canvas-2);border:1px solid var(--line)}
+.receipt{margin:0;display:grid;gap:8px}.receipt dt{color:var(--ink-3);font-size:12px}.receipt dd{margin:0}
+.choice{display:flex;gap:8px;align-items:center;font-weight:400}.form .choice input{width:auto}
+.tables{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));display:grid}
 .cms{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}
 .form.cms-main{max-width:none}
 .cms-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.cms-row>div{display:grid;gap:8px;align-content:start}

@@ -15,6 +15,10 @@ import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan } from '.
 import {
   SLOTLOCK_CASE_ACTIONS,
   SLOTLOCK_OVERRIDE_SOLO_DAYS,
+  SLOTLOCK_PRIVACY_CONCERNS,
+  SLOTLOCK_PRIVACY_EXPORT_DAYS,
+  SLOTLOCK_PRIVACY_KINDS,
+  SLOTLOCK_STAFF_RECORD_YEARS,
   SLOTLOCK_STAFF_NOTE_MAX,
   SLOTLOCK_STAFF_ROLES,
   type SlotlockContentStep,
@@ -147,6 +151,37 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   override_unchanged: { kind: 'warn', text: 'That override had ended already.' },
   alert_resolved: { kind: 'done', text: 'Alert resolved.' },
   alert_unchanged: { kind: 'warn', text: 'That alert was resolved already.' },
+  privacy_opened: { kind: 'done', text: 'Request logged. Reply with the word below, and ask the account holder to make an API key with it as its name.' },
+  privacy_verified: { kind: 'done', text: 'Verified: the account holder made a key named with the word after the request arrived.' },
+  privacy_not_verified: { kind: 'warn', text: 'No key named with the word yet, made by the account holder since the request arrived. Check again when they reply.' },
+  privacy_needs_verifying: { kind: 'warn', text: 'Verify the request first: it has to be shown to come from the account holder.' },
+  privacy_export_started: { kind: 'done', text: `Export started. The next maintenance pass builds it, within the hour, and it waits on the account's Privacy page for ${SLOTLOCK_PRIVACY_EXPORT_DAYS} days.` },
+  privacy_export_busy: { kind: 'warn', text: 'An export of this account is being built already. Start this one once it is ready.' },
+  privacy_export_limit: { kind: 'warn', text: 'The account keeps five exports already. Its holder deletes one, or one expires first.' },
+  privacy_erasure_asked: { kind: 'done', text: 'Erasure asked for. Another Owner approves it next.' },
+  privacy_erasure_approved: { kind: 'done', text: 'Erasure approved. It can be carried out once the Stripe subscription is not live.' },
+  privacy_erasure_own: { kind: 'warn', text: 'You asked for this erasure, so another Owner approves it.' },
+  privacy_not_approved: { kind: 'warn', text: "An erasure needs a second Owner's approval first." },
+  privacy_subscription_live: { kind: 'warn', text: "The account's Stripe subscription is still live. Cancel it in Stripe first; its webhook records that within a minute." },
+  privacy_erased: { kind: 'done', text: 'Erased. The receipt below is all that stays of the account here.' },
+  privacy_closed: { kind: 'done', text: 'Request closed.' },
+  privacy_unchanged: { kind: 'warn', text: 'That request is closed already, or that step is not one it has.' },
+  privacy_invalid: { kind: 'warn', text: 'Check the form: the account must exist, the date be today or earlier, and the reference and outcome one line each with no email address.' },
+});
+
+const PRIVACY_KIND_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  access: 'A copy of their data',
+  export: 'Their data to take elsewhere',
+  correction: 'A correction',
+  erasure: 'Erasure',
+  other: 'Something else',
+});
+const PRIVACY_STATUS_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  open: 'Open',
+  done: 'Done',
+  refused: 'Refused',
+  withdrawn: 'Withdrawn',
+  passed_on: 'Passed on',
 });
 
 const PLANS: readonly SlotlockPlan[] = ['free', 'developer', 'team'];
@@ -355,6 +390,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     ...(slotlockStaffMay(session.r, 'billing.read') ? [{ href: '/billing', label: 'Billing' }] : []),
     ...(slotlockStaffMay(session.r, 'accounts.read') ? [{ href: '/usage', label: 'Usage' }] : []),
     ...(slotlockStaffMay(session.r, 'safety.act') ? [{ href: '/cases', label: 'Cases' }] : []),
+    ...(slotlockStaffMay(session.r, 'privacy.act') ? [{ href: '/privacy', label: 'Privacy' }] : []),
     ...(slotlockStaffMay(session.r, 'content.write') ? [{ href: '/content', label: 'Content' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.read') ? [{ href: '/staff', label: 'Staff' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.log') ? [{ href: '/staff/log', label: 'Staff log' }] : []),
@@ -413,6 +449,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         ? [html`<li><a href="/billing#overrides">${count(n('overrides_pending'))} ${n('overrides_pending') === 1 ? 'override waits' : 'overrides wait'} for a second Owner</a></li>`]
         : []),
       ...(slotlockStaffMay(session.r, 'billing.read') ? billingDailyAttention(row?.home.billing_daily as unknown as { finished_at: string; attention: boolean } | null) : []),
+      ...(n('privacy_due_soon') > 0 && slotlockStaffMay(session.r, 'privacy.act')
+        ? [html`<li><a href="/privacy">${count(n('privacy_due_soon'))} privacy ${n('privacy_due_soon') === 1 ? 'request is' : 'requests are'} due within a week or overdue</a> <span class="sub">The law gives a month from when each arrived.</span></li>`]
+        : []),
       ...(n('cases_open') > 0 && slotlockStaffMay(session.r, 'safety.act')
         ? [html`<li><a href="/cases">${count(n('cases_open'))} open ${n('cases_open') === 1 ? 'case' : 'cases'}</a> <span class="sub">Each needs an action and an outcome.</span></li>`]
         : []),
@@ -625,6 +664,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
                 : html`<p class="fine">No cases.</p>`}
               <details class="act"><summary>Open a case</summary>${caseForm(session, ref)}</details>`
             : ''}
+          ${slotlockStaffMay(session.r, 'privacy.act')
+            ? html`<h3>Privacy</h3><p><a href="/privacy?${new URLSearchParams({ account: ref }).toString()}">Log a privacy request for this account</a></p>`
+            : ''}
           <h3>Notes</h3>
           ${notes.length
             ? html`<ul class="list notes">${notes.map((note, index) => html`<li><p class="pre">${note.body}</p><span class="sub">${authors[index] ?? note.staff_ref} · ${when(note.created_at)}</span></li>`)}</ul>`
@@ -720,6 +762,221 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         </aside>
       </div>`;
     return page(session, `Case #${id}`, '/cases', body, undefined, noticeOf(url));
+  }
+
+  // ---------- Privacy (RFC 0006, M7) ----------
+  interface PrivacyRow {
+    id: string;
+    account_ref: string | null;
+    kind: string;
+    concerns: string;
+    received_on: Date;
+    due_on: Date;
+    status: string;
+    verified: boolean;
+    exporting: boolean;
+    erasure_asked: boolean;
+    erasure_approved: boolean;
+    opened_by: string;
+    opened_at: Date;
+    closed_at: Date | null;
+  }
+  const isoDay = (value: Date | string) => (value instanceof Date ? value.toISOString() : String(value)).slice(0, 10);
+  /** How long is left: overdue, due within a week, or the date. */
+  function duePill(dueOn: Date | string, status: string): Html {
+    const due = Date.parse(`${isoDay(dueOn)}T23:59:59Z`);
+    if (status !== 'open') return html`${day(isoDay(dueOn))}`;
+    const days = Math.floor((due - now()) / DAY_MS);
+    if (days < 0) return html`${pill('Overdue', 'bad')}<span class="sub">${day(isoDay(dueOn))}</span>`;
+    if (days <= 7) return html`${pill(days === 0 ? 'Due today' : `Due in ${days} ${days === 1 ? 'day' : 'days'}`, 'warn')}<span class="sub">${day(isoDay(dueOn))}</span>`;
+    return html`${day(isoDay(dueOn))}`;
+  }
+  const privacyStatusPill = (status: string) =>
+    status === 'open' ? pill('Open', 'warn') : pill(PRIVACY_STATUS_WORDS[status] ?? status, status === 'done' || status === 'passed_on' ? 'good' : 'muted');
+
+  function privacyForm(session: Session, account: string | null): Html {
+    const kinds = SLOTLOCK_PRIVACY_KINDS.map((value) => html`<option value="${value}">${PRIVACY_KIND_WORDS[value] ?? value}</option>`);
+    return html`<form class="pop form" method="post" action="/privacy"><input type="hidden" name="csrf" value="${csrfOf(session)}">
+      <label for="privacy-account">Account <span class="hint">github:…, team:…, as on its page</span></label>
+      <input id="privacy-account" name="account" required maxlength="500" autocomplete="off" spellcheck="false" value="${account ?? ''}">
+      <label for="privacy-kind">They ask for</label><select id="privacy-kind" name="kind">${kinds}</select>
+      <label for="privacy-concerns">It is about</label><select id="privacy-concerns" name="concerns">${SLOTLOCK_PRIVACY_CONCERNS.map((value) =>
+        html`<option value="${value}">${value === 'account' ? 'The account holder (we answer it)' : 'One of the account’s customers (we pass it on)'}</option>`)}</select>
+      <label for="privacy-received">Arrived on</label><input id="privacy-received" name="received" type="date" required value="${isoDay(new Date(now()))}">
+      <label for="privacy-reference">Where it is <span class="hint">the privacy mailbox thread's subject or id; never an email address</span></label>
+      <input id="privacy-reference" name="reference" required maxlength="200" autocomplete="off">
+      <button class="btn" type="submit">Log the request</button></form>`;
+  }
+
+  async function privacyPage(session: Session, url: URL): Promise<Response> {
+    const all = url.searchParams.get('status') === 'all';
+    const before = /^[1-9][0-9]{0,17}$/.test(url.searchParams.get('before') ?? '') ? (url.searchParams.get('before') as string) : null;
+    const rows = await options.sql()<PrivacyRow[]>`
+      SELECT * FROM slotlock.admin_privacy_requests(${session.s}, ${!all}, ${all ? before : null}, ${PAGE})`;
+    const prefill = url.searchParams.get('account')?.slice(0, 500) || null;
+    const tab = (value: string, label: string) =>
+      html`<a class="tab" href="/privacy${value === 'open' ? '' : '?status=all'}" ${(value === 'all') === all ? new Html('aria-current="page"') : ''}>${label}</a>`;
+    const progress = (row: PrivacyRow) => {
+      if (row.concerns === 'customer') return html`<span class="sub-inline">${row.status === 'open' ? 'To pass on to the account holder' : 'For the account holder'}</span>`;
+      const steps = [row.verified ? 'Verified' : 'Not verified'];
+      if (row.exporting) steps.push('Export started');
+      if (row.erasure_asked) steps.push(row.erasure_approved ? 'Erasure approved' : 'Erasure asked');
+      return html`<span class="sub-inline">${steps.join(' · ')}</span>`;
+    };
+    const last = rows.at(-1)?.id;
+    const body = html`
+      ${pageHead('Privacy', 'Requests', 'Requests to see, take away, correct or erase data, each answered within a month of arriving. One about an account holder is answered here; one about an account’s own customer goes to the account holder, its controller.')}
+      <nav class="tabs" aria-label="Requests">${tab('open', 'Open')}${tab('all', 'All')}</nav>
+      <details class="act wide" ${prefill ? new Html('open') : ''}><summary>Log a request</summary>${privacyForm(session, prefill)}</details>
+      ${table('Privacy requests', ['Request', 'Account', 'Arrived', 'Due', 'Status', 'Progress'], rows.map((row) => [
+        html`<a href="/privacy/${row.id}">#${row.id} ${PRIVACY_KIND_WORDS[row.kind] ?? row.kind}</a><span class="sub">${row.concerns === 'account' ? 'The account holder' : 'An account’s customer'}</span>`,
+        row.account_ref ? html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>` : html`<span class="sub-inline">Erased</span>`,
+        html`${day(isoDay(row.received_on))}`,
+        duePill(row.due_on, row.status),
+        privacyStatusPill(row.status),
+        progress(row),
+      ]), all ? 'No requests yet.' : 'No open requests.')}
+      ${all && rows.length === PAGE && last ? html`<p class="pager"><a class="btn" href="/privacy?${new URLSearchParams({ status: 'all', before: last }).toString()}">Older</a></p>` : ''}
+      <h2>Was an account erased?</h2>
+      <form class="filters" method="get" action="/privacy/receipts" role="search">
+        <label class="sr-only" for="receipt-account">Account</label>
+        <input id="receipt-account" name="account" required maxlength="500" placeholder="github:…, team:…" autocomplete="off" spellcheck="false">
+        <button class="btn" type="submit">Look for a receipt</button>
+      </form>`;
+    return page(session, 'Privacy', '/privacy', body, undefined, noticeOf(url));
+  }
+
+  async function privacyReceipts(session: Session, url: URL): Promise<Response> {
+    const account = (url.searchParams.get('account') ?? '').trim().slice(0, 500);
+    if (!account) return redirect('/privacy');
+    const rows = await options.sql()<{ request_id: string; erased_at: Date; rows_erased: string; asked_by: string; approved_by: string; erased_by: string }[]>`
+      SELECT * FROM slotlock.admin_privacy_receipts(${session.s}, ${account})`;
+    const names = await staffNames(rows.flatMap((row) => [row.asked_by, row.approved_by, row.erased_by]));
+    const body = html`
+      ${pageHead('Privacy', 'Erasure receipts', html`For <span class="mono">${account}</span>. A receipt names the account only by a digest, which this lookup matches.`)}
+      ${table('Receipts', ['Request', 'Erased', 'Rows', 'Asked, approved and erased by'], rows.map((row, index) => [
+        html`<a href="/privacy/${row.request_id}">#${row.request_id}</a>`,
+        html`${when(row.erased_at)}`,
+        html`${count(row.rows_erased)}`,
+        html`${names[index * 3] ?? row.asked_by}, ${names[index * 3 + 1] ?? row.approved_by}, ${names[index * 3 + 2] ?? row.erased_by}`,
+      ]), 'No receipt: this console has not erased that account.')}
+      <p><a class="btn" href="/privacy">All requests</a></p>`;
+    return page(session, 'Erasure receipts', '/privacy', body);
+  }
+
+  async function privacyRequestPage(session: Session, id: string, url: URL): Promise<Response> {
+    const [row] = await options.sql()<{ found: Record<string, unknown> | null }[]>`SELECT slotlock.admin_privacy_request(${session.s}, ${id}::bigint) AS found`;
+    const found = row?.found;
+    if (!found) {
+      return respond(layout(shellOf(session, 'Not found', '/privacy'), pageHead('Privacy', 'No such request', `There is no request #${id}.`)), 404, { 'Set-Cookie': sessionCookie(session) });
+    }
+    const text = (key: string) => (typeof found[key] === 'string' ? (found[key] as string) : null);
+    const account_ = text('account_ref');
+    const open = found.status === 'open';
+    const kind = String(found.kind);
+    const aboutAccount = found.concerns === 'account';
+    const plan = found.plan as { plan?: string; status?: string; stripe_customer?: string | null; live?: boolean } | null;
+    const proof = found.proof as { prefix: string; created_by: string | null; created_at: string } | null;
+    const made = found.export as { id: string; status: string; finished_at: string | null; expires_at: string; rows: string | number; tables: Record<string, number>; error: string | null } | null;
+    const receipt = found.receipt as { rows: number; asked_by: string; approved_by: string; erased_by: string; erased_at: string; digest: string } | null;
+    const people = [text('opened_by'), text('verified_by'), text('erasure_asked_by'), text('erasure_approved_by'), text('closed_by'),
+      receipt?.erased_by ?? null].map((ref) => ref ?? '');
+    const names = await staffNames(people);
+    const nameOf = (index: number) => names[index] || people[index] || '';
+    const mayErase = slotlockStaffMay(session.r, 'privacy.erase');
+    const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}">`;
+    const step = (number: number, title: string, done: boolean, content: Html) =>
+      html`<li class="step${done ? ' done' : ''}"><span class="step-mark" aria-hidden="true">${done ? '✓' : String(number)}</span><div><h3>${title}<span class="sr-only">${done ? ': done' : ''}</span></h3>${content}</div></li>`;
+
+    const verifyStep = step(1, 'Show it comes from the account holder', Boolean(found.verified_at), found.verified_at
+      ? html`<p>Verified ${when(String(found.verified_at))} by ${nameOf(1)}, with the key <code>${text('verified_key') ?? ''}</code>.</p>`
+      : html`<p>Reply with this word and ask them to make an API key with it as its name, signed in to the dashboard as the account (for a team or an organization, as one of its Owners):</p>
+        <p class="word"><code>${String(found.verification_word)}</code> <button class="link" type="button" data-copy="${String(found.verification_word)}" hidden>Copy</button></p>
+        ${proof ? html`<p class="fine">A key with that name is there: <code>${proof.prefix}</code>, made ${when(proof.created_at)}${proof.created_by ? html` by <span class="mono">${proof.created_by}</span>` : ''}.</p>` : ''}
+        ${open ? html`<form method="post" action="/privacy/${id}/verify">${csrf}<button class="btn" type="submit">Check for the key</button></form>` : ''}`);
+
+    let steps: Html;
+    if (!aboutAccount) {
+      steps = html`<ol class="steps">${step(1, 'Pass it on to the account holder', !open, html`<p>The account holder is the controller of their customers' data, and answers with the Privacy page of their dashboard or the subject API. Tell the person so, and tell the account holder, then close it as passed on.</p>`)}</ol>`;
+    } else if (kind === 'erasure') {
+      const live = Boolean(plan?.live);
+      const asked = Boolean(found.erasure_asked_at);
+      const approved = Boolean(found.erasure_approved_at);
+      const stripeLink = plan?.stripe_customer ? html` <a href="https://dashboard.stripe.com/customers/${encodeURIComponent(plan.stripe_customer)}" rel="noreferrer">Open the customer in Stripe</a>.` : '';
+      steps = html`<ol class="steps">
+        ${verifyStep}
+        ${step(2, 'Cancel the Stripe subscription', Boolean(receipt) || !live, receipt ? html`<p>Done before the erasure.</p>` : live
+          ? html`<p>${pill('Live', 'bad')} The account pays for ${plan?.plan ?? 'a plan'} (${plan?.status ?? 'active'}). Cancel it in Stripe; the webhook records it within a minute.${stripeLink}</p>`
+          : html`<p>No live subscription${plan?.status ? html` (${plan.status})` : ''}.</p>`)}
+        ${step(3, 'A second Owner approves', approved, approved
+          ? html`<p>Asked by ${nameOf(2)} ${when(String(found.erasure_asked_at))}; approved by ${nameOf(3)} ${when(String(found.erasure_approved_at))}.</p>`
+          : asked
+            ? html`<p>Asked by ${nameOf(2)} ${when(String(found.erasure_asked_at))}. Another Owner approves it.</p>${open && mayErase && !live && text('erasure_asked_by') !== session.s
+              ? html`<form method="post" action="/privacy/${id}/erasure/approve">${csrf}<button class="btn" type="submit">Approve the erasure</button></form>` : ''}`
+            : html`<p>${live ? 'Once the subscription is cancelled, an' : 'An'} Owner asks for it, and another approves it.</p>${open && mayErase && !live && found.verified_at
+              ? html`<form method="post" action="/privacy/${id}/erasure/ask">${csrf}<button class="btn" type="submit">Ask for the erasure</button></form>` : ''}`)}
+        ${step(4, 'Erase the account', Boolean(receipt), receipt ? html`<p>Erased ${when(receipt.erased_at)} by ${nameOf(5)}: ${count(receipt.rows)} rows, and its test environment, notes and cached Stripe data; abuse cases kept, no longer linked to it.</p>`
+          : open && mayErase && approved && !live && found.verified_at
+            ? html`<form class="form danger-zone" method="post" action="/privacy/${id}/erase">${csrf}
+                <p>Everything the account keeps goes, at once and for good: resources, bookings, events, contacts, keys, webhooks, history, exports, its plan and usage, its members and sessions. A suspension stays, and the staff log keeps what staff did.</p>
+                <label class="choice"><input type="checkbox" name="confirm" value="yes" required> I understand this cannot be undone</label>
+                <button class="btn danger" type="submit">Erase the account</button></form>`
+            : html`<p class="fine">Once the steps above are done${mayErase ? '' : ', by an Owner'}.</p>`)}
+        ${step(5, 'Keep the receipt', Boolean(receipt), receipt
+          ? html`<dl class="receipt"><div><dt>Request</dt><dd>#${id}</dd></div><div><dt>Account</dt><dd class="mono">digest ${receipt.digest.slice(0, 16)}…</dd></div><div><dt>Asked, approved, erased</dt><dd>${nameOf(2)}, ${nameOf(3)}, ${nameOf(5)}</dd></div><div><dt>When</dt><dd>${when(receipt.erased_at)}</dd></div></dl>`
+          : html`<p class="fine">Made with the erasure: the request, the account's digest, the time and who approved. No personal data; it is kept ${String(SLOTLOCK_STAFF_RECORD_YEARS)} years.</p>`)}
+      </ol>`;
+    } else if (kind === 'access' || kind === 'export') {
+      const tables = made ? Object.entries(made.tables ?? {}).sort(([a], [b]) => a.localeCompare(b)) : [];
+      steps = html`<ol class="steps">
+        ${verifyStep}
+        ${step(2, 'Make the export', made?.status === 'ready', made
+          ? made.status === 'ready'
+            ? html`<p>${pill('Ready', 'good')} ${count(made.rows)} rows from ${count(tables.length)} tables, on the account's Privacy page until ${when(made.expires_at)}.</p>
+              <details class="act wide"><summary>Rows by table</summary><ul class="list tables">${tables.map(([name, rows]) => html`<li><code>${name}</code> <span class="sub-inline">${count(rows)}</span></li>`)}</ul></details>`
+            : made.status === 'pending'
+              ? html`<p>${pill('Being built', 'info')} The next maintenance pass builds it, within the hour.</p>`
+              : html`<p>${pill('Failed', 'bad')} ${made.error === 'export_too_large' ? 'It is over 512 MB: the operator runs slotlock tenant export and sends it.' : 'Start it again.'}</p>`
+          : found.export_kept === false
+            ? html`<p>The export made for it has been deleted (its time passed, or the holder deleted it).</p>`
+            : open && found.verified_at
+              ? html`<p>A copy of every table the account keeps, read at one moment, without secrets. Its holder downloads it from their dashboard; staff never see its rows.</p><form method="post" action="/privacy/${id}/export">${csrf}<button class="btn" type="submit">Start the export</button></form>`
+              : html`<p class="fine">Once it is verified.</p>`)}
+        ${step(3, 'Tell them where it is', !open, html`<p>Reply that it is on their dashboard's Privacy page for ${SLOTLOCK_PRIVACY_EXPORT_DAYS} days, then close the request.</p>`)}
+      </ol>`;
+    } else {
+      steps = html`<ol class="steps">${verifyStep}${step(2, kind === 'correction' ? 'Make the correction' : 'Answer it', !open, html`<p>${kind === 'correction' ? 'Most of an account the holder corrects in the dashboard; say how, or correct what they cannot.' : 'Answer it from the privacy mailbox.'} Then close it with what was done.</p>`)}</ol>`;
+    }
+
+    const outcomes = (['done', 'refused', 'withdrawn', 'passed_on'] as const).filter((value) =>
+      value === 'passed_on' ? !aboutAccount : !(value === 'done' && aboutAccount && kind === 'erasure'));
+    const body = html`
+      ${pageHead(`Privacy request #${id}`, PRIVACY_KIND_WORDS[kind] ?? kind, html`${privacyStatusPill(String(found.status))} ${duePill(String(found.due_on), String(found.status))}`,
+        html`<a class="btn" href="/privacy">All requests</a>`)}
+      <div class="grid-2">
+        <div>
+          <h2>Steps</h2>
+          ${steps}
+          ${open ? html`<h2>Close it</h2>
+            <form class="form" method="post" action="/privacy/${id}/close">${csrf}
+              <label for="privacy-status">As</label><select id="privacy-status" name="status">${outcomes.map((value) => html`<option value="${value}">${PRIVACY_STATUS_WORDS[value] ?? value}</option>`)}</select>
+              <label for="privacy-outcome">What was done <span class="hint">one line, no email address</span></label><input id="privacy-outcome" name="outcome" required maxlength="200" autocomplete="off">
+              <button class="btn" type="submit">Close the request</button>
+            </form>` : found.outcome ? html`<h2>Outcome</h2><p class="panel">${String(found.outcome)}</p>` : ''}
+        </div>
+        <aside class="panel rail" aria-label="Details">
+          <dl>
+            <div><dt>Account</dt><dd>${account_ ? html`<a class="mono" href="${accountHref(account_)}">${account_}</a>` : 'Erased'}</dd></div>
+            <div><dt>About</dt><dd>${aboutAccount ? 'The account holder' : 'One of the account’s customers'}</dd></div>
+            <div><dt>Arrived</dt><dd>${day(String(found.received_on))}</dd></div>
+            <div><dt>Due</dt><dd>${day(String(found.due_on))}</dd></div>
+            <div><dt>Where it is</dt><dd>${String(found.reference)}</dd></div>
+            <div><dt>Logged</dt><dd>${when(String(found.opened_at))}<span class="sub">${nameOf(0)}</span></dd></div>
+            ${found.closed_at ? html`<div><dt>Closed</dt><dd>${when(String(found.closed_at))}<span class="sub">${nameOf(4)}</span></dd></div>` : ''}
+          </dl>
+        </aside>
+      </div>`;
+    return page(session, `Privacy request #${id}`, '/privacy', body, undefined, noticeOf(url));
   }
 
   async function staff(session: Session): Promise<Response> {
@@ -1411,6 +1668,90 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         },
       };
     }
+    if (path === '/privacy') {
+      return {
+        capability: 'privacy.act',
+        back: '/privacy',
+        async run(form) {
+          const received = field(form, 'received');
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(received)) return { code: 'privacy_invalid', ok: false };
+          try {
+            const [row] = await sql<{ id: string }[]>`
+              SELECT slotlock.admin_privacy_open(${session.s}, ${field(form, 'account')}, ${field(form, 'kind')},
+                ${field(form, 'concerns')}, ${received}::date, ${field(form, 'reference')}) AS id`;
+            return { code: 'privacy_opened', ok: true, to: `/privacy/${String(row?.id)}` };
+          } catch (error) {
+            if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'privacy_invalid', ok: false };
+            throw error;
+          }
+        },
+      };
+    }
+    const onPrivacy = /^\/privacy\/([1-9][0-9]{0,17})\/(verify|export|erasure\/ask|erasure\/approve|erase|close)$/.exec(path);
+    if (onPrivacy) {
+      const id = onPrivacy[1] as string;
+      const back = `/privacy/${id}`;
+      const step = onPrivacy[2] as string;
+      const outcomeOf: Record<string, { code: keyof typeof NOTICES; ok: boolean }> = {
+        verified: { code: 'privacy_verified', ok: true },
+        not_found: { code: 'privacy_not_verified', ok: false },
+        started: { code: 'privacy_export_started', ok: true },
+        in_progress: { code: 'privacy_export_busy', ok: false },
+        limit: { code: 'privacy_export_limit', ok: false },
+        not_verified: { code: 'privacy_needs_verifying', ok: false },
+        asked: { code: 'privacy_erasure_asked', ok: true },
+        approved: { code: 'privacy_erasure_approved', ok: true },
+        own: { code: 'privacy_erasure_own', ok: false },
+        not_approved: { code: 'privacy_not_approved', ok: false },
+        subscription_live: { code: 'privacy_subscription_live', ok: false },
+        erased: { code: 'privacy_erased', ok: true },
+      };
+      const queries = {
+        verify: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_verify(${session.s}, ${id}::bigint) AS result`,
+        export: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_export(${session.s}, ${id}::bigint) AS result`,
+        erasure_ask: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erasure_ask(${session.s}, ${id}::bigint) AS result`,
+        erasure_approve: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erasure_approve(${session.s}, ${id}::bigint) AS result`,
+        erase: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erase(${session.s}, ${id}::bigint) AS result`,
+      };
+      const call = (fn: keyof typeof queries) => async () => {
+        const [row] = await queries[fn]();
+        return outcomeOf[String(row?.result)] ?? { code: 'privacy_unchanged' as const, ok: false };
+      };
+      switch (step) {
+        case 'verify':
+          return { capability: 'privacy.act', back, run: call('verify') };
+        case 'export':
+          return { capability: 'privacy.act', back, run: call('export') };
+        case 'erasure/ask':
+          return { capability: 'privacy.erase', back, run: call('erasure_ask') };
+        case 'erasure/approve':
+          return { capability: 'privacy.erase', back, run: call('erasure_approve') };
+        case 'erase':
+          return {
+            capability: 'privacy.erase',
+            back,
+            async run(form) {
+              if (field(form, 'confirm') !== 'yes') return { code: 'invalid', ok: false };
+              return call('erase')();
+            },
+          };
+        default:
+          return {
+            capability: 'privacy.act',
+            back,
+            async run(form) {
+              try {
+                const [row] = await sql<{ ok: boolean }[]>`
+                  SELECT slotlock.admin_privacy_close(${session.s}, ${id}::bigint, ${field(form, 'status')}, ${field(form, 'outcome')}) AS ok`;
+                return row?.ok ? { code: 'privacy_closed', ok: true } : { code: 'privacy_unchanged', ok: false };
+              } catch (error) {
+                if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'privacy_invalid', ok: false };
+                throw error;
+              }
+            },
+          };
+      }
+    }
     const onCase = /^\/cases\/([1-9][0-9]{0,17})$/.exec(path);
     if (onCase) {
       const id = onCase[1] as string;
@@ -1505,6 +1846,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     '/staff': 'staff.read',
     '/staff/log': 'staff.log',
     '/cases': 'safety.act',
+    '/privacy': 'privacy.act',
+    '/privacy/receipts': 'privacy.act',
     '/billing': 'billing.read',
     '/usage': 'accounts.read',
   };
@@ -1586,7 +1929,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
     const accountMatch = /^\/accounts\/([^/]+)$/.exec(path);
     const caseMatch = /^\/cases\/([1-9][0-9]{0,17})$/.exec(path);
-    const capability = accountMatch ? 'accounts.read' : caseMatch ? 'safety.act' : needs[path];
+    const privacyMatch = /^\/privacy\/([1-9][0-9]{0,17})$/.exec(path);
+    const capability = accountMatch ? 'accounts.read' : caseMatch ? 'safety.act' : privacyMatch ? 'privacy.act' : needs[path];
     if (!capability) {
       return respond(layout(shellOf(session, 'Not found', path), pageHead('Slotlock admin', 'Not found', 'There is no page at this address.')), 404, { 'Set-Cookie': sessionCookie(session) });
     }
@@ -1604,6 +1948,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return account(session, ref, url);
     }
     if (caseMatch) return casePage(session, caseMatch[1] as string, url);
+    if (privacyMatch) return privacyRequestPage(session, privacyMatch[1] as string, url);
+    if (path === '/privacy/receipts') return privacyReceipts(session, url);
+    if (path === '/privacy') return privacyPage(session, url);
     if (path === '/cases') return casesPage(session, url);
     if (path === '/billing') return billingPage(session, url);
     if (path === '/usage') return usagePage(session);
