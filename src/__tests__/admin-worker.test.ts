@@ -16,6 +16,7 @@ const env = (overrides: Partial<SlotlockAdminWorkerEnv> = {}, allow = true): Slo
   SLOTLOCK_ADMIN_GITHUB_CLIENT_ID: 'id',
   SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET: 'secret',
   SLOTLOCK_ADMIN_SESSION_SECRET: 's'.repeat(40),
+  SLOTLOCK_ADMIN_CONSOLE_KEY: 'k'.repeat(64),
   ...overrides,
 });
 
@@ -40,6 +41,10 @@ describe('the admin console Worker', () => {
     const { worker, opened, ctx } = harness();
     for (const broken of [
       env({ SLOTLOCK_ADMIN_SESSION_SECRET: '' }),
+      // The key `slotlock staff console-key` prints: without it the database opens no session.
+      env({ SLOTLOCK_ADMIN_CONSOLE_KEY: undefined as never }),
+      env({ SLOTLOCK_ADMIN_CONSOLE_KEY: 'too-short' }),
+      env({ SLOTLOCK_ADMIN_CONSOLE_KEY: 's'.repeat(40) }),
       env({ SLOTLOCK_ADMIN_ACCESS_AUD: 'set-this-to-the-access-application-aud' }),
       env({ SLOTLOCK_ADMIN_PUBLIC_URL: 'http://admin.example.com' }),
       env({ SLOTLOCK_ADMIN_RATE_LIMIT: undefined as never }),
