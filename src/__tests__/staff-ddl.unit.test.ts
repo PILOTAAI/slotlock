@@ -82,20 +82,29 @@ describe('the admin console schema', () => {
   });
 
   it('checks the staff role first in every admin function but sign-in', () => {
+    // The passkey step itself, signing out, and nothing else, works before a passkey.
+    const beforePasskey = ['admin_passkeys', 'admin_passkey_challenge', 'admin_passkey_enroll', 'admin_passkey_used', 'admin_sign_out', 'admin_record'];
     for (const signature of SLOTLOCK_ADMIN_FUNCTIONS) {
       if (signature.startsWith('slotlock.admin_sign_in(')) continue;
       const body = named(signature)?.body ?? '';
-      const check = body.indexOf('PERFORM slotlock.staff_require(actor, ');
-      expect(check, signature).toBeGreaterThan(-1);
+      // The caller names a session, never a member: the database says who acts.
+      const check = /actor := slotlock\.staff_session\(actor, '[a-z.]+', (true|false)\);/.exec(body);
+      expect(check, signature).not.toBeNull();
+      expect(check?.[1], signature).toBe(beforePasskey.some((name) => signature.startsWith(`slotlock.${name}(`)) ? 'true' : 'false');
       // Nothing is read or written before the check.
-      const before = body.slice(0, check);
+      const before = body.slice(0, check?.index ?? 0);
       expect(before, signature).not.toMatch(/\b(SELECT|INSERT|UPDATE|DELETE|set_config)\b/);
     }
+    // Sign-in opens a session only for the console's key, before it reads or writes anything else.
+    const signIn = named('slotlock.admin_sign_in(text, text)')?.body ?? '';
+    expect(signIn.indexOf("RAISE EXCEPTION 'admin_console_key'")).toBeLessThan(signIn.indexOf('UPDATE slotlock.staff_members'));
+    expect(SLOTLOCK_STAFF_DDL).not.toMatch(/GRANT[^;]*staff_console_keys|GRANT[^;]*staff_sessions/);
   });
 
   it('records every call in the staff log, except the reads the log itself and sign-in need', () => {
     // The log's own reads, sign-in's passkey list, and the provider cache (the page using it is logged).
-    const silent = ['slotlock.admin_staff_log(', 'slotlock.admin_passkeys(', 'slotlock.admin_cache_read(', 'slotlock.admin_cache_write('];
+    // And the session check every request makes (the page it serves records itself).
+    const silent = ['slotlock.admin_staff_log(', 'slotlock.admin_passkeys(', 'slotlock.admin_cache_read(', 'slotlock.admin_cache_write(', 'slotlock.admin_session(', 'slotlock.admin_passkey_challenge(', 'slotlock.admin_staff_log_chain('];
     for (const signature of SLOTLOCK_ADMIN_FUNCTIONS) {
       if (silent.some((prefix) => signature.startsWith(prefix))) continue;
       expect(named(signature)?.body, signature).toContain('slotlock.staff_log(');
@@ -155,7 +164,7 @@ describe('the admin console schema', () => {
   it('erases only in the checklist’s order, and keeps no account reference in a receipt', () => {
     const body = functions.find((f) => f.name === 'slotlock.admin_privacy_erase')?.body ?? '';
     const steps = [
-      "PERFORM slotlock.staff_require(actor, 'privacy.erase')",
+      "actor := slotlock.staff_session(actor, 'privacy.erase', false)",
       'asked.verified_at IS NULL',
       'asked.erasure_approved_at IS NULL',
       'held.stripe_subscription IS NOT NULL',
@@ -229,6 +238,7 @@ describe('the admin console schema', () => {
     );
     expect(table.slice(0, table.indexOf('\n);'))).not.toContain('tenant_ref');
     expect(SLOTLOCK_STAFF_DDL).toContain('BEFORE UPDATE OR DELETE ON slotlock.staff_audit_events');
+    expect(SLOTLOCK_STAFF_DDL).toContain('BEFORE TRUNCATE ON slotlock.staff_audit_events');
     expect(SLOTLOCK_STAFF_DDL).toContain("RAISE EXCEPTION 'the staff audit log only grows'");
   });
 });

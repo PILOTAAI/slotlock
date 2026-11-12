@@ -32,6 +32,8 @@ export interface SlotlockAdminWorkerEnv {
   SLOTLOCK_ADMIN_GITHUB_CLIENT_ID?: string;
   SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET?: string;
   SLOTLOCK_ADMIN_SESSION_SECRET?: string;
+  /** The console's key, as `slotlock staff console-key` printed it: staff sessions open only with it. */
+  SLOTLOCK_ADMIN_CONSOLE_KEY?: string;
   SLOTLOCK_ADMIN_GITHUB_TOKEN?: string;
   /** A restricted Stripe key that reads subscriptions and invoices: revenue and customers. */
   SLOTLOCK_ADMIN_STRIPE_KEY?: string;
@@ -76,6 +78,7 @@ const REQUIRED = [
   'SLOTLOCK_ADMIN_GITHUB_CLIENT_ID',
   'SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET',
   'SLOTLOCK_ADMIN_SESSION_SECRET',
+  'SLOTLOCK_ADMIN_CONSOLE_KEY',
 ] as const;
 
 function unavailable(text: string, status = 503): Response {
@@ -113,6 +116,7 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
       },
       publicUrl,
       sessionSecret: env.SLOTLOCK_ADMIN_SESSION_SECRET as string,
+      consoleKey: (env.SLOTLOCK_ADMIN_CONSOLE_KEY as string).trim(),
       github: {
         clientId: (env.SLOTLOCK_ADMIN_GITHUB_CLIENT_ID as string).trim(),
         clientSecret: (env.SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET as string).trim(),

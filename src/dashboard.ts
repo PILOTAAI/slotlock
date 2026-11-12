@@ -515,7 +515,7 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'staff.feature_changed': 'turned a feature on or off for the account',
 });
 /** What the Teams page says where staff turned off creating teams for the person's account (M11). */
-const TEAM_CREATION_OFF = 'Creating team workspaces is turned off for your account. Teams you are in work as before.';
+const TEAM_CREATION_OFF = 'Creating team workspaces is turned off for your account, or it is suspended. Teams you are in work as before.';
 /** How a dashboard's banner names an announcement's kind (RFC 0006, M10). */
 const ANNOUNCEMENT_LABELS: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
   maintenance: 'Planned maintenance',
@@ -2564,6 +2564,15 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     if (enabled) enabledOf.set(personal, enabled);
     teamListOf.set(personal, listed);
     roles.set(personal, 'owner');
+    // The person's own workspace, read for itself: its suspension and what staff turned on or off
+    // apply here as they would after a switch (RFC 0006, M11).
+    const own = tenantOf(personal);
+    const [ownSuspension, ownNotices] = await Promise.all([
+      workspaces.suspension ? workspaces.suspension(own) : Promise.resolve(null),
+      workspaces.notices ? workspaces.notices(own) : Promise.resolve(null),
+    ]);
+    if (ownSuspension) suspendedOf.set(personal, ownSuspension);
+    if (ownNotices) noticesOf.set(personal, ownNotices);
     setSlotlockDashboardRequestScope(null);
     return personal;
   }
@@ -4320,8 +4329,13 @@ ${
    * The assistant's records, when the assistant is on and the adapter keeps them, and staff have not
    * turned it off for the workspace's plan or account (RFC 0006, M11). Per request (Workers).
    */
-  const assistantStore = (session: Session): SlotlockAssistantStore | undefined =>
-    assistantOptions && noticesOf.get(session)?.features.assistant !== false ? options.resources.assistant : undefined;
+  const assistantStore = (session: Session): SlotlockAssistantStore | undefined => {
+    if (!assistantOptions) return undefined;
+    const notices = noticesOf.get(session);
+    // Where staff can turn it off, a session whose workspace was not read for that gets none.
+    if (!notices && options.workspaces?.notices) return undefined;
+    return notices?.features.assistant === false ? undefined : options.resources.assistant;
+  };
   const privateUrls = assistantOptions?.privateUrls === true;
   const assistantFetch =
     assistantOptions?.fetch ?? createSlotlockGuardedFetch({ allowPrivateNetworks: privateUrls });
@@ -6784,9 +6798,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   async function teamCreationOn(session: Session): Promise<boolean> {
     const own = personOf(session);
     const notices =
-      tenantOf(session) === own
-        ? noticesOf.get(session)
-        : await (workspaces?.notices?.(own) ?? Promise.resolve(undefined));
+      (tenantOf(session) === own ? noticesOf.get(session) : undefined) ??
+      (await (workspaces?.notices?.(own) ?? Promise.resolve(undefined)));
     return notices?.features.team_workspaces !== false;
   }
 
@@ -6862,6 +6875,9 @@ ${
     for (let attempt = 0; attempt < 4 && 'refusal' in made && made.refusal === 'handle_taken'; attempt += 1) {
       made = await teamStore.create(person, name, teamHandleFrom(name, attempt), cap);
     }
+    // The database refuses too, while staff have creating teams off or the person's own account
+    // is suspended: say which, not a role refusal.
+    if ('refusal' in made && made.refusal === 'not_allowed') return teamsPage(session, 403, TEAM_CREATION_OFF);
     if ('refusal' in made) return teamsPage(session, TEAM_REFUSALS[made.refusal].status, TEAM_REFUSALS[made.refusal].text);
     await audit(
       session,

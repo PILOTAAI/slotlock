@@ -16,7 +16,7 @@ import { createSlotlockDashboard, createSlotlockDashboardResources, createSlotlo
 import { createSlotlockMaintenanceRecord, startSlotlockMaintenance } from '../maintenance.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { createSlotlockDashboardWorkspaces } from '../workspaces.js';
-import { Browser, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha } from './helpers/admin-browser.js';
+import { Browser, CONSOLE_KEY, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha } from './helpers/admin-browser.js';
 import { FAKE_APP_ID, FAKE_INSTALLATION, FAKE_REPOSITORY, createFakeGithubRepo } from './helpers/fake-github-repo.js';
 
 const url = process.env.DATABASE_URL?.trim();
@@ -202,6 +202,7 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
       await ownerStore.grantAdminRole(adminRole);
       await ownerStore.grantApplicationRole(appRole);
       const expires = new Date(Date.now() + 86_400_000);
+      await tx`SELECT slotlock.staff_console_key(${sha(CONSOLE_KEY)}, 'cli:ops')`;
       await tx`SELECT slotlock.staff_add('github:1001', 'owner', 'cli:ops', ${sha('owner-code')}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1002', 'support', 'cli:ops', ${sha('support-code')}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1003', 'billing', 'cli:ops', ${sha('billing-code')}, ${expires})`;
@@ -234,7 +235,7 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     const options = {
       sql: () => adminSql,
       publicUrl: ORIGIN,
-      sessionSecret: 'a-test-session-secret-of-forty-characters',
+      sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async (request: Request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
       fetch: createGithubSignInFetch(STAFF, {}, providers),
@@ -408,7 +409,7 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     await broken.close();
 
     const [failure] = await superuser<{ tenant_ref: string; error: string; code: string; message: string }[]>`SELECT * FROM slotlock.maintenance_failures`;
-    expect(failure).toMatchObject({ tenant_ref: ADA, error: 'Error', code: 'XX000', message: 'Could not extend … past 2027-01-01' });
+    expect(failure).toMatchObject({ tenant_ref: ADA, error: 'Error', code: 'XX000', message: 'Could not extend …' });
     // The hour it ran in, counted, never naming the account.
     const [round] = await superuser<{ actor: string; attention: boolean; summary: Record<string, number> }[]>`
       SELECT actor, attention, summary FROM slotlock.maintenance_runs WHERE job = 'maintenance'`;
@@ -424,7 +425,7 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     const system = await text(staff.support, '/system');
     expect(system).toContain(`href="/accounts/${encodeURIComponent(ADA)}" class="mono">${ADA}</a>`);
     expect(system).toContain('<code>Error XX000</code>');
-    expect(system).toContain('Could not extend … past 2027-01-01');
+    expect(system).toContain('Could not extend …');
     expect(system).not.toContain('Weekly standup');
 
     // The next pass runs: the failure clears, and Home has nothing to say about it.
@@ -453,7 +454,7 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     expect((await form(staff.owner, '/system/flags', { flag: 'team_workspaces', plan: 'team', enabled: '0', reason: 'Team creation paused for the migration' }, '/system')).headers.get('location'))
       .toBe('/system?done=flag_set');
     const beaTeams = await customers.bea.page('/dashboard/teams');
-    expect(beaTeams).toContain('Creating team workspaces is turned off for your account.');
+    expect(beaTeams).toContain('Creating team workspaces is turned off for your account');
     expect(beaTeams).not.toContain('action="/dashboard/teams/create"');
     expect(await customers.ada.page('/dashboard/teams')).toContain('action="/dashboard/teams/create"');
 

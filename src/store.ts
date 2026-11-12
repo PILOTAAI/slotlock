@@ -68,8 +68,9 @@ import {
   createSlotlockTenantRlsDdl,
   slotlockCoverageChangeRenameSql,
   slotlockTenantLockKey,
+  SLOTLOCK_DEFINER_FUNCTIONS,
 } from './ddl.js';
-import { SLOTLOCK_PRIVACY_EXPORT_DAYS, createSlotlockAdminRoleGrantsDdl } from './staff-ddl.js';
+import { SLOTLOCK_ADMIN_FUNCTIONS, SLOTLOCK_PRIVACY_EXPORT_DAYS, createSlotlockAdminRoleGrantsDdl } from './staff-ddl.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import {
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
@@ -5601,6 +5602,25 @@ function buildSlotlockStore(
                     FROM ordinary, pg_catalog.pg_parameter_acl setting
                    CROSS JOIN LATERAL pg_catalog.aclexplode(setting.paracl) acl
                    WHERE acl.grantee IN (ordinary.oid, 0)
+            -- The admin console's role reads and writes nothing but through its functions (RFC
+            -- 0006, 4.4): no right on a slotlock table, view or sequence, and none of the serving
+            -- role's functions, held itself, through a role it belongs to (the serving role's
+            -- grants), or through PUBLIC. The serving role holds no admin function either.
+            UNION SELECT 'a right on slotlock table ' || rel.relname
+                    FROM ordinary, slotlock, pg_catalog.pg_class rel
+                   WHERE ${noun} = 'admin' AND rel.relnamespace = slotlock.oid
+                     AND rel.relkind IN ('r', 'p', 'v', 'm', 'f')
+                     AND (pg_catalog.has_table_privilege(ordinary.oid, rel.oid, 'SELECT, INSERT, UPDATE, DELETE')
+                          OR pg_catalog.has_any_column_privilege(ordinary.oid, rel.oid, 'SELECT, INSERT, UPDATE'))
+            UNION SELECT 'a right on slotlock sequence ' || rel.relname
+                    FROM ordinary, slotlock, pg_catalog.pg_class rel
+                   WHERE ${noun} = 'admin' AND rel.relnamespace = slotlock.oid AND rel.relkind = 'S'
+                     AND pg_catalog.has_sequence_privilege(ordinary.oid, rel.oid, 'USAGE, SELECT, UPDATE')
+            UNION SELECT 'EXECUTE on ' || fn.signature
+                    FROM ordinary,
+                         pg_catalog.unnest(${noun === 'admin' ? [...SLOTLOCK_DEFINER_FUNCTIONS] : [...SLOTLOCK_ADMIN_FUNCTIONS]}::text[]) AS fn (signature)
+                   WHERE pg_catalog.to_regprocedure(fn.signature) IS NOT NULL
+                     AND pg_catalog.has_function_privilege(ordinary.oid, pg_catalog.to_regprocedure(fn.signature), 'EXECUTE')
           )
           SELECT EXISTS (SELECT 1 FROM target) AS found,
                  ARRAY(SELECT reason FROM reasons ORDER BY reason) AS reasons`;

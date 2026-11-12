@@ -145,7 +145,7 @@ export function slotlockSitePage(data: SlotlockSitePageData): Html {
         <div>
           <h3>Top pages</h3>
           ${table('Top pages by page loads', ['Page', 'Page loads'], report.pages.map((row) => [
-            html`<a href="${site}${row.path}" rel="noreferrer">${row.path}</a>`, html`${count(row.count)}`,
+            row.path.startsWith('/') ? html`<a href="${site}${row.path}" rel="noreferrer">${row.path}</a>` : html`${row.path}`, html`${count(row.count)}`,
           ]), 'No page loads in this period.')}
         </div>
         <div>
@@ -374,7 +374,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
       html`${count(row.failures)}`,
       html`<code>${row.error}${row.code ? ` ${row.code}` : ''}</code>${row.message ? html`<span class="sub">${row.message}</span>` : ''}`,
     ]), 'Every account’s last pass ran.')}
-    <p class="fine">The error's class, code and first line, with anything in quotes taken out: never the account's data. Cleared when a pass runs; kept ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days otherwise.</p>
+    <p class="fine">The error's class, code and first line up to its first quotation mark, where a value would start: never the account's data. Cleared when a pass runs; kept ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days otherwise.</p>
     <h3>The last day, by server hour</h3>
     ${table('Maintenance hours', ['Hour to', 'Passes', 'Failed', 'Extended', 'Pruned', 'Released'], system.rounds.map((round) => [
       html`${when(round.finished_at)}<span class="sub">from ${when(round.started_at)}</span>`,

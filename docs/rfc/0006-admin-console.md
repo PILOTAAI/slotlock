@@ -781,7 +781,7 @@ runs.
     through the App with Actions (read).
   - **Maintenance**: `slotlock serve` records each account whose pass failed
     (`maintenance_failures`: when, how often, and the error's class, code and first line with
-    anything in quotes taken out), clears it when a pass runs, and records each hour's passes as
+    the line cut at its first quotation mark), clears it when a pass runs, and records each hour's passes as
     `maintenance_runs` job `maintenance`, counted and never naming an account. Home says when
     maintenance is failing for an account, or no server has recorded an hour in three.
   - **Webhooks**: endpoints failing or turned off across up to 5,000 accounts, as counts, read

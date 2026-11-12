@@ -82,6 +82,11 @@ export interface SlotlockAdminOptions {
   publicUrl: string;
   /** 32+ random characters; seals sessions and the sign-in in progress. */
   sessionSecret: string;
+  /**
+   * The console's key (`slotlock staff console-key`): the database opens a staff session only for
+   * a caller that shows it, so the console's database credential alone acts as no one.
+   */
+  consoleKey: string;
   github: { clientId: string; clientSecret: string };
   /**
    * Cloudflare Access (createSlotlockAccessVerifier). Null only with `insecureWithoutAccess`, for a
@@ -133,6 +138,8 @@ export interface SlotlockAdmin {
 const SESSION_COOKIE = '__Host-slotlock-admin';
 const OAUTH_COOKIE = '__Host-slotlock-admin-oauth';
 const PASSKEY_COOKIE = '__Host-slotlock-admin-passkey';
+/** What an action just did, for the page it went back to: a notice shows only with it. */
+const NOTICE_COOKIE = '__Host-slotlock-admin-notice';
 const SESSION_MS = 8 * 60 * 60 * 1000;
 const IDLE_MS = 30 * 60 * 1000;
 /** A passkey sign-in this recent lets a member register another passkey. */
@@ -142,8 +149,10 @@ const GITHUB_CACHE_MS = 60 * 60 * 1000;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 /** A person's account, whose dashboard sessions staff can see and end. */
-const PERSON_REF = /^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$/;
+const PERSON_REF = /^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A staff session's token, as slotlock.admin_sign_in makes it. */
+const SESSION_TOKEN = /^stf_[0-9a-f]{64}$/;
 /** A page the passkey step may send the browser back to: this console's own path, never another site. */
 const LOCAL_PATH = /^\/(?![/\\])[^\s]*$/;
 
@@ -270,6 +279,11 @@ interface CaseRow {
 interface Session {
   /** staff_ref: github:<id> */
   s: string;
+  /**
+   * The database's session token (slotlock.admin_sign_in): every admin function takes it, and the
+   * database, not this cookie, says who it is and whether it still holds.
+   */
+  t: string;
   /** GitHub login, shown in the console only (never stored in the database). */
   l: string;
   r: SlotlockStaffRole;
@@ -299,6 +313,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const origin = new URL(options.publicUrl).origin;
   const rpId = new URL(options.publicUrl).hostname;
   if (options.sessionSecret.length < 32) throw new Error('SLOTLOCK_ADMIN_SESSION_SECRET must be 32+ characters');
+  if (typeof options.consoleKey !== 'string' || options.consoleKey.length < 32 || options.consoleKey.length > 200) {
+    throw new Error('SLOTLOCK_ADMIN_CONSOLE_KEY must be the key `slotlock staff console-key` printed');
+  }
+  if (options.consoleKey === options.sessionSecret) {
+    throw new Error('SLOTLOCK_ADMIN_CONSOLE_KEY must not be the session secret');
+  }
   if (options.access === null && !options.insecureWithoutAccess) {
     throw new Error('the admin console needs Cloudflare Access (SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN and SLOTLOCK_ADMIN_ACCESS_AUD)');
   }
@@ -361,9 +381,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   function readSession(request: Request): Session | null {
     const session = unseal<Session>('session', cookies(request).get(SESSION_COOKIE));
     if (!session || !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(session.r)) return null;
+    if (typeof session.t !== 'string' || !SESSION_TOKEN.test(session.t)) return null;
     if (now() - session.seen > IDLE_MS) return null;
     return session;
   }
+  const noticeCookie = (to: string, code: string) =>
+    cookie(NOTICE_COOKIE, seal('notice', { c: code, p: new URL(to, origin).pathname, exp: now() + 60_000 }), 60);
   const sessionCookie = (session: Session) =>
     cookie(SESSION_COOKIE, seal('session', { ...session, seen: now() }), Math.ceil((session.exp - now()) / 1000));
 
@@ -405,7 +428,15 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           'User-Agent': 'slotlock-admin',
           ...(options.githubToken ? { Authorization: `Bearer ${options.githubToken}` } : {}),
         },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(5000),
       });
+      // Only "no such account" is kept for the hour; a slow, limited or failing GitHub is asked
+      // again in a minute.
+      if (!response.ok && response.status !== 404) {
+        githubCache.set(path, { value: null, until: now() + 60_000 });
+        return null;
+      }
       if (response.ok) {
         const body = (await response.json()) as { id?: unknown; login?: unknown; type?: unknown };
         if (typeof body.id === 'number' && typeof body.login === 'string') {
@@ -413,7 +444,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         }
       }
     } catch {
-      value = null;
+      // No answer in time: asked again in a minute, never kept as "no such account".
+      githubCache.set(path, { value: null, until: now() + 60_000 });
+      return null;
     }
     if (githubCache.size > 2000) githubCache.clear();
     githubCache.set(path, { value, until: now() + GITHUB_CACHE_MS });
@@ -456,8 +489,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return code && Object.hasOwn(NOTICES, code) ? NOTICES[code] : undefined;
   };
   /** GitHub logins for staff references (github:<id>); a cli:<user> stays as it is. */
-  const staffNames = (refs: readonly string[]) =>
-    Promise.all(refs.map(async (ref) => (ref.startsWith('github:') ? ((await loginOf(ref)) ?? ref) : ref)));
+  const staffNames = async (refs: readonly string[]) => {
+    // Each member looked up once, however many rows name them.
+    const unique = [...new Set(refs)];
+    const names = new Map(await Promise.all(unique.map(async (ref) => [ref, ref.startsWith('github:') ? ((await loginOf(ref)) ?? ref) : ref] as const)));
+    return refs.map((ref) => names.get(ref) ?? ref);
+  };
 
   const kindPill = (kind: string) => pill(kind, kind === 'test' ? 'warn' : 'muted');
   const planPill = (plan: string | null) =>
@@ -495,7 +532,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   async function home(session: Session): Promise<Response> {
     const sql = options.sql();
     const [row] = await sql<{ home: Record<string, number | { day: string; count: number }[]> }[]>`
-      SELECT slotlock.admin_home(${session.s}) AS home`;
+      SELECT slotlock.admin_home(${session.t}) AS home`;
     const n = (key: string) => Number(row?.home[key] ?? 0);
     const change = (current: number, previous: number) =>
       previous === 0 ? null : `${current >= previous ? '+' : ''}${Math.round(((current - previous) / previous) * 100)}% on last month`;
@@ -545,12 +582,15 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const plan = ['free', 'developer', 'team'].includes(url.searchParams.get('plan') ?? '') ? url.searchParams.get('plan') : null;
     const status = ['active', 'suspended'].includes(url.searchParams.get('status') ?? '') ? url.searchParams.get('status') : null;
     const after = url.searchParams.get('after')?.slice(0, 500) || null;
-    const githubFor = url.searchParams.get('for');
+    // The login a search found, only when GitHub says that id is that login: a link cannot label an
+    // account with a login of its choosing.
+    const asked = url.searchParams.get('for');
+    const githubFor = asked && /^[1-9][0-9]{0,19}$/.test(q) && (await loginOf(`github:${q}`))?.toLowerCase() === asked.toLowerCase() ? asked : null;
     const sql = options.sql();
     const rows = await sql<{
       account_ref: string; kind: string; name: string | null; created_at: Date | null; last_active: Date | null;
       plan: string; plan_status: string | null; suspended: boolean; operations_month: string; bookings_month: string;
-    }[]>`SELECT * FROM slotlock.admin_accounts(${session.s}, ${q || null}, ${plan}, ${status}, ${after}, ${PAGE})`;
+    }[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${q || null}, ${plan}, ${status}, ${after}, ${PAGE})`;
     const named = await Promise.all(
       rows.map(async (row) => row.name ?? (row.kind === 'person' && row.account_ref.startsWith('github:') && rows.length <= 10 ? await loginOf(row.account_ref) : null)),
     );
@@ -589,7 +629,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
   async function account(session: Session, ref: string, url: URL): Promise<Response> {
     const sql = options.sql();
-    const [row] = await sql<{ account: Record<string, unknown> | null }[]>`SELECT slotlock.admin_account(${session.s}, ${ref}) AS account`;
+    const [row] = await sql<{ account: Record<string, unknown> | null }[]>`SELECT slotlock.admin_account(${session.t}, ${ref}) AS account`;
     const data = row?.account;
     if (!data) {
       return respond(layout(shellOf(session, 'Not found', '/accounts'), html`${pageHead('Accounts', 'No such account', html`No account has the reference <code>${ref}</code>.`)}`), 404, { 'Set-Cookie': sessionCookie(session) });
@@ -599,20 +639,20 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const safety = slotlockStaffMay(session.r, 'safety.act');
     const [keys, usage, audit, login, sessions, notes, cases, overrides] = await Promise.all([
       sql<{ id: string; name: string; prefix: string; scopes: string[]; created_at: Date; expires_at: Date | null; last_used_at: Date | null; revoked_at: Date | null }[]>`
-        SELECT * FROM slotlock.admin_account_keys(${session.s}, ${ref})`,
-      sql<{ day: Date; metric: string; count: string }[]>`SELECT * FROM slotlock.admin_account_usage(${session.s}, ${ref}, 30)`,
+        SELECT * FROM slotlock.admin_account_keys(${session.t}, ${ref})`,
+      sql<{ day: Date; metric: string; count: string }[]>`SELECT * FROM slotlock.admin_account_usage(${session.t}, ${ref}, 30)`,
       sql<{ occurred_at: Date; action: string; actor_type: string; actor_ref: string; target_type: string | null; target_ref: string | null; outcome: string; reason: string | null }[]>`
-        SELECT * FROM slotlock.admin_account_audit(${session.s}, ${ref}, 50)`,
+        SELECT * FROM slotlock.admin_account_audit(${session.t}, ${ref}, 50)`,
       loginOf(ref),
       person
         ? sql<{ handle: string; started_at: Date; last_seen_at: Date; expires_at: Date }[]>`
-            SELECT * FROM slotlock.admin_account_sessions(${session.s}, ${ref})`
+            SELECT * FROM slotlock.admin_account_sessions(${session.t}, ${ref})`
         : Promise.resolve([]),
-      sql<{ id: string; staff_ref: string; body: string; created_at: Date }[]>`SELECT * FROM slotlock.admin_account_notes(${session.s}, ${ref})`,
+      sql<{ id: string; staff_ref: string; body: string; created_at: Date }[]>`SELECT * FROM slotlock.admin_account_notes(${session.t}, ${ref})`,
       safety
-        ? sql<CaseRow[]>`SELECT * FROM slotlock.admin_cases(${session.s}, ${null}, ${ref}, ${null}, ${20})`
+        ? sql<CaseRow[]>`SELECT * FROM slotlock.admin_cases(${session.t}, ${null}, ${ref}, ${null}, ${20})`
         : Promise.resolve([] as CaseRow[]),
-      sql<OverrideRow[]>`SELECT * FROM slotlock.admin_account_overrides(${session.s}, ${ref})`,
+      sql<OverrideRow[]>`SELECT * FROM slotlock.admin_account_overrides(${session.t}, ${ref})`,
     ]);
     const plan = await planSection(session, ref, data, overrides);
     const authors = await staffNames(notes.map((note) => note.staff_ref));
@@ -759,7 +799,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const status = wanted === 'closed' || wanted === 'all' ? wanted : 'open';
     const after = /^[1-9][0-9]{0,17}$/.test(url.searchParams.get('after') ?? '') ? (url.searchParams.get('after') as string) : null;
     const rows = await options.sql()<CaseRow[]>`
-      SELECT * FROM slotlock.admin_cases(${session.s}, ${status === 'all' ? null : status}, ${null}, ${after}, ${PAGE})`;
+      SELECT * FROM slotlock.admin_cases(${session.t}, ${status === 'all' ? null : status}, ${null}, ${after}, ${PAGE})`;
     const tab = (value: string, label: string) =>
       html`<a class="tab" href="/cases?status=${value}" ${status === value ? new Html('aria-current="page"') : ''}>${label}</a>`;
     const last = rows.at(-1)?.id;
@@ -780,7 +820,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   async function casePage(session: Session, id: string, url: URL): Promise<Response> {
-    const [row] = await options.sql()<{ found: Record<string, unknown> | null }[]>`SELECT slotlock.admin_case(${session.s}, ${id}::bigint) AS found`;
+    const [row] = await options.sql()<{ found: Record<string, unknown> | null }[]>`SELECT slotlock.admin_case(${session.t}, ${id}::bigint) AS found`;
     const found = row?.found;
     if (!found) {
       return respond(layout(shellOf(session, 'Not found', '/cases'), pageHead('Cases', 'No such case', `There is no case #${id}.`)), 404, { 'Set-Cookie': sessionCookie(session) });
@@ -875,7 +915,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const all = url.searchParams.get('status') === 'all';
     const before = /^[1-9][0-9]{0,17}$/.test(url.searchParams.get('before') ?? '') ? (url.searchParams.get('before') as string) : null;
     const rows = await options.sql()<PrivacyRow[]>`
-      SELECT * FROM slotlock.admin_privacy_requests(${session.s}, ${!all}, ${all ? before : null}, ${PAGE})`;
+      SELECT * FROM slotlock.admin_privacy_requests(${session.t}, ${!all}, ${all ? before : null}, ${PAGE})`;
     const prefill = url.searchParams.get('account')?.slice(0, 500) || null;
     const tab = (value: string, label: string) =>
       html`<a class="tab" href="/privacy${value === 'open' ? '' : '?status=all'}" ${(value === 'all') === all ? new Html('aria-current="page"') : ''}>${label}</a>`;
@@ -913,7 +953,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const account = (url.searchParams.get('account') ?? '').trim().slice(0, 500);
     if (!account) return redirect('/privacy');
     const rows = await options.sql()<{ request_id: string; erased_at: Date; rows_erased: string; asked_by: string; approved_by: string; erased_by: string }[]>`
-      SELECT * FROM slotlock.admin_privacy_receipts(${session.s}, ${account})`;
+      SELECT * FROM slotlock.admin_privacy_receipts(${session.t}, ${account})`;
     const names = await staffNames(rows.flatMap((row) => [row.asked_by, row.approved_by, row.erased_by]));
     const body = html`
       ${pageHead('Privacy', 'Erasure receipts', html`For <span class="mono">${account}</span>. A receipt names the account only by a digest, which this lookup matches.`)}
@@ -928,7 +968,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   async function privacyRequestPage(session: Session, id: string, url: URL): Promise<Response> {
-    const [row] = await options.sql()<{ found: Record<string, unknown> | null }[]>`SELECT slotlock.admin_privacy_request(${session.s}, ${id}::bigint) AS found`;
+    const [row] = await options.sql()<{ found: Record<string, unknown> | null }[]>`SELECT slotlock.admin_privacy_request(${session.t}, ${id}::bigint) AS found`;
     const found = row?.found;
     if (!found) {
       return respond(layout(shellOf(session, 'Not found', '/privacy'), pageHead('Privacy', 'No such request', `There is no request #${id}.`)), 404, { 'Set-Cookie': sessionCookie(session) });
@@ -1044,7 +1084,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
   async function staff(session: Session): Promise<Response> {
     const rows = await options.sql()<{ staff_ref: string; role: string; status: string; added_by: string; added_at: Date; last_seen_at: Date | null; passkeys: number; enrolling: boolean }[]>`
-      SELECT * FROM slotlock.admin_staff(${session.s})`;
+      SELECT * FROM slotlock.admin_staff(${session.t})`;
     const logins = await Promise.all(rows.map((row) => loginOf(row.staff_ref)));
     const body = html`
       ${pageHead('Slotlock Cloud', 'Staff', html`Who can use this console. Add, change and remove staff with <code>slotlock staff</code> as the schema owner.`)}
@@ -1062,10 +1102,18 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   async function staffLog(session: Session, url: URL): Promise<Response> {
     const before = /^[1-9][0-9]{0,18}$/.test(url.searchParams.get('before') ?? '') ? BigInt(url.searchParams.get('before') as string) : null;
     const rows = await options.sql()<{ chain_index: string; occurred_at: Date; staff_ref: string; action: string; account_ref: string | null; target: string | null; reason: string | null }[]>`
-      SELECT * FROM slotlock.admin_staff_log(${session.s}, ${before === null ? null : before.toString()}, ${PAGE})`;
+      SELECT * FROM slotlock.admin_staff_log(${session.t}, ${before === null ? null : before.toString()}, ${PAGE})`;
     const last = rows.at(-1)?.chain_index;
+    const [chainRow] = await options.sql()<{ chain: { checked: number; broken_at: number | null; head_index: number | null; head_hash: string | null } }[]>`
+      SELECT slotlock.admin_staff_log_chain(${session.t}) AS chain`;
+    const chain = chainRow?.chain;
     const body = html`
       ${pageHead('Slotlock Cloud', 'Staff log', 'Every sign-in, every view of an account and every staff action, newest first. It only grows, and each entry is chained to the one before by SHA-256.')}
+      ${chain?.broken_at
+        ? html`<p class="notice warn" role="status"><strong>The chain breaks at #${String(chain.broken_at)}.</strong> An entry was changed or removed outside the console. Compare with the last head you recorded, and run <code>slotlock staff verify-log</code>.</p>`
+        : chain?.head_index
+          ? html`<p class="fine">The newest ${count(chain.checked)} entries check out. Head: #${String(chain.head_index)} <code class="mono">${chain.head_hash ?? ''}</code>. Record it somewhere the database's owner cannot change: a later rewrite of the log would not match it.</p>`
+          : ''}
       ${table('Staff log', ['#', 'When', 'Who', 'Action', 'Account'], rows.map((row) => [
         html`<span class="mono">${row.chain_index}</span>`,
         html`${when(row.occurred_at)}`,
@@ -1084,7 +1132,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (GITHUB_LOGIN.test(q) && !/^[0-9]+$/.test(q) && !/^(slk|cus)_/.test(q)) {
       const profile = await githubProfile(`/users/${encodeURIComponent(q)}`);
       if (profile) {
-        await record(session.s, 'search.github_lookup', null, q.slice(0, 200));
+        await record(session.t, 'search.github_lookup', null, q.slice(0, 200));
         return redirect(`/accounts?${new URLSearchParams({ q: profile.id, for: profile.login }).toString()}`);
       }
     }
@@ -1149,18 +1197,22 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
     if (!user) return refused('Sign-in failed', 'GitHub did not confirm who you are. Try again.', 502);
     const staffRef = `github:${user.id}`;
-    const [row] = await options.sql()<{ role: string | null }[]>`SELECT slotlock.admin_sign_in(${staffRef}) AS role`;
-    const role = row?.role;
-    if (!role || !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(role)) {
+    // With the console's key, which the console's database credential alone does not hold: the
+    // database opens the session and keeps it, so it can end it wherever the cookie went.
+    const [row] = await options.sql()<{ opened: { role?: unknown; session?: unknown } | null }[]>`
+      SELECT slotlock.admin_sign_in(${staffRef}, ${options.consoleKey}) AS opened`;
+    const role = row?.opened?.role;
+    const token = row?.opened?.session;
+    if (typeof role !== 'string' || !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(role) || typeof token !== 'string' || !SESSION_TOKEN.test(token)) {
       return refused('Not staff', `GitHub account ${user.login} is not on the Slotlock staff. The attempt was recorded.`);
     }
     // Half signed in: enough to reach the passkey step, for 15 minutes. The passkey starts the 8 hours.
-    const session: Session = { s: staffRef, l: user.login, r: role as SlotlockStaffRole, st: 'github', iat: now(), seen: now(), exp: now() + FRESH_MS };
+    const session: Session = { s: staffRef, t: token, l: user.login, r: role as SlotlockStaffRole, st: 'github', iat: now(), seen: now(), exp: now() + FRESH_MS };
     return redirect('/passkey', [clear(OAUTH_COOKIE), sessionCookie(session)]);
   }
 
   async function passkeyPage(session: Session, url: URL): Promise<Response> {
-    const keys = await options.sql()<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.s})`;
+    const keys = await options.sql()<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.t})`;
     const asked = url.searchParams.get('next') ?? '/';
     const next = LOCAL_PATH.test(asked) ? asked : '/';
     const fresh = url.searchParams.get('fresh') === '1';
@@ -1188,7 +1240,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
   async function passkeyOptions(session: Session, body: Record<string, unknown>): Promise<Response> {
     const purpose = body.purpose === 'create' ? 'create' : 'get';
-    const keys = await options.sql()<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.s})`;
+    const keys = await options.sql()<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.t})`;
     if (purpose === 'get' && keys.length === 0) return json({ error: 'No passkey yet: create one first.' }, 409);
     if (purpose === 'create' && keys.length > 0 && !(session.st === 'full' && session.pv && now() - session.pv < FRESH_MS)) {
       return json({ error: 'Sign in with your passkey in the last 15 minutes to add another.' }, 403);
@@ -1208,8 +1260,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             excludeCredentials: ids,
           }
         : { challenge, rpId, allowCredentials: ids, userVerification: 'required', timeout: 120_000 };
+    // Kept on the session in the database too: used once, and by this session only.
+    await options.sql()`SELECT slotlock.admin_passkey_challenge(${session.t}, ${purpose}, ${challengeHash(challenge)})`;
     return json(publicKey, 200, [cookie(PASSKEY_COOKIE, seal('passkey', { c: challenge, p: purpose, s: session.s, exp: now() + 5 * 60 * 1000 }), 300)]);
   }
+
+  const challengeHash = (challenge: string) => createHash('sha256').update(challenge).digest();
 
   function pendingChallenge(request: Request, session: Session, purpose: 'create' | 'get'): string | null {
     const pending = unseal<{ c: string; p: string; s: string; exp: number }>('passkey', cookies(request).get(PASSKEY_COOKIE));
@@ -1220,7 +1276,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const challenge = pendingChallenge(request, session, 'create');
     if (!challenge) return json({ error: 'The request expired. Try again.' }, 400);
     const sql = options.sql();
-    const keys = await sql<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.s})`;
+    const keys = await sql<{ credential_id: Buffer }[]>`SELECT credential_id FROM slotlock.admin_passkeys(${session.t})`;
     const adding = keys.length > 0;
     if (adding && !(session.st === 'full' && session.pv && now() - session.pv < FRESH_MS)) {
       return json({ error: 'Sign in with your passkey in the last 15 minutes to add another.' }, 403);
@@ -1238,7 +1294,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         rpId,
       });
     } catch (error) {
-      await record(session.s, 'staff.passkey_refused', null, null, { step: 'register', code: (error as { code?: string }).code ?? 'invalid' });
+      await record(session.t, 'staff.passkey_refused', null, null, { step: 'register', code: (error as { code?: string }).code ?? 'invalid' });
       return json({ error: 'The passkey could not be checked. Try again.' }, 400);
     }
     // The id the browser reported is the one the authenticator attested.
@@ -1246,8 +1302,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return json({ error: 'The passkey could not be checked. Try again.' }, 400);
     }
     const [row] = await sql<{ ok: boolean }[]>`
-      SELECT slotlock.admin_passkey_enroll(${session.s}, ${adding ? null : createHash('sha256').update(code).digest()},
-        ${Buffer.from(verified.credentialId)}, ${Buffer.from(verified.publicKey)}, ${verified.algorithm}, ${verified.signCount}, ${name}) AS ok`;
+      SELECT slotlock.admin_passkey_enroll(${session.t}, ${adding ? null : createHash('sha256').update(code).digest()},
+        ${Buffer.from(verified.credentialId)}, ${Buffer.from(verified.publicKey)}, ${verified.algorithm}, ${verified.signCount}, ${name},
+        ${challengeHash(challenge)}) AS ok`;
     if (!row?.ok) return json({ error: adding ? 'That passkey was refused.' : 'That code is wrong or spent. Ask an owner for a new one.' }, 403);
     const upgraded: Session = { ...session, st: 'full', pv: now(), exp: session.st === 'full' ? session.exp : now() + SESSION_MS };
     return json({ ok: true }, 200, [clear(PASSKEY_COOKIE), sessionCookie(upgraded)]);
@@ -1258,11 +1315,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (!challenge) return json({ error: 'The request expired. Try again.' }, 400);
     const sql = options.sql();
     const keys = await sql<{ credential_id: Buffer; public_key: Buffer; algorithm: number }[]>`
-      SELECT credential_id, public_key, algorithm FROM slotlock.admin_passkeys(${session.s})`;
+      SELECT credential_id, public_key, algorithm FROM slotlock.admin_passkeys(${session.t})`;
     const id = typeof body.id === 'string' ? body.id : '';
     const key = keys.find((candidate) => base64urlEncode(new Uint8Array(candidate.credential_id)) === id);
     if (!key || (key.algorithm !== -7 && key.algorithm !== -257)) {
-      await record(session.s, 'staff.passkey_refused', null, null, { step: 'verify', code: 'unknown_passkey' });
+      await record(session.t, 'staff.passkey_refused', null, null, { step: 'verify', code: 'unknown_passkey' });
       return json({ error: 'That passkey is not registered for you.' }, 403);
     }
     let signCount: number;
@@ -1278,11 +1335,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         algorithm: key.algorithm,
       }));
     } catch (error) {
-      await record(session.s, 'staff.passkey_refused', null, null, { step: 'verify', code: (error as { code?: string }).code ?? 'invalid' });
+      await record(session.t, 'staff.passkey_refused', null, null, { step: 'verify', code: (error as { code?: string }).code ?? 'invalid' });
       return json({ error: 'The passkey could not be checked. Try again.' }, 403);
     }
     const [row] = await sql<{ ok: boolean }[]>`
-      SELECT slotlock.admin_passkey_used(${session.s}, ${Buffer.from(base64urlDecode(id))}, ${signCount}) AS ok`;
+      SELECT slotlock.admin_passkey_used(${session.t}, ${Buffer.from(base64urlDecode(id))}, ${signCount}, ${challengeHash(challenge)}) AS ok`;
     if (!row?.ok) return json({ error: 'That passkey was refused.' }, 403);
     const upgraded: Session = { ...session, st: 'full', pv: now(), exp: session.st === 'full' ? session.exp : now() + SESSION_MS };
     return json({ ok: true }, 200, [clear(PASSKEY_COOKIE), sessionCookie(upgraded)]);
@@ -1296,12 +1353,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   /** A provider read, from the hour's cache or fresh (then kept); null when the provider failed. */
   async function cached<T>(session: Session, key: string, read: () => Promise<T>): Promise<T | null> {
     const sql = options.sql();
-    const [row] = await sql<{ value: T | null }[]>`SELECT slotlock.admin_cache_read(${session.s}, ${key}) AS value`;
+    const [row] = await sql<{ value: T | null }[]>`SELECT slotlock.admin_cache_read(${session.t}, ${key}) AS value`;
     if (row?.value) return row.value;
     try {
       const value = await read();
       // An object, sent as one: postgres.js encodes JSON parameters itself (a string would be stored as a JSON string).
-      await sql`SELECT slotlock.admin_cache_write(${session.s}, ${key}, ${sql.json(value as never)})`;
+      await sql`SELECT slotlock.admin_cache_write(${session.t}, ${key}, ${sql.json(value as never)})`;
       return value;
     } catch (error) {
       console.error('slotlock-admin provider read failed', (error as { code?: unknown } | null)?.code ?? 'unknown');
@@ -1327,13 +1384,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const sql = options.sql();
     const showAll = url.searchParams.get('alerts') === 'all';
     const [[summaryRow], alerts, overrides, partners] = await Promise.all([
-      sql<{ billing: Record<string, unknown> }[]>`SELECT slotlock.admin_billing(${session.s}) AS billing`,
+      sql<{ billing: Record<string, unknown> }[]>`SELECT slotlock.admin_billing(${session.t}) AS billing`,
       sql<{ id: string; kind: string; account_ref: string; stripe_ref: string; detail: Record<string, unknown>; created_at: Date; resolved_at: Date | null; resolved_by: string | null }[]>`
-        SELECT * FROM slotlock.admin_billing_alerts(${session.s}, ${!showAll}, ${null}, ${50})`,
+        SELECT * FROM slotlock.admin_billing_alerts(${session.t}, ${!showAll}, ${null}, ${50})`,
       sql<{ id: string; account_ref: string; plan: string | null; starts_at: Date; ends_at: Date; reason: string; created_by: string; approved_by: string | null; state: string }[]>`
-        SELECT * FROM slotlock.admin_overrides(${session.s})`,
+        SELECT * FROM slotlock.admin_overrides(${session.t})`,
       sql<{ id: string; name: string; status: string; accounts: string; last_month: Date | null; closed_at: Date | null; webhook_status: number | null; invoiced: string | null; currency: string | null; unsent: string; mismatched_days: string }[]>`
-        SELECT * FROM slotlock.admin_partners(${session.s})`,
+        SELECT * FROM slotlock.admin_partners(${session.t})`,
     ]);
     const billing = summaryRow?.billing ?? {};
     const paying = (billing.paying ?? {}) as Record<string, number>;
@@ -1425,9 +1482,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   async function usagePage(session: Session): Promise<Response> {
     const sql = options.sql();
     const [usage, leaders] = await Promise.all([
-      sql<{ day: Date; metric: string; origin: string; count: string }[]>`SELECT * FROM slotlock.admin_usage(${session.s}, ${30})`,
+      sql<{ day: Date; metric: string; origin: string; count: string }[]>`SELECT * FROM slotlock.admin_usage(${session.t}, ${30})`,
       sql<{ account_ref: string; plan: string | null; operations: string; bookings: string; quota_operations: string | null; quota_bookings: string | null; quota_stop_percent: number | null }[]>`
-        SELECT * FROM slotlock.admin_usage_accounts(${session.s})`,
+        SELECT * FROM slotlock.admin_usage_accounts(${session.t})`,
     ]);
     const monthStart = new Date(now()).toISOString().slice(0, 7);
     const byDay = new Map<string, number>();
@@ -1587,7 +1644,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       providerRead(session, 'site:visits', insights.visits),
       providerRead(session, 'site:deploys', github ? () => github.workflowRuns('site.yml', 5) : null),
     ]);
-    await record(session.s, 'page.viewed', null, '/site');
+    await record(session.t, 'page.viewed', null, '/site');
     return page(session, 'Site and search', '/site', slotlockSitePage({ siteUrl, google, bing, visits, deploys }));
   }
 
@@ -1595,7 +1652,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const sql = options.sql();
     const endedToo = url.searchParams.get('ended') === '1';
     const account = (url.searchParams.get('account') ?? '').trim().slice(0, 500) || null;
-    const rows = await sql<SlotlockAnnouncementRow[]>`SELECT * FROM slotlock.admin_announcements(${session.s}, ${endedToo})`;
+    const rows = await sql<SlotlockAnnouncementRow[]>`SELECT * FROM slotlock.admin_announcements(${session.t}, ${endedToo})`;
     let incidents: SlotlockProviderRead<{ open: Awaited<ReturnType<SlotlockCmsGitHub['statusIssues']>>; closed: Awaited<ReturnType<SlotlockCmsGitHub['statusIssues']>> }> = { state: 'off' };
     if (github) {
       try {
@@ -1651,8 +1708,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   async function systemPage(session: Session, url: URL): Promise<Response> {
     const sql = options.sql();
     const [[systemRow], [flagsRow], hosts, deploys] = await Promise.all([
-      sql<{ system: SlotlockSystemData }[]>`SELECT slotlock.admin_system(${session.s}) AS system`,
-      sql<{ flags: SlotlockFlagsData }[]>`SELECT slotlock.admin_flags(${session.s}) AS flags`,
+      sql<{ system: SlotlockSystemData }[]>`SELECT slotlock.admin_system(${session.t}) AS system`,
+      sql<{ flags: SlotlockFlagsData }[]>`SELECT slotlock.admin_flags(${session.t}) AS flags`,
       hostHealth(),
       providerRead(session, 'system:deploys', github
         ? async () => Promise.all(DEPLOY_WORKFLOWS.map(async (entry) => ({ ...entry, runs: await github.workflowRuns(entry.workflow, 3) })))
@@ -1727,7 +1784,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             async run(form) {
               const linked = /^[1-9][0-9]{0,17}$/.test(field(form, 'case')) ? field(form, 'case') : null;
               const [row] = await sql<{ ok: boolean }[]>`
-                SELECT slotlock.admin_suspend(${session.s}, ${ref}, ${field(form, 'reason')}, ${optional(field(form, 'message'))}, ${linked}::bigint) AS ok`;
+                SELECT slotlock.admin_suspend(${session.t}, ${ref}, ${field(form, 'reason')}, ${optional(field(form, 'message'))}, ${linked}::bigint) AS ok`;
               return row?.ok ? { code: 'suspended', ok: true } : { code: 'already_suspended', ok: false };
             },
           };
@@ -1737,7 +1794,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             back,
             async run(form) {
               const [row] = await sql<{ ok: boolean }[]>`
-                SELECT slotlock.admin_unsuspend(${session.s}, ${ref}, ${field(form, 'reason')}) AS ok`;
+                SELECT slotlock.admin_unsuspend(${session.t}, ${ref}, ${field(form, 'reason')}) AS ok`;
               return row?.ok ? { code: 'unsuspended', ok: true } : { code: 'not_suspended', ok: false };
             },
           };
@@ -1749,7 +1806,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
               const key = field(form, 'key');
               if (!UUID.test(key)) return { code: 'invalid', ok: false };
               const [row] = await sql<{ ok: boolean }[]>`
-                SELECT slotlock.admin_revoke_key(${session.s}, ${ref}, ${key}::uuid, ${field(form, 'reason')}) AS ok`;
+                SELECT slotlock.admin_revoke_key(${session.t}, ${ref}, ${key}::uuid, ${field(form, 'reason')}) AS ok`;
               return row?.ok ? { code: 'key_revoked', ok: true } : { code: 'key_unchanged', ok: false };
             },
           };
@@ -1761,7 +1818,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
               const handle = field(form, 'session');
               if (handle !== 'all' && !/^[0-9a-f]{16}$/.test(handle)) return { code: 'invalid', ok: false };
               const [row] = await sql<{ ended: number }[]>`
-                SELECT slotlock.admin_end_sessions(${session.s}, ${ref}, ${handle === 'all' ? null : handle}, ${field(form, 'reason')}) AS ended`;
+                SELECT slotlock.admin_end_sessions(${session.t}, ${ref}, ${handle === 'all' ? null : handle}, ${field(form, 'reason')}) AS ended`;
               return handle !== 'all' && Number(row?.ended ?? 0) === 0
                 ? { code: 'session_gone', ok: false }
                 : { code: 'sessions_ended', ok: true };
@@ -1800,7 +1857,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
               }
               if (limits.some((value) => value === null)) return { code: 'invalid', ok: false };
               await sql`
-                SELECT slotlock.admin_override_create(${session.s}, ${ref}, ${plan}, ${limits[0]}, ${limits[1]}, ${limits[2]},
+                SELECT slotlock.admin_override_create(${session.t}, ${ref}, ${plan}, ${limits[0]}, ${limits[1]}, ${limits[2]},
                   ${quotas[0]}, ${quotas[1]}, ${quotas[2]}, ${new Date(ends)}, ${field(form, 'reason')})`;
               return ends - now() > SLOTLOCK_OVERRIDE_SOLO_DAYS * DAY_MS
                 ? { code: 'override_requested', ok: true }
@@ -1812,7 +1869,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             capability: 'accounts.act',
             back,
             async run(form) {
-              await sql`SELECT slotlock.admin_add_note(${session.s}, ${ref}, ${lines(form, 'note')})`;
+              await sql`SELECT slotlock.admin_add_note(${session.t}, ${ref}, ${lines(form, 'note')})`;
               return { code: 'note_added', ok: true };
             },
           };
@@ -1831,7 +1888,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         async run(form) {
           const id = idOf(form, 'override');
           if (!id) return { code: 'invalid', ok: false };
-          const [row] = await sql<{ result: string }[]>`SELECT slotlock.admin_override_approve(${session.s}, ${id}::bigint) AS result`;
+          const [row] = await sql<{ result: string }[]>`SELECT slotlock.admin_override_approve(${session.t}, ${id}::bigint) AS result`;
           if (row?.result === 'approved') return { code: 'override_approved', ok: true };
           return { code: row?.result === 'own' ? 'override_own' : 'override_not_pending', ok: false };
         },
@@ -1844,7 +1901,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         async run(form) {
           const id = idOf(form, 'override');
           if (!id) return { code: 'invalid', ok: false };
-          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_override_end(${session.s}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_override_end(${session.t}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
           return row?.ok ? { code: 'override_ended', ok: true } : { code: 'override_unchanged', ok: false };
         },
       };
@@ -1856,7 +1913,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         async run(form) {
           const id = idOf(form, 'alert');
           if (!id) return { code: 'invalid', ok: false };
-          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_billing_alert_resolve(${session.s}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_billing_alert_resolve(${session.t}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
           return row?.ok ? { code: 'alert_resolved', ok: true } : { code: 'alert_unchanged', ok: false };
         },
       };
@@ -1867,7 +1924,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         back: '/cases',
         async run(form) {
           const [row] = await sql<{ id: string }[]>`
-            SELECT slotlock.admin_case_open(${session.s}, ${optional(field(form, 'account'))}, ${field(form, 'source')},
+            SELECT slotlock.admin_case_open(${session.t}, ${optional(field(form, 'account'))}, ${field(form, 'source')},
               ${field(form, 'summary')}, ${optional(field(form, 'section'))}, ${optional(lines(form, 'evidence'))}) AS id`;
           return { code: 'case_opened', ok: true, to: `/cases/${String(row?.id)}` };
         },
@@ -1882,7 +1939,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           if (!/^\d{4}-\d{2}-\d{2}$/.test(received)) return { code: 'privacy_invalid', ok: false };
           try {
             const [row] = await sql<{ id: string }[]>`
-              SELECT slotlock.admin_privacy_open(${session.s}, ${field(form, 'account')}, ${field(form, 'kind')},
+              SELECT slotlock.admin_privacy_open(${session.t}, ${field(form, 'account')}, ${field(form, 'kind')},
                 ${field(form, 'concerns')}, ${received}::date, ${field(form, 'reference')}) AS id`;
             return { code: 'privacy_opened', ok: true, to: `/privacy/${String(row?.id)}` };
           } catch (error) {
@@ -1909,7 +1966,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           const plan = audience === 'plan' ? field(form, 'plan') : null;
           const account = audience === 'account' ? field(form, 'account') : null;
           try {
-            await sql`SELECT slotlock.admin_announce(${session.s}, ${audience}, ${plan}, ${account}, ${kind},
+            await sql`SELECT slotlock.admin_announce(${session.t}, ${audience}, ${plan}, ${account}, ${kind},
               ${field(form, 'message')}, ${optional(field(form, 'link'))}, ${starts}, ${ends})`;
           } catch (error) {
             if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'announcement_invalid', ok: false };
@@ -1926,7 +1983,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         async run(form) {
           const id = idOf(form, 'announcement');
           if (!id) return { code: 'invalid', ok: false };
-          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_announcement_end(${session.s}, ${id}::bigint) AS ok`;
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_announcement_end(${session.t}, ${id}::bigint) AS ok`;
           return row?.ok ? { code: 'announcement_ended', ok: true } : { code: 'announcement_unchanged', ok: false };
         },
       };
@@ -1944,14 +2001,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             const title = field(form, 'title');
             if (title.length < 1 || title.length > 120 || /\p{Cc}/u.test(title)) return { code: 'incident_invalid', ok: false };
             // Recorded before GitHub is asked, as the CMS's steps are.
-            await sql`SELECT slotlock.admin_status_record(${session.s}, 'status.opened', ${null}, ${sql.json({ title })})`;
+            await sql`SELECT slotlock.admin_status_record(${session.t}, 'status.opened', ${null}, ${sql.json({ title })})`;
             await github.openStatusIssue({ title, body: text });
             return { code: 'incident_opened', ok: true };
           }
           const issue = Number(field(form, 'issue'));
           if (!Number.isSafeInteger(issue) || issue < 1 || issue > 2_147_483_647) return { code: 'invalid', ok: false };
           const close = form.get('close') === '1';
-          await sql`SELECT slotlock.admin_status_record(${session.s}, ${close ? 'status.closed' : 'status.updated'}, ${issue}::integer, ${sql.json({ length: text.length })})`;
+          await sql`SELECT slotlock.admin_status_record(${session.t}, ${close ? 'status.closed' : 'status.updated'}, ${issue}::integer, ${sql.json({ length: text.length })})`;
           const posted = await github.updateStatusIssue({ number: issue, body: text, close });
           if (!posted) return { code: 'incident_unchanged', ok: false };
           return { code: close ? 'incident_closed' : 'incident_updated', ok: true };
@@ -1971,7 +2028,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             return { code: 'flag_invalid', ok: false };
           }
           try {
-            await sql`SELECT slotlock.admin_flag_set(${session.s}, ${flag}, ${plan}, ${account}, ${field(form, 'enabled') === '1'}, ${field(form, 'reason')})`;
+            await sql`SELECT slotlock.admin_flag_set(${session.t}, ${flag}, ${plan}, ${account}, ${field(form, 'enabled') === '1'}, ${field(form, 'reason')})`;
           } catch (error) {
             if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'flag_invalid', ok: false };
             throw error;
@@ -1987,7 +2044,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         async run(form) {
           const id = idOf(form, 'flag');
           if (!id) return { code: 'invalid', ok: false };
-          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_flag_clear(${session.s}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_flag_clear(${session.t}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
           return row?.ok ? { code: 'flag_cleared', ok: true } : { code: 'flag_unchanged', ok: false };
         },
       };
@@ -2012,11 +2069,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         erased: { code: 'privacy_erased', ok: true },
       };
       const queries = {
-        verify: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_verify(${session.s}, ${id}::bigint) AS result`,
-        export: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_export(${session.s}, ${id}::bigint) AS result`,
-        erasure_ask: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erasure_ask(${session.s}, ${id}::bigint) AS result`,
-        erasure_approve: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erasure_approve(${session.s}, ${id}::bigint) AS result`,
-        erase: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erase(${session.s}, ${id}::bigint) AS result`,
+        verify: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_verify(${session.t}, ${id}::bigint) AS result`,
+        export: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_export(${session.t}, ${id}::bigint) AS result`,
+        erasure_ask: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erasure_ask(${session.t}, ${id}::bigint) AS result`,
+        erasure_approve: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erasure_approve(${session.t}, ${id}::bigint) AS result`,
+        erase: () => sql<{ result: string }[]>`SELECT slotlock.admin_privacy_erase(${session.t}, ${id}::bigint) AS result`,
       };
       const call = (fn: keyof typeof queries) => async () => {
         const [row] = await queries[fn]();
@@ -2047,7 +2104,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             async run(form) {
               try {
                 const [row] = await sql<{ ok: boolean }[]>`
-                  SELECT slotlock.admin_privacy_close(${session.s}, ${id}::bigint, ${field(form, 'status')}, ${field(form, 'outcome')}) AS ok`;
+                  SELECT slotlock.admin_privacy_close(${session.t}, ${id}::bigint, ${field(form, 'status')}, ${field(form, 'outcome')}) AS ok`;
                 return row?.ok ? { code: 'privacy_closed', ok: true } : { code: 'privacy_unchanged', ok: false };
               } catch (error) {
                 if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'privacy_invalid', ok: false };
@@ -2070,7 +2127,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             return { code: 'invalid', ok: false };
           }
           const [row] = await sql<{ ok: boolean }[]>`
-            SELECT slotlock.admin_case_update(${session.s}, ${id}::bigint, ${status}, ${done}, ${optional(lines(form, 'outcome'))}) AS ok`;
+            SELECT slotlock.admin_case_update(${session.t}, ${id}::bigint, ${status}, ${done}, ${optional(lines(form, 'outcome'))}) AS ok`;
           return row?.ok ? { code: 'case_updated', ok: true } : { code: 'invalid', ok: false };
         },
       };
@@ -2099,7 +2156,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return refused('Refused', 'That form expired. Reload the page and send it again.');
     }
     if (!slotlockStaffMay(session.r, action.capability)) {
-      await record(session.s, 'page.refused', null, path.slice(0, 200));
+      await record(session.t, 'page.refused', null, path.slice(0, 200));
       return respond(layout(shellOf(session, 'Not allowed', path), pageHead('Slotlock admin', 'Not allowed', `Your role (${session.r}) does not do this.`)), 403, { 'Set-Cookie': sessionCookie(session) });
     }
     const back = typeof action.back === 'string' ? action.back : action.back(form);
@@ -2115,7 +2172,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       outcome = { code: 'invalid', ok: false };
     }
     const to = outcome.to ?? back;
-    return redirect(`${to}?${new URLSearchParams({ [outcome.ok ? 'done' : 'error']: outcome.code }).toString()}`, [sessionCookie(session)]);
+    return redirect(`${to}?${new URLSearchParams({ [outcome.ok ? 'done' : 'error']: outcome.code }).toString()}`, [sessionCookie(session), noticeCookie(to, outcome.code)]);
   }
 
   // ---------- The CMS ----------
@@ -2134,11 +2191,16 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       },
       page: (title, path, body, notice, status = 200) =>
         respond(layout({ ...shellOf(session, title, path, undefined, notice), script: '/editor.js' }, body), status, { 'Set-Cookie': sessionCookie(session) }),
-      redirect: (location) => redirect(location, [sessionCookie(session)]),
+      redirect: (location) => {
+        // The CMS's notices hold the same way: only on the page the action sent the browser to.
+        const target = new URL(location, origin);
+        const code = target.searchParams.get('done') ?? target.searchParams.get('error');
+        return redirect(location, [sessionCookie(session), ...(code ? [noticeCookie(target.pathname, code)] : [])]);
+      },
       json: (value, status = 200) => json(value, status, [sessionCookie(session)]),
       async record(step: SlotlockContentStep, slug: string, extra: Record<string, string | number> = {}) {
         const sql = options.sql();
-        await sql`SELECT slotlock.admin_content_record(${session.s}, ${step}, ${slug}, ${sql.json(extra)})`;
+        await sql`SELECT slotlock.admin_content_record(${session.t}, ${step}, ${slug}, ${sql.json(extra)})`;
       },
     };
   }
@@ -2160,9 +2222,50 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     '/system': 'system.read',
   };
 
+  /**
+   * The console's own database role, checked once per isolate before it serves anything that reads
+   * the database (RFC 0006, 4.4): not a superuser, not BYPASSRLS, and no right on a slotlock table,
+   * view or sequence, itself or through a role it belongs to. A reason when it fails, else null.
+   */
+  let roleChecked: Promise<string | null> | null = null;
+  function roleProblem(): Promise<string | null> {
+    roleChecked ??= (async () => {
+      const [row] = await options.sql()<{ privileged: boolean; tables: boolean }[]>`
+        SELECT member.rolsuper OR member.rolbypassrls AS privileged,
+               EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_class rel
+                   JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+                  WHERE ns.nspname = 'slotlock'
+                    AND ((rel.relkind IN ('r', 'p', 'v', 'm', 'f')
+                          AND pg_catalog.has_table_privilege(rel.oid, 'SELECT, INSERT, UPDATE, DELETE'))
+                         OR (rel.relkind = 'S' AND pg_catalog.has_sequence_privilege(rel.oid, 'USAGE, SELECT, UPDATE')))
+               ) AS tables
+          FROM pg_catalog.pg_roles member WHERE member.rolname = current_user`;
+      if (!row) return 'its role could not be read';
+      if (row.privileged) return 'its role is a superuser or bypasses row security';
+      if (row.tables) return 'its role holds rights on slotlock tables';
+      return null;
+    })();
+    // A database that could not be asked is asked again next time; an answer is kept.
+    roleChecked.catch(() => {
+      roleChecked = null;
+    });
+    return roleChecked;
+  }
+
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    // A notice says what an action just did, so it shows only on the page that action sent this
+    // browser to: a link from elsewhere that names one shows none.
+    const shown = url.searchParams.get('done') ?? url.searchParams.get('error');
+    if (shown !== null) {
+      const flash = unseal<{ c: string; p: string; exp: number }>('notice', cookies(request).get(NOTICE_COOKIE));
+      if (!flash || flash.c !== shown || flash.p !== path) {
+        url.searchParams.delete('done');
+        url.searchParams.delete('error');
+      }
+    }
     if (request.method === 'GET') {
       if (path === '/admin.css') return respond(SLOTLOCK_ADMIN_CSS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/css; charset=utf-8');
       if (path === '/admin.js') return respond(SLOTLOCK_ADMIN_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
@@ -2177,6 +2280,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       if (!identity) return refused('Access required', 'This console is only reachable through Cloudflare Access.');
     }
 
+    const unsafe = await roleProblem();
+    if (unsafe) {
+      console.error('slotlock-admin refuses to serve:', unsafe);
+      return refused('Not available', 'The console is not configured safely, and serves nothing until it is.', 503);
+    }
+
     if (request.method === 'POST') {
       // Every POST from our own pages, and from nowhere else.
       if (request.headers.get('origin') !== origin) return refused('Refused', 'That request did not come from this console.');
@@ -2185,7 +2294,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
 
     if (request.method === 'GET' && path === '/sign-in') return signInPage();
-    if (request.method === 'GET' && path === '/sign-in/github') return startGithub();
+    if (request.method === 'GET' && path === '/sign-in/github') {
+      // A link from elsewhere cannot trade a full session for a half one: a signed-in member goes home.
+      if (readSession(request)?.st === 'full') return redirect('/');
+      return startGithub();
+    }
     if (request.method === 'GET' && path === '/callback') return callback(request, url);
 
     // Lock 2: a GitHub sign-in that the database mapped to staff.
@@ -2198,7 +2311,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (request.method === 'POST' && path === '/sign-out') {
       const form = await request.formData();
       if (form.get('csrf') !== csrfOf(session)) return refused('Refused', 'That form expired. Try again.');
-      await record(session.s, 'staff.signed_out');
+      // Ended in the database: the cookie, wherever it went, opens nothing from now on.
+      await options.sql()`SELECT slotlock.admin_sign_out(${session.t})`;
       return redirect('/sign-in', [clear(SESSION_COOKIE)]);
     }
 
@@ -2226,9 +2340,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
     // Lock 3: a passkey, before any page with data.
     if (session.st !== 'full') return redirect(`/passkey?${new URLSearchParams({ next: path }).toString()}`);
+    // And the database's word on the session, on every request: one ended by signing out, by the
+    // member's reset or removal, or by a new console key is refused (42501, so sign in again), and
+    // a role changed since sign-in applies at once.
+    const [current] = await options.sql()<{ role: string | null }[]>`SELECT slotlock.admin_session(${session.t}) AS role`;
+    if (current?.role && (SLOTLOCK_STAFF_ROLES as readonly string[]).includes(current.role)) session.r = current.role as SlotlockStaffRole;
     if (cms.owns(path)) {
       if (!slotlockStaffMay(session.r, 'content.write')) {
-        await record(session.s, 'page.refused', null, path.slice(0, 200));
+        await record(session.t, 'page.refused', null, path.slice(0, 200));
         return respond(layout(shellOf(session, 'Not allowed', path), pageHead('Slotlock admin', 'Not allowed', `Your role (${session.r}) does not open this page.`)), 403, { 'Set-Cookie': sessionCookie(session) });
       }
       return cms.handle(request, url, cmsRequest(session));
@@ -2243,7 +2362,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return respond(layout(shellOf(session, 'Not found', path), pageHead('Slotlock admin', 'Not found', 'There is no page at this address.')), 404, { 'Set-Cookie': sessionCookie(session) });
     }
     if (!slotlockStaffMay(session.r, capability)) {
-      await record(session.s, 'page.refused', null, path.slice(0, 200));
+      await record(session.t, 'page.refused', null, path.slice(0, 200));
       return respond(layout(shellOf(session, 'Not allowed', path), pageHead('Slotlock admin', 'Not allowed', `Your role (${session.r}) does not open this page.`)), 403, { 'Set-Cookie': sessionCookie(session) });
     }
     if (accountMatch) {

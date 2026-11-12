@@ -15,7 +15,7 @@ import { maintainSlotlockTenant } from '../maintenance.js';
 import { SLOTLOCK_PRIVACY_EXPORT_DAYS } from '../staff-ddl.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { SLOTLOCK_TENANT_EXPORT_TABLES } from '../types.js';
-import { Browser, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha } from './helpers/admin-browser.js';
+import { Browser, CONSOLE_KEY, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha, staffSession } from './helpers/admin-browser.js';
 
 const url = process.env.DATABASE_URL?.trim();
 const PEOPLE: Record<string, { id: number; login: string }> = {
@@ -106,6 +106,7 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
       await ownerStore.applyTenantRls();
       await ownerStore.grantAdminRole(adminRole);
       const expires = new Date(Date.now() + 86_400_000);
+      await tx`SELECT slotlock.staff_console_key(${sha(CONSOLE_KEY)}, 'cli:ops')`;
       await tx`SELECT slotlock.staff_add('github:1001', 'owner', 'cli:ops', ${sha('owner-code')}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1002', 'support', 'cli:ops', ${sha('support-code')}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1003', 'billing', 'cli:ops', ${sha('billing-code')}, ${expires})`;
@@ -147,7 +148,7 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
     admin = createSlotlockAdmin({
       sql: () => adminSql,
       publicUrl: ORIGIN,
-      sessionSecret: 'a-test-session-secret-of-forty-characters',
+      sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async (request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
       fetch: createGithubSignInFetch(PEOPLE, {}),
@@ -358,7 +359,7 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
     // A recent event cannot be removed, by anyone.
     await expect(superuser`DELETE FROM slotlock.staff_audit_events WHERE occurred_at > now() - interval '1 day'`).rejects.toMatchObject({ code: '42501' });
     // The next staff action takes what is past its time.
-    await adminSql`SELECT slotlock.admin_home('github:1001')`;
+    await adminSql`SELECT slotlock.admin_home(${await staffSession(superuser, 'github:1001')})`;
     expect(await superuser`SELECT 1 FROM slotlock.staff_audit_events WHERE occurred_at < now() - interval '6 years'`).toHaveLength(0);
     expect((await superuser<{ summary: string }[]>`SELECT summary FROM slotlock.abuse_cases WHERE status = 'closed'`).map((row) => row.summary)).toEqual(['A recent case']);
     expect(kept?.id).toBeDefined();

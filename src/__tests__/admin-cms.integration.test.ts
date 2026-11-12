@@ -13,7 +13,7 @@ import { checkPost, parsePost, renderPostBody } from '../../site/src/lib/post-fo
 import { mergeDuePosts } from '../../scripts/cms-scheduled-merge.mjs';
 import { type SlotlockAdmin, createSlotlockAdmin } from '../admin/app.js';
 import { createSlotlockStore } from '../store.js';
-import { Browser, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha } from './helpers/admin-browser.js';
+import { Browser, CONSOLE_KEY, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha, staffSession } from './helpers/admin-browser.js';
 import { FAKE_APP_ID, FAKE_INSTALLATION, FAKE_REPOSITORY, type FakeGithubRepo, createFakeGithubRepo } from './helpers/fake-github-repo.js';
 
 const url = process.env.DATABASE_URL?.trim();
@@ -118,6 +118,7 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
       await store.applyTenantRls();
       await store.grantAdminRole(adminRole);
       const expires = new Date(Date.now() + 86_400_000);
+      await tx`SELECT slotlock.staff_console_key(${sha(CONSOLE_KEY)}, 'cli:ops')`;
       await tx`SELECT slotlock.staff_add('github:1001', 'owner', 'cli:ops', ${sha('owner-code')}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1002', 'support', 'cli:ops', ${sha('support-code')}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1004', 'editor', 'cli:ops', ${sha('editor-code')}, ${expires})`;
@@ -158,7 +159,7 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     admin = createSlotlockAdmin({
       sql: () => adminSql,
       publicUrl: ORIGIN,
-      sessionSecret: 'a-test-session-secret-of-forty-characters',
+      sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async (request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
       cms: {
@@ -312,10 +313,11 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
   it('does not let an Editor publish, in the console or in the database', async () => {
     const refused = await form(editor, `/content/${SLUG}/publish`, { sha: headOf(SLUG) }, `/content/${SLUG}`);
     expect(refused.status).toBe(403);
-    await expect(adminSql`SELECT slotlock.admin_content_record('github:1004', 'content.published', ${SLUG}, '{}'::jsonb)`).rejects.toMatchObject({ code: '42501' });
-    await expect(adminSql`SELECT slotlock.admin_content_record('github:1002', 'content.saved', ${SLUG}, '{}'::jsonb)`).rejects.toMatchObject({ code: '42501' });
-    await expect(adminSql`SELECT slotlock.admin_content_record('github:1004', 'content.anything', ${SLUG}, '{}'::jsonb)`).rejects.toMatchObject({ code: '22023' });
-    await expect(adminSql`SELECT slotlock.admin_content_record('github:1004', 'content.saved', '../etc', '{}'::jsonb)`).rejects.toMatchObject({ code: '22023' });
+    const [editorSession, supportSession] = [await staffSession(superuser, 'github:1004'), await staffSession(superuser, 'github:1002')];
+    await expect(adminSql`SELECT slotlock.admin_content_record(${editorSession}, 'content.published', ${SLUG}, '{}'::jsonb)`).rejects.toMatchObject({ code: '42501' });
+    await expect(adminSql`SELECT slotlock.admin_content_record(${supportSession}, 'content.saved', ${SLUG}, '{}'::jsonb)`).rejects.toMatchObject({ code: '42501' });
+    await expect(adminSql`SELECT slotlock.admin_content_record(${editorSession}, 'content.anything', ${SLUG}, '{}'::jsonb)`).rejects.toMatchObject({ code: '22023' });
+    await expect(adminSql`SELECT slotlock.admin_content_record(${editorSession}, 'content.saved', '../etc', '{}'::jsonb)`).rejects.toMatchObject({ code: '22023' });
     expect(pullOf(SLUG)?.state).toBe('open');
     expect(repo.text('main', `site/content/blog/${SLUG}.md`)).toBeNull();
   });
@@ -462,7 +464,7 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     const bare = createSlotlockAdmin({
       sql: () => adminSql,
       publicUrl: ORIGIN,
-      sessionSecret: 'a-test-session-secret-of-forty-characters',
+      sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async () => ({ email: 'staff@example.com', sub: 'sub-1' }) },
       fetch: createGithubSignInFetch(PEOPLE, {}),

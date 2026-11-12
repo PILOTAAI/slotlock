@@ -718,11 +718,21 @@ describe('what maintenance tells the admin console (RFC 0006, M11)', () => {
       .toThrow(RangeError);
   });
 
-  it('keeps an error to its class, code and first line, with anything in quotes taken out', () => {
+  it('keeps an error to its class, code and first line up to its first quotation mark', () => {
     expect(slotlockMaintenanceError(Object.assign(new Error('Key (title)=("Board meeting") clashes\nDETAIL: more'), { code: '23505' })))
-      .toEqual({ name: 'Error', code: '23505', message: 'Key (title)=(…) clashes' });
-    expect(slotlockMaintenanceError(new RangeError(`Invalid time zone ‘Mars/Olympus’ for ${'x'.repeat(300)}`)).message)
-      .toMatch(/^Invalid time zone … for x+…$/);
+      .toEqual({ name: 'Error', code: '23505', message: 'Key (title)=( …' });
+    // A quoted value that holds its own quotes, runs past the cut, or mixes its marks: all of it goes.
+    for (const leaky of [
+      'uuid: "Lunch with "Bob Smith" re: divorce"',
+      `uuid: "${'Jane Doe, jane@example.com, '.repeat(200)}"`,
+      'Could not extend “Weekly standup with Ada" past 2027',
+      "Could not extend 'Ada's standup' past 2027",
+    ]) {
+      const kept = slotlockMaintenanceError(new Error(leaky)).message ?? '';
+      expect(kept, leaky).not.toMatch(/Bob|Jane|Ada|standup/);
+    }
+    expect(slotlockMaintenanceError(new Error("Can't roll the series: the horizon moved")).message).toBe("Can't roll the series: the horizon moved");
+    expect(slotlockMaintenanceError(new RangeError(`Invalid time zone for ${'x'.repeat(300)}`)).message).toMatch(/^Invalid time zone for x+…$/);
     expect([...(slotlockMaintenanceError(new Error('y'.repeat(500))).message ?? '')]).toHaveLength(200);
     expect(slotlockMaintenanceError(Object.assign(new Error(''), { name: 'Not a name!', code: 'has space' })))
       .toEqual({ name: 'Error', code: null, message: null });

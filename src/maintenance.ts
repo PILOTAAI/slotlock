@@ -389,25 +389,24 @@ export interface SlotlockMaintenanceRound {
 
 /**
  * What a failed pass records: the error's class and code as they are, and the first line of its
- * message with anything in quotes taken out (where a message would carry a value), cut to 200
- * characters.
+ * message up to its first quotation mark (where a message would start to carry a value), cut to
+ * 200 characters. An apostrophe inside a word is not a quotation mark.
  */
 export function slotlockMaintenanceError(error: unknown): SlotlockMaintenanceError {
   if (!(error instanceof Error)) return { name: 'Error', code: null, message: null };
   const name = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : 'Error';
   const raw = (error as { code?: unknown }).code;
   const code = typeof raw === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(raw) ? raw : null;
-  // The first line, cut before any pattern runs; each quoted run excludes its own opening mark, so
-  // the scan stays linear however many quotes a message holds.
+  // The first line, cut before any pattern runs; one scan for the first mark, however many there are.
   const end = error.message.search(/[\r\n]/);
-  const line = (end === -1 ? error.message : error.message.slice(0, end))
-    .slice(0, 2000)
-    .replace(/"[^"]*"|'[^']*'|`[^`]*`|“[^“”]*”|‘[^‘’]*’/g, '…')
+  const first = (end === -1 ? error.message : error.message.slice(0, end)).slice(0, 2000);
+  const quote = first.search(/["`“”«»„]|(?<!\p{L})['‘’]|['‘’](?!\p{L})/u);
+  const line = (quote === -1 ? first : `${first.slice(0, quote).trimEnd()} …`)
     .replace(/[\p{Cc}\p{Cf}]/gu, '')
     .trim();
   const characters = [...line];
   const message = characters.length > 200 ? `${characters.slice(0, 199).join('')}…` : line;
-  return { name, code, message: message.length > 0 ? message : null };
+  return { name, code, message: message.length > 0 && message !== '…' ? message : null };
 }
 
 /**

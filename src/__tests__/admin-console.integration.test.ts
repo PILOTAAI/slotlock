@@ -7,7 +7,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAdmin, createSlotlockAdmin } from '../admin/app.js';
 import { createSlotlockStore } from '../store.js';
-import { Browser, ORIGIN, SoftwarePasskey, b64u, createGithubSignInFetch, sha } from './helpers/admin-browser.js';
+import { Browser, CONSOLE_KEY, ORIGIN, SoftwarePasskey, b64u, createGithubSignInFetch, sha, staffSession } from './helpers/admin-browser.js';
 
 const url = process.env.DATABASE_URL?.trim();
 
@@ -89,6 +89,7 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
 
     await asOwner(async (tx) => {
       const expires = new Date(Date.now() + 86_400_000);
+      await tx`SELECT slotlock.staff_console_key(${sha(CONSOLE_KEY)}, 'cli:ops')`;
       await tx`SELECT slotlock.staff_add('github:1001', 'owner', 'cli:ops', ${sha(OWNER_CODE)}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1002', 'support', 'cli:ops', ${sha(SUPPORT_CODE)}, ${expires})`;
       await tx`SELECT slotlock.staff_add('github:1003', 'viewer', 'cli:ops', ${sha(VIEWER_CODE)}, ${expires})`;
@@ -109,7 +110,7 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     admin = createSlotlockAdmin({
       sql: () => adminSql,
       publicUrl: ORIGIN,
-      sessionSecret: 'a-test-session-secret-of-forty-characters',
+      sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async (request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
       fetch: githubFetch,
@@ -133,7 +134,7 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(css.status).toBe(200);
     expect(css.headers.get('content-type')).toContain('text/css');
     expect(() =>
-      createSlotlockAdmin({ sql: () => adminSql, publicUrl: ORIGIN, sessionSecret: 'x'.repeat(40), github: { clientId: 'a', clientSecret: 'b' }, access: null }),
+      createSlotlockAdmin({ sql: () => adminSql, publicUrl: ORIGIN, sessionSecret: 'x'.repeat(40), consoleKey: CONSOLE_KEY, github: { clientId: 'a', clientSecret: 'b' }, access: null }),
     ).toThrow(/Cloudflare Access/);
   });
 
@@ -565,7 +566,8 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect((await send(billing, `${accountPath}/overrides`, { csrf, back: accountPath, kind: 'plan', plan: 'team', ends: isoDay(120), reason: 'Annual pilot' })).headers.get('location')).toBe(
       `${accountPath}?error=override_needs_owner`,
     );
-    await expect(adminSql`SELECT slotlock.admin_override_create('github:1006', ${PERSON}, 'team', 500, 100, 25, NULL, NULL, NULL, now() + interval '120 days', 'Annual')`).rejects.toMatchObject({ code: '22023' });
+    const billingSession = await staffSession(superuser, 'github:1006');
+    await expect(adminSql`SELECT slotlock.admin_override_create(${billingSession}, ${PERSON}, 'team', 500, 100, 25, NULL, NULL, NULL, now() + interval '120 days', 'Annual')`).rejects.toMatchObject({ code: '22023' });
   });
 
   it('needs a second Owner for an override longer than 90 days', async () => {
@@ -637,7 +639,7 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
       }), { headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
     const withStripe = createSlotlockAdmin({
-      sql: () => adminSql, publicUrl: ORIGIN, sessionSecret: 'a-test-session-secret-of-forty-characters',
+      sql: () => adminSql, publicUrl: ORIGIN, sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async (request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
       fetch: stripeFetch, now: () => clock, stripeKey: 'rk_test_admin',
@@ -699,5 +701,55 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const after = await support.request('/accounts');
     expect(after.status).toBe(303);
     expect(after.headers.get('location')).toBe('/sign-in');
+  });
+
+  it('ends a session everywhere on sign-out or a reset, uses each passkey challenge once, and keeps a full session from a link that restarts sign-in', async () => {
+    const { browser, passkey } = await newStaff(1020, 'support');
+    const copy = new Browser(() => admin);
+    for (const [name, value] of browser.jar) copy.jar.set(name, value);
+    expect((await copy.request('/')).status).toBe(200);
+    // A link from another site that restarts sign-in sends a signed-in member home, as they were.
+    expect((await browser.request('/sign-in/github')).headers.get('location')).toBe('/');
+    expect((await browser.request('/')).status).toBe(200);
+    // Signing out ends the session in the database: a copy of its cookie opens nothing after.
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await browser.request('/')).text())?.[1] ?? '';
+    await browser.request('/sign-out', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf }).toString() });
+    expect((await copy.request('/')).headers.get('location')).toBe('/sign-in');
+
+    // A passkey sign-in, captured with its challenge cookie, cannot be used again: not on its own
+    // session, not on another session of the same member. (This passkey keeps no counter.)
+    const first = new Browser(() => admin);
+    expect((await first.signIn('code-support-1020')).headers.get('location')).toBe('/passkey');
+    const other = new Browser(() => admin);
+    await other.signIn('code-support-1020');
+    const options = await first.json('/passkey/options', { purpose: 'get' });
+    const { challenge } = (await options.json()) as { challenge: string };
+    const challengeCookie = first.jar.get('__Host-slotlock-admin-passkey') ?? '';
+    const assertion = passkey.get(challenge, { advance: false });
+    expect((await first.json('/passkey/verify', assertion)).status).toBe(200);
+    first.jar.set('__Host-slotlock-admin-passkey', challengeCookie);
+    expect((await first.json('/passkey/verify', assertion)).status).toBe(403);
+    other.jar.set('__Host-slotlock-admin-passkey', challengeCookie);
+    expect((await other.json('/passkey/verify', assertion)).status).toBe(403);
+    expect((await other.request('/')).headers.get('location')).toMatch(/^\/passkey/);
+
+    // A reset, as `slotlock staff reset` makes one after a lost device, ends the member's sessions.
+    expect((await first.request('/accounts')).status).toBe(200);
+    await asOwner((tx) => tx`SELECT slotlock.staff_reset('github:1020', 'cli:ops', ${sha('lost')}, ${new Date(Date.now() + 86_400_000)})`);
+    expect((await first.request('/accounts')).headers.get('location')).toBe('/sign-in');
+  });
+
+  it('shows no notice or label that a link from elsewhere names, only what its own action did', async () => {
+    const browser = browsers.owner();
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    // A login the link chose, for an id that is someone else's: not shown.
+    const labelled = await (await browser.request(`/accounts?${new URLSearchParams({ q: '424242', for: 'someone-else' }).toString()}`)).text();
+    expect(labelled).not.toContain('someone-else');
+    // A notice the link names, with no action behind it: not shown.
+    for (const path of [`/accounts/${encodeURIComponent(PERSON)}?done=suspended`, '/privacy?error=privacy_invalid']) {
+      const page = await (await browser.request(path)).text();
+      expect(page, path).not.toContain('class="notice');
+    }
   });
 });

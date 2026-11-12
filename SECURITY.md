@@ -257,7 +257,7 @@ Analytics are read with read-only credentials (a service account added as a rest
 key, a token with Account Analytics Read), kept an hour, and never shown on a page. The System page
 shows which settings are connected, never their values, and counts failing webhooks across accounts
 without any endpoint's address. A server records each account whose maintenance failed with the
-error's class, code and first line, quotes taken out, so no calendar value reaches the console.
+error's class, code and first line, cut at its first quotation mark, where a value would start.
 
 The staff log, closed abuse cases and closed privacy requests are kept six years and then deleted.
 Until then, nothing in the staff log can be changed or deleted, by the console's role or by the

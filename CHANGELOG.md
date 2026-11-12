@@ -73,7 +73,7 @@ versioning.
   - **Feature flags**: the dashboard's assistant and creating team workspaces turned off (or on, where
     configured) for a plan or one account, recorded in the staff log and the account's audit log.
 - **`slotlock serve` records its maintenance** for the admin console: each account whose pass
-  failed, with the error's class, code and first line (quotes taken out), until a pass runs; and
+  failed, with the error's class, code and first line (cut at its first quotation mark), until a pass runs; and
   each hour's passes, counted (`createSlotlockMaintenanceRecord`, `slotlockMaintenanceError`).
   Self-hosted deployments keep these in their own database: at most one row per account, and 400
   hours.

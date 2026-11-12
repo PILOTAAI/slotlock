@@ -3,9 +3,12 @@
 // Access and sends the console's own Origin on every POST.
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto';
 import { expect } from 'vitest';
+import type { Sql, TransactionSql } from 'postgres';
 import type { SlotlockAdmin } from '../../admin/app.js';
 
 export const ORIGIN = 'https://admin.slotlock.test';
+/** The console's key in the tests, set with slotlock.staff_console_key as the schema owner. */
+export const CONSOLE_KEY = 'console-key-for-the-tests-0123456789abcdef';
 export const RP_ID = 'admin.slotlock.test';
 export const sha = (data: string | Uint8Array) => createHash('sha256').update(data).digest();
 export const b64u = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64url');
@@ -163,3 +166,15 @@ export class Browser {
   }
 }
 
+/**
+ * A staff session made straight in the database, as if the member had signed in with GitHub and a
+ * passkey: for tests that call the admin functions themselves. `sql` must be able to write
+ * slotlock.staff_sessions (the schema owner or a superuser). Its token, as the functions take it.
+ */
+export async function staffSession(sql: Sql | TransactionSql, staffRef: string): Promise<string> {
+  const token = `stf_${randomBytes(32).toString('hex')}`;
+  await sql`
+    INSERT INTO slotlock.staff_sessions (token_digest, staff_ref, stage, expires_at, passkey_at)
+    VALUES (${sha(token)}, ${staffRef}, 'full', now() + interval '8 hours', now())`;
+  return token;
+}

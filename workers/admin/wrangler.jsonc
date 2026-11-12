@@ -19,6 +19,11 @@
 //       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET  a client secret of that app
 //       SLOTLOCK_ADMIN_SESSION_SECRET        32+ random characters (openssl rand -hex 32); not the
 //                                            dashboard's
+//       SLOTLOCK_ADMIN_CONSOLE_KEY           the key `slotlock staff console-key` prints (as the
+//                                            schema owner): the database opens staff sessions only
+//                                            for it, so this Worker's database credential alone
+//                                            acts as no one. Running it again replaces the key and
+//                                            ends every staff session
 //     and, optionally:
 //       SLOTLOCK_ADMIN_GITHUB_TOKEN          a fine-grained token with no permissions, to raise
 //                                            GitHub's rate limit on reading public profiles

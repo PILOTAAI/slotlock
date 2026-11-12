@@ -825,6 +825,20 @@ export async function migrateSlotlock(
         { code: 'admin_role_not_separate' as const },
       );
     }
+    // Nor a member of the other, either way round: a console role in the serving role would read
+    // tenants' tables, a serving role in the console role could SET ROLE to it.
+    const [entangled] = await owner<{ console_in: boolean; serving_in: boolean; owner_in: boolean }[]>`
+      SELECT pg_catalog.pg_has_role(${adminRole}, ${role}, 'MEMBER') AS console_in,
+             pg_catalog.pg_has_role(${role}, ${adminRole}, 'MEMBER') AS serving_in,
+             pg_catalog.pg_has_role(${adminRole}, ${ownerRole}, 'MEMBER') AS owner_in`;
+    if (entangled?.console_in || entangled?.serving_in || entangled?.owner_in) {
+      throw Object.assign(
+        new Error(
+          `SLOTLOCK_ADMIN_DATABASE_URL connects as ${adminRole}, which ${entangled.serving_in ? `the serving role ${role} is a member of` : entangled.console_in ? `is a member of the serving role ${role}` : `is a member of the schema owner ${ownerRole}`}: revoke that membership, so neither role can use the other's rights`,
+        ),
+        { code: 'admin_role_not_separate' as const },
+      );
+    }
     await store.grantAdminRole(adminRole);
     log.info('admin_role_granted', { role: adminRole });
   } finally {
@@ -2438,10 +2452,10 @@ function readStaffRef(value: string | undefined): string | null {
 async function runStaffCommand(
   config: SlotlockDatabaseConfig,
   out: OutputStream,
-  action: 'list' | 'add' | 'role' | 'reset' | 'remove',
+  action: 'list' | 'add' | 'role' | 'reset' | 'remove' | 'console-key' | 'verify-log',
   staffRef: string | null,
   role: string | undefined,
-): Promise<void> {
+): Promise<number> {
   const sql = connect(config.migrateDatabaseUrl ?? config.databaseUrl, 1);
   const actor = cliActor();
   const line = (value: Record<string, unknown>) => out.write(`${JSON.stringify(value)}\n`);
@@ -2461,7 +2475,27 @@ async function runStaffCommand(
           FROM slotlock.staff_members member
          ORDER BY member.status, member.added_at`;
       for (const row of rows) line({ ...row });
-      return;
+      return 0;
+    }
+    if (action === 'verify-log') {
+      // Every event, oldest kept first: its head is what to compare with a head recorded earlier.
+      const [chain] = await sql<{ checked: string; broken_at: string | null; head_index: string | null; head_hash: Buffer | null }[]>`
+        SELECT * FROM slotlock.staff_audit_chain_check(NULL)`;
+      line({
+        checked: Number(chain?.checked ?? 0),
+        broken_at: chain?.broken_at === null || chain?.broken_at === undefined ? null : Number(chain.broken_at),
+        head_index: chain?.head_index === null || chain?.head_index === undefined ? null : Number(chain.head_index),
+        head_hash: chain?.head_hash ? Buffer.from(chain.head_hash).toString('hex') : null,
+      });
+      return chain?.broken_at === null || chain?.broken_at === undefined ? 0 : 1;
+    }
+    if (action === 'console-key') {
+      // The console proves with this key that a staff session is its own: only its SHA-256 is
+      // stored, where the console's database role cannot read it. Replacing it ends every session.
+      const key = randomBytes(32).toString('base64url');
+      await sql`SELECT slotlock.staff_console_key(${createHash('sha256').update(key).digest()}, ${actor})`;
+      line({ console_key: key, set_as: 'SLOTLOCK_ADMIN_CONSOLE_KEY' });
+      return 0;
     }
     if (action === 'add' || action === 'reset') {
       const issued = code();
@@ -2471,15 +2505,16 @@ async function runStaffCommand(
         await sql`SELECT slotlock.staff_reset(${staffRef}, ${actor}, ${issued.hash}, ${issued.expires})`;
       }
       line({ staff: staffRef, ...(role !== undefined ? { role } : {}), enrollment_code: issued.value, expires_at: issued.expires.toISOString() });
-      return;
+      return 0;
     }
     if (action === 'role') {
       await sql`SELECT slotlock.staff_set_role(${staffRef}, ${role ?? null}, ${actor})`;
       line({ staff: staffRef, role });
-      return;
+      return 0;
     }
     await sql`SELECT slotlock.staff_remove(${staffRef}, ${actor})`;
     line({ staff: staffRef, removed: true });
+    return 0;
   } finally {
     await sql.end({ timeout: 5 });
   }
@@ -2935,6 +2970,10 @@ Commands:
                            Change a member's role
   staff reset <github-id>  Remove a member's passkeys and print a new one-time code
   staff remove <github-id> Remove a member and their passkeys (never the last owner)
+  staff verify-log         Check the staff log's whole chain and print its head, to compare with
+                           one recorded earlier (exit 1 when an entry does not hold)
+  staff console-key        Set the admin console's key and print it once, for the console's
+                           SLOTLOCK_ADMIN_CONSOLE_KEY; replacing it ends every staff session
   audit verify             Check the tenant's audit log chain: prints how many events held and
                            the first that does not (exit 1 when one does not)
   audit export             Print the tenant's audit log, newest first, one JSON object per line
@@ -3144,6 +3183,8 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
     'staff role': 3,
     'staff reset': 2,
     'staff remove': 2,
+    'staff console-key': 1,
+    'staff verify-log': 1,
     'plan status': 1,
     'plan default': 2,
     'key create': 2,
@@ -3485,18 +3526,21 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
       case 'staff add':
       case 'staff role':
       case 'staff reset':
-      case 'staff remove': {
-        const action = subcommand.slice('staff '.length) as 'list' | 'add' | 'role' | 'reset' | 'remove';
-        const staffRef = action === 'list' ? null : readStaffRef(operands[1]);
-        if (action !== 'list' && staffRef === null) {
+      case 'staff remove':
+      case 'staff console-key':
+      case 'staff verify-log': {
+        const action = subcommand.slice('staff '.length) as 'list' | 'add' | 'role' | 'reset' | 'remove' | 'console-key' | 'verify-log';
+        const staffRef = action === 'list' || action === 'console-key' || action === 'verify-log' ? null : readStaffRef(operands[1]);
+        if (action !== 'list' && action !== 'console-key' && action !== 'verify-log' && staffRef === null) {
           return usage('<github-id> must be a GitHub account id (a number, or github:<number>)');
         }
         const role = action === 'add' || action === 'role' ? operands[2] : undefined;
         if (role !== undefined && !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(role)) {
           return usage(`<role> must be one of ${SLOTLOCK_STAFF_ROLES.join(', ')}`);
         }
+        let status: number;
         try {
-          await runStaffCommand(readSlotlockDatabaseConfig(io.env), io.stdout, action, staffRef, role);
+          status = await runStaffCommand(readSlotlockDatabaseConfig(io.env), io.stdout, action, staffRef, role);
         } catch (error) {
           const code = (error as { code?: unknown } | null)?.code;
           if (code === '42501' || code === '42883') {
@@ -3515,7 +3559,7 @@ export async function runSlotlockCli(argv: readonly string[], io: SlotlockCliIo)
           }
           throw error;
         }
-        return 0;
+        return status;
       }
       case 'tenant export':
         return runTenantExport(readSlotlockDatabaseConfig(io.env), io, values.out);

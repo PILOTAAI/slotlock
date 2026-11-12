@@ -1560,6 +1560,13 @@ BEGIN
     RETURN QUERY SELECT NULL::text, 'not_allowed'::text;
     RETURN;
   END IF;
+  -- Nor one whose own account staff suspended, or for which (or for whose plan) they turned
+  -- creating teams off (RFC 0006, M11): the dashboard says so too, and this holds whatever it does.
+  IF slotlock.tenant_suspended(requested_person)
+     OR (slotlock.tenant_dashboard_notices(requested_person) -> 'features' ->> 'team_workspaces') = 'false' THEN
+    RETURN QUERY SELECT NULL::text, 'not_allowed'::text;
+    RETURN;
+  END IF;
   IF requested_handle IS NULL OR requested_handle !~ '^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$' THEN
     RETURN QUERY SELECT NULL::text, 'invalid_handle'::text;
     RETURN;
@@ -3786,6 +3793,14 @@ BEGIN
   DELETE FROM slotlock.maintenance_failures WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
+  -- Staff's internal notes about it go with it, however it is erased; its abuse cases stay, no
+  -- longer linked to it (PRIVACY.md).
+  erased_table := 'account_notes';
+  DELETE FROM slotlock.account_notes WHERE account_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  UPDATE slotlock.abuse_cases SET account_ref = NULL, updated_at = statement_timestamp()
+   WHERE account_ref = requested_tenant_ref;
   -- A partner's account: what it used in months its partner has not closed is kept for billing
   -- first (by the partner's account reference only), then its partner's record of it goes too.
   INSERT INTO slotlock.partner_erased_usage AS kept (partner_id, account, plan, month, metric, count)

@@ -64,6 +64,14 @@ export const SLOTLOCK_STAFF_REF_PATTERN = '^github:[1-9][0-9]{0,19}$';
 const STAFF_ACTOR_PATTERN = '^(github:[1-9][0-9]{0,19}|cli:[a-z_][a-z0-9_.-]{0,63})$';
 /** Days an enrollment code lasts: long enough to receive it, short enough to be worthless later. */
 export const SLOTLOCK_STAFF_ENROLLMENT_DAYS = 2;
+/** Minutes a staff session may sit unused before it ends. */
+export const SLOTLOCK_STAFF_IDLE_MINUTES = 30;
+/** Hours a staff session lasts from its first passkey sign-in. */
+export const SLOTLOCK_STAFF_SESSION_HOURS = 8;
+/** Minutes after a passkey sign-in in which an action, or a new passkey, needs no new one. */
+export const SLOTLOCK_STAFF_FRESH_MINUTES = 15;
+/** Events of the staff log the Staff log page checks the chain of, newest first. */
+export const SLOTLOCK_STAFF_CHAIN_CHECKED = 10_000;
 /** Passkeys one staff member may register. */
 export const SLOTLOCK_STAFF_MAX_PASSKEYS = 10;
 /** Rows one console call returns at most. */
@@ -151,6 +159,8 @@ export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'privacy_requests',
   'privacy_erasure_receipts',
   'privacy_keys',
+  'staff_console_keys',
+  'staff_sessions',
   'announcements',
   'feature_flags',
   'maintenance_failures',
@@ -158,7 +168,10 @@ export const SLOTLOCK_STAFF_TABLES = Object.freeze([
 
 /** The SECURITY DEFINER functions the console's role executes, and nothing else. */
 export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
-  'slotlock.admin_sign_in(text)',
+  'slotlock.admin_sign_in(text, text)',
+  'slotlock.admin_sign_out(text)',
+  'slotlock.admin_session(text)',
+  'slotlock.admin_passkey_challenge(text, text, bytea)',
   'slotlock.admin_record(text, text, text, text, text, jsonb)',
   'slotlock.admin_home(text)',
   'slotlock.admin_accounts(text, text, text, text, text, integer)',
@@ -168,9 +181,10 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_account_audit(text, text, integer)',
   'slotlock.admin_staff(text)',
   'slotlock.admin_staff_log(text, bigint, integer)',
+  'slotlock.admin_staff_log_chain(text)',
   'slotlock.admin_passkeys(text)',
-  'slotlock.admin_passkey_enroll(text, bytea, bytea, bytea, integer, bigint, text)',
-  'slotlock.admin_passkey_used(text, bytea, bigint)',
+  'slotlock.admin_passkey_enroll(text, bytea, bytea, bytea, integer, bigint, text, bytea)',
+  'slotlock.admin_passkey_used(text, bytea, bigint, bytea)',
   'slotlock.admin_suspend(text, text, text, text, bigint)',
   'slotlock.admin_unsuspend(text, text, text)',
   'slotlock.admin_revoke_key(text, text, uuid, text)',
@@ -235,6 +249,7 @@ export const SLOTLOCK_STAFF_OPERATOR_FUNCTIONS = Object.freeze([
   'slotlock.staff_reset(text, text, bytea, timestamptz)',
   'slotlock.staff_remove(text, text)',
   'slotlock.staff_operator_record(text, text, text, text)',
+  'slotlock.staff_console_key(bytea, text)',
   'slotlock.record_maintenance_run(text, text, timestamptz, boolean, jsonb)',
 ] as const);
 
@@ -242,12 +257,17 @@ export const SLOTLOCK_STAFF_OPERATOR_FUNCTIONS = Object.freeze([
 const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_log(text, text, text, text, text, jsonb)',
   'slotlock.staff_require(text, text)',
+  'slotlock.staff_session(text, text, boolean)',
+  'slotlock.staff_sessions_end(text)',
+  'slotlock.staff_challenge_spend(bytea, text, bytea)',
+  'slotlock.staff_session_raise(bytea)',
   'slotlock.staff_directory()',
   'slotlock.staff_account_known(text)',
   'slotlock.staff_reason_valid(text)',
   'slotlock.staff_customer_audit(text, text, text, text, text, text)',
   'slotlock.staff_cache_capability(text)',
   'slotlock.staff_records_prune()',
+  'slotlock.staff_audit_chain_check(integer)',
   'slotlock.privacy_digest(text)',
 ] as const;
 
@@ -395,13 +415,18 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_suspend$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'safety.act');
+  actor := slotlock.staff_session(actor, 'safety.act', false);
   PERFORM slotlock.staff_account_known(account);
   PERFORM slotlock.staff_reason_valid(why);
   IF message IS NOT NULL AND (char_length(message) NOT BETWEEN 1 AND 500 OR message ~ '[[:cntrl:]]') THEN
     RAISE EXCEPTION 'admin_message_invalid' USING ERRCODE = '22023';
   END IF;
-  IF case_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM slotlock.abuse_cases opened WHERE opened.id = case_id) THEN
+  -- Only an open case, about this account or about none yet, records the suspension.
+  IF case_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM slotlock.abuse_cases opened
+     WHERE opened.id = case_id AND opened.status = 'open'
+       AND (opened.account_ref IS NULL OR opened.account_ref = account)
+  ) THEN
     RAISE EXCEPTION 'admin_case_unknown' USING ERRCODE = '22023';
   END IF;
   -- As suspend_tenant: the tenant's lock and its key lock, so writes in flight finish first.
@@ -435,7 +460,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_unsuspend$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'safety.act');
+  actor := slotlock.staff_session(actor, 'safety.act', false);
   PERFORM slotlock.staff_reason_valid(why);
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || account, 0));
   DELETE FROM slotlock.tenant_suspensions held WHERE held.tenant_ref = account;
@@ -457,7 +482,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_revoke_key$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.act');
+  actor := slotlock.staff_session(actor, 'accounts.act', false);
   PERFORM slotlock.staff_reason_valid(why);
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || account, 0));
   UPDATE slotlock.api_keys minted SET revoked_at = now()
@@ -481,7 +506,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_account_sessions$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'account.sessions_viewed', account, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT encode(substr(kept.sid_sha256, 1, 8), 'hex'), kept.started_at, kept.last_seen_at, kept.expires_at
@@ -503,9 +528,10 @@ AS $slotlock_admin_end_sessions$
 DECLARE
   ended integer;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.act');
+  actor := slotlock.staff_session(actor, 'accounts.act', false);
   PERFORM slotlock.staff_reason_valid(why);
-  IF account IS NULL OR account !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255})$' THEN
+  -- A person: by GitHub, by Google, or one a team's identity provider made (sso:).
+  IF account IS NULL OR account !~ '^(github:[1-9][0-9]{0,19}|google:[A-Za-z0-9._-]{1,255}|sso:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
     RAISE EXCEPTION 'admin_not_a_person' USING ERRCODE = '22023';
   END IF;
   IF handle IS NOT NULL AND handle !~ '^[0-9a-f]{16}$' THEN
@@ -537,7 +563,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_account_notes$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'account.notes_viewed', account, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT kept.id, kept.staff_ref, kept.body, kept.created_at FROM slotlock.account_notes kept
@@ -558,7 +584,7 @@ AS $slotlock_admin_add_note$
 DECLARE
   added bigint;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.act');
+  actor := slotlock.staff_session(actor, 'accounts.act', false);
   PERFORM slotlock.staff_account_known(account);
   IF note_text IS NULL OR char_length(note_text) NOT BETWEEN 1 AND ${SLOTLOCK_STAFF_NOTE_MAX}
      OR NOT (${multiline('note_text')}) THEN
@@ -582,7 +608,7 @@ AS $slotlock_admin_case_open$
 DECLARE
   opened bigint;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'safety.act');
+  actor := slotlock.staff_session(actor, 'safety.act', false);
   IF account IS NOT NULL THEN
     PERFORM slotlock.staff_account_known(account);
   END IF;
@@ -613,7 +639,7 @@ DECLARE
   account text;
   now_status text;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'safety.act');
+  actor := slotlock.staff_session(actor, 'safety.act', false);
   SELECT opened.status, opened.account_ref INTO was, account FROM slotlock.abuse_cases opened
    WHERE opened.id = case_id FOR UPDATE;
   IF NOT FOUND THEN
@@ -655,7 +681,7 @@ AS $slotlock_admin_cases$
 DECLARE
   shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'safety.act');
+  actor := slotlock.staff_session(actor, 'safety.act', false);
   PERFORM slotlock.staff_log(actor, 'cases.listed', account, NULL, NULL,
     jsonb_strip_nulls(jsonb_build_object('status', status_filter)));
   RETURN QUERY
@@ -681,7 +707,7 @@ AS $slotlock_admin_case$
 DECLARE
   result jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'safety.act');
+  actor := slotlock.staff_session(actor, 'safety.act', false);
   SELECT to_jsonb(opened) || jsonb_build_object('history', (
            SELECT coalesce(jsonb_agg(jsonb_build_object(
                     'occurred_at', event.occurred_at, 'staff_ref', event.staff_ref, 'action', event.action,
@@ -815,7 +841,7 @@ DECLARE
   added bigint;
   long boolean;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.act');
+  actor := slotlock.staff_session(actor, 'billing.act', false);
   PERFORM slotlock.staff_account_known(account);
   PERFORM slotlock.staff_reason_valid(why);
   IF until IS NULL OR until <= statement_timestamp() THEN
@@ -868,7 +894,7 @@ AS $slotlock_admin_override_approve$
 DECLARE
   asked slotlock.tenant_plan_overrides%ROWTYPE;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'plans.approve');
+  actor := slotlock.staff_session(actor, 'plans.approve', false);
   SELECT * INTO asked FROM slotlock.tenant_plan_overrides waiting WHERE waiting.id = override_id FOR UPDATE;
   IF NOT FOUND OR asked.approved_at IS NOT NULL OR asked.ended_at IS NOT NULL
      OR asked.ends_at <= statement_timestamp() THEN
@@ -906,7 +932,7 @@ DECLARE
   account text;
   was_approved boolean;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.act');
+  actor := slotlock.staff_session(actor, 'billing.act', false);
   PERFORM slotlock.staff_reason_valid(why);
   UPDATE slotlock.tenant_plan_overrides ending
      SET ended_at = statement_timestamp(), ended_by = actor
@@ -936,7 +962,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_account_overrides$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'account.overrides_viewed', account, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT given.id, given.plan, given.max_resources, given.max_api_keys, given.max_webhook_endpoints,
@@ -959,7 +985,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_overrides$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.read');
+  actor := slotlock.staff_session(actor, 'billing.read', false);
   PERFORM slotlock.staff_log(actor, 'overrides.listed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT given.id, given.tenant_ref, given.plan, given.starts_at, given.ends_at, given.reason, given.created_by,
@@ -983,7 +1009,7 @@ DECLARE
   month_start date := ${monthStart};
   result jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.read');
+  actor := slotlock.staff_session(actor, 'billing.read', false);
   SELECT jsonb_build_object(
     'paying', (SELECT coalesce(jsonb_object_agg(paid.plan, paid.total), '{}'::jsonb) FROM (
                  SELECT planned.plan, count(*) AS total FROM slotlock.tenant_plans planned
@@ -1023,7 +1049,7 @@ AS $slotlock_admin_billing_alerts$
 DECLARE
   shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.read');
+  actor := slotlock.staff_session(actor, 'billing.read', false);
   PERFORM slotlock.staff_log(actor, 'billing.alerts_listed', NULL, NULL, NULL,
     jsonb_build_object('open_only', coalesce(open_only, true)));
   RETURN QUERY
@@ -1047,7 +1073,7 @@ AS $slotlock_admin_billing_alert_resolve$
 DECLARE
   account text;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.act');
+  actor := slotlock.staff_session(actor, 'billing.act', false);
   PERFORM slotlock.staff_reason_valid(why);
   UPDATE slotlock.billing_alerts open
      SET resolved_at = statement_timestamp(), resolved_by = actor
@@ -1073,7 +1099,7 @@ AS $slotlock_admin_usage$
 DECLARE
   span integer := least(greatest(coalesce(days, 30), 1), 400);
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'usage.viewed', NULL, NULL, NULL, jsonb_build_object('days', span));
   RETURN QUERY
   SELECT used.day, used.metric, used.origin, sum(used.count)::bigint
@@ -1097,7 +1123,7 @@ AS $slotlock_admin_usage_accounts$
 DECLARE
   month_start date := ${monthStart};
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'usage.accounts_listed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   WITH month AS (
@@ -1129,7 +1155,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_partners$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'billing.read');
+  actor := slotlock.staff_session(actor, 'billing.read', false);
   PERFORM slotlock.staff_log(actor, 'partners.viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT partner.id, partner.name, partner.status,
@@ -1160,7 +1186,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_cache_read$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', false);
   PERFORM slotlock.staff_require(actor, slotlock.staff_cache_capability(cache_key));
   RETURN (SELECT kept.value FROM slotlock.admin_cache kept
            WHERE kept.key = cache_key AND kept.expires_at > statement_timestamp());
@@ -1175,7 +1201,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_cache_write$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', false);
   PERFORM slotlock.staff_require(actor, slotlock.staff_cache_capability(cache_key));
   DELETE FROM slotlock.admin_cache old WHERE old.expires_at < statement_timestamp();
   INSERT INTO slotlock.admin_cache AS kept (key, value, expires_at)
@@ -1223,7 +1249,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_content_record$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'content.write');
+  actor := slotlock.staff_session(actor, 'content.write', false);
   IF happened IN (${contentSteps(SLOTLOCK_CONTENT_STEPS.publish)}) THEN
     PERFORM slotlock.staff_require(actor, 'content.publish');
   ELSIF happened IS NULL OR happened NOT IN (${contentSteps(SLOTLOCK_CONTENT_STEPS.write)}) THEN
@@ -1368,7 +1394,7 @@ AS $slotlock_admin_privacy_open$
 DECLARE
   added bigint;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   PERFORM slotlock.staff_account_known(account);
   IF received IS NULL OR received > ${today} OR received < ${today} - 366 THEN
     RAISE EXCEPTION 'privacy_received' USING ERRCODE = '22023';
@@ -1396,7 +1422,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_privacy_requests$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   PERFORM slotlock.staff_log(actor, 'privacy.listed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT asked.id, asked.account_ref, asked.kind, asked.concerns, asked.received_on, asked.due_on, asked.status,
@@ -1428,7 +1454,7 @@ DECLARE
   proof jsonb;
   receipt jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   SELECT * INTO asked FROM slotlock.privacy_requests found WHERE found.id = request_id;
   IF NOT FOUND THEN
     RETURN NULL;
@@ -1475,7 +1501,7 @@ DECLARE
   asked slotlock.privacy_requests%ROWTYPE;
   proved text;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
   IF NOT FOUND OR asked.status <> 'open' THEN
     RETURN 'closed';
@@ -1487,7 +1513,7 @@ BEGIN
    WHERE key.tenant_ref = asked.account_ref AND key.name = asked.verification_word AND key.revoked_at IS NULL
      AND key.created_at >= asked.opened_at
      AND CASE
-           WHEN asked.account_ref ~ '^(github|google):' THEN key.created_by = asked.account_ref
+           WHEN asked.account_ref ~ '^(github|google|sso):' THEN key.created_by = asked.account_ref
            WHEN asked.account_ref ~ '^(team|github-org):' THEN EXISTS (
              SELECT 1 FROM slotlock.workspace_memberships member
               WHERE member.tenant_ref = asked.account_ref AND member.person_ref = key.created_by
@@ -1528,7 +1554,7 @@ DECLARE
   kept integer;
   made uuid;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
   IF NOT FOUND OR asked.status <> 'open' THEN
     RETURN 'closed';
@@ -1581,7 +1607,7 @@ AS $slotlock_admin_privacy_erasure_ask$
 DECLARE
   asked slotlock.privacy_requests%ROWTYPE;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.erase');
+  actor := slotlock.staff_session(actor, 'privacy.erase', false);
   SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
   IF NOT FOUND OR asked.status <> 'open' THEN
     RETURN 'closed';
@@ -1623,7 +1649,7 @@ AS $slotlock_admin_privacy_erasure_approve$
 DECLARE
   asked slotlock.privacy_requests%ROWTYPE;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.erase');
+  actor := slotlock.staff_session(actor, 'privacy.erase', false);
   SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
   IF NOT FOUND OR asked.status <> 'open' THEN
     RETURN 'closed';
@@ -1671,7 +1697,7 @@ DECLARE
   customer text;
   gone bigint := 0;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.erase');
+  actor := slotlock.staff_session(actor, 'privacy.erase', false);
   SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
   IF NOT FOUND OR asked.status <> 'open' THEN
     RETURN 'closed';
@@ -1734,7 +1760,7 @@ AS $slotlock_admin_privacy_close$
 DECLARE
   asked slotlock.privacy_requests%ROWTYPE;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   SELECT * INTO asked FROM slotlock.privacy_requests waiting WHERE waiting.id = request_id FOR UPDATE;
   IF NOT FOUND OR asked.status <> 'open' THEN
     RETURN false;
@@ -1764,7 +1790,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_privacy_receipts$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'privacy.act');
+  actor := slotlock.staff_session(actor, 'privacy.act', false);
   IF account IS NULL OR octet_length(account) NOT BETWEEN 1 AND 500 THEN
     RAISE EXCEPTION 'admin_account_unknown' USING ERRCODE = '22023';
   END IF;
@@ -1868,7 +1894,7 @@ CREATE INDEX IF NOT EXISTS slotlock_staff_audit_events_flag_idx
   ON slotlock.staff_audit_events (chain_index) WHERE action IN ('flag.set', 'flag.cleared');
 
 -- Accounts whose maintenance pass is failing (M11): one row each, with how many times and the last
--- error's class, code and message (cut to 200 characters, values in quotes taken out by the
+-- error's class, code and message (cut to 200 characters, and at its first quotation mark by the
 -- server). Cleared when a pass for the account runs again; kept ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days after the last
 -- failure otherwise.
 CREATE TABLE IF NOT EXISTS slotlock.maintenance_failures (
@@ -1994,7 +2020,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_announcements$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.read');
+  actor := slotlock.staff_session(actor, 'system.read', false);
   PERFORM slotlock.staff_log(actor, 'announcement.list_viewed', NULL, NULL, NULL,
     jsonb_build_object('ended', coalesce(ended_too, false)));
   RETURN QUERY
@@ -2027,7 +2053,7 @@ DECLARE
   begins timestamptz := coalesce(starts, statement_timestamp());
   added bigint;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.act');
+  actor := slotlock.staff_session(actor, 'system.act', false);
   IF wanted_audience = 'account' THEN
     PERFORM slotlock.staff_account_known(account);
   END IF;
@@ -2062,7 +2088,7 @@ AS $slotlock_admin_announcement_end$
 DECLARE
   account text;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.act');
+  actor := slotlock.staff_session(actor, 'system.act', false);
   UPDATE slotlock.announcements running
      SET ended_at = statement_timestamp(), ended_by = actor
    WHERE running.id = announcement_id AND running.ended_at IS NULL AND running.ends_at > statement_timestamp()
@@ -2086,7 +2112,7 @@ AS $slotlock_admin_flags$
 DECLARE
   result jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.read');
+  actor := slotlock.staff_session(actor, 'system.read', false);
   SELECT jsonb_build_object(
     'flags', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                 'id', given.id, 'flag', given.flag, 'plan', given.plan, 'account_ref', given.tenant_ref,
@@ -2119,7 +2145,7 @@ DECLARE
   before boolean;
   kept bigint;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.act');
+  actor := slotlock.staff_session(actor, 'system.act', false);
   PERFORM slotlock.staff_reason_valid(why);
   IF wanted_flag IS NULL OR wanted_flag NOT IN (${featureFlags}) THEN
     RAISE EXCEPTION 'admin_flag_unknown' USING ERRCODE = '22023';
@@ -2166,7 +2192,7 @@ AS $slotlock_admin_flag_clear$
 DECLARE
   gone slotlock.feature_flags;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.act');
+  actor := slotlock.staff_session(actor, 'system.act', false);
   PERFORM slotlock.staff_reason_valid(why);
   DELETE FROM slotlock.feature_flags given WHERE given.id = flag_id RETURNING given.* INTO gone;
   IF gone.id IS NULL THEN
@@ -2207,7 +2233,7 @@ DECLARE
   oldest timestamptz;
   result jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.read');
+  actor := slotlock.staff_session(actor, 'system.read', false);
   FOR account IN SELECT hooked.tenant_ref FROM slotlock.webhook_tenants hooked
                   ORDER BY hooked.tenant_ref LIMIT ${SLOTLOCK_WEBHOOK_HEALTH_ACCOUNTS} LOOP
     PERFORM set_config('slotlock.tenant_ref', account, true);
@@ -2264,7 +2290,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_status_record$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'system.act');
+  actor := slotlock.staff_session(actor, 'system.act', false);
   IF happened IS NULL OR happened NOT IN (${statusSteps})
      OR (issue IS NULL) <> (happened = 'status.opened') OR issue < 1
      OR (extra IS NOT NULL AND (jsonb_typeof(extra) <> 'object' OR pg_column_size(extra) > 4096)) THEN
@@ -2324,6 +2350,55 @@ CREATE TABLE IF NOT EXISTS slotlock.staff_passkeys (
 CREATE INDEX IF NOT EXISTS slotlock_staff_passkeys_staff_idx ON slotlock.staff_passkeys (staff_ref);
 ALTER TABLE slotlock.staff_passkeys ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.staff_passkeys FROM PUBLIC;
+
+-- The console's key (RFC 0006, 4.4): a digest of a secret the console holds and the console's
+-- database role cannot read, set by the deployment role (slotlock staff console-key). A staff
+-- session opens only for a caller that shows the key, so the console's database credential alone
+-- acts as no one.
+CREATE TABLE IF NOT EXISTS slotlock.staff_console_keys (
+  id smallint PRIMARY KEY DEFAULT 1,
+  key_digest bytea NOT NULL,
+  set_by text NOT NULL,
+  set_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_staff_console_keys_valid CHECK (
+    id = 1 AND octet_length(key_digest) = 32 AND set_by ~ '${STAFF_ACTOR_PATTERN}'
+  )
+);
+ALTER TABLE slotlock.staff_console_keys ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.staff_console_keys FROM PUBLIC;
+
+-- Staff sessions: opened by the console's key once GitHub named a member ('github', 15 minutes),
+-- raised by a passkey ('full', 8 hours from then), and ended by signing out, by the member's
+-- reset, removal or role change, after ${SLOTLOCK_STAFF_IDLE_MINUTES} idle minutes, or at their end. Every admin function
+-- takes a session's token, never a member's reference: the database, not the caller, says who
+-- acts. The token is kept only as its SHA-256. A passkey challenge waits on its session for five
+-- minutes and is used once.
+CREATE TABLE IF NOT EXISTS slotlock.staff_sessions (
+  token_digest bytea PRIMARY KEY,
+  staff_ref text NOT NULL REFERENCES slotlock.staff_members (staff_ref) ON DELETE CASCADE,
+  stage text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  last_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  expires_at timestamptz NOT NULL,
+  passkey_at timestamptz,
+  ended_at timestamptz,
+  challenge_digest bytea,
+  challenge_purpose text,
+  challenge_expires_at timestamptz,
+  CONSTRAINT slotlock_staff_sessions_valid CHECK (
+    octet_length(token_digest) = 32
+    AND stage IN ('github', 'full')
+    AND (stage = 'full') = (passkey_at IS NOT NULL)
+    AND expires_at > created_at
+    AND (challenge_digest IS NULL) = (challenge_purpose IS NULL)
+    AND (challenge_digest IS NULL) = (challenge_expires_at IS NULL)
+    AND (challenge_digest IS NULL OR octet_length(challenge_digest) = 32)
+    AND (challenge_purpose IS NULL OR challenge_purpose IN ('create', 'get'))
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_staff_sessions_staff_idx ON slotlock.staff_sessions (staff_ref) WHERE ended_at IS NULL;
+ALTER TABLE slotlock.staff_sessions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.staff_sessions FROM PUBLIC;
 
 -- The staff audit log: every sign-in, every view of an account and every staff action, chained by
 -- SHA-256 so a change shows. account_ref is not a tenant column on purpose: erasing an account
@@ -2406,7 +2481,8 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_refuse_staff_audit_change$
 BEGIN
-  -- Only an event past its ${SLOTLOCK_STAFF_RECORD_YEARS} years goes (staff_records_prune); nothing is ever changed.
+  -- Only an event past its ${SLOTLOCK_STAFF_RECORD_YEARS} years goes (staff_records_prune); nothing is ever changed,
+  -- and the log is never emptied at once (TRUNCATE skips the row triggers, so it has its own).
   IF TG_OP = 'DELETE' AND OLD.occurred_at < statement_timestamp() - interval '${SLOTLOCK_STAFF_RECORD_YEARS} years' THEN
     RETURN OLD;
   END IF;
@@ -2416,6 +2492,44 @@ $slotlock_refuse_staff_audit_change$;
 DROP TRIGGER IF EXISTS slotlock_staff_audit_events_frozen ON slotlock.staff_audit_events;
 CREATE TRIGGER slotlock_staff_audit_events_frozen BEFORE UPDATE OR DELETE ON slotlock.staff_audit_events
   FOR EACH ROW EXECUTE FUNCTION slotlock.refuse_staff_audit_change();
+DROP TRIGGER IF EXISTS slotlock_staff_audit_events_not_emptied ON slotlock.staff_audit_events;
+CREATE TRIGGER slotlock_staff_audit_events_not_emptied BEFORE TRUNCATE ON slotlock.staff_audit_events
+  FOR EACH STATEMENT EXECUTE FUNCTION slotlock.refuse_staff_audit_change();
+
+-- The chain, checked from the oldest of the newest events kept (all of them with NULL): each event
+-- follows the one before and hashes what it says. The schema owner can still turn the triggers off
+-- and rewrite the log, so the head (its index and hash) is worth recording somewhere the owner
+-- cannot change: the Staff log page and \`slotlock staff verify-log\` show it. broken_at is the first
+-- event that does not hold, NULL when all do.
+CREATE OR REPLACE FUNCTION slotlock.staff_audit_chain_check(newest integer)
+RETURNS TABLE (checked bigint, broken_at bigint, head_index bigint, head_hash bytea)
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_audit_chain_check$
+DECLARE
+  event slotlock.staff_audit_events;
+  started boolean := false;
+BEGIN
+  checked := 0;
+  FOR event IN
+    SELECT recent.* FROM (SELECT kept.* FROM slotlock.staff_audit_events kept
+                           ORDER BY kept.chain_index DESC LIMIT coalesce(newest, 2147483647)) recent
+     ORDER BY recent.chain_index
+  LOOP
+    IF (started AND (event.chain_index <> head_index + 1 OR event.prev_hash IS DISTINCT FROM head_hash))
+       OR event.hash <> sha256(coalesce(event.prev_hash, ''::bytea) || convert_to(slotlock.staff_audit_event_text(event), 'UTF8')) THEN
+      broken_at := event.chain_index;
+      EXIT;
+    END IF;
+    started := true;
+    checked := checked + 1;
+    head_index := event.chain_index;
+    head_hash := event.hash;
+  END LOOP;
+  RETURN NEXT;
+END
+$slotlock_staff_audit_chain_check$;
 
 -- What the staff keep past their time goes, a little at a time, as staff use the console: events in
 -- the staff log, closed abuse cases, and closed privacy requests with their erasure receipts, each
@@ -2482,6 +2596,47 @@ ${capabilityCase}
 END
 $slotlock_staff_require$;
 
+-- The staff member a session's token names, when the session is open and its member may use the
+-- capability; otherwise an error (42501), so nothing after it runs. Only a session raised by a
+-- passkey reaches data; signed_in_only lets the passkey step itself through. Its last use is
+-- kept to the minute, for the idle limit.
+CREATE OR REPLACE FUNCTION slotlock.staff_session(token text, capability text, signed_in_only boolean)
+RETURNS text
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_session$
+DECLARE
+  found slotlock.staff_sessions;
+BEGIN
+  IF token IS NULL OR token !~ '^stf_[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'staff_session' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO found FROM slotlock.staff_sessions held
+   WHERE held.token_digest = sha256(convert_to(token, 'UTF8'));
+  IF found.token_digest IS NULL OR found.ended_at IS NOT NULL OR found.expires_at <= statement_timestamp()
+     OR found.last_seen_at < statement_timestamp() - interval '${SLOTLOCK_STAFF_IDLE_MINUTES} minutes'
+     OR (found.stage <> 'full' AND NOT coalesce(signed_in_only, false)) THEN
+    RAISE EXCEPTION 'staff_session' USING ERRCODE = '42501';
+  END IF;
+  PERFORM slotlock.staff_require(found.staff_ref, capability);
+  IF found.last_seen_at < statement_timestamp() - interval '1 minute' THEN
+    UPDATE slotlock.staff_sessions held SET last_seen_at = statement_timestamp()
+     WHERE held.token_digest = found.token_digest;
+  END IF;
+  RETURN found.staff_ref;
+END
+$slotlock_staff_session$;
+
+-- End every open session of a member: a reset, a removal, a role change.
+CREATE OR REPLACE FUNCTION slotlock.staff_sessions_end(member_ref text)
+RETURNS void
+LANGUAGE sql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_sessions_end$
+  UPDATE slotlock.staff_sessions held SET ended_at = statement_timestamp()
+   WHERE held.staff_ref = member_ref AND held.ended_at IS NULL;
+$slotlock_staff_sessions_end$;
+
 -- Every account: a person (github:, google:), an organization (github-org:), a team workspace
 -- (team:), a partner's account (partner:), and any other tenant holding data or a plan. Test
 -- environments (~test) are listed too; the console hides them unless asked. Names only where the
@@ -2503,7 +2658,7 @@ AS $slotlock_staff_directory$
   SELECT refs.ref,
          CASE
            WHEN refs.ref ~ '~test$' THEN 'test'
-           WHEN refs.ref LIKE 'github:%' OR refs.ref LIKE 'google:%' THEN 'person'
+           WHEN refs.ref LIKE 'github:%' OR refs.ref LIKE 'google:%' OR refs.ref LIKE 'sso:%' THEN 'person'
            WHEN refs.ref LIKE 'github-org:%' THEN 'organization'
            WHEN refs.ref LIKE 'team:%' THEN 'team'
            WHEN refs.ref LIKE 'partner:%' THEN 'partner'
@@ -2518,29 +2673,131 @@ AS $slotlock_staff_directory$
     LEFT JOIN slotlock.partner_accounts partner ON partner.tenant_ref = refs.ref;
 $slotlock_staff_directory$;
 
--- Signing in to the console: the member's role, or NULL for anyone who is not active staff. Both
--- are recorded.
-CREATE OR REPLACE FUNCTION slotlock.admin_sign_in(actor text)
-RETURNS text
+-- Signing in to the console, once GitHub named the member: with the console's key, a session at
+-- the 'github' stage (enough for the passkey step, for 15 minutes) and the member's role, as
+-- {"role", "session"}; NULL for anyone who is not active staff. Both are recorded. Without the
+-- key, an error (42501) and nothing recorded: the console's database credential alone opens no
+-- session, and learns no role.
+CREATE OR REPLACE FUNCTION slotlock.admin_sign_in(member text, console_key text)
+RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_sign_in$
 DECLARE
   found_role text;
+  token text;
 BEGIN
-  IF actor IS NULL OR actor !~ '${SLOTLOCK_STAFF_REF_PATTERN}' THEN
+  IF console_key IS NULL OR octet_length(console_key) NOT BETWEEN 32 AND 200 OR NOT EXISTS (
+    SELECT 1 FROM slotlock.staff_console_keys kept WHERE kept.key_digest = sha256(convert_to(console_key, 'UTF8'))
+  ) THEN
+    RAISE EXCEPTION 'admin_console_key' USING ERRCODE = '42501';
+  END IF;
+  IF member IS NULL OR member !~ '${SLOTLOCK_STAFF_REF_PATTERN}' THEN
     RETURN NULL;
   END IF;
-  UPDATE slotlock.staff_members member SET last_seen_at = statement_timestamp()
-   WHERE member.staff_ref = actor AND member.status = 'active'
-  RETURNING member.role INTO found_role;
-  PERFORM slotlock.staff_log(actor,
+  -- Sessions ended or run out a day ago go.
+  DELETE FROM slotlock.staff_sessions old
+   WHERE coalesce(old.ended_at, old.expires_at) < statement_timestamp() - interval '1 day';
+  UPDATE slotlock.staff_members found SET last_seen_at = statement_timestamp()
+   WHERE found.staff_ref = member AND found.status = 'active'
+  RETURNING found.role INTO found_role;
+  PERFORM slotlock.staff_log(member,
     CASE WHEN found_role IS NULL THEN 'staff.sign_in_refused' ELSE 'staff.signed_in' END,
     NULL, NULL, NULL, '{}'::jsonb);
-  RETURN found_role;
+  IF found_role IS NULL THEN
+    RETURN NULL;
+  END IF;
+  token := 'stf_' || replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '');
+  INSERT INTO slotlock.staff_sessions (token_digest, staff_ref, stage, expires_at)
+  VALUES (sha256(convert_to(token, 'UTF8')), member, 'github', statement_timestamp() + interval '15 minutes');
+  RETURN jsonb_build_object('role', found_role, 'session', token);
 END
 $slotlock_admin_sign_in$;
+
+-- Signing out: the session ends at once, wherever its cookie went. False when it had ended.
+CREATE OR REPLACE FUNCTION slotlock.admin_sign_out(actor text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_sign_out$
+DECLARE
+  token_hash bytea := sha256(convert_to(coalesce(actor, ''), 'UTF8'));
+BEGIN
+  actor := slotlock.staff_session(actor, 'home', true);
+  UPDATE slotlock.staff_sessions held SET ended_at = statement_timestamp()
+   WHERE held.token_digest = token_hash AND held.ended_at IS NULL;
+  PERFORM slotlock.staff_log(actor, 'staff.signed_out', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN FOUND;
+END
+$slotlock_admin_sign_out$;
+
+-- The session as it stands, for each request the console serves: the member's role now (a role
+-- changed since sign-in applies at once), or an error (42501) for a session that ended. Not
+-- recorded: every request asks it, and the pages record themselves.
+CREATE OR REPLACE FUNCTION slotlock.admin_session(actor text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_session$
+BEGIN
+  actor := slotlock.staff_session(actor, 'home', false);
+  RETURN (SELECT member.role FROM slotlock.staff_members member WHERE member.staff_ref = actor);
+END
+$slotlock_admin_session$;
+
+-- A passkey challenge the console made for this session: kept, as its SHA-256, for five minutes
+-- and one use (admin_passkey_used, admin_passkey_enroll), so it serves no other session and no
+-- second sign-in.
+CREATE OR REPLACE FUNCTION slotlock.admin_passkey_challenge(actor text, purpose text, challenge_hash bytea)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_passkey_challenge$
+DECLARE
+  token_hash bytea := sha256(convert_to(coalesce(actor, ''), 'UTF8'));
+BEGIN
+  actor := slotlock.staff_session(actor, 'home', true);
+  IF purpose IS NULL OR purpose NOT IN ('create', 'get') OR challenge_hash IS NULL OR octet_length(challenge_hash) <> 32 THEN
+    RAISE EXCEPTION 'admin_passkey_challenge' USING ERRCODE = '22023';
+  END IF;
+  UPDATE slotlock.staff_sessions held
+     SET challenge_digest = challenge_hash, challenge_purpose = purpose,
+         challenge_expires_at = statement_timestamp() + interval '5 minutes'
+   WHERE held.token_digest = token_hash;
+END
+$slotlock_admin_passkey_challenge$;
+
+-- Use up this session's challenge for a purpose: true when it was the one waiting, and in time.
+CREATE OR REPLACE FUNCTION slotlock.staff_challenge_spend(token_hash bytea, purpose text, challenge_hash bytea)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_challenge_spend$
+BEGIN
+  UPDATE slotlock.staff_sessions held
+     SET challenge_digest = NULL, challenge_purpose = NULL, challenge_expires_at = NULL
+   WHERE held.token_digest = token_hash AND held.challenge_digest = challenge_hash
+     AND held.challenge_purpose = purpose AND held.challenge_expires_at > statement_timestamp();
+  RETURN FOUND;
+END
+$slotlock_staff_challenge_spend$;
+
+-- A session a passkey just confirmed: 'full', for 8 hours from its first passkey.
+CREATE OR REPLACE FUNCTION slotlock.staff_session_raise(token_hash bytea)
+RETURNS void
+LANGUAGE sql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_session_raise$
+  UPDATE slotlock.staff_sessions held
+     SET expires_at = CASE WHEN held.stage = 'full' THEN held.expires_at
+                           ELSE statement_timestamp() + interval '${SLOTLOCK_STAFF_SESSION_HOURS} hours' END,
+         stage = 'full', passkey_at = statement_timestamp()
+   WHERE held.token_digest = token_hash;
+$slotlock_staff_session_raise$;
 
 -- What the console itself records: a sign-out, a passkey refused, a page refused, a lookup. Only
 -- staff, and only staff., page. and search. events: an account action is recorded by its function.
@@ -2551,7 +2808,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_record$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', true);
   IF happened IS NULL OR happened !~ '^(staff|page|search)\\.' THEN
     RAISE EXCEPTION 'admin_record_action' USING ERRCODE = '22023';
   END IF;
@@ -2572,7 +2829,7 @@ DECLARE
   last_month_start date := (${monthStart} - interval '1 month')::date;
   result jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', false);
   WITH accounts AS (
     SELECT listed.kind FROM slotlock.staff_directory() listed WHERE listed.kind <> 'test'
   ), usage AS (
@@ -2650,7 +2907,7 @@ DECLARE
   month_start date := ${monthStart};
   shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   IF char_length(coalesce(wanted, '')) > 200 OR wanted ~ '[[:cntrl:]]' THEN
     RAISE EXCEPTION 'admin_query_invalid' USING ERRCODE = '22023';
   END IF;
@@ -2717,7 +2974,7 @@ DECLARE
   month_start date := ${monthStart};
   result jsonb;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   IF requested IS NULL OR octet_length(requested) NOT BETWEEN 1 AND 500 OR requested ~ '[[:cntrl:]]' THEN
     RAISE EXCEPTION 'admin_account_invalid' USING ERRCODE = '22023';
   END IF;
@@ -2782,7 +3039,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_account_keys$
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'account.keys_viewed', account, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT minted.id, minted.name, minted.prefix, minted.scopes, minted.created_at, minted.expires_at,
@@ -2805,7 +3062,7 @@ AS $slotlock_admin_account_usage$
 DECLARE
   span integer := least(greatest(coalesce(days, 90), 1), 400);
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'account.usage_viewed', account, NULL, NULL,
     jsonb_build_object('days', span));
   RETURN QUERY
@@ -2831,7 +3088,7 @@ DECLARE
   previous text := current_setting('slotlock.tenant_ref', true);
   shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'accounts.read');
+  actor := slotlock.staff_session(actor, 'accounts.read', false);
   PERFORM slotlock.staff_log(actor, 'account.audit_viewed', account, NULL, NULL, '{}'::jsonb);
   PERFORM set_config('slotlock.tenant_ref', account, true);
   RETURN QUERY
@@ -2855,7 +3112,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_staff$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'staff.read');
+  actor := slotlock.staff_session(actor, 'staff.read', false);
   PERFORM slotlock.staff_log(actor, 'staff.list_viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT member.staff_ref, member.role, member.status, member.added_by, member.added_at,
@@ -2879,7 +3136,7 @@ AS $slotlock_admin_staff_log$
 DECLARE
   shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'staff.log');
+  actor := slotlock.staff_session(actor, 'staff.log', false);
   RETURN QUERY
   SELECT event.chain_index, event.occurred_at, event.staff_ref, event.action, event.account_ref,
          event.target, event.reason, event.metadata
@@ -2889,6 +3146,25 @@ BEGIN
    LIMIT shown;
 END
 $slotlock_admin_staff_log$;
+
+-- The staff log's chain (staff.log): its newest ${SLOTLOCK_STAFF_CHAIN_CHECKED} events checked, and its head, for an
+-- Owner to record outside the database. Not itself recorded, like reading the log.
+CREATE OR REPLACE FUNCTION slotlock.admin_staff_log_chain(actor text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_staff_log_chain$
+DECLARE
+  result jsonb;
+BEGIN
+  actor := slotlock.staff_session(actor, 'staff.log', false);
+  SELECT jsonb_build_object('checked', checked, 'broken_at', broken_at, 'head_index', head_index,
+                            'head_hash', encode(head_hash, 'hex'))
+    INTO result FROM slotlock.staff_audit_chain_check(${SLOTLOCK_STAFF_CHAIN_CHECKED});
+  RETURN result;
+END
+$slotlock_admin_staff_log_chain$;
 
 -- The caller's own passkeys, to check a sign-in against. Any active member.
 CREATE OR REPLACE FUNCTION slotlock.admin_passkeys(actor text)
@@ -2900,7 +3176,7 @@ SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_passkeys$
 #variable_conflict use_column
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', true);
   RETURN QUERY
   SELECT key.credential_id, key.public_key, key.algorithm, key.sign_count, key.name, key.created_at,
          key.last_used_at
@@ -2910,22 +3186,30 @@ BEGIN
 END
 $slotlock_admin_passkeys$;
 
--- Register a passkey the console has verified. A member's first passkey needs the one-time code
--- the deployment role issued (slotlock staff add or reset), which this uses up; a later one needs
--- no code, and the console asks for a passkey sign-in first. False when the code is wrong or
--- spent, or the member already has the most passkeys allowed.
-CREATE OR REPLACE FUNCTION slotlock.admin_passkey_enroll(actor text, code_hash bytea, credential bytea, key bytea, alg integer, counter bigint, label text)
+-- Register a passkey the console has verified, against this session's 'create' challenge. A
+-- member's first passkey needs the one-time code the deployment role issued (slotlock staff add or
+-- reset), which this uses up; a later one needs a passkey sign-in in this session in the last 15
+-- minutes. Either raises the session, as a passkey sign-in does. False when the challenge, the
+-- code or the sign-in does not hold, or the member has the most passkeys allowed.
+CREATE OR REPLACE FUNCTION slotlock.admin_passkey_enroll(actor text, code_hash bytea, credential bytea, key bytea, alg integer, counter bigint, label text, challenge_hash bytea)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_passkey_enroll$
 DECLARE
+  token_hash bytea := sha256(convert_to(coalesce(actor, ''), 'UTF8'));
   held integer;
   member slotlock.staff_members;
+  current slotlock.staff_sessions;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', true);
   SELECT * INTO member FROM slotlock.staff_members found WHERE found.staff_ref = actor FOR UPDATE;
+  SELECT * INTO current FROM slotlock.staff_sessions here WHERE here.token_digest = token_hash;
+  IF NOT slotlock.staff_challenge_spend(token_hash, 'create', challenge_hash) THEN
+    PERFORM slotlock.staff_log(actor, 'staff.passkey_refused', NULL, NULL, 'challenge', '{}'::jsonb);
+    RETURN false;
+  END IF;
   SELECT count(*) INTO held FROM slotlock.staff_passkeys owned WHERE owned.staff_ref = actor;
   IF held >= ${SLOTLOCK_STAFF_MAX_PASSKEYS} THEN
     PERFORM slotlock.staff_log(actor, 'staff.passkey_refused', NULL, NULL, 'too many passkeys', '{}'::jsonb);
@@ -2937,33 +3221,41 @@ BEGIN
       PERFORM slotlock.staff_log(actor, 'staff.passkey_refused', NULL, NULL, 'enrollment code', '{}'::jsonb);
       RETURN false;
     END IF;
-  ELSIF code_hash IS NOT NULL THEN
-    PERFORM slotlock.staff_log(actor, 'staff.passkey_refused', NULL, NULL, 'already enrolled', '{}'::jsonb);
+  ELSIF code_hash IS NOT NULL OR current.stage <> 'full'
+        OR current.passkey_at < statement_timestamp() - interval '${SLOTLOCK_STAFF_FRESH_MINUTES} minutes' THEN
+    PERFORM slotlock.staff_log(actor, 'staff.passkey_refused', NULL, NULL, 'needs a recent passkey sign-in', '{}'::jsonb);
     RETURN false;
   END IF;
   INSERT INTO slotlock.staff_passkeys (credential_id, staff_ref, public_key, algorithm, sign_count, name)
   VALUES (credential, actor, key, alg, greatest(coalesce(counter, 0), 0), label);
   UPDATE slotlock.staff_members found SET enrollment_hash = NULL, enrollment_expires_at = NULL
    WHERE found.staff_ref = actor;
+  PERFORM slotlock.staff_session_raise(token_hash);
   PERFORM slotlock.staff_log(actor, 'staff.passkey_added', NULL, label, NULL,
     jsonb_build_object('algorithm', alg));
   RETURN true;
 END
 $slotlock_admin_passkey_enroll$;
 
--- A passkey sign-in the console verified: move its counter on. False (and recorded) when the
--- counter did not move forward, which a cloned authenticator shows; true otherwise. Counters
--- that stay at zero are passkeys that keep none.
-CREATE OR REPLACE FUNCTION slotlock.admin_passkey_used(actor text, credential bytea, counter bigint)
+-- A passkey sign-in the console verified against this session's 'get' challenge: the challenge is
+-- used up, the passkey's counter moves on, and the session is raised. False (and recorded) when the
+-- challenge is not this session's or was used, or the counter did not move forward, which a cloned
+-- authenticator shows. Counters that stay at zero are passkeys that keep none.
+CREATE OR REPLACE FUNCTION slotlock.admin_passkey_used(actor text, credential bytea, counter bigint, challenge_hash bytea)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_passkey_used$
 DECLARE
+  token_hash bytea := sha256(convert_to(coalesce(actor, ''), 'UTF8'));
   stored bigint;
 BEGIN
-  PERFORM slotlock.staff_require(actor, 'home');
+  actor := slotlock.staff_session(actor, 'home', true);
+  IF NOT slotlock.staff_challenge_spend(token_hash, 'get', challenge_hash) THEN
+    PERFORM slotlock.staff_log(actor, 'staff.passkey_refused', NULL, NULL, 'challenge', '{}'::jsonb);
+    RETURN false;
+  END IF;
   SELECT key.sign_count INTO stored FROM slotlock.staff_passkeys key
    WHERE key.credential_id = credential AND key.staff_ref = actor FOR UPDATE;
   IF stored IS NULL THEN
@@ -2978,10 +3270,27 @@ BEGIN
   UPDATE slotlock.staff_passkeys key SET sign_count = greatest(coalesce(counter, 0), 0),
          last_used_at = statement_timestamp()
    WHERE key.credential_id = credential;
+  PERFORM slotlock.staff_session_raise(token_hash);
   PERFORM slotlock.staff_log(actor, 'staff.passkey_verified', NULL, NULL, NULL, '{}'::jsonb);
   RETURN true;
 END
 $slotlock_admin_passkey_used$;
+
+-- The console's key: set, or replaced, by the deployment role (slotlock staff console-key), from
+-- the digest of a key the console holds. Replacing it ends every staff session.
+CREATE OR REPLACE FUNCTION slotlock.staff_console_key(key_hash bytea, actor text)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_console_key$
+BEGIN
+  INSERT INTO slotlock.staff_console_keys AS kept (id, key_digest, set_by) VALUES (1, key_hash, actor)
+  ON CONFLICT (id) DO UPDATE SET key_digest = EXCLUDED.key_digest, set_by = EXCLUDED.set_by,
+                                 set_at = statement_timestamp();
+  UPDATE slotlock.staff_sessions held SET ended_at = statement_timestamp() WHERE held.ended_at IS NULL;
+  PERFORM slotlock.staff_log(actor, 'staff.console_key_set', NULL, NULL, NULL, '{}'::jsonb);
+END
+$slotlock_staff_console_key$;
 
 -- Add a member, or bring back a removed one, with a role and a one-time code for their first
 -- passkey. Deployment role only (slotlock staff add).
@@ -3000,6 +3309,7 @@ BEGIN
     SET role = EXCLUDED.role, status = 'active', removed_at = NULL, added_by = EXCLUDED.added_by,
         added_at = statement_timestamp(), enrollment_hash = EXCLUDED.enrollment_hash,
         enrollment_expires_at = EXCLUDED.enrollment_expires_at;
+  PERFORM slotlock.staff_sessions_end(member_ref);
   PERFORM slotlock.staff_log(actor, CASE WHEN existed THEN 'staff.readded' ELSE 'staff.added' END,
     NULL, member_ref, NULL, jsonb_build_object('role', member_role));
 END
@@ -3020,6 +3330,7 @@ BEGIN
     RAISE EXCEPTION 'staff_not_found' USING ERRCODE = 'P0002';
   END IF;
   UPDATE slotlock.staff_members member SET role = member_role WHERE member.staff_ref = member_ref;
+  PERFORM slotlock.staff_sessions_end(member_ref);
   PERFORM slotlock.staff_log(actor, 'staff.role_changed', NULL, member_ref, NULL,
     jsonb_build_object('from', previous_role, 'to', member_role));
 END
@@ -3039,6 +3350,7 @@ BEGIN
     RAISE EXCEPTION 'staff_not_found' USING ERRCODE = 'P0002';
   END IF;
   DELETE FROM slotlock.staff_passkeys key WHERE key.staff_ref = member_ref;
+  PERFORM slotlock.staff_sessions_end(member_ref);
   PERFORM slotlock.staff_log(actor, 'staff.passkeys_reset', NULL, member_ref, NULL, '{}'::jsonb);
 END
 $slotlock_staff_reset$;
@@ -3069,6 +3381,7 @@ BEGIN
          enrollment_expires_at = NULL
    WHERE member.staff_ref = member_ref;
   DELETE FROM slotlock.staff_passkeys key WHERE key.staff_ref = member_ref;
+  PERFORM slotlock.staff_sessions_end(member_ref);
   PERFORM slotlock.staff_log(actor, 'staff.removed', NULL, member_ref, NULL,
     jsonb_build_object('role', removed_role));
 END
