@@ -3,8 +3,11 @@
 import type { Sql } from 'postgres';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  type SlotlockMaintenanceRecord,
   type SlotlockMaintenanceResult,
+  type SlotlockMaintenanceRound,
   maintainSlotlockTenant,
+  slotlockMaintenanceError,
   startSlotlockMaintenance,
   withSlotlockMaintenanceLock,
 } from '../maintenance.js';
@@ -640,3 +643,92 @@ describe('startSlotlockMaintenance', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('what maintenance tells the admin console (RFC 0006, M11)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: Date.UTC(2027, 0, 1) });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const HOUR = 3_600_000;
+  const recorder = () => {
+    const failed: [string, ReturnType<typeof slotlockMaintenanceError>][] = [];
+    const ran: string[] = [];
+    const rounds: SlotlockMaintenanceRound[] = [];
+    const record: SlotlockMaintenanceRecord = {
+      failed: async (tenantRef, error) => {
+        failed.push([tenantRef, error]);
+      },
+      ran: async (tenantRef) => {
+        ran.push(tenantRef);
+      },
+      round: async (round) => {
+        rounds.push(round);
+      },
+    };
+    return { record, failed, ran, rounds };
+  };
+
+  it('records each failed pass with its tenant, clears it when a pass runs, and counts an hour of passes without a tenant', async () => {
+    const fake = fakeStore();
+    fake.fail('fleet-b', Object.assign(new Error("Could not roll 'Standup with Ada'"), { code: '23P01' }));
+    const { record, failed, ran, rounds } = recorder();
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store, sql: fakeSql().sql, tenants: ['fleet-a', 'fleet-b'], intervalMs: HOUR, record,
+    });
+    await settle();
+    expect(ran).toEqual(['fleet-a']);
+    expect(failed).toEqual([['fleet-b', { name: 'Error', code: '23P01', message: 'Could not roll …' }]]);
+    // Nothing counted yet: an hour has not passed.
+    expect(rounds).toEqual([]);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    await settle();
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]).toMatchObject({ passes: 1, failed: 1, startedAt: new Date(Date.UTC(2027, 0, 1)) });
+    expect(JSON.stringify(rounds[0])).not.toContain('fleet');
+    await scheduler.close();
+    // Closing records what ran since: the hour's second passes.
+    expect(rounds).toHaveLength(2);
+    expect(rounds[1]).toMatchObject({ passes: 1, failed: 1 });
+  });
+
+  it('records nothing for an hour in which no pass ran, and reports a record that failed without stopping', async () => {
+    const fake = fakeStore();
+    const onError = vi.fn();
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store, sql: fakeSql().sql, tenants: ['fleet'], intervalMs: HOUR, onError,
+      record: {
+        failed: async () => undefined,
+        ran: async () => {
+          throw new Error('database away');
+        },
+        round: async () => undefined,
+      },
+    });
+    await settle();
+    expect(tenantsMaintainedOf(fake)).toEqual(['fleet']);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'database away' }));
+    await scheduler.close();
+    expect(() => startSlotlockMaintenance({ store: fake.store, sql: fakeSql().sql, tenants: [], intervalMs: HOUR, recordEveryMs: 59_999 }))
+      .toThrow(RangeError);
+  });
+
+  it('keeps an error to its class, code and first line, with anything in quotes taken out', () => {
+    expect(slotlockMaintenanceError(Object.assign(new Error('Key (title)=("Board meeting") clashes\nDETAIL: more'), { code: '23505' })))
+      .toEqual({ name: 'Error', code: '23505', message: 'Key (title)=(…) clashes' });
+    expect(slotlockMaintenanceError(new RangeError(`Invalid time zone ‘Mars/Olympus’ for ${'x'.repeat(300)}`)).message)
+      .toMatch(/^Invalid time zone … for x+…$/);
+    expect([...(slotlockMaintenanceError(new Error('y'.repeat(500))).message ?? '')]).toHaveLength(200);
+    expect(slotlockMaintenanceError(Object.assign(new Error(''), { name: 'Not a name!', code: 'has space' })))
+      .toEqual({ name: 'Error', code: null, message: null });
+    expect(slotlockMaintenanceError('thrown string')).toEqual({ name: 'Error', code: null, message: null });
+  });
+});
+
+const tenantsMaintainedOf = (fake: ReturnType<typeof fakeStore>) =>
+  fake.calls.filter(({ task }) => task === 'prune').map(({ tenantRef }) => tenantRef);

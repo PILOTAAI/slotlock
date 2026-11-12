@@ -78,6 +78,9 @@ protection officer.
 | From 12 December 2026, our staff's internal notes about your account | Our staff | Until your account is erased |
 | From 12 December 2026, abuse cases: a report to abuse@ or what our staff saw, the section of the Acceptable Use Policy, the evidence, what was done and how it ended, with your account's id | A reporter, our staff | Six years after the case is closed, then deleted. Once your account is erased, a case stays without its link to your account |
 | From 12 December 2026, your privacy requests: your account's id, what you asked for, when it arrived, where it is in our privacy mailbox, the word we sent you, the key that showed it was you, and which of our staff handled each step. Never your email address, which stays in the mailbox (below) | You, our staff | Six years after the request is closed, then deleted. Once your account is erased, the request keeps only a digest of its id |
+| From 12 December 2026, what our staff show on your dashboard: announcements to every account or to your plan's accounts (planned maintenance, a change to Slotlock, an incident), and a notice to your account alone, with your account's id, the text, an optional link, when it shows and who wrote it | Our staff | A year after it ends or is ended, then deleted; a notice to your account alone, at once when your account is erased |
+| From 12 December 2026, a feature our staff turned on or off for your account (the assistant, or creating team workspaces), with your account's id, the reason and who did it | Our staff | Until they take it away, or your account is erased |
+| From 12 December 2026, when our hourly maintenance of your account last failed: your account's id, when it first and last failed, how many times, and the error's class, code and first line with anything in quotes taken out. Never your calendar content | The service | Until maintenance runs for your account again, and at most 30 days after it last failed; at once when your account is erased |
 | From 12 December 2026, an erasure's receipt: the request, a digest of your account's id (SHA-256 with a secret of ours, so it names the account only to someone with our database who already knows its id), how many rows were erased, which of our staff asked, approved and erased, and when | The service | Six years, then deleted |
 
 The API server's logs record each call's operation and outcome, never its arguments or who made it.
@@ -105,7 +108,10 @@ own site. We use no analytics or advertising cookies, so there is nothing to con
 The website at `https://slotlock.pylota.io` counts visits with Cloudflare Web Analytics. It sets no
 cookie and stores nothing in your browser; it records the page, the site that linked to it, the
 browser, the country and how long the page took to load, and we see only totals. We use the totals
-to learn which pages people read and how they find them.
+to learn which pages people read and how they find them. From 12 December 2026 our staff console
+also reads, from Google Search Console and Bing Webmaster Tools, how often each page of the website
+and each search showed in their results and was clicked: totals by page and by search, never who
+searched.
 
 If you write to us at support@, abuse@ or privacy@pylota.io, we keep what you send and our reply in
 our mailboxes, hosted by Google Workspace, for two years and then delete them.
@@ -125,8 +131,15 @@ their role again on every page.
   login.
 - **What they record:** every sign-in, every account page opened and every action is in the staff
   log. An action on your account (a suspension and its end, a revoked key, ended sessions, a plan
-  or limits given until a date) also goes into your account's own audit log, as "Slotlock staff"
-  with the reason given, so you can see it.
+  or limits given until a date, a notice sent to you, a feature turned on or off for you) also goes
+  into your account's own audit log, as "Slotlock staff" with the reason given, so you can see it.
+- **What they tell you:** a line above every page of your dashboard, for planned maintenance, a
+  change to Slotlock, an incident, or a notice to your account alone; and incidents on the status
+  page, which are public GitHub issues labelled `status`. Never marketing, and never by email from
+  the console.
+- **How the service runs:** they see when maintenance of an account failed (as "What we hold"
+  says), and how many webhook endpoints are failing across all accounts, as counts: no endpoint's
+  address and no delivery's content.
 - **Your privacy requests** are handled there: we check it is you as "Your rights" says, make your
   export for you, and erase your account in fixed steps, with a second member of staff approving
   each erasure. An export made for you waits on your dashboard's Privacy page for 7 days; staff see
@@ -145,7 +158,7 @@ their role again on every page.
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Learning which pages of the website people read, and how they find them | Page views on `slotlock.pylota.io`, counted without cookies (above) | (f) legitimate interests: improving the website, with no way to tell who you are |
-| Running the service day to day: support, billing, handling abuse reports, and recording what our staff do on accounts | Staff log, internal notes, abuse cases | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
+| Running the service day to day: support, billing, handling abuse reports, telling you about maintenance and changes, turning features on or off, finding failed maintenance, and recording what our staff do on accounts | Staff log, internal notes, abuse cases, announcements and notices, feature flags, maintenance failures | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
 | Answering your privacy requests, and showing later that we did | Privacy requests, erasure receipts | (c) legal obligation: UK GDPR Articles 12 to 22, and 5(2), which asks us to be able to show it |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
 

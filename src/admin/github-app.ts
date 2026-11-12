@@ -99,7 +99,46 @@ export interface SlotlockCmsGitHub {
   deleteBranch(branch: string): Promise<void>;
   /** Squash-merge, only at this head commit. */
   merge(input: { number: number; sha: string; title: string; message: string }): Promise<{ merged: boolean; message: string }>;
+  /**
+   * The status page's incidents (docs/hosted/status.md): issues labelled `status`, open or recently
+   * closed, newest first (RFC 0006, M10).
+   */
+  statusIssues(state: 'open' | 'closed'): Promise<SlotlockStatusIssue[]>;
+  /** Open an incident: an issue labelled `status`. */
+  openStatusIssue(input: { title: string; body: string }): Promise<SlotlockStatusIssue>;
+  /**
+   * Add an update to an incident, and close it with that update when `close`. Only an open issue
+   * labelled `status`: false, and nothing posted, for any other.
+   */
+  updateStatusIssue(input: { number: number; body: string; close: boolean }): Promise<boolean>;
+  /** The last runs of one of the repository's workflows on main (deploys and the site's checks). */
+  workflowRuns(workflow: string, limit?: number): Promise<SlotlockWorkflowRun[]>;
 }
+
+/** An incident on the status page. */
+export interface SlotlockStatusIssue {
+  number: number;
+  title: string;
+  url: string;
+  createdAt: string;
+  closedAt: string | null;
+  comments: number;
+}
+
+/** A workflow run on main, as the System page lists deploys. */
+export interface SlotlockWorkflowRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  event: string;
+  sha: string;
+  url: string;
+  createdAt: string;
+}
+
+/** A workflow file the console may read the runs of. */
+export const SLOTLOCK_WORKFLOW_FILE = /^[a-z0-9][a-z0-9-]{0,60}\.ya?ml$/;
 
 export class SlotlockCmsError extends Error {
   readonly status: number;
@@ -285,6 +324,15 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     if (!SLOTLOCK_CMS_BRANCH.test(branch)) throw new SlotlockCmsError('The console deletes only cms/<slug> branches', 400);
     await call('DELETE', `${repo}/git/refs/heads/${branch}`, undefined, [404, 422]);
   }
+
+  const asStatusIssue = (raw: Record<string, unknown>): SlotlockStatusIssue => ({
+    number: Number(raw.number),
+    title: String(raw.title ?? ''),
+    url: String(raw.html_url ?? ''),
+    createdAt: String(raw.created_at ?? ''),
+    closedAt: typeof raw.closed_at === 'string' ? raw.closed_at : null,
+    comments: Number(raw.comments ?? 0),
+  });
 
   const asPullRequest = (raw: Record<string, unknown>): SlotlockCmsPullRequest => {
     const head = (raw.head ?? {}) as { ref?: unknown; sha?: unknown };
@@ -492,6 +540,49 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     },
 
     deleteBranch,
+
+    async statusIssues(state) {
+      const { body } = await call<Record<string, unknown>[]>(
+        'GET', `${repo}/issues?labels=status&state=${state}&sort=created&direction=desc&per_page=${state === 'open' ? 50 : 10}`,
+      );
+      // The issues API lists pull requests too; an incident is an issue.
+      return (body ?? []).filter((item) => !item.pull_request).map(asStatusIssue);
+    },
+
+    async openStatusIssue({ title, body }) {
+      const { body: made } = await call<Record<string, unknown>>('POST', `${repo}/issues`, { title, body, labels: ['status'] });
+      return asStatusIssue(made ?? {});
+    },
+
+    async updateStatusIssue({ number, body, close }) {
+      const { status, body: issue } = await call<{ state?: unknown; labels?: { name?: unknown }[]; pull_request?: unknown } | null>(
+        'GET', `${repo}/issues/${number}`, undefined, [404, 410],
+      );
+      const isIncident =
+        status === 200 && issue && !issue.pull_request && issue.state === 'open' &&
+        (issue.labels ?? []).some((label) => label.name === 'status');
+      if (!isIncident) return false;
+      await call('POST', `${repo}/issues/${number}/comments`, { body });
+      if (close) await call('PATCH', `${repo}/issues/${number}`, { state: 'closed', state_reason: 'completed' });
+      return true;
+    },
+
+    async workflowRuns(workflow, limit = 5) {
+      if (!SLOTLOCK_WORKFLOW_FILE.test(workflow)) throw new SlotlockCmsError('A workflow is a .yml file name', 400);
+      const { body } = await call<{ workflow_runs?: Record<string, unknown>[] } | null>(
+        'GET', `${repo}/actions/workflows/${workflow}/runs?branch=main&per_page=${Math.min(Math.max(limit, 1), 20)}`, undefined, [404],
+      );
+      return (body?.workflow_runs ?? []).map((run) => ({
+        id: Number(run.id),
+        name: String(run.name ?? workflow),
+        status: String(run.status ?? ''),
+        conclusion: typeof run.conclusion === 'string' ? run.conclusion : null,
+        event: String(run.event ?? ''),
+        sha: String(run.head_sha ?? ''),
+        url: String(run.html_url ?? ''),
+        createdAt: String(run.created_at ?? ''),
+      }));
+    },
 
     async merge({ number, sha, title, message }) {
       const { status, body } = await call<{ merged?: boolean; message?: string }>(

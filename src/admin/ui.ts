@@ -178,7 +178,8 @@ export function table(caption: string, columns: string[], rows: Html[][], empty:
     <caption class="sr-only">${caption}</caption>
     <thead><tr>${columns.map((column) => html`<th scope="col">${column}</th>`)}</tr></thead>
     <tbody>${rows.map(
-      (row) => html`<tr>${row.map((cell, index) => html`<td data-label="${columns[index] ?? ''}">${cell}</td>`)}</tr>`,
+      // Each cell's content in one box, so a stacked row on a phone keeps it together beside its label.
+      (row) => html`<tr>${row.map((cell, index) => html`<td data-label="${columns[index] ?? ''}"><div class="cell">${cell}</div></td>`)}</tr>`,
     )}</tbody>
   </table></div>`;
 }
@@ -344,6 +345,9 @@ body.plain{display:grid;place-items:center;min-height:100vh;padding:16px}
 .fine{font-size:12px;color:var(--ink-3)}
 .form{display:grid;gap:8px;max-width:560px}.form p{margin:0;color:var(--ink-2)}
 .form label{font-weight:500;font-size:13px}.hint{font-weight:400;color:var(--ink-3)}
+.form label.check{display:flex;gap:8px;align-items:center;font-weight:400}.form label.check input{width:auto;flex:none}
+form.inline{display:inline;margin:0}
+.incidents{list-style:none;margin:0 0 12px;display:grid;gap:16px}.incidents p{margin:0 0 8px}.incidents .sub{color:var(--ink-3);font-size:13px}
 .form input,.form textarea,.form select{padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--canvas);color:var(--ink);font:inherit;width:100%}
 .form textarea{resize:vertical;min-height:64px}
 .form input:focus,.form textarea:focus,.form select:focus{outline:2px solid var(--accent);outline-offset:1px}
@@ -404,7 +408,8 @@ pre.pop{max-height:320px;overflow:auto;font-size:12px}
 .article blockquote{margin:0 0 1em;padding-left:14px;border-left:3px solid var(--line)}
 .article figure{margin:0 0 1.2em}.article img{max-width:100%;height:auto;border-radius:10px}.article .post-meta{margin:0 0 6px;font:12px var(--mono);color:var(--ink-3)}
 @media (max-width:860px){.cms,.cms-row{grid-template-columns:1fr}.app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}.nav{display:flex;flex-wrap:wrap}.side-foot{margin:0;border:0;padding:0}.grid-2{grid-template-columns:1fr}.content{padding:18px 16px}.top{padding:10px 16px}
-thead{display:none}tr{display:block;border-top:1px solid var(--line-2)}td{display:flex;justify-content:space-between;gap:12px;border:0;padding:6px 14px}td::before{content:attr(data-label);color:var(--ink-3);font-size:12px}}
+thead{display:none}tr{display:block;border-top:1px solid var(--line-2)}td{display:flex;justify-content:space-between;gap:12px;border:0;padding:6px 14px}td::before{content:attr(data-label);color:var(--ink-3);font-size:12px;flex:none}td .cell{min-width:0;text-align:right}}
+td .cell{overflow-wrap:anywhere}
 `;
 
 /**

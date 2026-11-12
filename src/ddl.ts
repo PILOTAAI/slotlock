@@ -8,7 +8,12 @@
 // role can write to ("$user", public) would run with that ownership. The DDL pins search_path to
 // pg_catalog and pg_temp while it runs and restores the caller's at the end. Apply it in one
 // transaction: under autocommit the pin ends with its own statement.
-import { SLOTLOCK_STAFF_DDL, SLOTLOCK_STAFF_OPERATOR_FUNCTIONS, SLOTLOCK_STAFF_TABLES } from './staff-ddl.js';
+import {
+  SLOTLOCK_STAFF_DDL,
+  SLOTLOCK_STAFF_OPERATOR_FUNCTIONS,
+  SLOTLOCK_STAFF_SERVING_FUNCTIONS,
+  SLOTLOCK_STAFF_TABLES,
+} from './staff-ddl.js';
 import {
   SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
   SLOTLOCK_MAX_LOCATION_DEPTH,
@@ -411,6 +416,9 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.erase_subject_changes(text, text, text, text)',
   'slotlock.tenant_suspension_notice(text)',
   'slotlock.note_billing_event(text, text, text, jsonb)',
+  // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
+  // 0006, M10 and M11; staff-ddl.ts).
+  ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -3762,6 +3770,20 @@ BEGIN
   RETURN NEXT;
   erased_table := 'billing_alerts';
   DELETE FROM slotlock.billing_alerts WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  -- What staff kept for it (RFC 0006, M10 and M11): notices to it, its feature flags, and a
+  -- maintenance failure. The staff log keeps that they were made.
+  erased_table := 'announcements';
+  DELETE FROM slotlock.announcements WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'feature_flags';
+  DELETE FROM slotlock.feature_flags WHERE tenant_ref = requested_tenant_ref;
+  GET DIAGNOSTICS erased_rows = ROW_COUNT;
+  RETURN NEXT;
+  erased_table := 'maintenance_failures';
+  DELETE FROM slotlock.maintenance_failures WHERE tenant_ref = requested_tenant_ref;
   GET DIAGNOSTICS erased_rows = ROW_COUNT;
   RETURN NEXT;
   -- A partner's account: what it used in months its partner has not closed is kept for billing

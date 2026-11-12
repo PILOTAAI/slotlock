@@ -619,6 +619,15 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           max_webhook_endpoints, ends_at, reason, created_by, approved_by, approved_at)
         VALUES (${tenantRef}, 'team', 500, 100, 25, now() + interval '30 days', 'Pilot', 'github:1', 'github:1', now())`;
       await application`SELECT slotlock.note_billing_event('payment_failed', ${tenantRef}, ${`in_${uid}`}, '{}'::jsonb)`;
+      // A notice staff sent it and a feature they turned off for it (RFC 0006, M10 and M11), and a
+      // maintenance pass of its that failed.
+      await superuser`
+        INSERT INTO slotlock.announcements (audience, tenant_ref, kind, message, starts_at, ends_at, created_by)
+        VALUES ('account', ${tenantRef}, 'notice', 'Your plan changes on Monday', now(), now() + interval '1 day', 'github:1')`;
+      await superuser`
+        INSERT INTO slotlock.feature_flags (flag, tenant_ref, enabled, reason, set_by)
+        VALUES ('assistant', ${tenantRef}, false, 'Pilot without the assistant', 'github:1')`;
+      await application`SELECT slotlock.note_maintenance_failure(${tenantRef}, 'Error', NULL, 'Roll failed')`;
       // Its usage: operations a server counted, and its feed rolled up (which writes its cursor).
       await recordSlotlockUsage(application, randomUUID(), [
         { tenantRef, day: slotlockUsageDay(Date.now()), metric: 'operations', keyId: '', origin: 'rest', count: 1 },

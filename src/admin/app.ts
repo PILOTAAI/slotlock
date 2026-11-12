@@ -21,6 +21,10 @@ import {
   SLOTLOCK_STAFF_RECORD_YEARS,
   SLOTLOCK_STAFF_NOTE_MAX,
   SLOTLOCK_STAFF_ROLES,
+  SLOTLOCK_ANNOUNCEMENT_AUDIENCES,
+  SLOTLOCK_ANNOUNCEMENT_KINDS,
+  SLOTLOCK_FEATURE_FLAGS,
+  SLOTLOCK_STAFF_PLANS,
   type SlotlockContentStep,
   type SlotlockStaffCapability,
   type SlotlockStaffRole,
@@ -28,7 +32,18 @@ import {
 } from '../staff-ddl.js';
 import type { SlotlockAccessIdentity } from './access.js';
 import { SLOTLOCK_ADMIN_EDITOR_JS, type SlotlockCmsRequest, createSlotlockAdminCms } from './cms.js';
-import { createSlotlockCmsGitHub } from './github-app.js';
+import { type SlotlockCmsGitHub, createSlotlockCmsGitHub } from './github-app.js';
+import { type SlotlockAdminInsightsOptions, createSlotlockAdminInsights } from './insights.js';
+import {
+  type SlotlockAnnouncementRow,
+  type SlotlockFlagsData,
+  type SlotlockHostHealth,
+  type SlotlockProviderRead,
+  type SlotlockSystemData,
+  slotlockCommunicationsPage,
+  slotlockSitePage,
+  slotlockSystemPage,
+} from './system.js';
 import {
   base64urlDecode,
   base64urlEncode,
@@ -97,6 +112,16 @@ export interface SlotlockAdminOptions {
     /** The preview Worker's workers.dev host: each CMS pull request is at https://pr-<n>-<host>/. */
     previewHost?: string;
   };
+  /**
+   * The site's search and visits (RFC 0006, M9): Search Console, Bing Webmaster Tools and Cloudflare
+   * Web Analytics, each read-only and optional. Without one, its part of the Site page says what to set.
+   */
+  insights?: Omit<SlotlockAdminInsightsOptions, 'fetch' | 'now'>;
+  /**
+   * The hosts the System page asks (M11): the API's /healthz and the dashboard. Default hosted
+   * Slotlock's, as the status probe checks them (docs/hosted/status.md).
+   */
+  hosts?: { api?: string; dashboard?: string };
   fetch?: typeof fetch;
   now?: () => number;
 }
@@ -135,6 +160,20 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   not_suspended: { kind: 'warn', text: 'It was not suspended. Nothing changed.' },
   key_revoked: { kind: 'done', text: 'Key revoked. Its next request is refused.' },
   key_unchanged: { kind: 'warn', text: "That key was revoked already, or is not this account's." },
+  announced: { kind: 'done', text: 'Announced. It shows above every page of the dashboard while it runs.' },
+  announcement_ended: { kind: 'done', text: 'Ended. It has left every dashboard.' },
+  announcement_unchanged: { kind: 'warn', text: 'That announcement had ended or run out already.' },
+  announcement_invalid: { kind: 'warn', text: 'Nothing was announced: check the account, plan, message, link and times (it must end in the future, within 90 days of its start).' },
+  flag_set: { kind: 'done', text: 'Flag set. The dashboard follows it from its next page.' },
+  flag_cleared: { kind: 'done', text: 'Flag removed. The plan, or the deployment, decides again.' },
+  flag_unchanged: { kind: 'warn', text: 'That flag was removed already.' },
+  flag_invalid: { kind: 'warn', text: 'Nothing changed: choose a plan or give one live account (not both), and a reason.' },
+  incident_opened: { kind: 'done', text: 'Incident opened on the status page.' },
+  incident_updated: { kind: 'done', text: 'Update posted on the status page.' },
+  incident_closed: { kind: 'done', text: 'Update posted and the incident closed.' },
+  incident_unchanged: { kind: 'warn', text: 'That is not an open incident on the status page. Nothing was posted.' },
+  incident_invalid: { kind: 'warn', text: 'Nothing was posted: an incident needs a title of up to 120 characters and a text of up to 2,000.' },
+  status_unavailable: { kind: 'warn', text: 'The status page needs the Slotlock CMS GitHub App with Issues (read and write).' },
   sessions_ended: { kind: 'done', text: 'Signed out.' },
   session_gone: { kind: 'warn', text: 'That session had ended already.' },
   note_added: { kind: 'done', text: 'Note added.' },
@@ -266,17 +305,19 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const now = options.now ?? (() => Date.now());
   const fetcher = options.fetch ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
   const githubCache = new Map<string, { value: { id: string; login: string; type: string } | null; until: number }>();
+  /** The Slotlock CMS GitHub App: the CMS, the status page's incidents and the deploy history. */
+  const github: SlotlockCmsGitHub | null = options.cms
+    ? createSlotlockCmsGitHub({
+        appId: options.cms.appId,
+        privateKey: options.cms.privateKey,
+        installationId: options.cms.installationId,
+        repository: options.cms.repository,
+        fetch: fetcher,
+        now,
+      })
+    : null;
   const cms = createSlotlockAdminCms({
-    github: options.cms
-      ? createSlotlockCmsGitHub({
-          appId: options.cms.appId,
-          privateKey: options.cms.privateKey,
-          installationId: options.cms.installationId,
-          repository: options.cms.repository,
-          fetch: fetcher,
-          now,
-        })
-      : null,
+    github,
     siteUrl: options.cms?.siteUrl ?? 'https://slotlock.pylota.io',
     ...(options.cms?.previewHost ? { previewHost: options.cms.previewHost } : {}),
     fetch: fetcher,
@@ -392,6 +433,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     ...(slotlockStaffMay(session.r, 'safety.act') ? [{ href: '/cases', label: 'Cases' }] : []),
     ...(slotlockStaffMay(session.r, 'privacy.act') ? [{ href: '/privacy', label: 'Privacy' }] : []),
     ...(slotlockStaffMay(session.r, 'content.write') ? [{ href: '/content', label: 'Content' }] : []),
+    ...(slotlockStaffMay(session.r, 'site.read') ? [{ href: '/site', label: 'Site and search' }] : []),
+    ...(slotlockStaffMay(session.r, 'system.read') ? [{ href: '/communications', label: 'Communications' }] : []),
+    ...(slotlockStaffMay(session.r, 'system.read') ? [{ href: '/system', label: 'System' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.read') ? [{ href: '/staff', label: 'Staff' }] : []),
     ...(slotlockStaffMay(session.r, 'staff.log') ? [{ href: '/staff/log', label: 'Staff log' }] : []),
   ];
@@ -421,6 +465,23 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const statusPill = (suspended: boolean, planStatus: string | null) =>
     suspended ? pill('Suspended', 'bad') : planStatus === 'past_due' ? pill('Past due', 'warn') : pill('Active', 'good');
   const accountHref = (ref: string) => `/accounts/${encodeURIComponent(ref)}`;
+
+  /**
+   * Maintenance on Home (RFC 0006, M11): accounts whose pass failed and has not run since, and a
+   * server that stopped recording its hours. Only staff who open the System page get the link.
+   */
+  function maintenanceAttention(session: Session, failing: number, last: { finished_at: string; attention: boolean } | null | undefined): Html[] {
+    const linked = slotlockStaffMay(session.r, 'system.read');
+    const items: Html[] = [];
+    if (failing > 0) {
+      const text = `Maintenance is failing for ${count(failing)} ${failing === 1 ? 'account' : 'accounts'}`;
+      items.push(html`<li>${linked ? html`<a href="/system#maintenance">${text}</a>` : text} <span class="sub">Their recurring events stop extending and expired holds stay until it runs.</span></li>`);
+    }
+    if (linked && last && now() - new Date(last.finished_at).getTime() > 3 * 3_600_000) {
+      items.push(html`<li><a href="/system#maintenance">No server has recorded maintenance since ${when(last.finished_at)}</a> <span class="sub">Check that <code>slotlock serve</code> is running.</span></li>`);
+    }
+    return items;
+  }
 
   /** Whether billing daily ran in the last day, and cleanly. */
   function billingDailyAttention(last: { finished_at: string; attention: boolean } | null | undefined): Html[] {
@@ -455,6 +516,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ...(n('cases_open') > 0 && slotlockStaffMay(session.r, 'safety.act')
         ? [html`<li><a href="/cases">${count(n('cases_open'))} open ${n('cases_open') === 1 ? 'case' : 'cases'}</a> <span class="sub">Each needs an action and an outcome.</span></li>`]
         : []),
+      ...maintenanceAttention(session, n('maintenance_failing'), row?.home.maintenance_last as unknown as { finished_at: string; attention: boolean } | null),
     ];
     const read = slotlockStaffMay(session.r, 'accounts.read');
     const body = html`
@@ -470,6 +532,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         { label: 'Bookings', value: count(n('bookings_month')), note: change(n('bookings_month'), n('bookings_last_month')) },
         { label: 'Suspended', value: count(n('suspended')), ...(read ? { href: '/accounts?status=suspended' } : {}) },
         { label: 'Staff', value: count(n('staff')), ...(slotlockStaffMay(session.r, 'staff.read') ? { href: '/staff' } : {}) },
+        { label: 'Announcements', value: count(n('announcements_live')), note: 'Showing on dashboards now', ...(slotlockStaffMay(session.r, 'system.read') ? { href: '/communications' } : {}) },
       ])}
       <h2>Sign-ups</h2>
       ${bars('New accounts', signups.map((point) => ({ day: String(point.day), count: Number(point.count) })))}
@@ -576,7 +639,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       !key.revoked_at && !(key.expires_at && new Date(key.expires_at).getTime() < now_);
     const body = html`
       ${pageHead(`Account · ${String(data.kind)}`, title, html`<code>${ref}</code> <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan))} ${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
-        html`${stripe ? html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe</a>` : ''}${safety ? html`<a class="btn ${suspended ? '' : 'danger'}" href="#danger">${suspended ? 'Lift suspension' : 'Suspend'}</a>` : ''}`)}
+        html`${stripe ? html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe</a>` : ''}${slotlockStaffMay(session.r, 'system.act') && data.kind !== 'test' ? html`<a class="btn" href="/communications?${new URLSearchParams({ account: ref }).toString()}">Send a notice</a>` : ''}${safety ? html`<a class="btn ${suspended ? '' : 'danger'}" href="#danger">${suspended ? 'Lift suspension' : 'Suspend'}</a>` : ''}`)}
       <div class="grid-2">
         <div>
           ${suspended
@@ -1489,6 +1552,148 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         : ''}`;
   }
 
+  // ---------- Site, communications and system (Phase 6) ----------
+  const insights = createSlotlockAdminInsights({ ...(options.insights ?? {}), fetch: fetcher, now });
+  const siteUrl = (options.cms?.siteUrl ?? 'https://slotlock.pylota.io').replace(/\/$/, '');
+  const hostUrls = {
+    api: options.hosts?.api ?? 'https://slotlock-api.pylota.io/healthz',
+    dashboard: options.hosts?.dashboard ?? 'https://app.slotlock.pylota.io/dashboard',
+  };
+  /** The workflows whose runs on main the System page lists as deploys. */
+  const DEPLOY_WORKFLOWS = [
+    { workflow: 'site.yml', label: 'Site' },
+    { workflow: 'dashboard.yml', label: 'Dashboard and console Workers' },
+    { workflow: 'image.yml', label: 'Server image' },
+    { workflow: 'release.yml', label: 'Releases' },
+  ] as const;
+
+  /** A provider's part of a page: off without it, failed when it could not be read, else its hour's read. */
+  async function providerRead<T>(session: Session, key: string, read: (() => Promise<T>) | null): Promise<SlotlockProviderRead<T>> {
+    if (!read) return { state: 'off' };
+    const value = await cached(session, key, read);
+    return value === null ? { state: 'failed' } : { state: 'ok', value };
+  }
+  /** Staff references and their GitHub logins, for a page that names who did what. */
+  const namesOf = async (refs: readonly string[]) => {
+    const unique = [...new Set(refs)];
+    const names = await staffNames(unique);
+    return new Map(unique.map((ref, index) => [ref, names[index] ?? ref]));
+  };
+
+  async function sitePage(session: Session): Promise<Response> {
+    const [google, bing, visits, deploys] = await Promise.all([
+      providerRead(session, 'site:google', insights.google),
+      providerRead(session, 'site:bing', insights.bing),
+      providerRead(session, 'site:visits', insights.visits),
+      providerRead(session, 'site:deploys', github ? () => github.workflowRuns('site.yml', 5) : null),
+    ]);
+    await record(session.s, 'page.viewed', null, '/site');
+    return page(session, 'Site and search', '/site', slotlockSitePage({ siteUrl, google, bing, visits, deploys }));
+  }
+
+  async function communicationsPage(session: Session, url: URL): Promise<Response> {
+    const sql = options.sql();
+    const endedToo = url.searchParams.get('ended') === '1';
+    const account = (url.searchParams.get('account') ?? '').trim().slice(0, 500) || null;
+    const rows = await sql<SlotlockAnnouncementRow[]>`SELECT * FROM slotlock.admin_announcements(${session.s}, ${endedToo})`;
+    let incidents: SlotlockProviderRead<{ open: Awaited<ReturnType<SlotlockCmsGitHub['statusIssues']>>; closed: Awaited<ReturnType<SlotlockCmsGitHub['statusIssues']>> }> = { state: 'off' };
+    if (github) {
+      try {
+        const [open, closed] = await Promise.all([github.statusIssues('open'), github.statusIssues('closed')]);
+        incidents = { state: 'ok', value: { open, closed } };
+      } catch (error) {
+        console.error('slotlock-admin status page read failed', (error as { status?: unknown } | null)?.status ?? 'unknown');
+        incidents = { state: 'failed' };
+      }
+    }
+    const body = slotlockCommunicationsPage({
+      csrf: csrfOf(session),
+      mayAct: slotlockStaffMay(session.r, 'system.act'),
+      announcements: rows,
+      endedToo,
+      account,
+      incidents,
+      names: await namesOf(rows.map((row) => row.created_by)),
+      now: now(),
+    }, accountHref);
+    return page(session, 'Communications', '/communications', body, undefined, noticeOf(url));
+  }
+
+  /** Each host as it answers now: the API's readiness and version, the dashboard's sign-in page. */
+  async function hostHealth(): Promise<SlotlockHostHealth[]> {
+    const ask = async (name: string, target: string, api: boolean): Promise<SlotlockHostHealth> => {
+      const started = now();
+      try {
+        const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { Accept: api ? 'application/json' : 'text/html' } });
+        let version: string | null = null;
+        let up = response.status === 200;
+        let answer = `HTTP ${response.status}`;
+        if (api) {
+          const body = (await response.json().catch(() => ({}))) as { status?: unknown; version?: unknown };
+          version = typeof body.version === 'string' ? body.version.slice(0, 40) : null;
+          up = response.status === 200 && body.status === 'ready';
+          if (!up && response.status === 200) answer = 'not ready';
+        } else {
+          await response.body?.cancel();
+        }
+        return { name, url: target, up, answer: up ? 'ok' : answer, version, ms: now() - started };
+      } catch {
+        return { name, url: target, up: false, answer: 'no answer in five seconds', version: null, ms: now() - started };
+      }
+    };
+    return Promise.all([
+      ask('API', hostUrls.api, true),
+      ask('Dashboard', hostUrls.dashboard, false),
+      ask('Site', `${siteUrl}/`, false),
+    ]);
+  }
+
+  async function systemPage(session: Session, url: URL): Promise<Response> {
+    const sql = options.sql();
+    const [[systemRow], [flagsRow], hosts, deploys] = await Promise.all([
+      sql<{ system: SlotlockSystemData }[]>`SELECT slotlock.admin_system(${session.s}) AS system`,
+      sql<{ flags: SlotlockFlagsData }[]>`SELECT slotlock.admin_flags(${session.s}) AS flags`,
+      hostHealth(),
+      providerRead(session, 'system:deploys', github
+        ? async () => Promise.all(DEPLOY_WORKFLOWS.map(async (entry) => ({ ...entry, runs: await github.workflowRuns(entry.workflow, 3) })))
+        : null),
+    ]);
+    const flags = flagsRow?.flags ?? { flags: [], history: [] };
+    const connected = (value: unknown) => (value ? 'connected' : 'not set');
+    const body = slotlockSystemPage({
+      csrf: csrfOf(session),
+      mayAct: slotlockStaffMay(session.r, 'system.act'),
+      system: systemRow?.system as SlotlockSystemData,
+      flags,
+      hosts,
+      deploys,
+      configuration: [
+        { name: 'Console', value: origin },
+        { name: 'Site', value: siteUrl },
+        { name: 'API health', value: hostUrls.api },
+        { name: 'Dashboard', value: hostUrls.dashboard },
+        { name: 'Cloudflare Access', value: options.access ? 'checked on every request' : 'off (local only)' },
+        { name: 'Stripe (read-only key)', value: connected(options.stripeKey) },
+        { name: 'GitHub App (CMS, status, deploys)', value: options.cms ? `connected to ${options.cms.repository}` : 'not set' },
+        { name: 'Preview deploys', value: options.cms?.previewHost ?? 'not set' },
+        { name: 'Search Console', value: options.insights?.google ? `connected to ${options.insights.google.property}` : 'not set' },
+        { name: 'Bing Webmaster Tools', value: options.insights?.bing ? `connected to ${options.insights.bing.site}` : 'not set' },
+        { name: 'Cloudflare Web Analytics', value: connected(options.insights?.cloudflare) },
+      ],
+      names: await namesOf([...flags.flags.map((flag) => flag.set_by), ...flags.history.map((event) => event.staff_ref)]),
+      now: now(),
+    }, accountHref);
+    return page(session, 'System', '/system', body, undefined, noticeOf(url));
+  }
+
+  /** A datetime-local value from a form, read as UTC; null when empty, undefined when not one. */
+  const minuteOf = (value: string): Date | null | undefined => {
+    if (value === '') return null;
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return undefined;
+    const at = new Date(`${value}:00Z`);
+    return Number.isNaN(at.getTime()) ? undefined : at;
+  };
+
   // ---------- Actions ----------
   interface Action {
     capability: SlotlockStaffCapability;
@@ -1687,6 +1892,106 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         },
       };
     }
+    // Phase 6: announcements, the status page and feature flags (system.act, the Owner).
+    if (path === '/communications') {
+      return {
+        capability: 'system.act',
+        back: '/communications',
+        async run(form) {
+          const audience = field(form, 'audience');
+          const kind = field(form, 'kind');
+          const starts = minuteOf(field(form, 'starts'));
+          const ends = minuteOf(field(form, 'ends'));
+          if (!(SLOTLOCK_ANNOUNCEMENT_AUDIENCES as readonly string[]).includes(audience)
+            || !(SLOTLOCK_ANNOUNCEMENT_KINDS as readonly string[]).includes(kind) || starts === undefined || !ends) {
+            return { code: 'announcement_invalid', ok: false };
+          }
+          const plan = audience === 'plan' ? field(form, 'plan') : null;
+          const account = audience === 'account' ? field(form, 'account') : null;
+          try {
+            await sql`SELECT slotlock.admin_announce(${session.s}, ${audience}, ${plan}, ${account}, ${kind},
+              ${field(form, 'message')}, ${optional(field(form, 'link'))}, ${starts}, ${ends})`;
+          } catch (error) {
+            if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'announcement_invalid', ok: false };
+            throw error;
+          }
+          return { code: 'announced', ok: true };
+        },
+      };
+    }
+    if (path === '/communications/end') {
+      return {
+        capability: 'system.act',
+        back: '/communications',
+        async run(form) {
+          const id = idOf(form, 'announcement');
+          if (!id) return { code: 'invalid', ok: false };
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_announcement_end(${session.s}, ${id}::bigint) AS ok`;
+          return row?.ok ? { code: 'announcement_ended', ok: true } : { code: 'announcement_unchanged', ok: false };
+        },
+      };
+    }
+    if (path === '/communications/status' || path === '/communications/status/update') {
+      const opening = path === '/communications/status';
+      return {
+        capability: 'system.act',
+        back: '/communications',
+        async run(form) {
+          if (!github) return { code: 'status_unavailable', ok: false };
+          const text = lines(form, 'body');
+          if (text.length < 1 || text.length > 2000) return { code: 'incident_invalid', ok: false };
+          if (opening) {
+            const title = field(form, 'title');
+            if (title.length < 1 || title.length > 120 || /\p{Cc}/u.test(title)) return { code: 'incident_invalid', ok: false };
+            // Recorded before GitHub is asked, as the CMS's steps are.
+            await sql`SELECT slotlock.admin_status_record(${session.s}, 'status.opened', ${null}, ${sql.json({ title })})`;
+            await github.openStatusIssue({ title, body: text });
+            return { code: 'incident_opened', ok: true };
+          }
+          const issue = Number(field(form, 'issue'));
+          if (!Number.isSafeInteger(issue) || issue < 1 || issue > 2_147_483_647) return { code: 'invalid', ok: false };
+          const close = form.get('close') === '1';
+          await sql`SELECT slotlock.admin_status_record(${session.s}, ${close ? 'status.closed' : 'status.updated'}, ${issue}::integer, ${sql.json({ length: text.length })})`;
+          const posted = await github.updateStatusIssue({ number: issue, body: text, close });
+          if (!posted) return { code: 'incident_unchanged', ok: false };
+          return { code: close ? 'incident_closed' : 'incident_updated', ok: true };
+        },
+      };
+    }
+    if (path === '/system/flags') {
+      return {
+        capability: 'system.act',
+        back: '/system',
+        async run(form) {
+          const flag = field(form, 'flag');
+          const plan = optional(field(form, 'plan'));
+          const account = plan ? null : optional(field(form, 'account'));
+          if (!(SLOTLOCK_FEATURE_FLAGS as readonly string[]).includes(flag) || (plan && !(SLOTLOCK_STAFF_PLANS as readonly string[]).includes(plan))
+            || (!plan && !account) || !['0', '1'].includes(field(form, 'enabled'))) {
+            return { code: 'flag_invalid', ok: false };
+          }
+          try {
+            await sql`SELECT slotlock.admin_flag_set(${session.s}, ${flag}, ${plan}, ${account}, ${field(form, 'enabled') === '1'}, ${field(form, 'reason')})`;
+          } catch (error) {
+            if ((error as { code?: unknown } | null)?.code === '22023') return { code: 'flag_invalid', ok: false };
+            throw error;
+          }
+          return { code: 'flag_set', ok: true };
+        },
+      };
+    }
+    if (path === '/system/flags/clear') {
+      return {
+        capability: 'system.act',
+        back: '/system',
+        async run(form) {
+          const id = idOf(form, 'flag');
+          if (!id) return { code: 'invalid', ok: false };
+          const [row] = await sql<{ ok: boolean }[]>`SELECT slotlock.admin_flag_clear(${session.s}, ${id}::bigint, ${field(form, 'reason')}) AS ok`;
+          return row?.ok ? { code: 'flag_cleared', ok: true } : { code: 'flag_unchanged', ok: false };
+        },
+      };
+    }
     const onPrivacy = /^\/privacy\/([1-9][0-9]{0,17})\/(verify|export|erasure\/ask|erasure\/approve|erase|close)$/.exec(path);
     if (onPrivacy) {
       const id = onPrivacy[1] as string;
@@ -1850,6 +2155,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     '/privacy/receipts': 'privacy.act',
     '/billing': 'billing.read',
     '/usage': 'accounts.read',
+    '/site': 'site.read',
+    '/communications': 'system.read',
+    '/system': 'system.read',
   };
 
   async function handle(request: Request): Promise<Response> {
@@ -1954,6 +2262,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (path === '/cases') return casesPage(session, url);
     if (path === '/billing') return billingPage(session, url);
     if (path === '/usage') return usagePage(session);
+    if (path === '/site') return sitePage(session);
+    if (path === '/communications') return communicationsPage(session, url);
+    if (path === '/system') return systemPage(session, url);
     if (path === '/') return home(session);
     if (path === '/accounts') return accounts(session, url);
     if (path === '/search') return search(session, url);

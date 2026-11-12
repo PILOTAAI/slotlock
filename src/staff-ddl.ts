@@ -31,7 +31,12 @@ export type SlotlockStaffRole = (typeof SLOTLOCK_STAFF_ROLES)[number];
  * - `content.write` writes blog posts in the CMS and submits them for review;
  * - `content.publish` publishes or schedules a submitted post (E5: Owner only);
  * - `privacy.act` logs a privacy request, verifies who sent it, starts an export and closes it;
- * - `privacy.erase` asks for, approves (four eyes) and carries out an account's erasure.
+ * - `privacy.erase` asks for, approves (four eyes) and carries out an account's erasure;
+ * - `site.read` opens the site's search and visit numbers (M9);
+ * - `system.read` opens the System page: maintenance, failing webhooks, feature flags and
+ *   announcements (M11);
+ * - `system.act` writes announcements and service notices, turns features on or off and opens or
+ *   updates incidents on the status page (M10, M11: Owner only).
  * The database checks the same map (slotlock.staff_require), so the console and the database cannot
  * disagree.
  */
@@ -39,11 +44,12 @@ export const SLOTLOCK_STAFF_CAPABILITIES = Object.freeze({
   owner: [
     'home', 'accounts.read', 'accounts.act', 'safety.act', 'billing.read', 'billing.act', 'plans.approve',
     'content.write', 'content.publish', 'privacy.act', 'privacy.erase', 'staff.read', 'staff.log',
+    'site.read', 'system.read', 'system.act',
   ],
-  support: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'privacy.act'],
+  support: ['home', 'accounts.read', 'accounts.act', 'safety.act', 'privacy.act', 'system.read'],
   billing: ['home', 'accounts.read', 'billing.read', 'billing.act'],
-  editor: ['home', 'content.write'],
-  viewer: ['home', 'billing.read'],
+  editor: ['home', 'content.write', 'site.read'],
+  viewer: ['home', 'billing.read', 'site.read'],
 } as const satisfies Record<SlotlockStaffRole, readonly string[]>);
 export type SlotlockStaffCapability = (typeof SLOTLOCK_STAFF_CAPABILITIES)[SlotlockStaffRole][number];
 
@@ -70,8 +76,11 @@ export const SLOTLOCK_CASE_ACTIONS = Object.freeze(['none', 'warned', 'keys_revo
 export const SLOTLOCK_STAFF_NOTE_MAX = 2000;
 /** The longest plan override one person may give; a longer one needs a second Owner. */
 export const SLOTLOCK_OVERRIDE_SOLO_DAYS = 90;
-/** Jobs whose runs the console shows: `slotlock billing daily` and `slotlock overage report`. */
-export const SLOTLOCK_MAINTENANCE_JOBS = Object.freeze(['billing_daily', 'overage_report'] as const);
+/**
+ * Jobs whose runs the console shows: `slotlock billing daily` and `slotlock overage report`, and an
+ * hour of each server's maintenance passes (`maintenance`).
+ */
+export const SLOTLOCK_MAINTENANCE_JOBS = Object.freeze(['billing_daily', 'overage_report', 'maintenance'] as const);
 /** How long a cached provider read (Stripe) is kept, in seconds (RFC 0006, 4.6). */
 export const SLOTLOCK_ADMIN_CACHE_SECONDS = 3600;
 /** What a privacy request asks for (RFC 0006, M7). */
@@ -101,6 +110,35 @@ export const SLOTLOCK_CONTENT_STEPS = Object.freeze({
   publish: ['content.published', 'content.scheduled', 'content.unscheduled', 'content.updated'],
 } as const);
 export type SlotlockContentStep = (typeof SLOTLOCK_CONTENT_STEPS)[keyof typeof SLOTLOCK_CONTENT_STEPS][number];
+/** What an announcement is about, as the dashboard's banner names it (RFC 0006, M10). */
+export const SLOTLOCK_ANNOUNCEMENT_KINDS = Object.freeze(['maintenance', 'change', 'incident', 'notice'] as const);
+export type SlotlockAnnouncementKind = (typeof SLOTLOCK_ANNOUNCEMENT_KINDS)[number];
+/** Who sees one: every account, the accounts on a plan, or one account (a service notice). */
+export const SLOTLOCK_ANNOUNCEMENT_AUDIENCES = Object.freeze(['everyone', 'plan', 'account'] as const);
+export type SlotlockAnnouncementAudience = (typeof SLOTLOCK_ANNOUNCEMENT_AUDIENCES)[number];
+/** The longest announcement, in characters: one line of a banner. */
+export const SLOTLOCK_ANNOUNCEMENT_MAX = 300;
+/** The longest an announcement runs, in days. */
+export const SLOTLOCK_ANNOUNCEMENT_MAX_DAYS = 90;
+/** Announcements a dashboard shows at once, newest first. */
+export const SLOTLOCK_ANNOUNCEMENTS_SHOWN = 3;
+/** Plans an announcement or a feature flag can name. */
+export const SLOTLOCK_STAFF_PLANS = Object.freeze(['free', 'developer', 'team'] as const);
+/**
+ * Features staff turn on or off for a plan or one account (RFC 0006, M11), where the deployment has
+ * them configured: `assistant` (the dashboard's chat assistant, by the workspace in use) and
+ * `team_workspaces` (creating a team workspace, by the person's own account). An account's setting
+ * outranks its plan's; with neither, the deployment's configuration decides.
+ */
+export const SLOTLOCK_FEATURE_FLAGS = Object.freeze(['assistant', 'team_workspaces'] as const);
+export type SlotlockFeatureFlag = (typeof SLOTLOCK_FEATURE_FLAGS)[number];
+/** Days an account's maintenance failure is kept once it stops recurring. */
+export const SLOTLOCK_MAINTENANCE_FAILURE_DAYS = 30;
+/** Accounts with webhooks the System page counts failing endpoints across, at most. */
+export const SLOTLOCK_WEBHOOK_HEALTH_ACCOUNTS = 5000;
+/** Steps of an incident on the status page, as the staff log names them (RFC 0006, M10). */
+export const SLOTLOCK_STATUS_STEPS = Object.freeze(['status.opened', 'status.updated', 'status.closed'] as const);
+export type SlotlockStatusStep = (typeof SLOTLOCK_STATUS_STEPS)[number];
 
 export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'staff_members',
@@ -113,6 +151,9 @@ export const SLOTLOCK_STAFF_TABLES = Object.freeze([
   'privacy_requests',
   'privacy_erasure_receipts',
   'privacy_keys',
+  'announcements',
+  'feature_flags',
+  'maintenance_failures',
 ] as const);
 
 /** The SECURITY DEFINER functions the console's role executes, and nothing else. */
@@ -165,6 +206,26 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_privacy_erase(text, bigint)',
   'slotlock.admin_privacy_close(text, bigint, text, text)',
   'slotlock.admin_privacy_receipts(text, text)',
+  'slotlock.admin_announcements(text, boolean)',
+  'slotlock.admin_announce(text, text, text, text, text, text, text, timestamptz, timestamptz)',
+  'slotlock.admin_announcement_end(text, bigint)',
+  'slotlock.admin_flags(text)',
+  'slotlock.admin_flag_set(text, text, text, text, boolean, text)',
+  'slotlock.admin_flag_clear(text, bigint, text)',
+  'slotlock.admin_system(text)',
+  'slotlock.admin_status_record(text, text, integer, jsonb)',
+] as const);
+
+/**
+ * What the serving role runs for Phase 6 (RFC 0006, M10 and M11): a dashboard's announcements and
+ * feature flags, and maintenance's record of its passes. Granted with the other tenant functions
+ * (ddl.ts SLOTLOCK_TENANT_ADMIN_FUNCTIONS).
+ */
+export const SLOTLOCK_STAFF_SERVING_FUNCTIONS = Object.freeze([
+  'slotlock.tenant_dashboard_notices(text)',
+  'slotlock.note_maintenance_failure(text, text, text, text)',
+  'slotlock.note_maintenance_recovered(text)',
+  'slotlock.note_maintenance_round(timestamptz, boolean, jsonb)',
 ] as const);
 
 /** Functions only the deployment role runs (`slotlock staff …`): granted to no role. */
@@ -680,7 +741,8 @@ const overrideState = (alias: string) => `CASE
  */
 const STAFF_BILLING_DDL = `
 -- Each run of a billing job (slotlock billing daily, slotlock overage report): when, by whom, and
--- whether it needs a person, with the lines it printed. The newest 400 of each job are kept.
+-- whether it needs a person, with the lines it printed; and each hour of a server's maintenance
+-- (serve), with its passes and failures counted. The newest 400 of each job are kept.
 CREATE TABLE IF NOT EXISTS slotlock.maintenance_runs (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   job text NOT NULL,
@@ -691,7 +753,7 @@ CREATE TABLE IF NOT EXISTS slotlock.maintenance_runs (
   summary jsonb NOT NULL DEFAULT '{}'::jsonb,
   CONSTRAINT slotlock_maintenance_runs_valid CHECK (
     job IN (${maintenanceJobs})
-    AND actor ~ '^cli:[a-z_][a-z0-9_.-]{0,63}$'
+    AND (actor ~ '^cli:[a-z_][a-z0-9_.-]{0,63}$' OR (job = 'maintenance' AND actor = 'serve'))
     AND finished_at >= started_at
     AND jsonb_typeof(summary) = 'object' AND pg_column_size(summary) <= 16384
   )
@@ -700,15 +762,17 @@ CREATE INDEX IF NOT EXISTS slotlock_maintenance_runs_job_idx ON slotlock.mainten
 ALTER TABLE slotlock.maintenance_runs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON slotlock.maintenance_runs FROM PUBLIC;
 
--- What the console read from a provider (Stripe), kept an hour so pages stay fast and within the
--- provider's limits (RFC 0006, 4.6). revenue: keys need billing.read, account: keys accounts.read.
+-- What the console read from a provider, kept an hour so pages stay fast and within the provider's
+-- limits (RFC 0006, 4.6): Stripe (revenue: keys need billing.read, account: keys accounts.read);
+-- Search Console, Bing and Cloudflare Web Analytics (site: keys, site.read); and GitHub's deploys
+-- and the hosts' health (system: keys, system.read).
 CREATE TABLE IF NOT EXISTS slotlock.admin_cache (
   key text PRIMARY KEY,
   value jsonb NOT NULL,
   stored_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   expires_at timestamptz NOT NULL,
   CONSTRAINT slotlock_admin_cache_valid CHECK (
-    key ~ '^(revenue|account):[A-Za-z0-9:_.~-]{1,200}$' AND pg_column_size(value) <= 262144
+    key ~ '^(revenue|account|site|system):[A-Za-z0-9:_.~-]{1,200}$' AND pg_column_size(value) <= 262144
   )
 );
 ALTER TABLE slotlock.admin_cache ENABLE ROW LEVEL SECURITY;
@@ -726,6 +790,10 @@ BEGIN
     RETURN 'billing.read';
   ELSIF cache_key LIKE 'account:%' THEN
     RETURN 'accounts.read';
+  ELSIF cache_key LIKE 'site:%' THEN
+    RETURN 'site.read';
+  ELSIF cache_key LIKE 'system:%' THEN
+    RETURN 'system.read';
   END IF;
   RAISE EXCEPTION 'admin_cache_key' USING ERRCODE = '22023';
 END
@@ -1710,6 +1778,504 @@ END
 $slotlock_admin_privacy_receipts$;
 `;
 
+const announcementKinds = SLOTLOCK_ANNOUNCEMENT_KINDS.map((value) => `'${value}'`).join(', ');
+const announcementAudiences = SLOTLOCK_ANNOUNCEMENT_AUDIENCES.map((value) => `'${value}'`).join(', ');
+const staffPlans = SLOTLOCK_STAFF_PLANS.map((value) => `'${value}'`).join(', ');
+const featureFlags = SLOTLOCK_FEATURE_FLAGS.map((value) => `'${value}'`).join(', ');
+const statusSteps = SLOTLOCK_STATUS_STEPS.map((value) => `'${value}'`).join(', ');
+/** One line of text a customer reads: no control characters. */
+const oneLine = (column: string, max: number) => `char_length(${column}) BETWEEN 1 AND ${max} AND ${column} !~ '[[:cntrl:]]'`;
+/** An account a staff record names: a live account, never its test environment. */
+const liveAccount = (column: string) =>
+  `(${column} IS NULL OR (octet_length(${column}) BETWEEN 1 AND 500 AND ${column} !~ '[[:cntrl:]]' AND ${column} !~ '~test$'))`;
+
+/**
+ * Phase 6 (RFC 0006, M10 and M11): what a dashboard shows besides the account's own data
+ * (announcements and service notices), the features staff turn on or off per plan or account, and
+ * maintenance's record of its passes and failures. The serving role writes the last and reads the
+ * first two (SLOTLOCK_STAFF_SERVING_FUNCTIONS); the console reads all three.
+ */
+const STAFF_SYSTEM_DDL = `
+-- Announcements (M10): a line above every page of the dashboard while it runs, for planned
+-- maintenance, a change to the API, an incident or a notice. To every account, the accounts on a
+-- plan, or one account (a service notice, which its audit log records too). An account's test
+-- environment sees what its live account does. Ended or over ones go a year on.
+CREATE TABLE IF NOT EXISTS slotlock.announcements (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  audience text NOT NULL,
+  plan text,
+  tenant_ref text,
+  kind text NOT NULL,
+  message text NOT NULL,
+  link text,
+  starts_at timestamptz NOT NULL,
+  ends_at timestamptz NOT NULL,
+  created_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  ended_by text,
+  ended_at timestamptz,
+  CONSTRAINT slotlock_announcements_valid CHECK (
+    audience IN (${announcementAudiences})
+    AND (plan IS NOT NULL) = (audience = 'plan')
+    AND (plan IS NULL OR plan IN (${staffPlans}))
+    AND (tenant_ref IS NOT NULL) = (audience = 'account')
+    AND ${liveAccount('tenant_ref')}
+    AND kind IN (${announcementKinds})
+    AND ${oneLine('message', SLOTLOCK_ANNOUNCEMENT_MAX)}
+    AND (link IS NULL OR (octet_length(link) BETWEEN 9 AND 300 AND link ~ '^https://[^[:space:][:cntrl:]"''<>]+$'))
+    AND ends_at > starts_at AND ends_at <= starts_at + interval '${SLOTLOCK_ANNOUNCEMENT_MAX_DAYS} days'
+    AND created_by ~ '${STAFF_ACTOR_PATTERN}'
+    AND (ended_by IS NULL) = (ended_at IS NULL)
+    AND (ended_by IS NULL OR ended_by ~ '${STAFF_ACTOR_PATTERN}')
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_announcements_running_idx
+  ON slotlock.announcements (ends_at) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS slotlock_announcements_account_idx
+  ON slotlock.announcements (tenant_ref) WHERE tenant_ref IS NOT NULL;
+ALTER TABLE slotlock.announcements ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.announcements FROM PUBLIC;
+
+-- Feature flags (M11): a feature turned on or off for a plan or one account, with why and by whom.
+-- Its history is the staff log's flag events. Nothing here turns on a feature the deployment has
+-- not configured.
+CREATE TABLE IF NOT EXISTS slotlock.feature_flags (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  flag text NOT NULL,
+  plan text,
+  tenant_ref text,
+  enabled boolean NOT NULL,
+  reason text NOT NULL,
+  set_by text NOT NULL,
+  set_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT slotlock_feature_flags_valid CHECK (
+    flag IN (${featureFlags})
+    AND (plan IS NULL) <> (tenant_ref IS NULL)
+    AND (plan IS NULL OR plan IN (${staffPlans}))
+    AND ${liveAccount('tenant_ref')}
+    AND octet_length(reason) BETWEEN 1 AND 200 AND reason !~ '[[:cntrl:]]'
+    AND set_by ~ '${STAFF_ACTOR_PATTERN}'
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_feature_flags_plan_key
+  ON slotlock.feature_flags (flag, plan) WHERE plan IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS slotlock_feature_flags_account_key
+  ON slotlock.feature_flags (flag, tenant_ref) WHERE tenant_ref IS NOT NULL;
+ALTER TABLE slotlock.feature_flags ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.feature_flags FROM PUBLIC;
+-- A flag's history, newest first, without reading the whole staff log.
+CREATE INDEX IF NOT EXISTS slotlock_staff_audit_events_flag_idx
+  ON slotlock.staff_audit_events (chain_index) WHERE action IN ('flag.set', 'flag.cleared');
+
+-- Accounts whose maintenance pass is failing (M11): one row each, with how many times and the last
+-- error's class, code and message (cut to 200 characters, values in quotes taken out by the
+-- server). Cleared when a pass for the account runs again; kept ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days after the last
+-- failure otherwise.
+CREATE TABLE IF NOT EXISTS slotlock.maintenance_failures (
+  tenant_ref text PRIMARY KEY,
+  first_failed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  last_failed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  failures integer NOT NULL DEFAULT 1,
+  error text NOT NULL,
+  code text,
+  message text,
+  CONSTRAINT slotlock_maintenance_failures_valid CHECK (
+    octet_length(tenant_ref) BETWEEN 1 AND 500
+    AND error ~ '^[A-Za-z][A-Za-z0-9_]{0,63}$'
+    AND (code IS NULL OR code ~ '^[A-Za-z0-9_.-]{1,64}$')
+    AND (message IS NULL OR ${oneLine('message', 200)})
+    AND failures >= 1 AND last_failed_at >= first_failed_at
+  )
+);
+CREATE INDEX IF NOT EXISTS slotlock_maintenance_failures_recent_idx
+  ON slotlock.maintenance_failures (last_failed_at DESC);
+ALTER TABLE slotlock.maintenance_failures ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON slotlock.maintenance_failures FROM PUBLIC;
+
+-- What a tenant's dashboard shows besides its own data: the announcements running now for every
+-- account, its plan or the account (newest first, at most ${SLOTLOCK_ANNOUNCEMENTS_SHOWN}), and the features staff turned
+-- on or off for its plan or the account, the account's setting first. A test environment reads
+-- its live account's. Never who wrote them, or why. The serving role's.
+CREATE OR REPLACE FUNCTION slotlock.tenant_dashboard_notices(requested_tenant_ref text)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_dashboard_notices$
+DECLARE
+  live text := regexp_replace(requested_tenant_ref, '~test$', '');
+  current_plan text;
+BEGIN
+  SELECT given.plan INTO current_plan FROM slotlock.tenant_plan(requested_tenant_ref) given LIMIT 1;
+  RETURN jsonb_build_object(
+    'announcements', (
+      SELECT coalesce(jsonb_agg(jsonb_build_object('id', shown.id, 'kind', shown.kind, 'message', shown.message,
+                                                   'link', shown.link, 'starts_at', shown.starts_at,
+                                                   'ends_at', shown.ends_at)
+                                ORDER BY shown.starts_at DESC, shown.id DESC), '[]'::jsonb)
+        FROM (SELECT running.* FROM slotlock.announcements running
+               WHERE running.ended_at IS NULL
+                 AND running.starts_at <= statement_timestamp() AND running.ends_at > statement_timestamp()
+                 AND (running.audience = 'everyone'
+                      OR (running.audience = 'plan' AND running.plan = current_plan)
+                      OR (running.audience = 'account' AND running.tenant_ref = live))
+               ORDER BY running.starts_at DESC, running.id DESC
+               LIMIT ${SLOTLOCK_ANNOUNCEMENTS_SHOWN}) shown),
+    'features', (
+      SELECT coalesce(jsonb_object_agg(chosen.flag, chosen.enabled), '{}'::jsonb)
+        FROM (SELECT DISTINCT ON (given.flag) given.flag, given.enabled FROM slotlock.feature_flags given
+               WHERE given.tenant_ref = live OR given.plan = current_plan
+               ORDER BY given.flag, (given.tenant_ref IS NOT NULL) DESC) chosen)
+  );
+END
+$slotlock_tenant_dashboard_notices$;
+
+-- A tenant's maintenance pass that failed (serve's scheduler): its failures counted, with the last
+-- error. Failures not seen for ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days go. The serving role's.
+CREATE OR REPLACE FUNCTION slotlock.note_maintenance_failure(requested_tenant_ref text, error_name text, error_code text, error_message text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_note_maintenance_failure$
+BEGIN
+  INSERT INTO slotlock.maintenance_failures AS kept (tenant_ref, error, code, message)
+  VALUES (requested_tenant_ref, error_name, error_code, error_message)
+  ON CONFLICT (tenant_ref) DO UPDATE
+     SET last_failed_at = statement_timestamp(), failures = least(kept.failures, 1000000) + 1,
+         error = EXCLUDED.error, code = EXCLUDED.code, message = EXCLUDED.message;
+  DELETE FROM slotlock.maintenance_failures old
+   WHERE old.last_failed_at < statement_timestamp() - interval '${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days';
+END
+$slotlock_note_maintenance_failure$;
+
+-- A tenant whose pass ran after failing: its failure is cleared. The serving role's.
+CREATE OR REPLACE FUNCTION slotlock.note_maintenance_recovered(requested_tenant_ref text)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_note_maintenance_recovered$
+  DELETE FROM slotlock.maintenance_failures failed WHERE failed.tenant_ref = requested_tenant_ref;
+$slotlock_note_maintenance_recovered$;
+
+-- An hour of one server's maintenance (serve's scheduler): its passes and failures counted, and
+-- what they did, as maintenance_runs job 'maintenance'. Never a tenant. The serving role's.
+CREATE OR REPLACE FUNCTION slotlock.note_maintenance_round(began timestamptz, needs_attention boolean, round_summary jsonb)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_note_maintenance_round$
+BEGIN
+  INSERT INTO slotlock.maintenance_runs (job, actor, started_at, attention, summary)
+  VALUES ('maintenance', 'serve', least(coalesce(began, statement_timestamp()), statement_timestamp()),
+          coalesce(needs_attention, false), coalesce(round_summary, '{}'::jsonb));
+  DELETE FROM slotlock.maintenance_runs old
+   WHERE old.job = 'maintenance'
+     AND old.id < (SELECT kept.id FROM slotlock.maintenance_runs kept WHERE kept.job = 'maintenance'
+                    ORDER BY kept.id DESC OFFSET 399 LIMIT 1);
+END
+$slotlock_note_maintenance_round$;
+
+-- Announcements (system.read), soonest to end first: those running or to come, and with ended_too
+-- the last 100 that ended or ran out too, each with its state.
+CREATE OR REPLACE FUNCTION slotlock.admin_announcements(actor text, ended_too boolean)
+RETURNS TABLE (id bigint, audience text, plan text, account_ref text, kind text, message text, link text,
+               starts_at timestamptz, ends_at timestamptz, created_by text, created_at timestamptz,
+               ended_by text, ended_at timestamptz, state text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_announcements$
+#variable_conflict use_column
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.read');
+  PERFORM slotlock.staff_log(actor, 'announcement.list_viewed', NULL, NULL, NULL,
+    jsonb_build_object('ended', coalesce(ended_too, false)));
+  RETURN QUERY
+  SELECT listed.id, listed.audience, listed.plan, listed.tenant_ref, listed.kind, listed.message, listed.link,
+         listed.starts_at, listed.ends_at, listed.created_by, listed.created_at, listed.ended_by, listed.ended_at,
+         CASE WHEN listed.ended_at IS NOT NULL THEN 'ended'
+              WHEN listed.ends_at <= statement_timestamp() THEN 'over'
+              WHEN listed.starts_at > statement_timestamp() THEN 'scheduled'
+              ELSE 'live' END
+    FROM slotlock.announcements listed
+   WHERE coalesce(ended_too, false) OR (listed.ended_at IS NULL AND listed.ends_at > statement_timestamp())
+   ORDER BY (listed.ended_at IS NULL AND listed.ends_at > statement_timestamp()) DESC,
+            CASE WHEN listed.ended_at IS NULL AND listed.ends_at > statement_timestamp() THEN listed.starts_at END,
+            coalesce(listed.ended_at, listed.ends_at) DESC, listed.id DESC
+   LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT};
+END
+$slotlock_admin_announcements$;
+
+-- Write an announcement (system.act): to every account, a plan's accounts or one account (a
+-- service notice, which the account's audit log records as sent by Slotlock staff). It runs from
+-- starts (now when NULL) until ends, at most ${SLOTLOCK_ANNOUNCEMENT_MAX_DAYS} days, and must not be over already. Its id.
+CREATE OR REPLACE FUNCTION slotlock.admin_announce(actor text, wanted_audience text, wanted_plan text, account text,
+  wanted_kind text, words text, url text, starts timestamptz, ends timestamptz)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_announce$
+DECLARE
+  begins timestamptz := coalesce(starts, statement_timestamp());
+  added bigint;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.act');
+  IF wanted_audience = 'account' THEN
+    PERFORM slotlock.staff_account_known(account);
+  END IF;
+  IF ends IS NULL OR ends <= statement_timestamp() THEN
+    RAISE EXCEPTION 'admin_announcement_over' USING ERRCODE = '22023';
+  END IF;
+  BEGIN
+    INSERT INTO slotlock.announcements (audience, plan, tenant_ref, kind, message, link, starts_at, ends_at, created_by)
+    VALUES (wanted_audience, wanted_plan, account, wanted_kind, btrim(words), nullif(btrim(url), ''), begins, ends, actor)
+    RETURNING announcements.id INTO added;
+  EXCEPTION WHEN check_violation OR not_null_violation THEN
+    RAISE EXCEPTION 'admin_announcement_invalid' USING ERRCODE = '22023';
+  END;
+  PERFORM slotlock.staff_log(actor, 'announcement.created', account, 'announcement:' || added, NULL,
+    jsonb_strip_nulls(jsonb_build_object('audience', wanted_audience, 'plan', wanted_plan, 'kind', wanted_kind,
+                                         'starts_at', begins, 'ends_at', ends)));
+  IF account IS NOT NULL THEN
+    PERFORM slotlock.staff_customer_audit(actor, account, 'staff.notice_sent', 'announcement', added::text, NULL);
+  END IF;
+  RETURN added;
+END
+$slotlock_admin_announce$;
+
+-- End an announcement early (system.act): it leaves every dashboard at once. False when it had
+-- ended or run out already.
+CREATE OR REPLACE FUNCTION slotlock.admin_announcement_end(actor text, announcement_id bigint)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_announcement_end$
+DECLARE
+  account text;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.act');
+  UPDATE slotlock.announcements running
+     SET ended_at = statement_timestamp(), ended_by = actor
+   WHERE running.id = announcement_id AND running.ended_at IS NULL AND running.ends_at > statement_timestamp()
+  RETURNING running.tenant_ref INTO account;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'announcement.ended', account, 'announcement:' || announcement_id, NULL, '{}'::jsonb);
+  RETURN true;
+END
+$slotlock_admin_announcement_end$;
+
+-- Feature flags (system.read): each plan's and account's setting, and the last 50 changes from the
+-- staff log.
+CREATE OR REPLACE FUNCTION slotlock.admin_flags(actor text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_flags$
+DECLARE
+  result jsonb;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.read');
+  SELECT jsonb_build_object(
+    'flags', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                'id', given.id, 'flag', given.flag, 'plan', given.plan, 'account_ref', given.tenant_ref,
+                'enabled', given.enabled, 'reason', given.reason, 'set_by', given.set_by, 'set_at', given.set_at)
+                ORDER BY given.flag, given.plan NULLS LAST, given.tenant_ref), '[]'::jsonb)
+                FROM slotlock.feature_flags given),
+    'history', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                  'occurred_at', changed.occurred_at, 'staff_ref', changed.staff_ref, 'action', changed.action,
+                  'account_ref', changed.account_ref, 'reason', changed.reason, 'metadata', changed.metadata)
+                  ORDER BY changed.chain_index DESC), '[]'::jsonb)
+                  FROM (SELECT logged.* FROM slotlock.staff_audit_events logged
+                         WHERE logged.action IN ('flag.set', 'flag.cleared')
+                         ORDER BY logged.chain_index DESC LIMIT 50) changed)
+  ) INTO result;
+  PERFORM slotlock.staff_log(actor, 'flag.list_viewed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN result;
+END
+$slotlock_admin_flags$;
+
+-- Turn a feature on or off for a plan or for one account (system.act), with a reason: an account's
+-- change is in its own audit log too (E8). Where the deployment has not configured the feature,
+-- this turns nothing on. The flag's id.
+CREATE OR REPLACE FUNCTION slotlock.admin_flag_set(actor text, wanted_flag text, wanted_plan text, account text, turned_on boolean, why text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_flag_set$
+DECLARE
+  before boolean;
+  kept bigint;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  IF wanted_flag IS NULL OR wanted_flag NOT IN (${featureFlags}) THEN
+    RAISE EXCEPTION 'admin_flag_unknown' USING ERRCODE = '22023';
+  END IF;
+  IF (wanted_plan IS NULL) = (account IS NULL) OR turned_on IS NULL
+     OR (wanted_plan IS NOT NULL AND wanted_plan NOT IN (${staffPlans})) THEN
+    RAISE EXCEPTION 'admin_flag_scope' USING ERRCODE = '22023';
+  END IF;
+  IF account IS NOT NULL THEN
+    PERFORM slotlock.staff_account_known(account);
+    IF account ~ '~test$' THEN
+      RAISE EXCEPTION 'admin_flag_scope' USING ERRCODE = '22023';
+    END IF;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:feature-flag:' || wanted_flag, 0));
+  SELECT given.id, given.enabled INTO kept, before FROM slotlock.feature_flags given
+   WHERE given.flag = wanted_flag AND (given.plan = wanted_plan OR given.tenant_ref = account);
+  IF kept IS NULL THEN
+    INSERT INTO slotlock.feature_flags (flag, plan, tenant_ref, enabled, reason, set_by)
+    VALUES (wanted_flag, wanted_plan, account, turned_on, why, actor)
+    RETURNING feature_flags.id INTO kept;
+  ELSE
+    UPDATE slotlock.feature_flags given
+       SET enabled = turned_on, reason = why, set_by = actor, set_at = statement_timestamp()
+     WHERE given.id = kept;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'flag.set', account, 'flag:' || wanted_flag, why,
+    jsonb_build_object('flag', wanted_flag, 'plan', wanted_plan, 'from', before, 'to', turned_on));
+  IF account IS NOT NULL THEN
+    PERFORM slotlock.staff_customer_audit(actor, account, 'staff.feature_changed', 'feature', wanted_flag, why);
+  END IF;
+  RETURN kept;
+END
+$slotlock_admin_flag_set$;
+
+-- Take a flag away (system.act), with a reason: the plan's setting, or the deployment's, decides
+-- again. False when there was no such flag.
+CREATE OR REPLACE FUNCTION slotlock.admin_flag_clear(actor text, flag_id bigint, why text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_flag_clear$
+DECLARE
+  gone slotlock.feature_flags;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.act');
+  PERFORM slotlock.staff_reason_valid(why);
+  DELETE FROM slotlock.feature_flags given WHERE given.id = flag_id RETURNING given.* INTO gone;
+  IF gone.id IS NULL THEN
+    RETURN false;
+  END IF;
+  PERFORM slotlock.staff_log(actor, 'flag.cleared', gone.tenant_ref, 'flag:' || gone.flag, why,
+    jsonb_build_object('flag', gone.flag, 'plan', gone.plan, 'from', gone.enabled, 'to', NULL));
+  IF gone.tenant_ref IS NOT NULL THEN
+    PERFORM slotlock.staff_customer_audit(actor, gone.tenant_ref, 'staff.feature_changed', 'feature', gone.flag, why);
+  END IF;
+  RETURN true;
+END
+$slotlock_admin_flag_clear$;
+
+-- The System page (system.read): the last day of each server's maintenance hours, the accounts
+-- whose pass is failing (the error's class, code and message, never their data), the last run of
+-- each billing job, and webhook endpoints failing or turned off across up to ${SLOTLOCK_WEBHOOK_HEALTH_ACCOUNTS} accounts
+-- with webhooks, as counts. Endpoints are counted under each account's own row security, then the
+-- setting is put back.
+CREATE OR REPLACE FUNCTION slotlock.admin_system(actor text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_system$
+DECLARE
+  previous text := current_setting('slotlock.tenant_ref', true);
+  account text;
+  checked integer := 0;
+  active_count bigint;
+  failing_count bigint;
+  disabled_count bigint;
+  failing_from timestamptz;
+  endpoints bigint := 0;
+  failing bigint := 0;
+  disabled bigint := 0;
+  failing_accounts integer := 0;
+  oldest timestamptz;
+  result jsonb;
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.read');
+  FOR account IN SELECT hooked.tenant_ref FROM slotlock.webhook_tenants hooked
+                  ORDER BY hooked.tenant_ref LIMIT ${SLOTLOCK_WEBHOOK_HEALTH_ACCOUNTS} LOOP
+    PERFORM set_config('slotlock.tenant_ref', account, true);
+    SELECT count(*) FILTER (WHERE hook.disabled_at IS NULL),
+           count(*) FILTER (WHERE hook.disabled_at IS NULL AND hook.failing_since IS NOT NULL),
+           count(*) FILTER (WHERE hook.disabled_at IS NOT NULL),
+           min(hook.failing_since) FILTER (WHERE hook.disabled_at IS NULL)
+      INTO active_count, failing_count, disabled_count, failing_from
+      FROM slotlock.webhook_endpoints hook WHERE hook.tenant_ref = account;
+    endpoints := endpoints + active_count;
+    failing := failing + failing_count;
+    disabled := disabled + disabled_count;
+    IF failing_count > 0 THEN
+      failing_accounts := failing_accounts + 1;
+      oldest := least(oldest, failing_from);
+    END IF;
+    checked := checked + 1;
+  END LOOP;
+  PERFORM set_config('slotlock.tenant_ref', coalesce(previous, ''), true);
+  SELECT jsonb_build_object(
+    'webhooks', jsonb_build_object('accounts', checked, 'capped', checked >= ${SLOTLOCK_WEBHOOK_HEALTH_ACCOUNTS},
+                                   'endpoints', endpoints, 'failing', failing, 'failing_accounts', failing_accounts,
+                                   'failing_since', oldest, 'disabled', disabled),
+    'rounds', (SELECT coalesce(jsonb_agg(jsonb_build_object('started_at', run.started_at, 'finished_at', run.finished_at,
+                                                            'attention', run.attention, 'summary', run.summary)
+                                         ORDER BY run.id DESC), '[]'::jsonb)
+                 FROM (SELECT kept.* FROM slotlock.maintenance_runs kept WHERE kept.job = 'maintenance'
+                        ORDER BY kept.id DESC LIMIT 24) run),
+    'failing', (SELECT coalesce(jsonb_agg(jsonb_build_object('account_ref', failed.tenant_ref,
+                                                             'first_failed_at', failed.first_failed_at,
+                                                             'last_failed_at', failed.last_failed_at,
+                                                             'failures', failed.failures, 'error', failed.error,
+                                                             'code', failed.code, 'message', failed.message)
+                                          ORDER BY failed.last_failed_at DESC), '[]'::jsonb)
+                  FROM (SELECT kept.* FROM slotlock.maintenance_failures kept
+                         ORDER BY kept.last_failed_at DESC LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT}) failed),
+    'failing_total', (SELECT count(*) FROM slotlock.maintenance_failures),
+    'jobs', (SELECT coalesce(jsonb_object_agg(last.job, jsonb_build_object('finished_at', last.finished_at,
+                                                                           'attention', last.attention)), '{}'::jsonb)
+               FROM (SELECT DISTINCT ON (run.job) run.job, run.finished_at, run.attention
+                       FROM slotlock.maintenance_runs run ORDER BY run.job, run.id DESC) last)
+  ) INTO result;
+  PERFORM slotlock.staff_log(actor, 'system.viewed', NULL, NULL, NULL, '{}'::jsonb);
+  RETURN result;
+END
+$slotlock_admin_system$;
+
+-- A step on the status page (system.act), recorded before the console asks GitHub for it: opening
+-- an incident (its issue not yet numbered), adding an update to one, or closing it.
+CREATE OR REPLACE FUNCTION slotlock.admin_status_record(actor text, happened text, issue integer, extra jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_status_record$
+BEGIN
+  PERFORM slotlock.staff_require(actor, 'system.act');
+  IF happened IS NULL OR happened NOT IN (${statusSteps})
+     OR (issue IS NULL) <> (happened = 'status.opened') OR issue < 1
+     OR (extra IS NOT NULL AND (jsonb_typeof(extra) <> 'object' OR pg_column_size(extra) > 4096)) THEN
+    RAISE EXCEPTION 'admin_status_step' USING ERRCODE = '22023';
+  END IF;
+  PERFORM slotlock.staff_log(actor, happened, NULL, CASE WHEN issue IS NULL THEN NULL ELSE 'issue:' || issue END,
+    NULL, extra);
+END
+$slotlock_admin_status_record$;
+`;
+
 export const SLOTLOCK_STAFF_DDL = `
 -- Staff (RFC 0006): who may use the admin console, as which role. Added, changed and removed only
 -- by the deployment role (slotlock.staff_add and the others below), never by the console.
@@ -1853,8 +2419,8 @@ CREATE TRIGGER slotlock_staff_audit_events_frozen BEFORE UPDATE OR DELETE ON slo
 
 -- What the staff keep past their time goes, a little at a time, as staff use the console: events in
 -- the staff log, closed abuse cases, and closed privacy requests with their erasure receipts, each
--- ${SLOTLOCK_STAFF_RECORD_YEARS} years after it happened or closed. The log's chain is then checked from the oldest
--- event kept.
+-- ${SLOTLOCK_STAFF_RECORD_YEARS} years after it happened or closed, and announcements a year after they ended. The
+-- log's chain is then checked from the oldest event kept.
 CREATE OR REPLACE FUNCTION slotlock.staff_records_prune()
 RETURNS void
 LANGUAGE plpgsql
@@ -1872,6 +2438,11 @@ BEGIN
   DELETE FROM slotlock.privacy_requests old
    WHERE old.id IN (SELECT kept.id FROM slotlock.privacy_requests kept
                      WHERE kept.closed_at < cutoff ORDER BY kept.id LIMIT 100);
+  -- Announcements a year after they ended or ran out; the staff log keeps that they were made.
+  DELETE FROM slotlock.announcements old
+   WHERE old.id IN (SELECT kept.id FROM slotlock.announcements kept
+                     WHERE coalesce(kept.ended_at, kept.ends_at) < statement_timestamp() - interval '1 year'
+                     ORDER BY kept.id LIMIT 100);
 END
 $slotlock_staff_records_prune$;
 
@@ -2044,7 +2615,16 @@ BEGIN
                              AND given.ends_at > statement_timestamp()),
     'billing_daily', (SELECT jsonb_build_object('finished_at', run.finished_at, 'attention', run.attention)
                         FROM slotlock.maintenance_runs run WHERE run.job = 'billing_daily'
-                       ORDER BY run.id DESC LIMIT 1)
+                       ORDER BY run.id DESC LIMIT 1),
+    -- Accounts whose maintenance failed and has not run since (Phase 6, M11), and the last hour a
+    -- server recorded.
+    'maintenance_failing', (SELECT count(*) FROM slotlock.maintenance_failures),
+    'maintenance_last', (SELECT jsonb_build_object('finished_at', run.finished_at, 'attention', run.attention)
+                           FROM slotlock.maintenance_runs run WHERE run.job = 'maintenance'
+                          ORDER BY run.id DESC LIMIT 1),
+    'announcements_live', (SELECT count(*) FROM slotlock.announcements running
+                            WHERE running.ended_at IS NULL AND running.starts_at <= statement_timestamp()
+                              AND running.ends_at > statement_timestamp())
   ) INTO result;
   PERFORM slotlock.staff_log(actor, 'home.viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN result;
@@ -2498,7 +3078,8 @@ ${STAFF_SUPPORT_DDL}
 ${STAFF_BILLING_DDL}
 ${STAFF_CONTENT_DDL}
 ${STAFF_PRIVACY_DDL}
-${[...STAFF_HELPER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS]
+${STAFF_SYSTEM_DDL}
+${[...STAFF_HELPER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_OPERATOR_FUNCTIONS, ...SLOTLOCK_STAFF_SERVING_FUNCTIONS]
   .map((signature) => `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`)
   .join('\n')}
 `;

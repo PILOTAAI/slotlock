@@ -60,6 +60,23 @@ versioning.
     its test environment and notes go, and a receipt with a salted digest of the account stays.
   - **Retention**: the staff log, closed abuse cases and closed privacy requests are deleted after
     six years (`SLOTLOCK_STAFF_RECORD_YEARS`).
+- **Site, communications and system in the admin console** (RFC 0006, Phase 6):
+  - **Site and search**: 28 days of Search Console, Bing Webmaster Tools and Cloudflare Web
+    Analytics, each optional and read-only, kept an hour: queries, pages, blog posts in results,
+    pages worth a new title, visits, referrers and the site's last deploys.
+  - **Announcements** on every page of the dashboard, for every account, a plan's accounts or one
+    account (a service notice, which its audit log records), from a start until an end.
+  - **The status page**: open, update and close incidents (issues labelled `status`) through the
+    Slotlock CMS App, which now needs Issues (read and write) and Actions (read).
+  - **System**: hosts and their versions, deploys, accounts whose maintenance is failing, an hour of
+    passes counted, failing webhooks as counts, and the console's configuration without secrets.
+  - **Feature flags**: the dashboard's assistant and creating team workspaces turned off (or on, where
+    configured) for a plan or one account, recorded in the staff log and the account's audit log.
+- **`slotlock serve` records its maintenance** for the admin console: each account whose pass
+  failed, with the error's class, code and first line (quotes taken out), until a pass runs; and
+  each hour's passes, counted (`createSlotlockMaintenanceRecord`, `slotlockMaintenanceError`).
+  Self-hosted deployments keep these in their own database: at most one row per account, and 400
+  hours.
 
 ### Changed
 
@@ -68,6 +85,8 @@ versioning.
   client that confirms destructive calls, Claude among them, now asks a person before either, as it
   already did for `slotlock_cancel` and `slotlock_delete_event`. `slotlock_release_slots` stays
   non-destructive: it lets go of the caller's own holds, which lapse within minutes anyway.
+- **The dashboard's brand link has a name on a phone**, where only the logo shows (axe found it
+  nameless).
 - **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
   a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
   the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.

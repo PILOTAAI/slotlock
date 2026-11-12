@@ -42,6 +42,19 @@ export interface SlotlockAdminWorkerEnv {
   SLOTLOCK_ADMIN_CMS_REPOSITORY?: string;
   SLOTLOCK_ADMIN_SITE_URL?: string;
   SLOTLOCK_ADMIN_PREVIEW_HOST?: string;
+  /** The Site page (RFC 0006, M9): a Google service account's JSON key, and the property. */
+  SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY?: string;
+  SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY?: string;
+  /** Bing Webmaster Tools' API key, and the site as Bing has it. */
+  SLOTLOCK_ADMIN_BING_KEY?: string;
+  SLOTLOCK_ADMIN_BING_SITE?: string;
+  /** Cloudflare Web Analytics: a token with Account Analytics Read, the account id and the site tag. */
+  SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN?: string;
+  SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT?: string;
+  SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE?: string;
+  /** The System page's hosts (M11): the API's /healthz and the dashboard. Default hosted Slotlock's. */
+  SLOTLOCK_ADMIN_API_HEALTH_URL?: string;
+  SLOTLOCK_ADMIN_DASHBOARD_URL?: string;
   [name: string]: unknown;
 }
 
@@ -85,7 +98,10 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
     if (!isRateLimit(env.SLOTLOCK_ADMIN_RATE_LIMIT)) return 'The admin console is not configured: bind SLOTLOCK_ADMIN_RATE_LIMIT.';
     if (typeof env.HYPERDRIVE?.connectionString !== 'string') return 'The admin console is not configured: bind HYPERDRIVE.';
     // Built once per isolate, again only if its configuration changed.
-    const key = [...REQUIRED.map((name) => env[name]), env.SLOTLOCK_ADMIN_GITHUB_TOKEN ?? '', env.SLOTLOCK_ADMIN_STRIPE_KEY ?? '', ...CMS.map((name) => env[name] ?? '')].join('\n');
+    const key = [
+      ...REQUIRED.map((name) => env[name]), env.SLOTLOCK_ADMIN_GITHUB_TOKEN ?? '', env.SLOTLOCK_ADMIN_STRIPE_KEY ?? '',
+      ...CMS.map((name) => env[name] ?? ''), ...INSIGHTS.map((name) => env[name] ?? ''),
+    ].join('\n');
     if (admin && built === key) return admin;
     const publicUrl = (env.SLOTLOCK_ADMIN_PUBLIC_URL as string).trim();
     if (new URL(publicUrl).protocol !== 'https:') return 'SLOTLOCK_ADMIN_PUBLIC_URL must be https.';
@@ -114,6 +130,7 @@ export function createSlotlockAdminWorker(workerOptions: SlotlockAdminWorkerOpti
         ? { stripeKey: env.SLOTLOCK_ADMIN_STRIPE_KEY.trim() }
         : {}),
       ...cmsOf(env),
+      ...insightsOf(env),
       ...(workerOptions.fetch ? { fetch: workerOptions.fetch } : {}),
     });
     built = key;
@@ -182,6 +199,47 @@ function cmsOf(env: SlotlockAdminWorkerEnv): { cms: NonNullable<SlotlockAdminOpt
     return {};
   }
   return { cms: { appId, installationId, privateKey, repository, siteUrl, ...(previewHost ? { previewHost } : {}) } };
+}
+
+const INSIGHTS = [
+  'SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY',
+  'SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY',
+  'SLOTLOCK_ADMIN_BING_KEY',
+  'SLOTLOCK_ADMIN_BING_SITE',
+  'SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN',
+  'SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT',
+  'SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE',
+  'SLOTLOCK_ADMIN_API_HEALTH_URL',
+  'SLOTLOCK_ADMIN_DASHBOARD_URL',
+] as const;
+
+/**
+ * The Site and System pages' providers and hosts (RFC 0006, M9 and M11). Each provider is on when
+ * all of its settings are there and well formed; one that is not is left off, and its part of the
+ * page says what to set, never taking the rest of the console down.
+ */
+export function insightsOf(env: SlotlockAdminWorkerEnv): Pick<SlotlockAdminOptions, 'insights' | 'hosts'> {
+  const text = (name: (typeof INSIGHTS)[number]) => (typeof env[name] === 'string' ? (env[name] as string).trim() : '');
+  const https = (value: string) => /^https:\/\/[^\s"'<>]+$/.test(value);
+  const insights: NonNullable<SlotlockAdminOptions['insights']> = {};
+  const serviceAccount = text('SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY');
+  const property = text('SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY');
+  if (serviceAccount && (/^sc-domain:[a-z0-9.-]{1,253}$/i.test(property) || https(property))) {
+    insights.google = { serviceAccount, property };
+  }
+  const bingKey = text('SLOTLOCK_ADMIN_BING_KEY');
+  const bingSite = text('SLOTLOCK_ADMIN_BING_SITE');
+  if (/^[A-Za-z0-9]{8,128}$/.test(bingKey) && https(bingSite)) insights.bing = { key: bingKey, site: bingSite };
+  const token = text('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN');
+  const account = text('SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT');
+  const siteTag = text('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE');
+  if (token && /^[0-9a-f]{32}$/.test(account) && /^[0-9a-f]{32}$/.test(siteTag)) insights.cloudflare = { token, account, siteTag };
+  const api = text('SLOTLOCK_ADMIN_API_HEALTH_URL');
+  const dashboard = text('SLOTLOCK_ADMIN_DASHBOARD_URL');
+  return {
+    ...(Object.keys(insights).length > 0 ? { insights } : {}),
+    hosts: { ...(https(api) ? { api } : {}), ...(https(dashboard) ? { dashboard } : {}) },
+  };
 }
 
 function isRateLimit(value: unknown): value is SlotlockAdminRateLimit {

@@ -9,6 +9,12 @@ import { type SlotlockWorkspaceSso, createSlotlockWorkspaceSso } from './workspa
 import { type SlotlockWorkspaceScim, createSlotlockWorkspaceScim } from './workspace-scim.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 import { type SlotlockResourceScope, isSlotlockResourceScope } from './resource-profile.js';
+import {
+  SLOTLOCK_ANNOUNCEMENT_KINDS,
+  SLOTLOCK_FEATURE_FLAGS,
+  type SlotlockAnnouncementKind,
+  type SlotlockFeatureFlag,
+} from './staff-ddl.js';
 
 /**
  * A person as the dashboard knows them: `github:<id>`, `google:<subject>`, or `sso:<uuid>` (one a
@@ -73,6 +79,11 @@ export interface SlotlockDashboardWorkspaces {
    * staff left. Null while it is not suspended. Only with the database.
    */
   suspension?(tenantRef: string): Promise<SlotlockSuspensionNotice | null>;
+  /**
+   * What staff put in front of the workspace (RFC 0006, M10 and M11): the announcements running for
+   * it, and the features turned on or off for its plan or account. Only with the database.
+   */
+  notices?(tenantRef: string): Promise<SlotlockDashboardNotices>;
   /** Teams' verified domains and requests to join through them (workspace-domains.ts): only with the database. */
   domains?: SlotlockWorkspaceDomains;
   /** Teams' single sign-on (workspace-sso.ts): only with the database. */
@@ -80,6 +91,31 @@ export interface SlotlockDashboardWorkspaces {
   /** Teams' SCIM provisioning (workspace-scim.ts): only with the database. */
   scim?: SlotlockWorkspaceScim;
 }
+
+/** An announcement a dashboard shows above every page while it runs (RFC 0006, M10). */
+export interface SlotlockAnnouncement {
+  id: string;
+  kind: SlotlockAnnouncementKind;
+  message: string;
+  /** An https link to more, such as the incident on the status page. */
+  link: string | null;
+  startsAt: Date;
+  endsAt: Date;
+}
+
+/** What staff put in front of a workspace: never who wrote it, or why. */
+export interface SlotlockDashboardNotices {
+  /** Running now, newest first. */
+  announcements: readonly SlotlockAnnouncement[];
+  /** Features staff turned on or off for it; one not named follows the deployment's configuration. */
+  features: Readonly<Partial<Record<SlotlockFeatureFlag, boolean>>>;
+}
+
+/** No announcement, and every feature as the deployment configures it. */
+export const SLOTLOCK_NO_DASHBOARD_NOTICES: SlotlockDashboardNotices = Object.freeze({
+  announcements: Object.freeze([]),
+  features: Object.freeze({}),
+});
 
 /** A suspended workspace's notice: never the internal reason. */
 export interface SlotlockSuspensionNotice {
@@ -319,6 +355,18 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
         // refuses a suspended tenant's writes.
         const code = (error as { code?: unknown } | null)?.code;
         if (code === '42883' || code === '42501') return null;
+        throw error;
+      }
+    },
+    async notices(tenantRef) {
+      try {
+        const [row] = await sql<{ notices: unknown }[]>`
+          SELECT slotlock.tenant_dashboard_notices(${tenantRef}::text) AS notices`;
+        return readDashboardNotices(row?.notices);
+      } catch (error) {
+        // A schema or grants from before this release: nothing to show, every feature as configured.
+        const code = (error as { code?: unknown } | null)?.code;
+        if (code === '42883' || code === '42501') return SLOTLOCK_NO_DASHBOARD_NOTICES;
         throw error;
       }
     },
@@ -676,4 +724,30 @@ export function createSlotlockMemoryDashboardWorkspaces(): SlotlockDashboardWork
       }
     },
   };
+}
+
+/** The database's notices, keeping only what reads as one (a kind, a line, an https link, flags). */
+function readDashboardNotices(value: unknown): SlotlockDashboardNotices {
+  const record = (value ?? {}) as { announcements?: unknown; features?: unknown };
+  const announcements = (Array.isArray(record.announcements) ? record.announcements : []).flatMap((entry) => {
+    const item = entry as Record<string, unknown>;
+    const kind = item.kind;
+    if (typeof kind !== 'string' || !(SLOTLOCK_ANNOUNCEMENT_KINDS as readonly string[]).includes(kind)) return [];
+    if (typeof item.message !== 'string' || item.message.length === 0) return [];
+    const link = typeof item.link === 'string' && /^https:\/\/[^\s"'<>]+$/.test(item.link) ? item.link : null;
+    return [{
+      id: String(item.id),
+      kind: kind as SlotlockAnnouncementKind,
+      message: item.message,
+      link,
+      startsAt: new Date(String(item.starts_at)),
+      endsAt: new Date(String(item.ends_at)),
+    }];
+  });
+  const features: Partial<Record<SlotlockFeatureFlag, boolean>> = {};
+  const given = record.features && typeof record.features === 'object' ? (record.features as Record<string, unknown>) : {};
+  for (const flag of SLOTLOCK_FEATURE_FLAGS) {
+    if (typeof given[flag] === 'boolean') features[flag] = given[flag];
+  }
+  return { announcements, features };
 }

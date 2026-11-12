@@ -28,9 +28,18 @@
 //                                            those parts say Stripe is not connected
 //       SLOTLOCK_ADMIN_CMS_APP_KEY           the CMS (RFC 0006, 4.5): the private key (.pem) of the
 //                                            "Slotlock CMS" GitHub App, with the vars below
+//       SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY    the Site page (M9): a Google service account's JSON key,
+//                                            the account added to the Search Console property as a
+//                                            restricted user, with the property below
+//       SLOTLOCK_ADMIN_BING_KEY              a Bing Webmaster Tools API key (its Settings, API access)
+//       SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN      an API token with Account Analytics Read and nothing
+//                                            else, for Cloudflare Web Analytics
+//     Each of the last three is optional: without it, its part of the Site page says what to set;
 //   - for the CMS, a GitHub App of its own ("Slotlock CMS"): repository permissions Contents and
-//     Pull requests (read and write), Checks and Commit statuses (read), Metadata (read); no
-//     webhook; installed on the site's repository only. Its App ID and installation id go in
+//     Pull requests (read and write), Checks and Commit statuses (read), Metadata (read), and for
+//     the status page and deploy history (M10, M11) Issues (read and write) and Actions (read); no
+//     webhook; installed on the site's repository only. The console comments on and closes only
+//     open issues labelled `status`. Its App ID and installation id go in
 //     SLOTLOCK_ADMIN_CMS_APP_ID and SLOTLOCK_ADMIN_CMS_INSTALLATION below. The App gets no bypass:
 //     main's ruleset (scripts/configure-github.sh) holds its merges to the same required checks,
 //     up to date with main, as everyone's. The console merges only pull requests that change blog
@@ -79,7 +88,17 @@
     "SLOTLOCK_ADMIN_SITE_URL": "https://slotlock.pylota.io",
     // Optional: the site's preview Worker's workers.dev host (slotlock-site-preview.<subdomain>.
     // workers.dev), so the editor links each CMS pull request's preview deploy (site.yml).
-    "SLOTLOCK_ADMIN_PREVIEW_HOST": ""
+    "SLOTLOCK_ADMIN_PREVIEW_HOST": "",
+    // Optional, for the Site page (M9): the Search Console property (sc-domain:<domain>, or the
+    // https:// URL prefix it was added as), the site as Bing Webmaster Tools has it, and the
+    // Cloudflare account id and Web Analytics site tag (32 hex characters each).
+    "SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY": "sc-domain:slotlock.pylota.io",
+    "SLOTLOCK_ADMIN_BING_SITE": "https://slotlock.pylota.io/",
+    "SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT": "",
+    "SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": "",
+    // The System page's hosts (M11), as the status probe checks them (docs/hosted/status.md).
+    "SLOTLOCK_ADMIN_API_HEALTH_URL": "https://slotlock-api.pylota.io/healthz",
+    "SLOTLOCK_ADMIN_DASHBOARD_URL": "https://app.slotlock.pylota.io/dashboard"
   },
   // A sign-in callback's query holds its OAuth code and state: keep query strings out of the logs.
   "observability": { "enabled": true, "redact_query_string": true }

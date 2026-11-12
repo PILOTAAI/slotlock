@@ -20,6 +20,7 @@ import {
   SLOTLOCK_STAFF_DDL,
   SLOTLOCK_STAFF_OPERATOR_FUNCTIONS,
   SLOTLOCK_STAFF_ROLES,
+  SLOTLOCK_STAFF_SERVING_FUNCTIONS,
   SLOTLOCK_STAFF_TABLES,
   createSlotlockAdminRoleGrantsDdl,
   slotlockStaffMay,
@@ -62,9 +63,22 @@ describe('the admin console schema', () => {
       expect(found?.header).toContain('SET search_path = pg_catalog, slotlock, pg_temp');
       expect(SLOTLOCK_STAFF_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
     }
-    // No other function in it runs as its owner.
+    // No other function in it runs as its owner, but the serving role's few (Phase 6): a
+    // dashboard's announcements and flags, and maintenance's record of its passes.
     const definers = functions.filter((f) => f.header.includes('SECURITY DEFINER')).map((f) => f.name);
-    expect(definers.sort()).toEqual(SLOTLOCK_ADMIN_FUNCTIONS.map((s) => s.slice(0, s.indexOf('('))).sort());
+    expect(definers.sort()).toEqual(
+      [...SLOTLOCK_ADMIN_FUNCTIONS, ...SLOTLOCK_STAFF_SERVING_FUNCTIONS].map((s) => s.slice(0, s.indexOf('('))).sort(),
+    );
+    const grants = createSlotlockAdminRoleGrantsDdl('slotlock_admin_app');
+    for (const signature of SLOTLOCK_STAFF_SERVING_FUNCTIONS) {
+      const found = named(signature);
+      expect(`${found?.name}(${found?.types})`).toBe(signature);
+      expect(SLOTLOCK_DEFINER_FUNCTIONS).toContain(signature);
+      expect(SLOTLOCK_STAFF_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
+      expect(grants).not.toContain(signature.slice(0, signature.indexOf('(')));
+      // They never take a staff member, so nothing a server sends reaches the staff log.
+      expect(found?.body, signature).not.toContain('staff_log(');
+    }
   });
 
   it('checks the staff role first in every admin function but sign-in', () => {
@@ -126,6 +140,11 @@ describe('the admin console schema', () => {
     // The CMS (Phase 4): the Owner and an Editor write posts; only the Owner publishes them (E5).
     expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'content.write'))).toEqual(['owner', 'editor']);
     expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'content.publish'))).toEqual(['owner']);
+    // Phase 6: search numbers for whoever writes or watches; the System page for the Owner and
+    // Support; announcements, flags and the status page for the Owner alone (4.3).
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'site.read'))).toEqual(['owner', 'editor', 'viewer']);
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'system.read'))).toEqual(['owner', 'support']);
+    expect(SLOTLOCK_STAFF_ROLES.filter((role) => slotlockStaffMay(role, 'system.act'))).toEqual(['owner']);
   });
 
   it('gives privacy requests to the Owner and Support, and an erasure to Owners only', () => {
@@ -160,7 +179,7 @@ describe('the admin console schema', () => {
   });
 
   it('gives every action on an account a reason, and records it in the account\'s own audit log too', () => {
-    for (const name of ['admin_suspend', 'admin_unsuspend', 'admin_revoke_key', 'admin_end_sessions']) {
+    for (const name of ['admin_suspend', 'admin_unsuspend', 'admin_revoke_key', 'admin_end_sessions', 'admin_flag_set']) {
       const body = functions.find((f) => f.name === `slotlock.${name}`)?.body ?? '';
       expect(body, name).toContain('PERFORM slotlock.staff_reason_valid(why);');
       expect(body, name).toContain('PERFORM slotlock.staff_customer_audit(actor, account, ');

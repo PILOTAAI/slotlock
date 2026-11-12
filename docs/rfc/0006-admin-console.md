@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. Phases 1 to 5 are built and wait for their independent security review and the owner's Phase 0 settings. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built and wait for their independent security review and the owner's Phase 0 settings. |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -738,6 +738,71 @@ Left for later phases:
   from their dashboard today;
 - restriction and objection have no steps of their own: they are logged as "other" and answered
   from the mailbox.
+
+**Where Phase 6 stands.** Insights, communications and the system are built and tested. Its
+done-when holds, end to end against PostgreSQL: an announcement scheduled in the console shows on
+every page of the customer's dashboard from its start, and leaves it when an Owner ends it; a
+maintenance pass that fails appears on Home and on the System page, and clears when the next pass
+runs.
+
+- **The roles.** `site.read` (the Owner, an Editor and the Viewer) opens Site and search;
+  `system.read` (the Owner and Support) opens Communications and System; `system.act` (the Owner)
+  writes announcements, opens and updates incidents, and sets feature flags, as 4.3 says.
+- **Site and search (M9).** The last 28 days from Search Console (a service account added to the
+  property as a restricted user), Bing Webmaster Tools (an API key) and Cloudflare Web Analytics (a
+  token with Account Analytics Read), each optional and kept an hour in `admin_cache` (4.6):
+  - clicks, impressions, click-through and position, by query and by page;
+  - the pages seen at least 100 times and clicked under 2% of the time, worth a new title (RFC
+    0005, Phase 5);
+  - each blog post in Google's results, which Phase 4 left for this phase. It is on this page, not
+    the CMS list, so an Editor sees it without a provider read on every list;
+  - page loads by day, top pages and referrers;
+  - Search Console's sitemaps, and the site workflow's last runs on `main`.
+- **Communications (M10).**
+  - **Announcements** (`announcements`): planned maintenance, a change to Slotlock, an incident or a
+    notice, to every account, a plan's accounts or one account, from a start until an end at most
+    90 days on. The dashboard shows the three newest running for its workspace above every page; a
+    test environment sees its live account's. An Owner can end one at once.
+  - **Service notices** are announcements to one account, and its audit log records them (E8). The
+    plan was to email them to account owners. The database keeps no email address for a person
+    (only the GitHub or Google id), and PRIVACY.md says so; emailing would mean collecting
+    addresses for this alone. A notice on the dashboard reaches the same people where they work,
+    and keeps that promise. Email stays out until there is a reason to hold addresses.
+  - **The status page**: its incidents are issues labelled `status` (docs/hosted/status.md). The
+    console lists the open ones and the last ten resolved, opens one, and posts an update to one
+    or closes it, through the Slotlock CMS App, which now needs Issues (read and write). It refuses
+    any issue that is not open and labelled `status`. Each step is in the staff log before GitHub is
+    asked.
+- **System (M11).**
+  - **Hosts**: the API's `/healthz` (ready, and its version), the dashboard and the site, asked as
+    the page opens with a five-second limit. The plan put health on Home. It is on this page
+    instead, so Home stays one database call and never waits on a host.
+  - **Deploys**: the last runs on `main` of the site, dashboard, image and release workflows, read
+    through the App with Actions (read).
+  - **Maintenance**: `slotlock serve` records each account whose pass failed
+    (`maintenance_failures`: when, how often, and the error's class, code and first line with
+    anything in quotes taken out), clears it when a pass runs, and records each hour's passes as
+    `maintenance_runs` job `maintenance`, counted and never naming an account. Home says when
+    maintenance is failing for an account, or no server has recorded an hour in three.
+  - **Webhooks**: endpoints failing or turned off across up to 5,000 accounts, as counts, read
+    under each account's own row security.
+  - **Feature flags** (`feature_flags`): the assistant (by the workspace in use) and creating team
+    workspaces (by the person's own account), on or off for a plan or one account. The account's
+    setting outranks its plan's, and with neither the deployment's configuration decides; a flag
+    never turns on what the deployment did not configure. Each change is in the staff log, which
+    is its history, and an account's is in its audit log.
+  - **Configuration**: the console's own settings, and whether each integration is connected, never
+    a secret.
+- **Erasure.** An account's notices, flags and maintenance failure go with it (`erase_tenant`).
+  Announcements are deleted a year after they end.
+
+Left for later:
+
+- emailing service notices, as above;
+- the API's own configuration on the System page: the console shows its version, not the settings
+  it runs with, which live on its server;
+- the comparison pages' "last checked" flags on Home (M8), and adding an author from the console,
+  both still open from Phase 4.
 
 ## Part 8: Non-goals and risks
 

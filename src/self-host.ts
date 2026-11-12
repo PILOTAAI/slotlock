@@ -123,6 +123,7 @@ import {
 import {
   type SlotlockMaintenanceResult,
   type SlotlockMaintenanceScheduler,
+  createSlotlockMaintenanceRecord,
   maintainSlotlockTenant,
   startSlotlockMaintenance,
   withSlotlockMaintenanceLock,
@@ -1486,6 +1487,9 @@ export async function startSlotlockServer(
         log.info('maintenance', { ...result });
       },
       onError: (error) => log.error('maintenance_failed', describeError(error)),
+      // For the admin console (RFC 0006, M11): each tenant whose pass failed, until one runs, and an
+      // hour's passes counted. Never a tenant's data.
+      record: createSlotlockMaintenanceRecord(sql),
     });
     if (config.webhooks !== 'off') {
       const deliveryStore = createSlotlockStore(sql, retention);

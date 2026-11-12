@@ -54,6 +54,23 @@ export interface FakeGithubRepo {
   openPull(branch: string, title: string, fork?: string): FakePull;
   /** The last squash merge's title and message. */
   merges: { title: string; message: string; number: number }[];
+  /** Issues, numbered after the pull requests: the status page's incidents (labelled status) and others. */
+  issues: Map<number, FakeIssue>;
+  /** Open an issue as a person (or the status probe) would, outside the console. */
+  openIssue(title: string, labels: string[]): FakeIssue;
+  /** Each workflow file's runs on main, newest first. */
+  runs: Map<string, { id: number; name: string; status: string; conclusion: string | null; event: string; head_sha: string; html_url: string; created_at: string }[]>;
+}
+
+export interface FakeIssue {
+  number: number;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  labels: string[];
+  comments: string[];
+  createdAt: string;
+  closedAt: string | null;
 }
 
 /** An object id shaped like git's (40 hex characters), from SHA-256: the fake needs only unique names. */
@@ -154,6 +171,14 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       pulls.set(pull.number, pull);
       return pull;
     },
+    issues: new Map(),
+    openIssue(title, labels) {
+      // Issues and pull requests share their numbers, as on GitHub.
+      const issue: FakeIssue = { number: nextPull++, title, body: '', state: 'open', labels: [...labels], comments: [], createdAt: new Date(now()).toISOString(), closedAt: null };
+      fake.issues.set(issue.number, issue);
+      return issue;
+    },
+    runs: new Map(),
   };
 
   const diff = (pull: FakePull) => {
@@ -298,6 +323,47 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       pulls.set(pull.number, pull);
       return reply(asPull(pull), 201);
     }
+    // Issues (the status page's incidents) and workflow runs (deploys).
+    const asIssue = (issue: FakeIssue) => ({
+      number: issue.number, title: issue.title, state: issue.state, html_url: `https://github.com/${FAKE_REPOSITORY}/issues/${issue.number}`,
+      created_at: issue.createdAt, closed_at: issue.closedAt, comments: issue.comments.length, labels: issue.labels.map((name) => ({ name })),
+    });
+    if (rest === '/issues' && method === 'GET') {
+      const label = target.searchParams.get('labels');
+      const state = target.searchParams.get('state') ?? 'open';
+      const listed = [...fake.issues.values()]
+        .filter((issue) => issue.state === state && (!label || issue.labels.includes(label)))
+        .sort((a, b) => b.number - a.number)
+        .slice(0, Number(target.searchParams.get('per_page') ?? 30));
+      return reply(listed.map(asIssue));
+    }
+    if (rest === '/issues' && method === 'POST') {
+      const issue = fake.openIssue(String(body.title), (body.labels as string[] | undefined) ?? []);
+      issue.body = String(body.body ?? '');
+      return reply(asIssue(issue), 201);
+    }
+    const onIssue = /^\/issues\/(\d+)(\/comments)?$/.exec(rest);
+    const issue = onIssue ? fake.issues.get(Number(onIssue[1])) : undefined;
+    if (onIssue && issue) {
+      if (!onIssue[2] && method === 'GET') return reply(asIssue(issue));
+      if (!onIssue[2] && method === 'PATCH') {
+        if (body.state === 'closed') {
+          issue.state = 'closed';
+          issue.closedAt = new Date(now()).toISOString();
+        }
+        return reply(asIssue(issue));
+      }
+      if (onIssue[2] && method === 'POST') {
+        issue.comments.push(String(body.body));
+        return reply({ id: issue.comments.length }, 201);
+      }
+    }
+    if ((match = /^\/actions\/workflows\/([a-z0-9.-]+)\/runs$/.exec(rest)) && method === 'GET') {
+      const listed = fake.runs.get(match[1] as string);
+      if (!listed) return reply({ message: 'Not Found' }, 404);
+      return reply({ total_count: listed.length, workflow_runs: listed.slice(0, Number(target.searchParams.get('per_page') ?? 30)) });
+    }
+
     const onPull = /^\/(pulls|issues)\/(\d+)(\/.*)?$/.exec(rest);
     const pull = onPull ? pulls.get(Number(onPull[2])) : undefined;
     if (onPull && !pull) return reply({ message: 'Not Found' }, 404);

@@ -31,7 +31,9 @@ import {
   slotlockRoleCan,
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
+import type { SlotlockAnnouncementKind } from './staff-ddl.js';
 import type {
+  SlotlockDashboardNotices,
   SlotlockDashboardWorkspaces,
   SlotlockSuspensionNotice,
   SlotlockTeamRefusal,
@@ -507,6 +509,19 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
   'staff.account_unsuspended': "lifted the account's suspension",
   'staff.key_revoked': 'revoked an API key',
   'staff.sessions_ended': 'signed a person out',
+  'staff.plan_overridden': "changed the account's plan or limits until a date",
+  'staff.plan_override_ended': "ended a change to the account's plan or limits",
+  'staff.notice_sent': 'sent the account a notice',
+  'staff.feature_changed': 'turned a feature on or off for the account',
+});
+/** What the Teams page says where staff turned off creating teams for the person's account (M11). */
+const TEAM_CREATION_OFF = 'Creating team workspaces is turned off for your account. Teams you are in work as before.';
+/** How a dashboard's banner names an announcement's kind (RFC 0006, M10). */
+const ANNOUNCEMENT_LABELS: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
+  maintenance: 'Planned maintenance',
+  change: 'A change to Slotlock',
+  incident: 'Incident',
+  notice: 'Notice',
 });
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
@@ -520,7 +535,10 @@ const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = O
   ]],
   ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
   ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
-  ['Slotlock staff', ['staff.account_suspended', 'staff.account_unsuspended', 'staff.key_revoked', 'staff.sessions_ended']],
+  ['Slotlock staff', [
+    'staff.account_suspended', 'staff.account_unsuspended', 'staff.key_revoked', 'staff.sessions_ended',
+    'staff.plan_overridden', 'staff.plan_override_ended', 'staff.notice_sent', 'staff.feature_changed',
+  ]],
   ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
 ]);
 const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
@@ -2363,6 +2381,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const deletingOf = new WeakMap<Session, Date>();
   /** The workspace's suspension notice, read with its standing: shown on every page while it lasts. */
   const suspendedOf = new WeakMap<Session, SlotlockSuspensionNotice>();
+  /**
+   * What staff put in front of the workspace (RFC 0006, M10 and M11), read with its standing: the
+   * announcements shown on every page, and the features turned on or off for it.
+   */
+  const noticesOf = new WeakMap<Session, SlotlockDashboardNotices>();
   /** The locations and groups each session's member is limited to (RFC 0004 D1), read with their standing. */
   const scopes = new WeakMap<Session, SlotlockResourceScope>();
   const brandName = options.name ?? 'Slotlock';
@@ -2505,16 +2528,18 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       return session;
     }
     const person = personOf(session);
-    const [standing, listed, alive, deleting, scope, suspension] = await Promise.all([
+    const [standing, listed, alive, deleting, scope, suspension, notices] = await Promise.all([
       workspaces.standing(tenantOf(session), person, session.sid),
       teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
       workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
       teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
       workspaces.scope && sharedWorkspace(session) ? workspaces.scope(tenantOf(session), person) : Promise.resolve(null),
       workspaces.suspension ? workspaces.suspension(tenantOf(session)) : Promise.resolve(null),
+      workspaces.notices ? workspaces.notices(tenantOf(session)) : Promise.resolve(null),
     ]);
     if (deleting) deletingOf.set(session, deleting);
     if (suspension) suspendedOf.set(session, suspension);
+    if (notices) noticesOf.set(session, notices);
     // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
     // from before this store, or of a person erased since (no record, no epoch) never passes; nor
     // one the person signed out from another device.
@@ -2696,7 +2721,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     | 'settings';
   // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
   // request: on Workers the adapter exists only inside one.
-  const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
+  const nav = (session: Session): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
     { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
     ...(options.resources.waitlist
@@ -2709,7 +2734,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     ...(options.resources.webhooks
       ? [{ section: 'webhooks' as const, label: 'Webhooks', path: '/webhooks', icon: ICONS.webhooks }]
       : []),
-    ...(assistantStore()
+    ...(assistantStore(session)
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
     ...(plans ? [{ section: 'plan' as const, label: 'Usage', path: '/plan', icon: ICONS.plan }] : []),
@@ -2756,7 +2781,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <link rel="stylesheet" href="${root}/style.css?v=${ASSET_VERSIONS.css}">
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
 </head>`;
-    const brand = html`<a class="brand" href="${root}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
+    // Named by its label too: on a phone the name is hidden and the mark alone shows.
+    const brand = html`<a class="brand" href="${root}" aria-label="${brandName}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
     const skip = html`<a class="skip" href="#main">Skip to content</a>`;
     // Copy buttons say what they did here, for screen readers (app.js).
     const live = html`<p class="visually-hidden" id="live" aria-live="polite"></p>`;
@@ -2770,7 +2796,7 @@ ${live}
 </body>
 </html>`;
     }
-    const links = nav()
+    const links = nav(session)
       .filter((item) => reaches(session, item.path || '/'))
       .map(
       (item) =>
@@ -2795,7 +2821,7 @@ ${skip}
             suspendedOf.get(session)?.message ? html` ${brandName} says: ${suspendedOf.get(session)?.message ?? ''}` : html``
           }</p>`
         : html``
-    }${
+    }${announcementBanners(session)}${
       deletingOf.has(session)
         ? html`<p class="test-banner deleting-banner">This team is deleted on ${formatDate(deletingOf.get(session) as Date)}; its keys are refused.${
             can(session, 'workspace.own') ? html` <a href="${root}/settings/team">Keep it</a>` : html``
@@ -2810,6 +2836,19 @@ ${live}
 
   // A notice is an alert only when the page answers with an error: a done or saved message is a
   // status, so success is never painted in the error colour.
+  /**
+   * The announcements running for the session's workspace (RFC 0006, M10): one line each, above
+   * every page, with a link to more where staff gave one.
+   */
+  const announcementBanners = (session: Session): Html => {
+    const shown = noticesOf.get(session)?.announcements ?? [];
+    return html`${shown.map(
+      (announcement) =>
+        html`<p class="test-banner announcement-banner announcement-${announcement.kind}" role="status"><strong>${ANNOUNCEMENT_LABELS[announcement.kind]}.</strong> ${announcement.message}${
+          announcement.link ? html` <a href="${announcement.link}" rel="noopener noreferrer">More about this</a>` : html``
+        }</p>`,
+    )}`;
+  };
   const noticeOf = (notice?: string | Html, status = 200) =>
     notice
       ? status >= 400
@@ -3069,7 +3108,7 @@ ${
     const tenantRef = tenantOf(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const assistant = assistantStore();
+    const assistant = assistantStore(session);
     // A member limited to some resources sees theirs: no keys, plan or setup, which are the workspace's.
     const limited = scopes.has(session);
     const [keys, resources, agenda, changes, approvals, waitlist, model] = await Promise.all([
@@ -3457,7 +3496,7 @@ ${
     query?: URLSearchParams,
     found?: PersonFound,
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     // Members are a team workspace's: its people come from invitations, not from GitHub.
     const sections = SETTINGS_SECTIONS.filter(
       (entry) =>
@@ -4277,9 +4316,12 @@ ${
   // ---- The assistant ----
 
   const assistantOptions = options.assistant;
-  /** The assistant's records, when the assistant is on and the adapter keeps them. Per request (Workers). */
-  const assistantStore = (): SlotlockAssistantStore | undefined =>
-    assistantOptions ? options.resources.assistant : undefined;
+  /**
+   * The assistant's records, when the assistant is on and the adapter keeps them, and staff have not
+   * turned it off for the workspace's plan or account (RFC 0006, M11). Per request (Workers).
+   */
+  const assistantStore = (session: Session): SlotlockAssistantStore | undefined =>
+    assistantOptions && noticesOf.get(session)?.features.assistant !== false ? options.resources.assistant : undefined;
   const privateUrls = assistantOptions?.privateUrls === true;
   const assistantFetch =
     assistantOptions?.fetch ?? createSlotlockGuardedFetch({ allowPrivateNetworks: privateUrls });
@@ -4506,7 +4548,7 @@ ${
   async function assistantModel(
     session: Session,
   ): Promise<{ model: SlotlockAssistantModel } | { problem: string } | null> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     const settings = store ? await store.getSettings(tenantOf(session)) : null;
     if (!settings || !assistantOptions) return null;
     if (namesOwnHost(settings.baseUrl)) return { problem: OWN_HOST_REFUSAL };
@@ -4858,7 +4900,7 @@ ${
     notice?: string,
     requested?: string,
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const tenantRef = tenantOf(session);
     const member = personOf(session);
@@ -4930,7 +4972,7 @@ ${
 
   /** The member's conversations on a page of their own: the Chats list where the page is narrow. */
   async function chatsPage(session: Session): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const chats = await store.listChats(tenantOf(session), personOf(session));
     const content = html`<div class="chats-page">${pageHead('Chats', html`<a class="button ghost" href="${chatUrl(null)}">${ASSISTANT_ICONS.plus}New chat</a>`)}${chatsPanel(session, chats, null)}</div>`;
@@ -4963,7 +5005,7 @@ ${
     notice: string | undefined,
     draft?: AssistantDraft,
   ): Promise<Html> {
-    const store = assistantStore() as SlotlockAssistantStore;
+    const store = assistantStore(session) as SlotlockAssistantStore;
     const settings = await store.getSettings(tenantOf(session));
     const token = csrfToken(session);
     const hidden = () =>
@@ -5048,7 +5090,7 @@ ${
     settingsPage(session, 403, 'Only an owner or an admin of this workspace can change the assistant.');
 
   async function saveAssistantSettings(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     const { provider, baseUrl: givenUrl } = formEndpoint(form);
@@ -5104,7 +5146,7 @@ ${
    * provider and URL. Saves nothing; counted as a message to the assistant.
    */
   async function loadAssistantModels(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
@@ -5171,7 +5213,7 @@ ${
   }
 
   async function removeAssistantSettings(session: Session): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     await store.deleteSettings(tenantOf(session), personOf(session));
@@ -5182,7 +5224,7 @@ ${
     page(session, 429, 'You have sent the assistant a lot in the last minute. Wait a moment and try again.');
 
   async function testAssistant(session: Session): Promise<Response> {
-    if (!assistantStore()) return notFound(session);
+    if (!assistantStore(session)) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
       return tooManyMessages(session, settingsPage);
@@ -5222,7 +5264,7 @@ ${
     form: URLSearchParams,
     hooks: { onEvent?: (event: SlotlockAssistantTurnEvent) => void; signal?: AbortSignal } = {},
   ): Promise<AssistantRun> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return { ok: false, status: 404, message: 'Nothing is here.' };
     const text = (form.get('message') ?? '').trim();
     if (text === '' || text.length > SLOTLOCK_ASSISTANT_MAX_MESSAGE) {
@@ -5441,7 +5483,7 @@ ${
           Object.keys(run.actions).length > 0
             ? await resourceLookups(tenantOf(session))
             : { names: new Map<string, string>(), zones: new Map<string, string>() };
-        const chats = await assistantStore()?.listChats(tenantOf(session), personOf(session));
+        const chats = await assistantStore(session)?.listChats(tenantOf(session), personOf(session));
         write({
           t: 'done',
           html: assistantItems(session, turn, run.actions, lookups.names, lookups.zones, run.chatId).join(''),
@@ -5480,7 +5522,7 @@ ${
     form: URLSearchParams,
     decision: 'approve' | 'dismiss',
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     const id = form.get('action') ?? '';
     const chatId = await chatOfForm(store, session, form, true);
@@ -5547,13 +5589,13 @@ ${
 
   /** A new conversation: the others are kept, in Chats. (A form of an earlier release posts here.) */
   async function resetAssistant(session: Session): Promise<Response> {
-    if (!assistantStore()) return notFound(session);
+    if (!assistantStore(session)) return notFound(session);
     return redirect(303, chatUrl(null));
   }
 
   /** Give one of the member's conversations a title of their own. */
   async function renameChat(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const chatId = chatOf(form.get('chat'));
     const title = (form.get('title') ?? '').replace(/\s+/gu, ' ').trim();
@@ -5568,7 +5610,7 @@ ${
 
   /** Delete one of the member's conversations, at once and for good. */
   async function deleteChat(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     const chatId = chatOf(form.get('chat'));
     if (chatId) await store.deleteChat(tenantOf(session), personOf(session), chatId);
@@ -6115,7 +6157,10 @@ ${
     if (route.startsWith('/closures') && options.resources.hours) return { path: '/closures', page: closuresPage };
     if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
     if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
-    if (route.startsWith('/assistant') && assistantStore()) return { path: '/assistant', page: assistantPage };
+    // The page itself answers a workspace whose assistant staff turned off (assistantStore).
+    if (route.startsWith('/assistant') && assistantOptions && options.resources.assistant) {
+      return { path: '/assistant', page: assistantPage };
+    }
     if ((route === '/teams/delete' || route === '/teams/restore') && teamStore) {
       return { path: '/settings/team', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'team') };
     }
@@ -6697,9 +6742,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   async function teamWorkspacesSection(session: Session, checked = false): Promise<Html> {
     if (!teamStore) return html``;
     const listed = teamListOf.get(session) ?? [];
-    const [offered, atDomain] = await Promise.all([
+    const [offered, atDomain, mayCreate] = await Promise.all([
       teamStore.pendingFor(personOf(session), verifiedEmails(session)),
       domainTeamsSection(session, checked),
+      teamCreationOn(session),
     ]);
     const token = csrfToken(session);
     const hidden = () =>
@@ -6724,7 +6770,24 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Team</th><th>Handle</th><th>You are</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``
-    }<form class="create-team" method="post" action="${root}/teams/create">${hidden()}<label for="team-name">Name</label><input id="team-name" name="name" maxlength="80" autocomplete="organization" required><button class="primary" type="submit">Create team</button></form></section>`;
+    }${
+      mayCreate
+        ? html`<form class="create-team" method="post" action="${root}/teams/create">${hidden()}<label for="team-name">Name</label><input id="team-name" name="name" maxlength="80" autocomplete="organization" required><button class="primary" type="submit">Create team</button></form>`
+        : html`<p class="muted">${TEAM_CREATION_OFF}</p>`
+    }</section>`;
+  }
+
+  /**
+   * Whether the person may create a team workspace: on unless staff turned it off for their own
+   * account's plan or the account (RFC 0006, M11). Teams they are in are not affected.
+   */
+  async function teamCreationOn(session: Session): Promise<boolean> {
+    const own = personOf(session);
+    const notices =
+      tenantOf(session) === own
+        ? noticesOf.get(session)
+        : await (workspaces?.notices?.(own) ?? Promise.resolve(undefined));
+    return notices?.features.team_workspaces !== false;
   }
 
   /** GitHub organizations turned on for Slotlock (organizations: 'enabled'). */
@@ -6783,6 +6846,7 @@ ${
   async function createTeam(session: Session, form: URLSearchParams): Promise<Response> {
     if (!teamStore) return nothingHere(session);
     if (session.idp === 'sso' || session.sc !== undefined) return teamsPage(session, 403, 'Sign in with GitHub or Google to create a team.');
+    if (!(await teamCreationOn(session))) return teamsPage(session, 403, TEAM_CREATION_OFF);
     const name = (form.get('name') ?? '').trim();
     if (name.length === 0 || name.length > 80 || /\p{Cc}/u.test(name)) {
       return teamsPage(session, 400, TEAM_REFUSALS.invalid_name.text);
@@ -10096,6 +10160,10 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 /* A team being deleted */
 .deleting-banner { background: var(--bad-soft, var(--surface-2)); }
 .suspended-banner { background: var(--bad-soft, var(--surface-2)); }
+.announcement-banner { border-style: solid; border-color: var(--line-strong); background: var(--accent-wash); color: var(--ink); }
+.announcement-banner strong { color: var(--ink); }
+.announcement-banner a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.announcement-incident { border-color: var(--warn-line); background: var(--warn-wash); }
 /* Sessions (Settings, Account) */
 h2.sessions-head { margin-top: var(--space-6); }
 /* Audit log */
