@@ -14,6 +14,9 @@ versioning.
   `_slotlock-challenge.example.com.example.com`), or the values found at that name when none is
   the one to publish, such as an old token or a value cut short. They are public DNS data, at
   most five of 120 characters.
+- **Docs: Slotlock Cloud's hosted page no longer offers single sign-on.** It is off on Cloud for now,
+  so the sign-in page offers GitHub and Google, and Settings, Identity has no Single sign-on section.
+  A deployment that sets `SLOTLOCK_TEAM_SSO=on` still has both.
 
 ## 0.10.1 - 2026-11-12
 
