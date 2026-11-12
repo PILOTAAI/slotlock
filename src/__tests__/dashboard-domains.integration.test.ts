@@ -209,9 +209,20 @@ describe.skipIf(!url)('verified domains in the dashboard (real Postgres)', () =>
     expect(pending).toContain(`_slotlock-challenge.${domain}`);
     const value = /(slotlock-verification=[a-z2-7]{26})/.exec(pending)?.[1] as string;
     expect(value).toBeDefined();
+    // Not there: the page names where it looked, and says the name is the label alone at most DNS hosts.
     const notYet = await ada.post('/dashboard/settings/identity', '/identity/domains/verify', {});
     expect(notYet.status).toBe(409);
-    expect(await notYet.text()).toContain('The record isn’t there yet.');
+    expect(await notYet.text()).toContain(
+      `No TXT record at _slotlock-challenge.${domain} yet. At most DNS hosts its name is _slotlock-challenge alone.`,
+    );
+    // Another value there (an old token, a value cut short): the page says what it found.
+    records.set(slotlockDomainRecord(domain, 'x').name, ['slotlock-verification=old', 'other <b>text</b>']);
+    await admin`UPDATE slotlock.workspace_domains SET last_checked_at = now() - interval '2 minutes' WHERE domain_ascii = ${domain}`;
+    const other = await ada.post('/dashboard/settings/identity', '/identity/domains/verify', {});
+    expect(other.status).toBe(409);
+    expect(await other.text()).toContain(
+      `_slotlock-challenge.${domain} has “slotlock-verification=old”, “other &lt;b&gt;text&lt;/b&gt;”, not the value below.`,
+    );
     // Published, and a minute later: verified.
     records.set(slotlockDomainRecord(domain, 'x').name, [value]);
     await admin`UPDATE slotlock.workspace_domains SET last_checked_at = now() - interval '2 minutes' WHERE domain_ascii = ${domain}`;

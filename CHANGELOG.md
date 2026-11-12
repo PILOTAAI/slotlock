@@ -3,6 +3,18 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- **Verify now says what it found when a domain's record isn't right.** Instead of only "The
+  record isn't there yet", the page names where it looked and what is there: "No TXT record at
+  _slotlock-challenge.example.com yet", with a note that most DNS hosts want the name
+  `_slotlock-challenge` alone (typing it in full often makes
+  `_slotlock-challenge.example.com.example.com`), or the values found at that name when none is
+  the one to publish, such as an old token or a value cut short. They are public DNS data, at
+  most five of 120 characters.
+
 ## 0.10.1 - 2026-11-12
 
 ### Added

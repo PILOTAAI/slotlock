@@ -32,7 +32,7 @@ import {
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
 import type { SlotlockDashboardWorkspaces, SlotlockTeamRefusal, SlotlockTeamWorkspace } from './workspaces.js';
-import { type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
+import { SLOTLOCK_DOMAIN_RECORD_LABEL, type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
 import {
   SLOTLOCK_GOOGLE_ISSUERS,
   type SlotlockSecretBox,
@@ -7450,6 +7450,17 @@ ${
     const found: SlotlockDomainCheckOutcome = await domainStore.verifyNow(tenantRef, personOf(session), form.get('id') ?? '', domainResolvers);
     const event = slotlockDomainCheckEvent(found, false);
     if (event) await audit(session, event, tenantRef);
+    if (found.outcome === 'absent' && found.domain !== null && found.check?.detail[0]) {
+      // What the resolver that decides found at the name, so a record at the wrong name or with
+      // another value shows itself: the values are public DNS data, at most 5 of 120 characters.
+      const at = `${SLOTLOCK_DOMAIN_RECORD_LABEL}.${found.domain}`;
+      const values = found.check.detail[0].values;
+      const said =
+        values.length === 0
+          ? `No TXT record at ${at} yet. At most DNS hosts its name is ${SLOTLOCK_DOMAIN_RECORD_LABEL} alone.`
+          : `${at} has ${values.map((value) => `“${value}”`).join(', ')}, not the value below.`;
+      return identityPage(session, 409, `${said} Slotlock also checks every hour for three days.`);
+    }
     const answer = VERIFY_ANSWERS[found.outcome];
     if (answer) return identityPage(session, answer.status, answer.text(found.domain ?? 'The domain'));
     if (found.outcome in DOMAIN_REFUSALS) return domainRefused(session, found.outcome as SlotlockDomainChangeRefusal);
