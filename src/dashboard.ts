@@ -39,7 +39,7 @@ import type {
   SlotlockTeamRefusal,
   SlotlockTeamWorkspace,
 } from './workspaces.js';
-import { type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
+import { SLOTLOCK_DOMAIN_RECORD_LABEL, type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
 import {
   SLOTLOCK_GOOGLE_ISSUERS,
   type SlotlockSecretBox,
@@ -3574,9 +3574,7 @@ ${
           : html``
       }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}${await sessionsList(session)}`;
     }
-    // People and the audit log are lists that need the width; the other sections are forms.
-    const wide = shown === 'members' || shown === 'audit';
-    const content = html`${pageHead('Settings')}<div class="settings${wide ? ' has-lists' : ''}">${nav}<div class="settings-body">${body}</div></div>`;
+    const content = html`${pageHead('Settings')}<div class="settings">${nav}<div class="settings-body">${body}</div></div>`;
     return respond(status, layout('Settings', content, session, 'settings'));
   }
 
@@ -7102,15 +7100,15 @@ ${
           made.status === 'ready' ? html`<a class="button" href="${root}/settings/privacy/download?id=${made.id}">Download</a> ` : html``
         }<form method="post" action="${root}/settings/privacy/export/delete">${hidden}<input type="hidden" name="id" value="${made.id}"><button type="submit">Delete</button></form></td></tr>`,
     );
-    const exportCard = html`<h2>Everything</h2><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted; one Slotlock makes for your privacy request, for a week.</p><form method="post" action="${root}/settings/privacy/export">${hidden}<button type="submit" class="primary">Export the workspace</button></form>${
+    const exportCard = html`<section class="set-card"><header class="panel-head"><h3>Workspace export</h3><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted; one Slotlock makes for your privacy request, for a week.</p></header>${
       rows.length > 0
         ? html`<div class="table"><table><thead><tr><th>Asked for</th><th>State</th><th>Rows</th><th>Deleted</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
         : html``
-    }`;
+    }<form method="post" action="${root}/settings/privacy/export">${hidden}<div class="card-foot"><button type="submit" class="primary">Export the workspace</button></div></form></section>`;
     const kinds = Object.entries(PERSON_KINDS).map(
       ([kind, label]) => html`<option value="${kind}"${found?.kind === kind ? html` selected` : html``}>${label}</option>`,
     );
-    const finder = html`<h2>One person</h2><p>For a person who asks what you keep about them, or to be erased. Find them by one thing you know.</p><form class="person-find" method="post" action="${root}/settings/privacy/person">${hidden}<label for="person-kind">By</label><select id="person-kind" name="kind">${kinds}</select><label for="person-value" class="visually-hidden">Value</label><input id="person-value" name="value" maxlength="320" required value="${found?.value ?? ''}"><button type="submit">Find</button></form>`;
+    const finder = html`<section class="set-card"><header class="panel-head"><h3>A person’s data</h3><p>For a person who asks what you keep about them, or to be erased. Find them by one thing you know.</p></header><form class="person-find" method="post" action="${root}/settings/privacy/person">${hidden}<div class="row"><label class="row-label" for="person-value">Find by</label><div class="row-value"><span class="field-with-button"><label class="visually-hidden" for="person-kind">What you know</label><select id="person-kind" name="kind">${kinds}</select><input id="person-value" name="value" maxlength="320" autocomplete="off" required value="${found?.value ?? ''}"><button type="submit">Find</button></span></div></div></form></section>`;
     let person = html``;
     if (found) {
       const counted = Object.entries(found.records).filter(([, rows_]) => rows_.length > 0);
@@ -7118,10 +7116,10 @@ ${
       person =
         counted.length === 0
           ? html`<p class="empty">Nothing kept names them.</p>`
-          : html`<div class="set-card">${counted.map(
+          : html`<section class="set-card"><header class="panel-head"><h3>What is kept about them</h3></header>${counted.map(
               ([table, rows_]) =>
                 html`<div class="row"><span class="row-label">${table.replaceAll('_', ' ')}</span><div class="row-value">${String(rows_.length)}${found.truncated && rows_.length >= 1_000 ? '+' : ''}</div></div>`,
-            )}</div><div class="actions"><form method="post" action="${root}/settings/privacy/person/export">${hidden}${keep}<button type="submit">Download what is kept</button></form></div><form method="post" action="${root}/settings/privacy/person/erase" class="danger-zone">${hidden}${keep}<p>Erasing deletes their contacts, attendee and waitlist entries, takes their email out of events and approvals, and replaces their references with a name that is no one's, everywhere, history included. Their bookings stay, as time taken. This cannot be undone.</p><label class="choice"><input type="checkbox" name="confirm" value="yes" required> I understand</label><button type="submit" class="danger">Erase this person</button></form>`;
+            )}<form method="post" action="${root}/settings/privacy/person/export">${hidden}${keep}<div class="card-foot"><button type="submit">Download what is kept</button></div></form></section><section class="set-card danger"><header class="panel-head"><h3>Erasure</h3><p>Erasing deletes their contacts, attendee and waitlist entries, takes their email out of events and approvals, and replaces their references with a name that is no one's, everywhere, history included. Their bookings stay, as time taken. This cannot be undone.</p></header><form method="post" action="${root}/settings/privacy/person/erase" class="danger-zone">${hidden}${keep}<div class="card-foot"><label class="choice"><input type="checkbox" name="confirm" value="yes" required> I understand</label><button type="submit" class="danger">Erase this person</button></div></form></section>`;
     }
     return html`${noticeOf(notice, status)}${exportCard}${finder}${person}`;
   }
@@ -7409,8 +7407,8 @@ ${
     const live = keys.filter((key) => key.revokedAt === null && (key.expiresAt === null || key.expiresAt.getTime() > now())).length;
     const card = html`<div class="set-card"><div class="row"><span class="row-label">Name</span><div class="row-value">${info.name}</div></div><div class="row"><span class="row-label">Handle</span><div class="row-value">@${info.handle}</div></div></div>`;
     const danger = deleting
-      ? html`<h2>Being deleted</h2><p>${info.name} and everything in it go on ${formatDate(deleting)}.</p><form method="post" action="${root}/teams/restore">${hidden}<button class="primary" type="submit">Keep ${info.name}</button></form>`
-      : html`<h2>Delete team</h2><p>Its keys stop at once, and seven days later it goes with everything in it: ${String(members.length)} member${members.length === 1 ? '' : 's'}, ${String(resources)} resource${resources === 1 ? '' : 's'} with their bookings and history, ${String(live)} key${live === 1 ? '' : 's'} and ${String(webhooks.length)} webhook${webhooks.length === 1 ? '' : 's'}. Until then any owner can keep it.</p><form class="create-team" method="post" action="${root}/teams/delete">${hidden}<label for="confirm-handle">Type ${info.handle} to confirm</label><input id="confirm-handle" name="confirm" autocomplete="off" required><button class="danger" type="submit">Delete ${info.name}</button></form>`;
+      ? html`<section class="set-card danger"><header class="panel-head"><h3>Being deleted</h3><p>${info.name} and everything in it go on ${formatDate(deleting)}.</p></header><form method="post" action="${root}/teams/restore">${hidden}<div class="card-foot"><button class="primary" type="submit">Keep ${info.name}</button></div></form></section>`
+      : html`<section class="set-card danger"><header class="panel-head"><h3>Delete team</h3><p>Its keys stop at once, and seven days later it goes with everything in it: ${String(members.length)} member${members.length === 1 ? '' : 's'}, ${String(resources)} resource${resources === 1 ? '' : 's'} with their bookings and history, ${String(live)} key${live === 1 ? '' : 's'} and ${String(webhooks.length)} webhook${webhooks.length === 1 ? '' : 's'}. Until then any owner can keep it.</p></header><form method="post" action="${root}/teams/delete">${hidden}<div class="row"><label class="row-label" for="confirm-handle">Type ${info.handle} to confirm</label><div class="row-value"><input id="confirm-handle" name="confirm" autocomplete="off" spellcheck="false" required></div></div><div class="card-foot"><button class="danger" type="submit">Delete ${info.name}</button></div></form></section>`;
     return html`${noticeOf(notice, status)}${card}${danger}`;
   }
 
@@ -7518,7 +7516,7 @@ ${
     const add =
       listed.length >= SLOTLOCK_WORKSPACE_DOMAIN_LIMIT
         ? html``
-        : html`<form class="invite" method="post" action="${root}/identity/domains">${hidden()}<label for="domain">Domain</label><input id="domain" name="domain" maxlength="253" autocomplete="off" spellcheck="false" placeholder="acme.com" required><button class="primary" type="submit">Add domain</button></form>`;
+        : html`<form class="set-card" method="post" action="${root}/identity/domains">${hidden()}<div class="row"><label class="row-label" for="domain">Add a domain<span class="row-hint">Colleagues at a verified domain can find the team and ask to join.</span></label><div class="row-value"><span class="field-with-button"><input id="domain" name="domain" maxlength="253" autocomplete="off" spellcheck="false" placeholder="acme.com" required><button class="primary" type="submit">Add domain</button></span></div></div></form>`;
     const verified = listed.some((domain) => domain.status === 'verified');
     const invites = html`<h2>Invitations</h2><div class="set-card"><div class="row"><span class="row-label">Go to</span><div class="row-value">${
       restricted ? 'Addresses at verified domains' : 'Any address'
@@ -7558,6 +7556,17 @@ ${
     const found: SlotlockDomainCheckOutcome = await domainStore.verifyNow(tenantRef, personOf(session), form.get('id') ?? '', domainResolvers);
     const event = slotlockDomainCheckEvent(found, false);
     if (event) await audit(session, event, tenantRef);
+    if (found.outcome === 'absent' && found.domain !== null && found.check?.detail[0]) {
+      // What the resolver that decides found at the name, so a record at the wrong name or with
+      // another value shows itself: the values are public DNS data, at most 5 of 120 characters.
+      const at = `${SLOTLOCK_DOMAIN_RECORD_LABEL}.${found.domain}`;
+      const values = found.check.detail[0].values;
+      const said =
+        values.length === 0
+          ? `No TXT record at ${at} yet. At most DNS hosts its name is ${SLOTLOCK_DOMAIN_RECORD_LABEL} alone.`
+          : `${at} has ${values.map((value) => `“${value}”`).join(', ')}, not the value below.`;
+      return identityPage(session, 409, `${said} Slotlock also checks every hour for three days.`);
+    }
     const answer = VERIFY_ANSWERS[found.outcome];
     if (answer) return identityPage(session, answer.status, answer.text(found.domain ?? 'The domain'));
     if (found.outcome in DOMAIN_REFUSALS) return domainRefused(session, found.outcome as SlotlockDomainChangeRefusal);
@@ -8024,7 +8033,7 @@ ${
     const hidden = () =>
       html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
     if (!state.enabled) {
-      return html`<h2>Provisioning</h2><form class="sso-form" method="post" action="${root}/identity/scim/enable">${hidden()}<fieldset><legend>When the directory deactivates someone, their API keys</legend><label><input type="radio" name="keys" value="revoke" required> Are revoked</label><label><input type="radio" name="keys" value="keep" required> Keep working</label></fieldset><button class="primary" type="submit">Turn on SCIM</button></form>`;
+      return html`<h2>Provisioning</h2><form class="set-card" method="post" action="${root}/identity/scim/enable">${hidden()}<fieldset class="row"><legend class="visually-hidden">When the directory deactivates someone, their API keys</legend><span class="row-label" aria-hidden="true">When the directory deactivates someone, their API keys</span><div class="row-value choices-inline"><label class="choice"><input type="radio" name="keys" value="revoke" required> Are revoked</label><label class="choice"><input type="radio" name="keys" value="keep" required> Keep working</label></div></fieldset><div class="card-foot"><button class="primary" type="submit">Turn on SCIM</button></div></form>`;
     }
     const shown = scimTokenShown.get(session);
     const tokens = state.tokens.map(
@@ -10064,6 +10073,8 @@ const DASHBOARD_CSS = `:root {
   /* The logo's inks (the Slotlock design system): ink lock and lime slot here, lime lock in the dark. */
   --logo-lock: #0a0b0d; --logo-slot: #d9ff43;
   --pop-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 12px 32px -8px rgba(24, 24, 27, 0.18);
+  --field: #ffffff; --field-line: #d4d4d8; --field-line-hover: #a1a1aa; --field-shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
+  --card-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -10077,6 +10088,8 @@ const DASHBOARD_CSS = `:root {
     --good: #4fca8f; --good-wash: #0f2419; --bad: #ff7a6b; --bad-ink: #1a0806; --bad-wash: #2c1512; --bad-line: #5a2a24;
     --warn: #f4c25a; --warn-wash: #2a2210; --warn-line: #4d3d17;
     --pop-shadow: 0 0 0 1px #26262c, 0 16px 40px -8px rgba(0, 0, 0, 0.7);
+    --field: #18181d; --field-line: #2f2f36; --field-line-hover: #4a4a53; --field-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    --card-shadow: none;
     color-scheme: dark;
   }
 }
@@ -10242,15 +10255,18 @@ details.command[open] > summary { margin-bottom: var(--space-2); }
 .page > .facts { padding: var(--space-4) var(--space-6); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
 
 /* Forms */
-label { display: grid; gap: 6px; font-size: var(--text-sm); font-weight: 500; color: var(--ink-2); min-width: 0; }
-input, select, textarea { font: inherit; font-size: 14px; color: var(--ink); background-color: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); min-width: 0; transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
+label { display: grid; gap: 6px; font-size: 13px; font-weight: 500; color: var(--ink); min-width: 0; }
+/* Fields: their own colour against any card, a hairline that darkens on hover, the accent and a ring
+   on focus, and a stroked chevron on selects (drawn with gradients: the page loads no images). */
+input, select, textarea { font: inherit; font-size: 14px; color: var(--ink); background-color: var(--field); border: 1px solid var(--field-line); border-radius: var(--radius); min-width: 0; box-shadow: var(--field-shadow); transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
 input, select { height: 36px; padding: 0 var(--space-3); }
-input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 0.8; }
-input:hover, select:hover, textarea:hover { border-color: var(--ink-3); }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--ring); }
-input[readonly] { background-color: var(--surface-2); }
-select { -webkit-appearance: none; appearance: none; padding-right: 32px; cursor: pointer; background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%); background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
-input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--ink); flex: none; }
+input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 0.75; font-family: var(--font); }
+input:hover, select:hover, textarea:hover { border-color: var(--field-line-hover); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; box-shadow: var(--field-shadow), 0 0 0 3px var(--ring); }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+input[readonly] { background-color: var(--sunken); box-shadow: none; }
+select { -webkit-appearance: none; appearance: none; padding-right: 34px; cursor: pointer; text-overflow: ellipsis; background-image: linear-gradient(45deg, transparent 40%, var(--ink-3) 40%, var(--ink-3) 60%, transparent 60%), linear-gradient(-45deg, transparent 40%, var(--ink-3) 40%, var(--ink-3) 60%, transparent 60%); background-position: right 17px center, right 12px center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--ink); flex: none; box-shadow: none; }
 input[type="time"] { font-variant-numeric: tabular-nums; }
 textarea { padding: 10px var(--space-3); resize: vertical; min-height: 72px; line-height: 1.5; }
 .create { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin: 0; }
