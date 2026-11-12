@@ -195,8 +195,9 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     tenants.push(team);
     const members = await (await ada.get('/dashboard/settings/members')).text();
     expect(members).toContain('<h3 class="list-head">People<span class="count">1</span></h3>');
-    // People are a list with the page's width, not a table in a form's column that scrolls sideways.
-    expect(members).toContain('<div class="settings has-lists">');
+    // People are a list with the page's width, as every Settings section is, not a table in a form's
+    // column that scrolls sideways.
+    expect(members).toContain('<div class="settings">');
     expect(members).not.toContain('<table');
     expect(members).toContain('@ada');
 
@@ -663,6 +664,9 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const page = await (await hal.get('/dashboard/settings/team')).text();
     expect(page).toContain('1 member, 0 resources');
     expect(page).toContain('Type short-lived to confirm');
+    // A danger card: what goes, the handle typed in a row, and the action in its red foot.
+    expect(page).toContain('<section class="set-card danger"><header class="panel-head"><h3>Delete team</h3>');
+    expect(page).toContain('<label class="row-label" for="confirm-handle">Type short-lived to confirm</label>');
     const wrong = await hal.post('/dashboard/settings/team', '/teams/delete', { confirm: 'short' });
     expect(wrong.status).toBe(400);
     expect(await wrong.text()).toContain('Type the team&#39;s handle to confirm.');
