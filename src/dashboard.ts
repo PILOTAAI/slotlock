@@ -7624,11 +7624,35 @@ ${
       (['okta', 'entra', 'google_workspace', 'oidc'] as const).map(
         (kind) => html`<option value="${kind}"${kind === selected ? html` selected` : html``}>${SSO_KIND_WORDS[kind]}</option>`,
       );
-    const form = html`<form class="sso-form" method="post" action="${root}/identity/sso">${hidden()}<label for="sso-kind">Provider</label><select id="sso-kind" name="kind">${kinds(connection?.kind ?? 'okta')}</select><label for="sso-issuer">Issuer URL, or Entra tenant ID</label><input id="sso-issuer" name="issuer" maxlength="500" autocomplete="off" spellcheck="false" required value="${
-      connection ? (connection.kind === 'entra' ? (connection.entraTenant ?? '') : connection.issuer) : ''
-    }"><label for="sso-client">Client ID</label><input id="sso-client" name="client_id" maxlength="255" autocomplete="off" spellcheck="false" required value="${connection?.clientId ?? ''}"><label for="sso-secret">Client secret</label><input id="sso-secret" name="client_secret" type="password" maxlength="1024" autocomplete="off"${
-      connection ? html` placeholder="••••${connection.secretLast4 ?? ''}"` : html` required`
-    }><button class="primary" type="submit">${connection ? 'Save' : 'Connect'}</button></form>`;
+    // Label-left rows in a card, as the domains above. The issuer row names what the chosen provider
+    // takes (a tenant ID for Entra) and is hidden for Google Workspace, whose issuer is fixed, so the
+    // field is not `required`: the server checks it for the providers that use it.
+    const row = (id: string, label: Html, field: Html, kind = '') =>
+      html`<div class="row${kind}"><label class="row-label" for="${id}">${label}</label><div class="row-value">${field}</div></div>`;
+    const form = html`<form class="set-card sso-form" method="post" action="${root}/identity/sso">${hidden()}${row(
+      'sso-kind',
+      html`Provider`,
+      html`<select id="sso-kind" name="kind">${kinds(connection?.kind ?? 'okta')}</select>`,
+    )}${row(
+      'sso-issuer',
+      html`<span class="for-issuer">Issuer URL</span><span class="for-entra">Tenant ID</span>`,
+      html`<input id="sso-issuer" name="issuer" maxlength="500" autocomplete="off" spellcheck="false" value="${
+        connection ? (connection.kind === 'entra' ? (connection.entraTenant ?? '') : connection.issuer) : ''
+      }">`,
+      ' sso-issuer',
+    )}${row(
+      'sso-client',
+      html`Client ID`,
+      html`<input id="sso-client" name="client_id" maxlength="255" autocomplete="off" spellcheck="false" required value="${connection?.clientId ?? ''}">`,
+    )}${row(
+      'sso-secret',
+      html`Client secret`,
+      html`<input id="sso-secret" name="client_secret" type="password" maxlength="1024" autocomplete="off"${
+        connection ? html` placeholder="••••${connection.secretLast4 ?? ''}"` : html` required`
+      }>`,
+    )}<div class="card-foot">${
+      connection ? html`` : html`<p class="fine">The redirect URI to give the provider appears once connected.</p>`
+    }<button class="primary" type="submit">${connection ? 'Save' : 'Connect'}</button></div></form>`;
     if (!connection) return html`<h2>Single sign-on</h2>${form}`;
     const tested = connection.testedVersion === connection.configVersion;
     const [pill, word] =
@@ -7638,30 +7662,51 @@ ${
     const testRow = claims
       ? html`<div class="row"><span class="row-label">Last test</span><div class="row-value"><code>${JSON.stringify(claims)}</code></div></div>`
       : html``;
-    const status = html`<div class="set-card"><div class="row"><span class="row-label">${SSO_KIND_WORDS[connection.kind]}</span><div class="row-value"><span class="pill ${pill}">${word}</span> <span class="muted">${connection.issuer}</span></div></div><div class="row"><span class="row-label">Redirect URI</span><div class="row-value">${copyField('sso-redirect', ssoRedirectUri(connection.id))}</div></div>${testRow}<div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/sso/test">${hidden()}${id}<button type="submit">Test sign-in</button></form>${
+    const remove = html`<details class="act danger"><summary>Delete<span class="visually-hidden"> connection</span></summary><div class="pop"><p>People who sign in only through it are erased with it.</p><form method="post" action="${root}/identity/sso/delete">${hidden()}${id}<button class="danger" type="submit">Delete connection</button></form></div></details>`;
+    const status = html`<div class="set-card"><div class="row"><span class="row-label">${SSO_KIND_WORDS[connection.kind]}</span><div class="row-value"><span class="pill ${pill}">${word}</span> <span class="muted">${connection.issuer}</span> ${remove}</div></div><div class="row"><span class="row-label">Redirect URI</span><div class="row-value">${copyField('sso-redirect', ssoRedirectUri(connection.id))}</div></div>${testRow}<div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/sso/test">${hidden()}${id}<button type="submit">Test sign-in</button></form>${
       connection.status === 'active'
         ? html`<form class="inline" method="post" action="${root}/identity/sso/status">${hidden()}${id}<input type="hidden" name="status" value="disabled"><button type="submit">Turn off</button></form>`
         : html`<form class="inline" method="post" action="${root}/identity/sso/status">${hidden()}${id}<input type="hidden" name="status" value="active"><button class="primary" type="submit"${tested ? html`` : html` disabled`}>Turn on</button></form>`
     }</div></div></div>`;
     const roleOptions = (selected: string, choices: readonly SlotlockWorkspaceRole[]) =>
       choices.map((role) => html`<option value="${role}"${role === selected ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`);
-    const provisioning = html`<h3>Who joins</h3><form class="sso-form" method="post" action="${root}/identity/sso/provisioning">${hidden()}<label><input type="checkbox" name="jit" value="1"${connection.jitEnabled ? html` checked` : html``}> Add people at the verified domains on their first sign-in</label><label for="sso-default-role">As</label><select id="sso-default-role" name="default_role">${roleOptions(connection.defaultRole, ['viewer', 'member', 'developer'])}</select><label for="sso-groups-claim">Groups claim</label><input id="sso-groups-claim" name="groups_claim" maxlength="100" value="${connection.groupsClaim}"><button type="submit">Save</button></form>${
+    const provisioning = html`<h3>Who joins</h3><form class="set-card sso-form" method="post" action="${root}/identity/sso/provisioning">${hidden()}<div class="row"><span class="row-label">First sign-in</span><div class="row-value"><label class="choice"><input type="checkbox" name="jit" value="1"${
+      connection.jitEnabled ? html` checked` : html``
+    }> Add people at the verified domains</label></div></div>${row(
+      'sso-default-role',
+      html`Joins as`,
+      html`<select id="sso-default-role" name="default_role">${roleOptions(connection.defaultRole, ['viewer', 'member', 'developer'])}</select>`,
+    )}${row(
+      'sso-groups-claim',
+      html`Groups claim`,
+      html`<input id="sso-groups-claim" name="groups_claim" maxlength="100" value="${connection.groupsClaim}">`,
+    )}<div class="card-foot"><button type="submit">Save</button></div></form>${
       mappings.length > 0
         ? html`<div class="table"><table><thead><tr><th>Group</th><th>Role</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${mappings.map(
             (mapping) =>
               html`<tr><td data-label="Group" class="strong">${mapping.value}</td><td data-label="Role">${SLOTLOCK_WORKSPACE_ROLE_NAMES[mapping.role]}</td><td class="actions"><form class="inline" method="post" action="${root}/identity/sso/mapping">${hidden()}<input type="hidden" name="value" value="${mapping.value}"><input type="hidden" name="role" value=""><button class="danger" type="submit">Remove<span class="visually-hidden"> ${mapping.value}</span></button></form></td></tr>`,
           )}</tbody></table></div>`
         : html``
-    }<form class="invite" method="post" action="${root}/identity/sso/mapping">${hidden()}<label for="sso-group">Group</label><input id="sso-group" name="value" maxlength="255" autocomplete="off" required><label class="visually-hidden" for="sso-group-role">Role</label><select id="sso-group-role" name="role">${roleOptions('member', ['admin', 'developer', 'member', 'viewer', 'billing'])}</select><button type="submit">Map group</button></form>`;
-    const enforcement = html`<h3>Require single sign-on</h3><form class="sso-form" method="post" action="${root}/identity/sso/require">${hidden()}<input type="hidden" name="on" value="${connection.requireSso ? '0' : '1'}"><label for="sso-max-age">Sign in again every (hours)</label><input id="sso-max-age" name="max_age" type="number" min="1" max="168" value="${String(connection.maxAgeHours)}"><button type="submit"${connection.status === 'active' || connection.requireSso ? html`` : html` disabled`}>${
+    }<form class="set-card" method="post" action="${root}/identity/sso/mapping">${hidden()}${row(
+      'sso-group',
+      html`Group`,
+      html`<span class="field-with-button"><input id="sso-group" name="value" maxlength="255" autocomplete="off" required><label class="visually-hidden" for="sso-group-role">Role</label><select id="sso-group-role" name="role">${roleOptions(
+        'member',
+        ['admin', 'developer', 'member', 'viewer', 'billing'],
+      )}</select><button type="submit">Map group</button></span>`,
+    )}</form>`;
+    const enforcement = html`<h3>Require single sign-on</h3><form class="set-card sso-form" method="post" action="${root}/identity/sso/require">${hidden()}<input type="hidden" name="on" value="${connection.requireSso ? '0' : '1'}">${row(
+      'sso-max-age',
+      html`Sign in again every`,
+      html`<span class="unit-input"><input id="sso-max-age" name="max_age" type="number" min="1" max="168" value="${String(connection.maxAgeHours)}"><span>hours</span></span>`,
+    )}<div class="card-foot"><button type="submit"${connection.status === 'active' || connection.requireSso ? html`` : html` disabled`}>${
       connection.requireSso ? 'Stop requiring it' : 'Require it'
-    }</button></form>${
+    }</button></div></form>${
       connection.status === 'active' && !connection.requireSso && session.sc === undefined
         ? html`<form class="inline" method="post" action="${root}/sso/proof">${hidden()}<input type="hidden" name="team" value="${tenantRef}"><button type="submit">Sign in with single sign-on</button></form>`
         : html``
     }`;
-    const remove = html`<details class="act danger"><summary>Delete connection</summary><div class="pop"><p>People who sign in only through it are erased with it.</p><form method="post" action="${root}/identity/sso/delete">${hidden()}${id}<button class="danger" type="submit">Delete connection</button></form></div></details>`;
-    return html`<h2>Single sign-on</h2>${status}${form}${provisioning}${enforcement}${remove}`;
+    return html`<h2>Single sign-on</h2>${status}${form}${provisioning}${enforcement}`;
   }
 
   async function saveSsoConnection(session: Session, form: URLSearchParams): Promise<Response> {

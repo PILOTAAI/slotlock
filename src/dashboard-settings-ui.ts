@@ -90,6 +90,7 @@ export const SLOTLOCK_SETTINGS_CSS = `
 .field-with-button { display: flex; gap: var(--space-2); align-items: center; }
 .field-with-button input { flex: 1; min-width: 0; }
 .field-with-button button { flex: none; }
+.row .field-with-button select { flex: none; width: auto; }
 .key-set { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
 .key-set code { background: none; padding: 0; color: var(--ink-2); letter-spacing: 0.04em; }
 .key-set details { display: contents; }
@@ -97,6 +98,17 @@ export const SLOTLOCK_SETTINGS_CSS = `
 .key-set details > summary::-webkit-details-marker { display: none; }
 .key-set details[open] > summary { display: none; }
 .key-set details[open] input { flex-basis: 100%; }
+/* Single sign-on (Identity): the issuer row names what the chosen provider takes, and Google
+   Workspace, whose issuer is fixed, has none. */
+.sso-form .for-entra { display: none; }
+.sso-form:has(#sso-kind option[value="entra"]:checked) .for-entra { display: inline; }
+.sso-form:has(#sso-kind option[value="entra"]:checked) .for-issuer { display: none; }
+.sso-form:has(#sso-kind option[value="google_workspace"]:checked) .sso-issuer { display: none; }
+.sso-form .card-foot > button { margin-left: auto; }
+.row .choice { margin: 0; }
+.row .unit-input { max-width: 180px; }
+.row-value > form.inline:has(select) { display: flex; gap: var(--space-2); align-items: center; }
+.row-value > form.inline:has(select) button { flex: none; }
 .danger-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 14px 20px; }
 .danger-row strong { font-size: 14px; font-weight: 500; color: var(--ink); }
 .danger-row details.act > summary { color: var(--bad); }
@@ -111,6 +123,8 @@ export const SLOTLOCK_SETTINGS_CSS = `
   .person { grid-template-columns: 32px minmax(0, 1fr); }
   .person .role, .person-actions, .person-actions.spans { grid-column: 2; justify-content: flex-start; flex-wrap: wrap; }
   .invite-row { flex-wrap: wrap; }
+  .row .field-with-button:has(select) { flex-wrap: wrap; }
+  .row .field-with-button:has(select) input { flex-basis: 100%; }
   .invite-row input { flex-basis: 100%; }
   .plan-note { flex-direction: column; align-items: flex-start; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }

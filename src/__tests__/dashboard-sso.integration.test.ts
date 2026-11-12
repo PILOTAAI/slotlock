@@ -180,6 +180,17 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
       INSERT INTO slotlock.workspace_domains (tenant_ref, domain_ascii, domain_unicode, status, token, verified_at)
       VALUES (${team}, ${domain}, ${domain}, 'verified', ${'b'.repeat(26)}, now())`;
 
+    // The form: one issuer field, named for what the chosen provider takes and hidden for Google
+    // Workspace (its issuer is fixed), so never `required`: the server checks it per provider.
+    const empty = await (await ada.get('/dashboard/settings/identity')).text();
+    const issuerField = /<input id="sso-issuer"[^>]*>/.exec(empty)?.[0] ?? '';
+    expect(issuerField).toContain('name="issuer"');
+    expect(issuerField).not.toContain('required');
+    expect(empty).toContain('<span class="for-issuer">Issuer URL</span><span class="for-entra">Tenant ID</span>');
+    const blank = await ada.post('/dashboard/settings/identity', '/identity/sso', { kind: 'okta', issuer: '', client_id: '0oa-acme-client', client_secret: 'acme-secret-value-1234' });
+    expect(blank.status).toBe(400);
+    expect(await blank.text()).toContain('Enter the issuer URL');
+
     // Connect: discovered, the secret sealed, the redirect URI shown.
     const saved = await ada.post('/dashboard/settings/identity', '/identity/sso', { kind: 'okta', issuer: ISSUER, client_id: '0oa-acme-client', client_secret: 'acme-secret-value-1234' });
     expect(saved.status).toBe(303);

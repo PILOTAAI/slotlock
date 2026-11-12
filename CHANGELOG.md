@@ -46,6 +46,19 @@ versioning.
   Its plans table gives a team workspace's people (up to 3 on Free, no limit on Team), and Team is
   described as a team workspace's plan. The Terms (updated 12 November 2026) and the privacy notice
   name Google sign-in as offered.
+- **Single sign-on's settings are cards like the domains above them**: a label beside each full-width
+  field, the button in the card's foot. The issuer field is named for the chosen provider ("Tenant
+  ID" for Microsoft Entra ID) and hidden for Google Workspace, whose issuer is fixed, so it is no
+  longer required there. "Who joins", group mappings and "Require single sign-on" follow, and Delete
+  sits beside the connection, as Remove does beside a domain.
+
+### Fixed
+
+- **Verify now on Slotlock Cloud said "DNS didn't answer" for every domain.** The DNS-over-HTTPS
+  lookup asked fetch to refuse redirects with `redirect: 'error'`, which a Cloudflare Worker's fetch
+  rejects outright, so neither resolver was ever asked. It now uses `redirect: 'manual'` and counts
+  a redirect as no answer, which every runtime accepts. The checks `slotlock serve` runs on Node
+  were not affected.
 
 ## 0.10.0 - 2026-11-11
 
