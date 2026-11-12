@@ -397,8 +397,12 @@ export function slotlockMaintenanceError(error: unknown): SlotlockMaintenanceErr
   const name = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : 'Error';
   const raw = (error as { code?: unknown }).code;
   const code = typeof raw === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(raw) ? raw : null;
-  const line = (error.message.split(/\r?\n/, 1)[0] ?? '')
-    .replace(/"[^"]*"|'[^']*'|`[^`]*`|“[^”]*”|‘[^’]*’/g, '…')
+  // The first line, cut before any pattern runs; each quoted run excludes its own opening mark, so
+  // the scan stays linear however many quotes a message holds.
+  const end = error.message.search(/[\r\n]/);
+  const line = (end === -1 ? error.message : error.message.slice(0, end))
+    .slice(0, 2000)
+    .replace(/"[^"]*"|'[^']*'|`[^`]*`|“[^“”]*”|‘[^‘’]*’/g, '…')
     .replace(/[\p{Cc}\p{Cf}]/gu, '')
     .trim();
   const characters = [...line];

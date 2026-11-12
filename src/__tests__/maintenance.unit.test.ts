@@ -727,6 +727,12 @@ describe('what maintenance tells the admin console (RFC 0006, M11)', () => {
     expect(slotlockMaintenanceError(Object.assign(new Error(''), { name: 'Not a name!', code: 'has space' })))
       .toEqual({ name: 'Error', code: null, message: null });
     expect(slotlockMaintenanceError('thrown string')).toEqual({ name: 'Error', code: null, message: null });
+    // A message of nothing but opening quotes: cut first, and scanned once, never quadratically.
+    const started = performance.now();
+    for (const mark of ['“', '‘', '"']) {
+      expect([...(slotlockMaintenanceError(new Error(mark.repeat(200_000))).message ?? '')].length).toBeLessThanOrEqual(200);
+    }
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });
 
