@@ -1,8 +1,8 @@
 # Hosted Slotlock
 
 Hosted Slotlock (Slotlock Cloud) is `slotlock serve` run for you by TREFT LTD (Pylota): sign in with
-GitHub, create a key, and point an agent at it. Nothing to install and no database to run. Any GitHub
-account can sign in. Self-hosting stays fully supported: see
+GitHub or Google, create a key, and point an agent at it. Nothing to install and no database to run.
+Any GitHub or Google account can sign in. Self-hosting stays fully supported: see
 [Self-host with Docker](/README.md#self-host-with-docker).
 
 | | |
@@ -13,14 +13,17 @@ account can sign in. Self-hosting stays fully supported: see
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
-| Price | Free, Developer at $10 a month or $100 a year, or, for a GitHub organization, Team at $40 a month or $400 a year: see [Plans](#plans). Best effort, with no service level agreement |
+| Price | Free, Developer at $10 a month or $100 a year, or, for a team workspace, Team at $40 a month or $400 a year: see [Plans](#plans). Best effort, with no service level agreement |
 
 ## Start
 
-1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub account. Slotlock asks
-   GitHub only to read which organizations you belong to (`read:org`), so you can work in the ones
-   turned on, and keeps only your user id and login, and those organizations in your session. By signing in you agree to the
-   [Terms of Service](/TERMS.md) and the [Acceptable Use Policy](/ACCEPTABLE-USE.md).
+1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub or Google account. With
+   GitHub, Slotlock reads your public profile and keeps only your user id and login; it asks for
+   your verified email addresses only when you accept an invitation sent to one. With Google, it
+   reads your account's id and email address, and keeps only those. A team that connects its own
+   identity provider signs its people in with single sign-on (the dashboard's **Single sign-on**
+   link). By signing in you agree to the [Terms of Service](/TERMS.md) and the
+   [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 2. Add your resources and their weekly hours, then create an API key: **Read only** for an agent
    that only looks, **Read and write** for an agent that books, **Full** for an application that
    also manages resources, holds and reservations. A key can have an expiry.
@@ -38,16 +41,20 @@ account can sign in. Self-hosting stays fully supported: see
 
 | | Free | Developer | Team | Custom |
 | --- | --- | --- | --- | --- |
-| Price | Free | $10 a month, or $100 a year | $40 a month, or $400 a year, for the whole organization | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
+| Price | Free | $10 a month, or $100 a year | $40 a month, or $400 a year, for the whole team | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
 | Resources | 10 | 100 | 500 | On your own servers |
 | Active API keys | 10 | 100 | 100 | |
 | Webhook endpoints | 2 | 10 | 25 | |
 | Operations a month | 25,000 | 500,000 | 2,000,000, shared | |
 | Bookings a month | 1,000 | 25,000 | 100,000, shared | |
+| People in a team workspace | Up to 3, open invitations included | | No limit | |
 
-**Team** is for a GitHub organization an owner has turned Slotlock on for (the dashboard's Teams
-page): every owner and member shares its resources, keys and history, and its price does not change
-with how many people use it. Only an owner of the organization buys or manages it.
+**Team** is for a shared workspace: a team workspace you create on the dashboard's **Teams** page,
+or a GitHub organization an owner has turned Slotlock on for (the dashboard's Teams
+page). Everyone in it shares its resources, keys and history, and its price does not change with how
+many people use it. On Free, each person may create one team workspace, with up to 3 people, open
+invitations included; Team lifts that limit. Only the workspace's Owners and Billing managers buy or
+manage it.
 
 Every account starts on Free. Upgrade on the dashboard's **Plan** page: Stripe takes the payment as
 merchant of record, in your currency, with any sales tax or VAT added. **Manage billing** on the same

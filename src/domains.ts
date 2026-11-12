@@ -222,9 +222,13 @@ export function createSlotlockDohResolver(
       try {
         const response = await fetchImpl(url.href, {
           headers: { accept: 'application/dns-json', 'cache-control': 'no-cache' },
-          redirect: 'error',
+          // Never followed, and never `redirect: 'error'`: a Worker's fetch throws on it ("error"
+          // won't be implemented ... use "manual" and check the response status code: workerd,
+          // checked 2026-11-12), so every Verify now on the dashboard Worker failed as unanswered.
+          redirect: 'manual',
           signal: AbortSignal.timeout(timeoutMs),
         });
+        if (response.status >= 300 && response.status < 400) return { status: 'error', reason: `redirect ${response.status}` };
         if (!response.ok) return { status: 'error', reason: `HTTP ${response.status}` };
         const text = await response.text();
         if (text.length > 65_536) return { status: 'error', reason: 'too large' };

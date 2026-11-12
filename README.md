@@ -21,7 +21,7 @@ each for the [booking MCP server](https://slotlock.pylota.io/mcp-server/), the
 [booking API](https://slotlock.pylota.io/booking-api/), [use cases](https://slotlock.pylota.io/use-cases/)
 and [pricing](https://slotlock.pylota.io/pricing/). There are three ways to run Slotlock:
 
-- **[Slotlock Cloud](docs/hosted/README.md)**: nothing to run. Sign in with GitHub at
+- **[Slotlock Cloud](docs/hosted/README.md)**: nothing to run. Sign in with GitHub or Google at
   `https://app.slotlock.pylota.io/dashboard`, create a key, and connect an agent to
   `https://slotlock-api.pylota.io/mcp`. Free while it is a preview, best effort, with no service
   level agreement.

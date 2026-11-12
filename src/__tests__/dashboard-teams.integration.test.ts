@@ -195,7 +195,10 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(team).toMatch(/^team:/);
     tenants.push(team);
     const members = await (await ada.get('/dashboard/settings/members')).text();
-    expect(members).toContain('<h2>Members · 1</h2>');
+    expect(members).toContain('<h3 class="list-head">People<span class="count">1</span></h3>');
+    // People are a list with the page's width, not a table in a form's column that scrolls sideways.
+    expect(members).toContain('<div class="settings has-lists">');
+    expect(members).not.toContain('<table');
     expect(members).toContain('@ada');
 
     const invited = await ada.post('/dashboard/settings/members', '/members/invite', { email: 'Desk@Clinic.example', role: 'member' });
@@ -218,6 +221,13 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(preview).toContain('Join Acme Rentals');
     expect(preview).toContain('d•••@clinic.example');
     expect(preview).not.toContain('desk@clinic.example');
+    // One card, as signing in is: the team, role and who invited, then the ways in at full width
+    // (in a table cell's right-aligned actions they sat off centre, 2026-11-12).
+    expect(preview).toContain('<section class="sign-in invite">');
+    expect(preview).toContain('<dl class="invite-facts"><div><dt>Team</dt><dd>Acme Rentals</dd></div><div><dt>Role</dt><dd>Member</dd></div><div><dt>Invited by</dt><dd>@ada</dd></div>');
+    expect(preview).toContain('<a class="button primary wide" href="/dashboard/sign-in?then=%2Finvite&amp;email=1">');
+    expect(preview).toContain('<a class="button wide" href="/dashboard/sign-in?with=google&amp;then=%2Finvite">');
+    expect(preview).not.toContain('class="actions"');
     expect(await (await scanner.get('/dashboard/invite')).text()).toContain('Join Acme Rentals');
 
     // Google, with the address unverified: not this person's to accept.
@@ -238,10 +248,10 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const workspaces = createSlotlockDashboardWorkspaces(application);
     expect((await workspaces.standing(team, `google:${googleSubject}`, null)).role).toBe('member');
     // The link is spent for everyone, the scanner included.
-    expect(await (await scanner.get('/dashboard/invite')).text()).toContain('This invitation was already used.');
+    expect(await (await scanner.get('/dashboard/invite')).text()).toContain('<h1>This invitation was already used</h1>');
     const roster = await (await ada.get('/dashboard/settings/members')).text();
     expect(roster).toContain('desk@clinic.example');
-    expect(roster).toContain('<h2>Members · 2</h2>');
+    expect(roster).toContain('<h3 class="list-head">People<span class="count">2</span></h3>');
   });
 
   it('lets a GitHub person join by the address GitHub verified, and never by one it did not', async () => {
@@ -386,7 +396,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect((await keys.list({ tenantRef: team })).filter((key) => key.revokedAt === null)).toHaveLength(1);
 
     // The only Owner may not leave; once Cy is an Owner too, she may, and Cy is left the Owner.
-    expect(await (await ada.get('/dashboard/settings/members')).text()).toContain('You’re the only owner. Make someone else an owner before leaving.');
+    expect(await (await ada.get('/dashboard/settings/members')).text()).toContain('The only owner, so can’t leave');
     expect((await ada.post('/dashboard/settings/members', '/members/role', { person: `github:${base + 2}`, role: 'owner' })).status).toBe(200);
     expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 2}`, null)).role).toBe('owner');
     const left = await ada.post('/dashboard/settings/members', '/members/leave', {});
@@ -437,7 +447,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(limited.status).toBe(200);
     const said = await limited.text();
     expect(said).toContain('@cy now reaches only the resources at those locations and in those groups, and 1 key they created was revoked.');
-    expect(said).toContain('<td data-label="Reaches">Locations north</td>');
+    expect(said).toContain(' · Reaches Locations north');
     const keys = createSlotlockApiKeyStore(application);
     expect((await keys.list({ tenantRef: team })).filter((key) => key.revokedAt === null)).toEqual([]);
     // A location the team does not have, or none, is refused.
@@ -588,7 +598,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ]);
     await ada.post('/dashboard/settings/members', '/members/invite', { email: 'two@clinic.example', role: 'member' });
     const full = await (await ada.get('/dashboard/settings/members')).text();
-    expect(full).toContain('3 of 3 people.');
+    expect(full).toContain('<strong>3 of 3 people</strong> on the Free plan, open invitations included. Upgrade to invite more.');
     expect(full).not.toContain('action="/dashboard/members/invite"');
   });
 

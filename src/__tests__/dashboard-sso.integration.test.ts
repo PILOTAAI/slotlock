@@ -171,7 +171,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
 
   it('connects, tests and turns on a provider; signs a colleague in through it alone; requires it with an Owner bypass', async () => {
     const dashboard = () => current;
-    const ada = new Browser(dashboard);
+    const ada = new Browser(() => current);
     await signIn(ada, 'ada');
     expect((await ada.post('/dashboard/teams', '/teams/create', { name: 'Acme Rentals' })).status).toBe(303);
     const team = (await teamOf(ada)) as string;
@@ -179,6 +179,17 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     await admin`
       INSERT INTO slotlock.workspace_domains (tenant_ref, domain_ascii, domain_unicode, status, token, verified_at)
       VALUES (${team}, ${domain}, ${domain}, 'verified', ${'b'.repeat(26)}, now())`;
+
+    // The form: one issuer field, named for what the chosen provider takes and hidden for Google
+    // Workspace (its issuer is fixed), so never `required`: the server checks it per provider.
+    const empty = await (await ada.get('/dashboard/settings/identity')).text();
+    const issuerField = /<input id="sso-issuer"[^>]*>/.exec(empty)?.[0] ?? '';
+    expect(issuerField).toContain('name="issuer"');
+    expect(issuerField).not.toContain('required');
+    expect(empty).toContain('<span class="for-issuer">Issuer URL</span><span class="for-entra">Tenant ID</span>');
+    const blank = await ada.post('/dashboard/settings/identity', '/identity/sso', { kind: 'okta', issuer: '', client_id: '0oa-acme-client', client_secret: 'acme-secret-value-1234' });
+    expect(blank.status).toBe(400);
+    expect(await blank.text()).toContain('Enter the issuer URL');
 
     // Connect: discovered, the secret sealed, the redirect URI shown.
     const saved = await ada.post('/dashboard/settings/identity', '/identity/sso', { kind: 'okta', issuer: ISSUER, client_id: '0oa-acme-client', client_secret: 'acme-secret-value-1234' });
@@ -200,7 +211,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     expect((await ada.post('/dashboard/settings/identity', '/identity/sso/status', { status: 'active' })).status).toBe(303);
 
     // A colleague through the provider alone: provisioned as a Viewer, scoped to the team.
-    const desk = new Browser(dashboard);
+    const desk = new Browser(() => current);
     const started = await desk.post(`/dashboard/sso?email=desk@${domain}`, '/sso/start', {});
     const { response } = await throughProvider(desk, started, { sub: 'desk-at-idp', email: `desk@${domain}` });
     expect(response.status).toBe(303);
@@ -212,7 +223,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
 
     // The callback refuses: another connection's path, another issuer, a replay, a wrong nonce, a forged key.
     const refusedBy = async (claims: Record<string, unknown>, key = signing.privateKey, tamper?: (query: URLSearchParams, back: URL) => void) => {
-      const browser = new Browser(dashboard);
+      const browser = new Browser(() => current);
       return (await throughProvider(browser, await browser.post(`/dashboard/sso?email=x@${domain}`, '/sso/start', {}), claims, key, tamper)).response.status;
     };
     expect(await refusedBy({ sub: 'x1', email: `x@${domain}` }, signing.privateKey, (_query, back) => {
@@ -221,7 +232,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     expect(await refusedBy({ sub: 'x2', email: `x@${domain}` }, signing.privateKey, (query) => query.set('iss', 'https://evil.example/'))).toBe(400);
     expect(await refusedBy({ sub: 'x3', email: `x@${domain}`, nonce: 'replayed-nonce' })).toBe(502);
     expect(await refusedBy({ sub: 'x4', email: `x@${domain}` }, forger.privateKey)).toBe(502);
-    const replay = new Browser(dashboard);
+    const replay = new Browser(() => current);
     const first = await throughProvider(replay, await replay.post(`/dashboard/sso?email=x@${domain}`, '/sso/start', {}), { sub: 'x5', email: `x@${domain}` });
     expect(first.response.status).toBe(303);
     expect((await replay.get(`${first.back.pathname}?code=again&state=${first.location.searchParams.get('state')}`)).status).toBe(400);
@@ -237,7 +248,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     const raw = randomBytes(32);
     await teams.invite({ tenantRef: team, inviter: `github:${base}`, to: { github: `github:${base + 1}`, login: 'bea' }, role: 'member', tokenSha256: createHash('sha256').update(raw).digest(), days: 7, dailyLimit: null, memberCap: null });
     await teams.accept({ tokenSha256: createHash('sha256').update(raw).digest(), person: `github:${base + 1}`, emails: [], memberCap: null });
-    const bea = new Browser(dashboard);
+    const bea = new Browser(() => current);
     await signIn(bea, 'bea');
     const turnedAway = await bea.post('/dashboard/teams', '/organization', { organization: team });
     expect(turnedAway.status).toBe(403);
@@ -246,7 +257,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     expect(away).not.toContain('/sso/bypass');
 
     // Ada in another browser, signed in with GitHub only: offered the bypass, which lets her in for an hour, audited.
-    const adaElsewhere = new Browser(dashboard);
+    const adaElsewhere = new Browser(() => current);
     await signIn(adaElsewhere, 'ada');
     const offered = await adaElsewhere.post('/dashboard/teams', '/organization', { organization: team });
     expect(await offered.text()).toContain('Use owner bypass');
@@ -270,7 +281,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     const cfo = `cfo@bigcorp-${base.toString(36)}.com`;
     const invitation = await teams.invite({ tenantRef: made.tenantRef, inviter: `github:${base + 1}`, to: { email: cfo }, role: 'admin', tokenSha256: randomBytes(32), days: 7, dailyLimit: null, memberCap: null });
     const handle = /^[a-z0-9-]+/.exec((await admin<{ handle: string }[]>`SELECT handle FROM slotlock.workspaces WHERE tenant_ref = ${team}`)[0]?.handle ?? '')?.[0] as string;
-    const scoped = new Browser(dashboard);
+    const scoped = new Browser(() => current);
     const signedIn = await throughProvider(scoped, await scoped.post(`/dashboard/sso/${handle}`, '/sso/start', {}), { sub: 'ada-at-idp', email: cfo });
     expect(signedIn.response.status).toBe(303);
     expect(await teamOf(scoped)).toBe(team);
@@ -300,7 +311,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     // A link to a team's single sign-on names the team; only its own page's button goes on to the
     // provider, so another site neither signs someone in to a team they did not choose nor sends
     // them anywhere through this one.
-    const linked = await new Browser(dashboard).get(`/dashboard/sso/${handle}`);
+    const linked = await new Browser(() => current).get(`/dashboard/sso/${handle}`);
     expect(linked.status).toBe(200);
     expect(linked.headers.get('location')).toBeNull();
     const confirm = await linked.text();
@@ -317,7 +328,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     expect(crossSite.status).toBe(403);
 
     // An address the provider itself says is unverified is not trusted: nobody is provisioned by it.
-    const unverified = new Browser(dashboard);
+    const unverified = new Browser(() => current);
     const notVerified = await throughProvider(unverified, await unverified.post(`/dashboard/sso?email=u@${domain}`, '/sso/start', {}), {
       sub: 'unverified-at-idp',
       email: `u@${domain}`,
@@ -328,7 +339,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
 
     // A token endpoint answering more than 64 KB is not read to the end: no sign-in.
     padTokenAnswer = true;
-    const flooded = new Browser(dashboard);
+    const flooded = new Browser(() => current);
     const flood = await throughProvider(flooded, await flooded.post(`/dashboard/sso?email=f@${domain}`, '/sso/start', {}), { sub: 'flood-at-idp', email: `f@${domain}` });
     padTokenAnswer = false;
     expect(flood.response.status).toBe(502);
@@ -346,12 +357,40 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     expect((await ada.post('/dashboard/settings/identity', '/identity/sso/status', { status: 'active' })).status).toBe(303);
     await admin`UPDATE slotlock.sso_connections SET kind = 'google_workspace' WHERE tenant_ref = ${team}`;
     const google = { iss: 'https://accounts.google.com', sub: 'desk-at-idp', email: `desk@${domain}`, email_verified: true };
-    const deskAgain = new Browser(dashboard);
+    const deskAgain = new Browser(() => current);
     const personal = await throughProvider(deskAgain, await deskAgain.post(`/dashboard/sso?email=desk@${domain}`, '/sso/start', {}), google);
     expect(personal.response.status).toBe(403);
     expect(await personal.response.text()).toContain('Google Workspace account at the team’s verified domain');
     const workspace = await throughProvider(deskAgain, await deskAgain.post(`/dashboard/sso?email=desk@${domain}`, '/sso/start', {}), { ...google, hd: domain });
     expect(workspace.response.status).toBe(303);
     expect(await teamOf(deskAgain)).toBe(team);
+  });
+
+  // An address or link no team signs in with is a way forward, not a dead end: it says what it read
+  // (the domain typed, never whether a team holds it), keeps the address, and offers the other ways.
+  it('answers an address no team signs in with by naming its domain, keeping it and offering other ways', async () => {
+    const fresh = await new Browser(() => current).get('/dashboard/sso');
+    expect(fresh.status).toBe(200);
+    const blank = await fresh.text();
+    expect(blank).not.toContain('role="alert"');
+    expect(blank).toContain('<form class="auth-form" method="get" action="/dashboard/sso">');
+
+    // A second-level public suffix, as the address that showed it had (2026-11-12): no team's domain.
+    const other = `nobody-${base.toString(36)}.co.uk`;
+    const none = await new Browser(() => current).get(`/dashboard/sso?email=support%40${other}`);
+    expect(none.status).toBe(404);
+    const said = await none.text();
+    expect(said).toContain(`Single sign-on isn’t set up for ${other}. Check the address, or sign in another way below.`);
+    expect(said).toContain(`value="support@${other}"`);
+    expect(said).toContain('<a class="button wide" href="/dashboard/sign-in">');
+    // This dashboard has no Google sign-in, so it offers none.
+    expect(said).not.toContain('with=google');
+    expect(said).toContain('An Owner verifies the domain and connects the provider in Settings, Identity');
+
+    const unread = await (await new Browser(() => current).get('/dashboard/sso?email=not-an-address')).text();
+    expect(unread).toContain('That doesn’t look like an email address.');
+    const linked = await (await new Browser(() => current).get('/dashboard/sso/no-such-team')).text();
+    expect(linked).toContain('No team signs in with single sign-on at that link.');
+    expect(linked).toContain('value=""');
   });
 });

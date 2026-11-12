@@ -5,7 +5,7 @@ description: Run Slotlock and PostgreSQL 18 with Docker, connect Claude Code, an
 ---
 
 :::tip[Nothing to run]
-[Slotlock Cloud](/docs/hosted/) is hosted for you: sign in with GitHub at
+[Slotlock Cloud](/docs/hosted/) is hosted for you: sign in with GitHub or Google at
 `https://app.slotlock.pylota.io/dashboard`, create a key, and connect your agent to
 `https://slotlock-api.pylota.io/mcp`. This page runs Slotlock yourself.
 :::

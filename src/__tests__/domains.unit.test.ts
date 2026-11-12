@@ -160,7 +160,27 @@ describe('DNS-over-HTTPS resolvers', () => {
     expect(cloudflareUrl).toBe(`${SLOTLOCK_DOH_ENDPOINTS.cloudflare}?name=_slotlock-challenge.acme-rentals.com&type=TXT`);
     expect(googleUrl).toBe(`${SLOTLOCK_DOH_ENDPOINTS.google}?name=_slotlock-challenge.acme-rentals.com&type=TXT`);
     expect(cloudflareInit.headers).toMatchObject({ accept: 'application/dns-json', 'cache-control': 'no-cache' });
-    expect(cloudflareInit.redirect).toBe('error');
+    expect(cloudflareInit.redirect).toBe('manual');
+  });
+
+  // The dashboard Worker hands its own fetch to the resolvers, and a Worker's fetch throws on
+  // `redirect: 'error'` (workerd's message, checked 2026-11-12): every Verify now answered "DNS
+  // didn't answer" on Slotlock Cloud. A fetch that refuses it, as a Worker's does, still gets an answer.
+  it("answers through a Worker's fetch, which refuses redirect: 'error', and follows no redirect", async () => {
+    const workerFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (init?.redirect === 'error') {
+        throw new TypeError('Invalid redirect value, must be one of "follow" or "manual" ("error" won\'t be implemented since it does not make sense at the edge; use "manual" and check the response status code).');
+      }
+      return Response.json({ Status: 0, Answer: [{ name: new URL(String(url)).searchParams.get('name'), type: 16, TTL: 5, data: '"slotlock-verification=tok"' }] });
+    });
+    for (const name of ['cloudflare', 'google'] as const) {
+      const answer = await createSlotlockDohResolver(name, { fetch: workerFetch as unknown as typeof fetch }).txt('_slotlock-challenge.acme-rentals.com');
+      expect(answer, name).toMatchObject({ status: 'ok', values: ['slotlock-verification=tok'] });
+    }
+    // A redirect is an answer from somewhere else: an error, never followed.
+    const moved = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.example/dns-query' } }));
+    expect(await createSlotlockDohResolver('cloudflare', { fetch: moved as unknown as typeof fetch }).txt('acme.com')).toEqual({ status: 'error', reason: 'redirect 302' });
+    expect(moved).toHaveBeenCalledTimes(1);
   });
 
   it('answers an error, never throws, on HTTP errors, bad bodies and timeouts', async () => {
