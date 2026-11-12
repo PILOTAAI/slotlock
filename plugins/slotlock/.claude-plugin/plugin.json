@@ -1,0 +1,19 @@
+{
+  "name": "slotlock",
+  "description": "Slotlock's MCP tools on Slotlock Cloud, and skills to book without double-booking and to set Slotlock up for a project.",
+  "author": {
+    "name": "PILOTAAI",
+    "url": "https://github.com/PILOTAAI"
+  },
+  "homepage": "https://slotlock.pylota.io/docs/connect/",
+  "repository": "https://github.com/PILOTAAI/slotlock",
+  "license": "Apache-2.0",
+  "keywords": [
+    "calendar",
+    "booking",
+    "scheduling",
+    "availability",
+    "mcp"
+  ],
+  "privacyPolicyUrl": "https://slotlock.pylota.io/docs/privacy/"
+}

@@ -5,6 +5,25 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- **A Claude Code plugin marketplace in this repository** (`.claude-plugin/marketplace.json`). Its
+  `slotlock` plugin connects Claude Code to Slotlock Cloud's MCP endpoint with the key in
+  `SLOTLOCK_API_KEY`, and adds two skills: `book-with-slotlock` (find, hold, book and change time
+  without double-booking, and what each refusal means) and `set-up-slotlock` (the docs site's setup
+  prompt). `/plugin marketplace add PILOTAAI/slotlock`, then `/plugin install slotlock@slotlock`. It
+  follows the repository's main branch, so it carries no version of its own.
+
+### Changed
+
+- **`slotlock_update_event` and `slotlock_reschedule` are marked destructive** (`destructiveHint:
+  true`): each overwrites a booking's time or details, and the time it frees can be taken at once. A
+  client that confirms destructive calls, Claude among them, now asks a person before either, as it
+  already did for `slotlock_cancel` and `slotlock_delete_event`. `slotlock_release_slots` stays
+  non-destructive: it lets go of the caller's own holds, which lapse within minutes anyway.
+
+## 0.10.0 - 2026-11-11
+
 This release gives a workspace its people and an audit trail. It brings six roles read from the
 database on every request, team workspaces with invitations, verified domains that let colleagues
 find and ask to join their team, single sign-on and SCIM provisioning through each team's own

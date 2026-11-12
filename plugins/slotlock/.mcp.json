@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "slotlock": {
+      "type": "http",
+      "url": "https://slotlock-api.pylota.io/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SLOTLOCK_API_KEY}"
+      }
+    }
+  }
+}
