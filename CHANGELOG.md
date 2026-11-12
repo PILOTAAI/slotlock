@@ -5,12 +5,14 @@ versioning.
 
 ## Unreleased
 
-The admin console for the people who run Slotlock Cloud ([RFC 0006](docs/rfc/0006-admin-console.md)),
-not yet live: its staff and sign-in, support actions, billing and usage, a CMS for the blog, and
-privacy requests.
-
 ### Added
 
+- **A Claude Code plugin marketplace in this repository** (`.claude-plugin/marketplace.json`). Its
+  `slotlock` plugin connects Claude Code to Slotlock Cloud's MCP endpoint with the key in
+  `SLOTLOCK_API_KEY`, and adds two skills: `book-with-slotlock` (find, hold, book and change time
+  without double-booking, and what each refusal means) and `set-up-slotlock` (the docs site's setup
+  prompt). `/plugin marketplace add PILOTAAI/slotlock`, then `/plugin install slotlock@slotlock`. It
+  follows the repository's main branch, so it carries no version of its own.
 - **Staff for the admin console** ([RFC 0006](docs/rfc/0006-admin-console.md), not yet live).
   `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL` grants the console's own role the admin
   functions and no table. `slotlock staff list|add|role|reset|remove`, run as the schema owner,
@@ -61,6 +63,11 @@ privacy requests.
 
 ### Changed
 
+- **`slotlock_update_event` and `slotlock_reschedule` are marked destructive** (`destructiveHint:
+  true`): each overwrites a booking's time or details, and the time it frees can be taken at once. A
+  client that confirms destructive calls, Claude among them, now asks a person before either, as it
+  already did for `slotlock_cancel` and `slotlock_delete_event`. `slotlock_release_slots` stays
+  non-destructive: it lets go of the caller's own holds, which lapse within minutes anyway.
 - **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
   a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
   the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.

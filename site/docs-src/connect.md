@@ -58,6 +58,24 @@ With `SLOTLOCK_CONFIRM_WRITES=all`, writes need a client that can show a confirm
 2026-07-28 with form elicitation); other clients get `confirmation_required`. Set it to `none` to let
 agents book on their own.
 
+## The Claude Code plugin, on Slotlock Cloud
+
+This repository is also a Claude Code plugin marketplace. Its `slotlock` plugin connects Claude Code
+to Slotlock Cloud (`https://slotlock-api.pylota.io/mcp`) with the API key in `SLOTLOCK_API_KEY`, and
+adds two skills: `book-with-slotlock`, for finding and booking time without double-booking, and
+`set-up-slotlock`, which sets Slotlock up for a project and proves it works (the
+[setup prompt](/docs/agent-setup/) as a skill).
+
+```text
+/plugin marketplace add PILOTAAI/slotlock
+/plugin install slotlock@slotlock
+```
+
+Set `SLOTLOCK_API_KEY` in the environment Claude Code starts from: the plugin sends it as
+`Authorization: Bearer`, and without it every call answers 401. The plugin follows this repository's
+main branch, so `/plugin marketplace update slotlock` brings its latest skills. For your own server,
+use `claude mcp add` below with its URL instead.
+
 ## Claude Code and the Claude API, against a deployed server
 
 **Claude Code:**
