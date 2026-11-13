@@ -7,8 +7,9 @@
 // reaches the owner as a failed run.
 //   node scripts/check-launch.mjs
 // Environment:
-//   SLOTLOCK_CHECK_STRIPE_KEY  optional: a restricted live key with Read on Products, Prices and
-//                              Webhook Endpoints, and nothing else. Without it, Stripe is skipped.
+//   SLOTLOCK_CHECK_STRIPE_KEY  optional: a restricted live key with Read on Products, Prices,
+//                              Webhook Endpoints and Events, and nothing else (scripts/
+//                              configure-stripe.mjs stores it). Without it, Stripe is skipped.
 //   GITHUB_TOKEN               optional: raises GitHub's rate limit; the checks read public data
 //   SLOTLOCK_CHECK_URLS        tests only: a JSON object replacing any base URL below
 import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
@@ -233,7 +234,7 @@ for (const file of readdirSync(blog).filter((name) => name.endsWith('.md')).sort
 
 const stripeKey = process.env.SLOTLOCK_CHECK_STRIPE_KEY;
 if (!stripeKey) {
-  warn('Stripe', 'skipped: set SLOTLOCK_CHECK_STRIPE_KEY (a restricted live key, Read on Products, Prices and Webhook Endpoints)');
+  warn('Stripe', 'skipped: set SLOTLOCK_CHECK_STRIPE_KEY (a restricted live key, Read on Products, Prices, Webhook Endpoints and Events)');
 } else {
   const stripe = (path) => request(`${URLS.stripe}/v1/${path}`, { headers: { authorization: `Bearer ${stripeKey}` } });
   await check('Stripe', async () => {
@@ -265,6 +266,27 @@ if (!stripeKey) {
     const missing = events.includes('*') ? [] : STRIPE_EVENTS.filter((event) => !events.includes(event));
     if (missing.length === 0) ok('Stripe', `the webhook at ${url} gets every event it needs`);
     else fail('Stripe', `the webhook at ${url} does not get: ${missing.join(', ')}`);
+  });
+  await check('Stripe', async () => {
+    // Events of the last three days that have not reached every endpoint: a purchase, renewal or
+    // cancellation the dashboard has not heard of. The last 15 minutes are left to Stripe's retries.
+    const now = Math.floor(Date.now() / 1000);
+    const { status, json } = await stripe(`events?delivery_success=false&created[gte]=${now - 3 * 86_400}&limit=100`);
+    if (status === 403) {
+      warn('Stripe', 'webhook deliveries not checked: give SLOTLOCK_CHECK_STRIPE_KEY Read on Events');
+      return;
+    }
+    if (status !== 200) throw new Error(`events answer ${status}: ${json?.error?.message ?? ''}`);
+    const stuck = (json.data ?? []).filter((event) => STRIPE_EVENTS.includes(event.type) && event.created < now - 15 * 60);
+    if (stuck.length === 0) {
+      ok('Stripe', 'every payment event of the last three days reached the webhook');
+      return;
+    }
+    const oldest = stuck.reduce((first, event) => (event.created < first.created ? event : first));
+    fail(
+      'Stripe',
+      `${stuck.length} payment event(s) of the last three days did not reach the webhook, the oldest a ${oldest.type} ${Math.round((now - oldest.created) / 3600)} hour(s) ago: see Developers > Webhooks in Stripe, and the dashboard Worker's STRIPE_WEBHOOK_SECRET`,
+    );
   });
 }
 
