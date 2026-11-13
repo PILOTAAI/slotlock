@@ -155,7 +155,7 @@ export const heroLog: LogLine[] = [
 export const heroWindow = {
   title: 'Slotlock · Today',
   now: 'now 09:41',
-  nav: ['Overview', 'Resources', 'Waitlist', 'API keys'],
+  nav: ['Overview', 'Resources', 'Approvals', 'API keys'],
   agents: 'Agent activity',
 };
 
@@ -299,7 +299,7 @@ export const dashboard = {
     path: 'app.slotlock.pylota.io/dashboard',
     brand: 'Slotlock',
     workspace: 'acme-rentals',
-    nav: ['Overview', 'Resources', 'Waitlist', 'API keys', ...(facts.assistant ? ['Assistant'] : []), 'Settings'],
+    nav: ['Overview', 'Resources', 'Approvals', 'API keys', ...(facts.assistant ? ['Assistant'] : []), 'Settings'],
     title: 'Overview',
     stats: [
       { label: `Booked, next ${facts.dashboardAgendaDays} days`, value: '18' },

@@ -169,7 +169,6 @@ import {
   type SlotlockSubjectExport,
   type SlotlockTenantExport,
   type SlotlockTenantExportPartResult,
-  type SlotlockWaitlistEntry,
   buildSlotlockTenantExport,
 } from './store.js';
 import type {
@@ -260,7 +259,6 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/webhooks',
   '/webhooks/delete',
   '/webhooks/enable',
-  '/waitlist/leave',
   '/approvals/decide',
   '/sandbox/seed',
   '/sandbox/reset',
@@ -855,11 +853,6 @@ export interface SlotlockDashboardResources {
     seed(tenantRef: string, scenario: SlotlockSandboxScenario): Promise<{ resources: number; bookings: number }>;
     reset(tenantRef: string): Promise<void>;
     fastForward(tenantRef: string, minutes: number): Promise<{ holds: number; approvals: number }>;
-  };
-  /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
-  waitlist?: {
-    list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
-    leave(tenantRef: string, id: string, actor?: string): Promise<boolean>;
   };
   /** The tenant's assistant settings and its members' conversations (assistant.ts). */
   assistant?: SlotlockAssistantStore;
@@ -1472,26 +1465,6 @@ export function createSlotlockDashboardResources(
           by(actor),
         ),
     },
-    waitlist: {
-      list: (tenantRef, limit) =>
-        store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
-      async leave(tenantRef, id, actor) {
-        const left = await store.withTenant(
-          tenantRef,
-          (tenant) => tenant.leaveWaitlist({ tenantRef, id }),
-          by(actor),
-        );
-        // An offered entry's hold went with it: offer that time to the next, as the API does.
-        if (left) {
-          await store
-            .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
-              origin: 'maintenance',
-            })
-            .catch(() => undefined);
-        }
-        return left;
-      },
-    },
     webhooks: {
       list: (tenantRef) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWebhookEndpoints({ tenantRef })),
@@ -1748,7 +1721,6 @@ const AGENDA_DAYS = 7;
 const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
-const WAITLIST_SHOWN = 200;
 /** Approvals the dashboard lists, pending and recent decided together, newest first. */
 const APPROVALS_SHOWN = 100;
 const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
@@ -1866,7 +1838,6 @@ const ICONS = Object.freeze({
   overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
   resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
   keys: icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>'),
-  waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
   plan: icon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>'),
@@ -2721,7 +2692,6 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   type Section =
     | 'overview'
     | 'resources'
-    | 'waitlist'
     | 'approvals'
     | 'keys'
     | 'webhooks'
@@ -2729,14 +2699,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     | 'plan'
     | 'teams'
     | 'settings';
-  // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
+  // Pages for what the adapter offers, so a custom one without approvals shows none. Read per
   // request: on Workers the adapter exists only inside one.
   const nav = (session: Session): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
     { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
-    ...(options.resources.waitlist
-      ? [{ section: 'waitlist' as const, label: 'Waitlist', path: '/waitlist', icon: ICONS.waitlist }]
-      : []),
     ...(options.resources.approvals
       ? [{ section: 'approvals' as const, label: 'Approvals', path: '/approvals', icon: ICONS.approvals }]
       : []),
@@ -3121,13 +3088,12 @@ ${
     const assistant = assistantStore(session);
     // A member limited to some resources sees theirs: no keys, plan or setup, which are the workspace's.
     const limited = scopes.has(session);
-    const [keys, resources, agenda, changes, approvals, waitlist, model] = await Promise.all([
+    const [keys, resources, agenda, changes, approvals, model] = await Promise.all([
       limited ? Promise.resolve([]) : options.keys.list({ tenantRef }),
       options.resources.list(tenantRef),
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, ACTIVITY_LIMIT),
       options.resources.approvals?.list(tenantRef, APPROVALS_SHOWN),
-      options.resources.waitlist?.list(tenantRef, WAITLIST_SHOWN),
       assistant?.getSettings(tenantRef),
     ]);
     // The plan is Live's: the test environment has none of its own.
@@ -3193,7 +3159,6 @@ ${
     const tiles: Html[] = [
       ...(agenda ? [stat(`Bookings, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`), stat('Live holds', counted(held), `${root}#upcoming`)] : []),
       ...(approvals ? [stat('Waiting for approval', String(waiting), `${root}/approvals`, waiting > 0 ? ' attention-stat' : '')] : []),
-      ...(waitlist ? [stat('On the waitlist', String(waitlist.filter((entry) => entry.status !== 'expired').length), `${root}/waitlist`)] : []),
       stat('Resources', String(resources.length), `${root}/resources`),
       ...(limited ? [] : [stat('Active keys', String(active.length), `${root}/keys`)]),
     ].slice(0, 4);
@@ -4173,62 +4138,6 @@ ${
       );
     }
     return redirect(303, `${root}/webhooks`);
-  }
-
-  async function waitlistPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const waitlist = options.resources.waitlist;
-    if (!waitlist) return notFound(session);
-    const tenantRef = tenantOf(session);
-    const [entries, resources] = await Promise.all([
-      waitlist.list(tenantRef, WAITLIST_SHOWN),
-      options.resources.list(tenantRef),
-    ]);
-    const byId = new Map(resources.map((resource) => [resource.id, resource]));
-    const token = csrfToken(session);
-    const rows = entries.map((entry) => {
-      const resource = entry.resourceId ? byId.get(entry.resourceId) : undefined;
-      const zone = resource?.timezone ?? 'UTC';
-      const day = dayLabel(entry.start, zone, now());
-      const what = entry.resourceId
-        ? resourceName(resource, entry.resourceId)
-        : `Pool ${entry.pool ?? ''}`;
-      const offered = entry.offeredResourceId
-        ? resourceName(byId.get(entry.offeredResourceId), entry.offeredResourceId)
-        : null;
-      const tone = entry.status === 'offered' ? 'active' : entry.status === 'expired' ? 'revoked' : 'held';
-      return html`<tr>
-<td data-label="When" class="strong">${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}</td>
-<td data-label="For"><span class="truncate" title="${what}">${what}</span></td>
-<td data-label="Holder"><code class="truncate" title="${entry.holderRef}">${entry.holderRef}</code></td>
-<td data-label="Status"><span class="cell"><span class="pill ${tone}">${entry.status === 'offered' ? 'Offered' : entry.status === 'expired' ? 'Expired' : 'Waiting'}</span>${offered && entry.offeredAt ? html`<span class="meta" title="${offered}">${offered}, ${ago(entry.offeredAt, now())}</span>` : html``}</span></td>
-<td data-label="Joined">${ago(entry.createdAt, now())}</td>
-<td class="actions"><details class="act danger"><summary>Remove</summary><div class="pop"><p>${entry.status === 'offered' ? 'Its offered hold is released and offered to the next.' : 'It stops waiting.'}</p>
-<form method="post" action="${root}/waitlist/leave"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button class="danger" type="submit">Remove entry</button></form></div></details></td>
-</tr>`;
-    });
-    const waiting = entries.filter((entry) => entry.status === 'waiting').length;
-    const offered = entries.filter((entry) => entry.status === 'offered').length;
-    const content = html`${noticeOf(notice, status)}
-${pageHead('Waitlist')}
-<div class="stats">
-<div class="stat"><span class="stat-label">Waiting</span><span class="stat-value">${String(waiting)}</span></div>
-<div class="stat"><span class="stat-label">Offered</span><span class="stat-value">${String(offered)}</span></div>
-</div>
-${
-  entries.length === 0
-    ? emptyState(ICONS.waitlist, 'Nobody is waiting. Agents add entries when the time they want is taken.')
-    : html`<div class="table"><table><thead><tr><th>When</th><th>For</th><th>Holder</th><th>Status</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>${entries.length >= WAITLIST_SHOWN ? html`<p class="fine">Showing the first ${String(WAITLIST_SHOWN)}.</p>` : html``}`
-}`;
-    return respond(status, layout('Waitlist', content, session, 'waitlist'));
-  }
-
-  async function leaveWaitlist(session: Session, form: URLSearchParams): Promise<Response> {
-    const waitlist = options.resources.waitlist;
-    if (!waitlist) return notFound(session);
-    if (!(await waitlist.leave(tenantOf(session), form.get('id') ?? '', personOf(session)))) {
-      return waitlistPage(session, 404, 'That entry is not on your waitlist.');
-    }
-    return redirect(303, `${root}/waitlist`);
   }
 
   // ---- Approvals (RFC 0004 A4) ----
@@ -6174,7 +6083,6 @@ ${
   function pageEntryFor(route: string): { path: string; page: FormAnswerPage } {
     if (route.startsWith('/keys')) return { path: '/keys', page: keysPage };
     if (route.startsWith('/webhooks') && options.resources.webhooks) return { path: '/webhooks', page: webhooksPage };
-    if (route.startsWith('/waitlist') && options.resources.waitlist) return { path: '/waitlist', page: waitlistPage };
     if (route.startsWith('/approvals') && options.resources.approvals) return { path: '/approvals', page: approvalsPage };
     if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
       return { path: '/locations', page: locationsPage };
@@ -9668,8 +9576,6 @@ ${
         return changeWebhook(session, form, 'remove');
       case '/webhooks/enable':
         return changeWebhook(session, form, 'enable');
-      case '/waitlist/leave':
-        return leaveWaitlist(session, form);
       case '/approvals/decide':
         return decideApproval(session, form);
       case '/sandbox/seed':
@@ -9816,7 +9722,6 @@ ${
           case '/keys':
           case '/resources':
           case '/webhooks':
-          case '/waitlist':
           case '/approvals':
           case '/assistant':
           case '/assistant/chats':
@@ -9853,7 +9758,6 @@ ${
               return await resourcesPage(session, 200, undefined, url.searchParams.get('hours') === 'own');
             }
             if (route === '/webhooks') return await webhooksPage(session);
-            if (route === '/waitlist') return await waitlistPage(session);
             if (route === '/approvals') return await approvalsPage(session);
             if (route === '/assistant') return await assistantPage(session, 200, undefined, url.searchParams.get('c') ?? undefined);
             if (route === '/assistant/chats') return await chatsPage(session);

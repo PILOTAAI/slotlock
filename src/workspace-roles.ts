@@ -37,7 +37,7 @@ export const SLOTLOCK_WORKSPACE_CAPABILITIES = Object.freeze([
   'usage.read',
   /** Chat with the assistant; what it proposes still waits for a person to approve. */
   'assistant.chat',
-  /** Run the booking desk: approvals, the waitlist, hours, closures and holiday calendars. */
+  /** Run the booking desk: approvals, hours, closures and holiday calendars. */
   'operations.run',
   /** Resources, their booking rules, pools, locations and groups. */
   'resources.manage',
@@ -209,7 +209,6 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/webhooks': 'webhooks.manage',
   '/webhooks/delete': 'webhooks.manage',
   '/webhooks/enable': 'webhooks.manage',
-  '/waitlist/leave': 'operations.run',
   '/approvals/decide': 'operations.run',
   '/hours': 'operations.run',
   '/closures': 'operations.run',
@@ -248,7 +247,6 @@ export const SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES: Readonly<Record<string, Slotl
   '/resources': 'workspace.read',
   '/resources/:id': 'workspace.read',
   '/webhooks': 'workspace.read',
-  '/waitlist': 'workspace.read',
   '/approvals': 'workspace.read',
   '/hours': 'workspace.read',
   '/closures': 'workspace.read',
@@ -293,7 +291,6 @@ export const SLOTLOCK_SCOPED_DASHBOARD_PAGES: ReadonlySet<string> = new Set([
   '/',
   '/resources',
   '/resources/:id',
-  '/waitlist',
   '/approvals',
   '/assistant',
   '/assistant/chats',
@@ -308,7 +305,6 @@ export const SLOTLOCK_SCOPED_DASHBOARD_POSTS: ReadonlySet<string> = new Set([
   ...Object.entries(SLOTLOCK_DASHBOARD_POST_CAPABILITIES)
     .filter(([, capability]) => capability === 'account.use' || capability === 'assistant.chat')
     .map(([route]) => route),
-  '/waitlist/leave',
   '/approvals/decide',
   '/assistant/approve',
 ]);
