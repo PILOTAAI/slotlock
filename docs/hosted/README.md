@@ -12,7 +12,7 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 | A2A | `https://slotlock-api.pylota.io/a2a`, agent card at `/.well-known/agent-card.json` |
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
-| Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
+| Status | [The status page](https://stats.uptimerobot.com/F7RQohQzXM), [open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
 | Price | Free, Developer at £5 a month or £50 a year, or, for a team workspace, Team at £15 a month or £150 a year: see [Plans](#plans). Best effort, with no service level agreement |
 
 ## Start
