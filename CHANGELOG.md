@@ -37,8 +37,9 @@ versioning.
   the dashboard and the site, plus a heartbeat for the status Worker, through UptimeRobot's v3 API.
   It is safe to run again. It stores the heartbeat URL as a `site` environment secret, on stdin.
   It also publishes a public status page, "Slotlock status", from the three service monitors: uptime
-  by day, incidents, and announcements people can subscribe to. It asks for the custom domain
-  `status.slotlock.pylota.io`, and falls back to UptimeRobot's own address where the plan refuses one.
+  by day, incidents and announcements, with email subscriptions where the plan has them. It asks
+  for the custom domain `status.slotlock.pylota.io`, and uses UptimeRobot's own address where the
+  plan refuses one.
 - **Posts merged ahead of their date publish themselves.** The site builds a post only once its
   `publishAt` has passed, and nothing rebuilt it at that time. `scheduled-posts.yml` checks every
   fifteen minutes for posts that are due but not live, and starts the Site workflow when it finds
@@ -164,8 +165,9 @@ versioning.
 
 - **`scripts/configure-uptime.mjs` creates the status page.** UptimeRobot refused it with 400: the
   page's order must be a number from 1 to 4, and the script sent `friendlyName`. It took that
-  400 for a refused custom domain too; it now falls back to UptimeRobot's address only when the
-  domain or the plan is refused.
+  400 for a refused custom domain too. A free plan then refused two features by name ("Feature
+  ownDomain is not enabled in your plan.", and the same for `subscribers`): the script now asks
+  again without each feature the plan refuses, and reports any other refusal as it is.
 - **Payment events now reach the plan.** At the pinned Stripe API version, an invoice names its
   subscription under `parent.subscription_details`. The webhook looked only at `subscription`, so
   it ignored `invoice.paid` and `invoice.payment_failed`: a failed renewal raised no alert, and a
