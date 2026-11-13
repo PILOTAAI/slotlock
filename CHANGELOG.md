@@ -103,6 +103,9 @@ versioning.
 
 ### Changed
 
+- **Hosted Slotlock's plan limits and monthly allowances start on 16 November 2026**, launch day,
+  instead of 9 and 10 December: the Terms, the hosted service page and the pricing page say so.
+  Accounts created before 9 November move to the Free limits that day too.
 - **The Java client reaches Maven Central with each release.** The release's `maven-central` job
   now uploads a deployment that publishes itself once Central has validated it, and waits until
   Central says it is published; it fails if Central refuses it. Approving the environment stays the
