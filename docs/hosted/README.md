@@ -13,7 +13,7 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 | REST | `https://slotlock-api.pylota.io/v1`, described at `/openapi.json` |
 | Dashboard | `https://app.slotlock.pylota.io/dashboard` |
 | Status | [Open `status` issues](https://github.com/PILOTAAI/slotlock/issues?q=is%3Aissue%20label%3Astatus%20is%3Aopen), and [how they are raised](/docs/hosted/status.md) |
-| Price | Free, Developer at $10 a month or $100 a year, or, for a team workspace, Team at $40 a month or $400 a year: see [Plans](#plans). Best effort, with no service level agreement |
+| Price | Free, Developer at £5 a month or £50 a year, or, for a team workspace, Team at £15 a month or £150 a year: see [Plans](#plans). Best effort, with no service level agreement |
 
 ## Start
 
@@ -39,7 +39,7 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 
 | | Free | Developer | Team | Custom |
 | --- | --- | --- | --- | --- |
-| Price | Free | $10 a month, or $100 a year | $40 a month, or $400 a year, for the whole team | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
+| Price | Free | £5 a month, or £50 a year | £15 a month, or £150 a year, for the whole team | [Talk to the founder](mailto:clever.eziogor@pylota.io) |
 | Resources | 10 | 100 | 500 | On your own servers |
 | Active API keys | 10 | 100 | 100 | |
 | Webhook endpoints | 2 | 10 | 25 | |

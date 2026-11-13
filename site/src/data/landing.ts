@@ -509,6 +509,10 @@ interface HostedPlan {
   id: string;
   monthly: number;
   yearly: number;
+  /** ISO 4217, such as GBP. */
+  currency: string;
+  /** Its sign, such as £. */
+  symbol: string;
   resources: number;
   apiKeys: number;
   webhookEndpoints: number;
@@ -530,7 +534,9 @@ const freePlan = hostedPlan('free');
 const developerPlan = hostedPlan('developer');
 const teamPlan = hostedPlan('team');
 const upgrade = { label: 'Upgrade', href: `${SIGN_IN_URL}/plan` };
-const paid = (plan: HostedPlan) => ({ price: `$${plan.monthly}`, per: `a month, or $${plan.yearly} a year` });
+const paid = (plan: HostedPlan) => ({ price: `${plan.symbol}${plan.monthly}`, per: `a month, or ${plan.symbol}${plan.yearly} a year` });
+/** The plans' currency sign, for Free and self-hosting at no charge. */
+const money = (developerPlan ?? freePlan)?.symbol ?? '$';
 
 export const pricing = {
   id: 'pricing',
@@ -549,7 +555,7 @@ export const pricing = {
           id: 'free',
           name: 'Free',
           host: 'We host',
-          price: '$0',
+          price: `${money}0`,
           per: '',
           tagline: 'Connect an agent today.',
           features: allows(freePlan),
@@ -561,7 +567,7 @@ export const pricing = {
           id: 'free',
           name: 'Free',
           host: 'We host',
-          price: '$0',
+          price: `${money}0`,
           per: 'while in preview',
           tagline: 'Connect an agent today.',
           features: [
@@ -605,7 +611,7 @@ export const pricing = {
       id: 'self',
       name: 'Self-host',
       host: 'You host',
-      price: '$0',
+      price: `${money}0`,
       per: facts.license,
       tagline: 'Your servers, your data.',
       features: [`Same server, ${facts.toolCount} tools`, 'PostgreSQL 16 to 18', 'No limits from us'],
@@ -645,7 +651,7 @@ export const source = {
 /** What a plan costs, in words, from facts.plans; "free while in preview" before plans exist. */
 const priceAnswer =
   developerPlan && teamPlan
-    ? `Slotlock Cloud starts free, with no card. Developer is $${developerPlan.monthly} a month and Team $${teamPlan.monthly} a month for the whole organization; running it yourself costs nothing ([pricing](/pricing/)).`
+    ? `Slotlock Cloud starts free, with no card. Developer is ${developerPlan.symbol}${developerPlan.monthly} a month and Team ${teamPlan.symbol}${teamPlan.monthly} a month for the whole organization; running it yourself costs nothing ([pricing](/pricing/)).`
     : 'Slotlock Cloud is free while it is in preview, and running it yourself costs nothing ([pricing](/pricing/)).';
 
 /**

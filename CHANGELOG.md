@@ -103,6 +103,12 @@ versioning.
 
 ### Changed
 
+- **Slotlock Cloud's prices are in pounds, and lower.** Developer is £5 a month or £50 a year
+  (was $10 or $100), and Team £15 a month or £150 a year (was $40 or $400). Stripe still shows
+  each buyer their own currency at checkout. The Plans table in `docs/hosted/README.md` stays the
+  source: the site's build now reads the currency from it too, so the pricing page, the landing
+  page, the comparisons and the structured data (`priceCurrency`) follow it. The Terms, the
+  dashboard Worker's default price labels, its guide and the launch check say the same.
 - **The Java client reaches Maven Central with each release.** The release's `maven-central` job
   now uploads a deployment that publishes itself once Central has validated it, and waits until
   Central says it is published; it fails if Central refuses it. Approving the environment stays the

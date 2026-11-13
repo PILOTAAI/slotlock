@@ -53,12 +53,12 @@ const STRIPE_EVENTS = [
   'invoice.paid',
   'invoice.payment_failed',
 ];
-/** The paid plans' prices, in cents, as the site states them (site/src/data, facts.plans). */
+/** The paid plans' prices, in pence, as docs/hosted/README.md and the site state them. */
 const PRICES = [
-  ['Developer monthly', 1000, 'month'],
-  ['Developer yearly', 10000, 'year'],
-  ['Team monthly', 4000, 'month'],
-  ['Team yearly', 40000, 'year'],
+  ['Developer monthly', 500, 'month'],
+  ['Developer yearly', 5000, 'year'],
+  ['Team monthly', 1500, 'month'],
+  ['Team yearly', 15000, 'year'],
 ];
 
 const results = [];
@@ -246,10 +246,10 @@ if (!stripeKey) {
     }
     for (const [name, amount, interval] of PRICES) {
       const found = prices.find(
-        (price) => price.unit_amount === amount && price.currency === 'usd' && price.recurring?.interval === interval,
+        (price) => price.unit_amount === amount && price.currency === 'gbp' && price.recurring?.interval === interval,
       );
       if (found) ok('Stripe', `${name}: ${found.id}`);
-      else fail('Stripe', `no active live price for ${name} (${amount / 100} USD a ${interval})`);
+      else fail('Stripe', `no active live price for ${name} (£${amount / 100} a ${interval})`);
     }
   });
   await check('Stripe', async () => {

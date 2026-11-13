@@ -1030,7 +1030,7 @@ export interface SlotlockDashboardBilling {
   }): Promise<string>;
   /** A billing portal URL for the tenant's customer. */
   portal(input: { customer: string; returnUrl: string }): Promise<string>;
-  /** The Developer plan's prices as shown, such as `$10`. */
+  /** The Developer plan's prices as shown, such as `£5`. */
   prices: { month: string; year: string };
   /**
    * The Team plan's prices as shown (Teams on Cloud). With them, an organization's workspace is

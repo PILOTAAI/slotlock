@@ -238,15 +238,15 @@ function readBilling(vars: SlotlockEnv) {
       ...(apiVersion ? { apiVersion } : {}),
     }),
     // As the Terms and the hosted page name them, unless the deployment shows its own.
-    ...(teamPrices ? { teamPrices: { month: teamShownMonth || '$40', year: teamShownYear || '$400' } } : {}),
+    ...(teamPrices ? { teamPrices: { month: teamShownMonth || '£15', year: teamShownYear || '£150' } } : {}),
     ...(overage !== undefined
       ? { overage: { price: vars.SLOTLOCK_PLAN_PRICE_OVERAGE?.trim() || 'the metered price', stopPercent: overage } }
       : {}),
     webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
     contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || SLOTLOCK_DEFAULT_PLAN_CONTACT,
     prices: {
-      month: vars.SLOTLOCK_PLAN_PRICE_MONTHLY?.trim() || '$10',
-      year: vars.SLOTLOCK_PLAN_PRICE_YEARLY?.trim() || '$100',
+      month: vars.SLOTLOCK_PLAN_PRICE_MONTHLY?.trim() || '£5',
+      year: vars.SLOTLOCK_PLAN_PRICE_YEARLY?.trim() || '£50',
     },
   };
 }

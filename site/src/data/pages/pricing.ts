@@ -9,6 +9,10 @@ interface HostedPlan {
   id: string;
   monthly: number;
   yearly: number;
+  /** ISO 4217, such as GBP. */
+  currency: string;
+  /** Its sign, such as £. */
+  symbol: string;
   resources: number;
   apiKeys: number;
   webhookEndpoints: number;
@@ -26,7 +30,7 @@ const free = plan('free');
 const developer = plan('developer');
 const team = plan('team');
 const n = (value: number | undefined) => (value === undefined ? 'None' : value.toLocaleString('en-GB'));
-const price = (p: HostedPlan) => (p.monthly === 0 ? '$0' : `$${p.monthly} a month, or $${p.yearly} a year`);
+const price = (p: HostedPlan) => (p.monthly === 0 ? `${p.symbol}0` : `${p.symbol}${p.monthly} a month, or ${p.symbol}${p.yearly} a year`);
 const contact = (facts as { planContact?: { label: string; href: string } | null }).planContact ?? {
   label: 'Write to support@pylota.io',
   href: 'mailto:support@pylota.io',
@@ -64,7 +68,7 @@ export const pricingPage: MarketingPage = {
           columns: ['', 'Free', 'Developer', 'Team', 'Self-host'],
           highlight: 2,
           rows: [
-            ['Price', price(free), price(developer), `${price(team)}, for the whole organization`, `$0 (${facts.license})`],
+            ['Price', price(free), price(developer), `${price(team)}, for the whole organization`, `${developer.symbol}0 (${facts.license})`],
             ['Resources', n(free.resources), n(developer.resources), n(team.resources), 'No limit from us'],
             ['Active API keys', n(free.apiKeys), n(developer.apiKeys), n(team.apiKeys), 'No limit from us'],
             ['Webhook endpoints', n(free.webhookEndpoints), n(developer.webhookEndpoints), n(team.webhookEndpoints), 'No limit from us'],

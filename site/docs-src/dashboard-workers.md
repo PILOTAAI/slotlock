@@ -51,8 +51,8 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 | Plan | Resources | Active API keys | Webhook endpoints | Price |
 | --- | --- | --- | --- | --- |
 | Free | 10 | 10 | 2 | Free |
-| Developer | 100 | 100 | 10 | $10 a month or $100 a year |
-| Team (an organization's) | 500 | 100 | 25 | $40 a month or $400 a year, for the organization |
+| Developer | 100 | 100 | 10 | £5 a month or £50 a year |
+| Team (an organization's) | 500 | 100 | 25 | £15 a month or £150 a year, for the organization |
 | Custom | Your servers | | | Talk to the founder |
 
 With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
@@ -90,10 +90,10 @@ It exits 1 while an event was not taken; run it again.
 
 The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): 500
 resources, 100 keys and 25 webhook endpoints, and monthly quotas its members share (2,000,000
-operations and 100,000 bookings, stopping at 110%), for $40 a month or $400 a year whatever the
+operations and 100,000 bookings, stopping at 110%), for £15 a month or £150 a year whatever the
 number of members. It is offered once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
 `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price ids) are set; `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and
-`SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the prices shown ($40 and $400 by default); an
+`SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the prices shown (£15 and £150 by default); an
 organization's owner then sees Upgrade to Team instead of Developer, and a subscription at a Team
 price gives Team, including one changed to it in the customer portal.
 
@@ -101,7 +101,7 @@ Without Stripe, **Usage** still shows each tenant's plan, limits and use (with `
 `SLOTLOCK_QUOTAS`, as on the server), and an owner asks for another plan at `SLOTLOCK_PLAN_CONTACT`.
 
 Optional variables: `SLOTLOCK_PLAN_CONTACT` (where plan and Custom enquiries go, an https or mailto URL),
-`SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `$10` and `$100`
+`SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `£5` and `£50`
 by default) and `STRIPE_API_VERSION` (default `2026-04-22.dahlia`, a version that has Managed
 Payments).
 
