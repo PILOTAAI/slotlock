@@ -16,6 +16,9 @@ versioning.
 - **`scripts/configure-uptime.mjs`** sets up UptimeRobot monitors for the API (`"status":"ready"`),
   the dashboard and the site, plus a heartbeat for the status Worker, through UptimeRobot's v3 API.
   It is safe to run again. It stores the heartbeat URL as a `site` environment secret, on stdin.
+  It also publishes a public status page, "Slotlock status", from the three service monitors: uptime
+  by day, incidents, and announcements people can subscribe to. It asks for the custom domain
+  `status.slotlock.pylota.io`, and falls back to UptimeRobot's own address where the plan refuses one.
 - **Posts merged ahead of their date publish themselves.** The site builds a post only once its
   `publishAt` has passed, and nothing rebuilt it at that time. `scheduled-posts.yml` checks every
   fifteen minutes for posts that are due but not live, and starts the Site workflow when it finds

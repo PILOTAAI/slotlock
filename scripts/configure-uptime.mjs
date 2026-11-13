@@ -10,8 +10,13 @@
 //                            minutes; it alerts when the pings stop. Its URL is stored, on stdin, as
 //                            the SLOTLOCK_STATUS_HEARTBEAT_URL secret of the `site` environment, and
 //                            the Status Worker workflow is started so the Worker gets it.
-// A monitor of the same name is kept as it is, so the script is safe to run again. UptimeRobot may
-// keep heartbeat monitors to paid plans; when it refuses one, the script says so and goes on.
+// It also publishes the public status page, "Slotlock status", from the three service monitors:
+// uptime by day for each, incidents as they happen, and announcements people can subscribe to by
+// email. It asks for the custom domain status.slotlock.pylota.io (a CNAME to stats.uptimerobot.com
+// in Cloudflare, DNS only), and takes UptimeRobot's own address where the plan refuses one.
+// A monitor or status page of the same name is kept as it is, so the script is safe to run again.
+// UptimeRobot may keep heartbeat monitors and custom domains to paid plans; when it refuses one,
+// the script says so and goes on.
 //
 //   UPTIMEROBOT_API_KEY=<key> node scripts/configure-uptime.mjs [--dry-run]
 // The key: UptimeRobot > Integrations & API > API > Main API key. It is read from the environment
@@ -23,6 +28,8 @@ const API = (process.env.SLOTLOCK_UPTIMEROBOT_API ?? 'https://api.uptimerobot.co
 const GH = process.env.SLOTLOCK_GH ?? 'gh';
 const REPOSITORY = 'PILOTAAI/slotlock';
 const INTERVAL = 300;
+const STATUS_PAGE = 'Slotlock status';
+const STATUS_DOMAIN = 'status.slotlock.pylota.io';
 const dryRun = process.argv.includes('--dry-run');
 
 const MONITORS = [
@@ -70,14 +77,14 @@ async function api(method, path, body) {
   return { status: response.status, json, text };
 }
 
-/** Every monitor on the account, following the pages. */
-async function monitors() {
+/** Every item of a listing (monitors, status pages), following the pages. */
+async function list(start, what) {
   const found = [];
-  let path = '/monitors?limit=50';
+  let path = start;
   for (let page = 0; path && page < 20; page += 1) {
     const { status, json, text } = await api('GET', path);
     if (status === 401 || status === 403) throw new Failure('UptimeRobot refused the API key: use the main API key, not a read-only or monitor key.');
-    if (status !== 200) throw new Failure(`UptimeRobot answered ${status} listing monitors: ${text.slice(0, 200)}`);
+    if (status !== 200) throw new Failure(`UptimeRobot answered ${status} listing ${what}: ${text.slice(0, 200)}`);
     found.push(...(json?.data ?? []));
     const next = json?.nextLink;
     path = next ? next.replace(/^https?:\/\/[^/]+\/v3/, '') : '';
@@ -85,12 +92,58 @@ async function monitors() {
   return found;
 }
 
+/** The public status page, from the service monitors: kept when it exists, else created. */
+async function statusPage(before) {
+  const pages = await list('/psps?limit=50', 'status pages');
+  const kept = pages.find((page) => page.friendlyName === STATUS_PAGE);
+  if (kept) {
+    console.log(`kept:    ${STATUS_PAGE}: ${pageUrl(kept)}`);
+    return;
+  }
+  if (dryRun) {
+    console.log(`would create: ${STATUS_PAGE}, a public status page of the API, the dashboard and the site, at https://${STATUS_DOMAIN}`);
+    return;
+  }
+  // The monitors as they are now, including any this run created.
+  const now = await list('/monitors?limit=50', 'monitors');
+  const ids = MONITORS.filter((spec) => spec.type !== 'HEARTBEAT')
+    .map((spec) => now.find((monitor) => monitor.friendlyName === spec.friendlyName)?.id ?? before.find((m) => m.friendlyName === spec.friendlyName)?.id)
+    .filter((id) => typeof id === 'number');
+  const page = {
+    friendlyName: STATUS_PAGE,
+    monitorIds: ids,
+    status: 'ENABLED',
+    homepageLink: 'https://slotlock.pylota.io',
+    subscription: true,
+    noIndex: false,
+    sort: 'friendlyName',
+  };
+  let answer = await api('POST', '/psps', { ...page, customDomain: STATUS_DOMAIN });
+  let custom = true;
+  if (answer.status !== 201 && answer.status !== 200) {
+    console.log(`note:    UptimeRobot answered ${answer.status} to the custom domain (${(answer.json?.message ?? answer.text).toString().slice(0, 160)}); publishing at its own address instead.`);
+    custom = false;
+    answer = await api('POST', '/psps', page);
+  }
+  if (answer.status !== 201 && answer.status !== 200) {
+    throw new Failure(`UptimeRobot answered ${answer.status} creating the status page: ${answer.text.slice(0, 300)}`);
+  }
+  console.log(`created: ${STATUS_PAGE} (status page ${answer.json?.id}): ${pageUrl(answer.json ?? {})}`);
+  if (custom) {
+    console.log(`         In Cloudflare, add the DNS record: ${STATUS_DOMAIN} CNAME stats.uptimerobot.com, DNS only (grey cloud).`);
+  }
+}
+
+function pageUrl(page) {
+  return page.customDomain ? `https://${page.customDomain}` : `https://stats.uptimerobot.com/${page.urlKey ?? '?'}`;
+}
+
 function gh(args, input) {
   return spawnSync(GH, args, { input: input ?? '', encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 async function main() {
-  const existing = await monitors();
+  const existing = await list('/monitors?limit=50', 'monitors');
   const byName = new Map(existing.map((monitor) => [monitor.friendlyName, monitor]));
   const contacts = await api('GET', '/user/alert-contacts');
   if (contacts.status !== 200) throw new Failure(`UptimeRobot answered ${contacts.status} listing alert contacts: ${contacts.text.slice(0, 200)}`);
@@ -126,6 +179,7 @@ async function main() {
     }
   }
 
+  await statusPage(existing);
   if (dryRun) {
     console.log('\nNothing was changed.');
     return;
