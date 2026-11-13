@@ -196,9 +196,11 @@ await check('status', async () => {
   if (!run) throw new Error('the status probe has never run');
   const jobs = (await github(`/actions/runs/${run.id}/jobs`)).json?.jobs ?? [];
   const age = (Date.now() - Date.parse(run.created_at)) / 60_000;
+  // GitHub runs this schedule hours late (docs/hosted/status.md): the status Worker and UptimeRobot
+  // watch every five minutes, and this workflow is their backup. Off is a failure; late is a warning.
   if (jobs.every((job) => job.conclusion === 'skipped')) fail('status', 'the status probe is off: set SLOTLOCK_STATUS_PROBE to on');
-  else if (age > 120) fail('status', `the status probe last ran ${Math.round(age)} minutes ago`);
-  else ok('status', `the status probe ran ${Math.round(age)} minutes ago (${run.conclusion})`);
+  else if (age > 12 * 60) warn('status', `the GitHub status probe last ran ${Math.round(age / 60)} hours ago`);
+  else ok('status', `the GitHub status probe ran ${Math.round(age)} minutes ago (${run.conclusion})`);
 });
 await check('status', async () => {
   const open = (await github('/issues?labels=status&state=open&per_page=10')).json ?? [];

@@ -7,6 +7,15 @@ versioning.
 
 ### Added
 
+- **A status Worker that runs on time** (`workers/status`, deployed by `status-worker.yml`). GitHub
+  ran the ten-minute status probe every 3.5 to 10.5 hours, and the scheduled-post workflow likewise.
+  The Worker runs every five minutes on a Cloudflare Cron Trigger. It checks the API, the dashboard
+  and the site, and opens and closes the same `status` issues as `scripts/status-probe.sh`. It
+  starts the Site workflow for a post whose time has come, and pings an UptimeRobot heartbeat. The
+  GitHub workflows stay as backups.
+- **`scripts/configure-uptime.mjs`** sets up UptimeRobot monitors for the API (`"status":"ready"`),
+  the dashboard and the site, plus a heartbeat for the status Worker, through UptimeRobot's v3 API.
+  It is safe to run again. It stores the heartbeat URL as a `site` environment secret, on stdin.
 - **Posts merged ahead of their date publish themselves.** The site builds a post only once its
   `publishAt` has passed, and nothing rebuilt it at that time. `scheduled-posts.yml` checks every
   fifteen minutes for posts that are due but not live, and starts the Site workflow when it finds

@@ -1,0 +1,26 @@
+// Hosted Slotlock's status probe and post scheduler (worker.ts), on a five-minute Cron Trigger.
+// status-worker.yml deploys it from main with the site's Cloudflare credentials (the `site`
+// environment), and sets its two secrets from that environment when they are there:
+//   SLOTLOCK_STATUS_GITHUB_TOKEN   a fine-grained token for PILOTAAI/slotlock alone: Issues read and
+//                                  write, Actions read and write. It opens and closes `status`
+//                                  issues and starts the Site workflow for a post that is due.
+//   SLOTLOCK_STATUS_HEARTBEAT_URL  UptimeRobot's heartbeat URL (scripts/configure-uptime.mjs).
+// Config reference: https://developers.cloudflare.com/workers/configuration/cron-triggers/
+// (read 2026-11-13).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "slotlock-status",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // It serves nothing: no route, no workers.dev address.
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "SLOTLOCK_STATUS_REPOSITORY": "PILOTAAI/slotlock",
+    "SLOTLOCK_STATUS_API": "https://slotlock-api.pylota.io",
+    "SLOTLOCK_STATUS_DASHBOARD": "https://app.slotlock.pylota.io",
+    "SLOTLOCK_STATUS_SITE": "https://slotlock.pylota.io"
+  },
+  "observability": { "enabled": true }
+}
