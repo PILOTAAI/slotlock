@@ -13,6 +13,8 @@ workers/dashboard/dist/
 workers/admin/node_modules
 workers/admin/.dev.vars
 workers/admin/dist/
+workers/status/node_modules
+workers/status/dist/
 # This deployment's console config, which scripts/configure-admin-console.mjs writes. It holds
 # no secret, but its ids are this account's, not the example's.
 workers/admin/wrangler.deploy.jsonc

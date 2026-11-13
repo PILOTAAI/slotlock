@@ -51,6 +51,17 @@ updates:
       admin:
         update-types: [minor, patch]
 
+  # The status Worker (workers/status): Wrangler only.
+  - package-ecosystem: npm
+    directory: /workers/status
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      status-worker:
+        update-types: [minor, patch]
+
   # RFC 0001's Hyperdrive spike Worker: Wrangler only, like the dashboard's.
   - package-ecosystem: npm
     directory: /spikes/hyperdrive

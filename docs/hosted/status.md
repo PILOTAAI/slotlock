@@ -17,19 +17,29 @@ Planned maintenance is announced the same way, as a `status` issue opened before
 
 ## How it works
 
-Every ten minutes, `.github/workflows/status.yml` runs `scripts/status-probe.sh` on a GitHub-hosted
-runner, away from the server it checks. It asks for:
+Three probes watch from outside the servers they check:
+
+- **The status Worker** (`workers/status`), every five minutes on a Cloudflare Cron Trigger. It
+  opens and closes the `status` issues, and also publishes blog posts whose time has come.
+- **`.github/workflows/status.yml`** runs `scripts/status-probe.sh` on a GitHub-hosted runner, as a
+  backup that keeps working if Cloudflare does not. It is set to every ten minutes, but GitHub runs
+  scheduled workflows late: in November 2026 it ran every 3.5 to 10.5 hours.
+- **UptimeRobot**, every five minutes from outside GitHub and Cloudflare
+  (`scripts/configure-uptime.mjs`). It alerts the maintainers directly, and also alerts when the
+  status Worker stops sending its heartbeat.
+
+The Worker and the workflow ask for:
 
 | Part | Request | Up when |
 | --- | --- | --- |
 | API | `GET https://slotlock-api.pylota.io/healthz` | `200` with `"status":"ready"`, which needs the database |
 | Dashboard | `GET https://app.slotlock.pylota.io/dashboard` | `200` |
+| Site (the Worker only) | `GET https://slotlock.pylota.io/` | `200` |
 
 A part that fails three checks in a row, 20 seconds apart, gets an issue titled "Hosted Slotlock API
-is down" or "Hosted Slotlock dashboard is down", once; the next run that finds it up closes the issue
-with the time. GitHub may run a scheduled workflow late, most often at the start of an hour, so the
-probe runs at seven minutes past and every ten minutes after; an incident shorter than that can go
-unrecorded.
+is down", "Hosted Slotlock dashboard is down" or "Slotlock site is down", once. The next run that
+finds it up closes the issue, with the time. The Worker and the workflow use the same titles, so
+either one opens or closes the same issue. An incident shorter than five minutes can go unrecorded.
 
 ## Turning it on
 
@@ -42,8 +52,16 @@ gh variable set SLOTLOCK_STATUS_PROBE --repo PILOTAAI/slotlock --body on
 
 The first incident creates the `status` label. GitHub turns a scheduled workflow off after 60 days
 without repository activity in a public repository; if that happens, re-enable "Hosted status" under
-Actions. The probe needs only `issues: write`; it reads nothing private and holds no credential
+Actions. The workflow needs only `issues: write`; it reads nothing private and holds no credential
 beyond the run's own token.
+
+The status Worker deploys from main with `.github/workflows/status-worker.yml`. It needs two secrets
+on the `site` environment, which that workflow passes to the Worker:
+
+- `SLOTLOCK_STATUS_GITHUB_TOKEN`: a fine-grained token for this repository alone, with Issues and
+  Actions read and write. Without it the Worker only logs what it finds.
+- `SLOTLOCK_STATUS_HEARTBEAT_URL`: UptimeRobot's heartbeat URL. `scripts/configure-uptime.mjs`
+  stores it.
 
 ## Objectives
 
@@ -55,7 +73,7 @@ credit.
 | --- | --- | --- |
 | Calls that succeed | 99.5% | `slotlock_calls_total`: every MCP, A2A and REST call that named an operation, failed when it ended in `internal_error` or a 5xx. A refusal that is the caller's (`forbidden`, `overlap`, `quota_exceeded`, any 4xx) is not a failure |
 | Calls under a second at the server | 95% | `slotlock_call_duration_seconds` |
-| The API answering the probe | 99.5% of checks | `scripts/status-probe.sh`, above |
+| The API answering the probe | 99.5% of checks | The status Worker and UptimeRobot, above |
 
 A 99.5% month allows about 3 hours 36 minutes of failure. The Prometheus rules in
 `docs/hosted/slo-rules.yml` record each ratio and alert when the month's error budget is being spent

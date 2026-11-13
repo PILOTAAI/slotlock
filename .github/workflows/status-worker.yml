@@ -1,0 +1,98 @@
+# Bundles the status Worker (workers/status) on every pull request that changes it, and deploys it
+# from main with the site's Cloudflare credentials (the `site` environment, limited to main). The
+# Worker probes hosted Slotlock and publishes due posts every five minutes, on a Cloudflare Cron
+# Trigger, because GitHub runs status.yml and scheduled-posts.yml hours late (worker.ts).
+#
+# Optional secrets on the `site` environment, passed to the Worker on each deploy (on stdin, never
+# printed; a missing one is left as the Worker has it):
+#   SLOTLOCK_STATUS_GITHUB_TOKEN   a fine-grained token for PILOTAAI/slotlock alone, with Issues
+#                                  read and write and Actions read and write
+#   SLOTLOCK_STATUS_HEARTBEAT_URL  UptimeRobot's heartbeat URL (scripts/configure-uptime.mjs)
+# Every action is pinned to a full commit SHA, the same as site.yml's.
+name: Status Worker
+
+on:
+  pull_request:
+    paths:
+      - "workers/status/**"
+      - ".github/workflows/status-worker.yml"
+  push:
+    branches: [main]
+    paths:
+      - "workers/status/**"
+      - ".github/workflows/status-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: status-worker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bundle:
+    name: Bundle the status Worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: workers/status
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22" # wrangler 4.152.0 needs >= 22.0.0
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+
+  deploy:
+    name: Deploy the status Worker
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: site
+    defaults:
+      run:
+        working-directory: workers/status
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - run: npm ci --no-audit --no-fund
+      - name: Check the Cloudflare credentials
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/check-cloudflare-credentials.sh
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
+      - name: Give the Worker its secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SLOTLOCK_STATUS_GITHUB_TOKEN: ${{ secrets.SLOTLOCK_STATUS_GITHUB_TOKEN }}
+          SLOTLOCK_STATUS_HEARTBEAT_URL: ${{ secrets.SLOTLOCK_STATUS_HEARTBEAT_URL }}
+        run: |
+          secrets=$(node -e '
+            const names = ["SLOTLOCK_STATUS_GITHUB_TOKEN", "SLOTLOCK_STATUS_HEARTBEAT_URL"];
+            const set = Object.fromEntries(names.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
+            process.stdout.write(Object.keys(set).length ? JSON.stringify(set) : "");
+          ')
+          if [ -z "$secrets" ]; then
+            echo "::warning title=Status Worker::No SLOTLOCK_STATUS_GITHUB_TOKEN or SLOTLOCK_STATUS_HEARTBEAT_URL on the site environment: the Worker probes and logs, but opens no issue, publishes no post and sends no heartbeat."
+            exit 0
+          fi
+          printf '%s' "$secrets" | npx wrangler secret bulk
+          echo "Set: $(printf '%s' "$secrets" | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>process.stdout.write(Object.keys(JSON.parse(s)).join(", ")))')" >> "$GITHUB_STEP_SUMMARY"
