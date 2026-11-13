@@ -23,8 +23,9 @@ and [pricing](https://slotlock.pylota.io/pricing/). There are three ways to run 
 
 - **[Slotlock Cloud](docs/hosted/README.md)**: nothing to run. Sign in with GitHub or Google at
   `https://app.slotlock.pylota.io/dashboard`, create a key, and connect an agent to
-  `https://slotlock-api.pylota.io/mcp`. Free while it is a preview, best effort, with no service
-  level agreement.
+  `https://slotlock-api.pylota.io/mcp`. Start on Free, with no card; Developer and Team add room
+  for agents in production ([pricing](https://slotlock.pylota.io/pricing/)). Best effort, with no
+  service level agreement.
 - **[Self-host with Docker](#self-host-with-docker)**, or from npm with
   [Self-hosting](https://slotlock.pylota.io/docs/self-host/).
 - **[As a TypeScript library](#quick-start-the-next-free-slot)** inside your own Node.js service.
