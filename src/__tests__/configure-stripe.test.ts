@@ -1,7 +1,7 @@
 // scripts/configure-stripe.mjs against a stand-in for Stripe's API: it creates the two products, the
-// four GBP prices by lookup key, the webhook and the portal settings once; moves a lookup key off a
-// price of the old amount and archives that price; keeps everything on a second run; changes nothing
-// on --dry-run; and never prints the webhook's signing secret.
+// four GBP prices by lookup key, the webhook and a portal configuration for each plan once; moves a
+// lookup key off a price of the old amount and archives that price; keeps everything on a second
+// run; changes nothing on --dry-run; and never prints the webhook's signing secret.
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type IncomingMessage, type Server, createServer } from 'node:http';
@@ -24,10 +24,25 @@ interface Price {
   lookup_key: string | null;
   active: boolean;
 }
-let products: { id: string; name: string; tax_code: string | null; metadata: Record<string, string> }[] = [];
+let products: { id: string; name: string; tax_code: string | null; metadata: Record<string, string>; default_price?: string | null }[] = [];
 let prices: Price[] = [];
 let endpoints: { id: string; url: string; status: string; enabled_events: string[] }[] = [];
-let portals: { id: string; is_default: boolean; body?: Record<string, string> }[] = [];
+interface Portal {
+  id: string;
+  is_default: boolean;
+  metadata?: Record<string, string>;
+  features?: {
+    subscription_update?: {
+      enabled?: boolean;
+      products?: { product: string; prices: string[]; adjustable_quantity?: { enabled: boolean } }[];
+      proration_behavior?: string;
+    };
+    subscription_cancel?: { mode?: string };
+    invoice_history?: { enabled?: boolean };
+  };
+  [field: string]: unknown;
+}
+let portals: Portal[] = [];
 const writes: { path: string; body: Record<string, string> }[] = [];
 let server: Server;
 let base = '';
@@ -37,6 +52,21 @@ async function body(request: IncomingMessage) {
   let text = '';
   for await (const chunk of request) text += chunk;
   return Object.fromEntries(new URLSearchParams(text));
+}
+
+/** Stripe's form fields (a[b][0][c]=…) as the nested object Stripe stores and returns. */
+function nested(fields: Record<string, string>) {
+  const out: Record<string, unknown> = {};
+  for (const [name, raw] of Object.entries(fields)) {
+    const keys = name.replace(/\]/g, '').split('[');
+    let node = out as Record<string, unknown>;
+    keys.forEach((key, index) => {
+      const next = keys[index + 1];
+      if (next === undefined) node[key] = raw === 'true' ? true : raw === 'false' ? false : raw;
+      else node = (node[key] ??= /^\d+$/.test(next) ? [] : {}) as Record<string, unknown>;
+    });
+  }
+  return out;
 }
 
 beforeAll(async () => {
@@ -49,12 +79,22 @@ beforeAll(async () => {
     if (request.method === 'GET') {
       if (path === 'balance') return send(200, { object: 'balance', livemode: false });
       if (path === 'products') return send(200, { data: products.filter(() => true) });
+      if (path === 'prices' && url.searchParams.has('product')) {
+        const product = url.searchParams.get('product');
+        return send(200, { data: prices.filter((price) => price.product === product && price.active) });
+      }
       if (path === 'prices') {
         const keys = url.searchParams.getAll('lookup_keys[]');
         return send(200, { data: prices.filter((price) => price.lookup_key && keys.includes(price.lookup_key)) });
       }
       if (path === 'webhook_endpoints') return send(200, { data: endpoints });
-      if (path === 'billing_portal/configurations') return send(200, { data: portals });
+      if (path === 'billing_portal/configurations') {
+        // As Stripe: a configuration's products only when expanded.
+        if (url.searchParams.getAll('expand[]').includes('data.features.subscription_update.products')) return send(200, { data: portals });
+        const bare = structuredClone(portals);
+        for (const portal of bare) delete portal.features?.subscription_update?.products;
+        return send(200, { data: bare });
+      }
       return send(404, { error: { message: 'unknown' } });
     }
     const fields = await body(request);
@@ -68,6 +108,7 @@ beforeAll(async () => {
       const product = products.find((item) => item.id === path.split('/')[1]);
       if (product) {
         product.tax_code = fields.tax_code ?? product.tax_code;
+        product.default_price = fields.default_price ?? product.default_price;
         if (fields['metadata[slotlock_plan]']) product.metadata = { slotlock_plan: fields['metadata[slotlock_plan]'] };
       }
       return send(200, product ?? {});
@@ -88,6 +129,10 @@ beforeAll(async () => {
     }
     if (path.startsWith('prices/')) {
       const price = prices.find((item) => item.id === path.split('/')[1]);
+      // As Stripe: a product's default price cannot be archived.
+      if (price && fields.active === 'false' && products.some((product) => product.default_price === price.id)) {
+        return send(400, { error: { message: 'This price cannot be archived because it is the default price of its product.' } });
+      }
       if (price && fields.active === 'false') price.active = false;
       return send(200, price ?? {});
     }
@@ -98,10 +143,18 @@ beforeAll(async () => {
       return send(200, { ...endpoint, secret: SIGNING_SECRET });
     }
     if (path.startsWith('webhook_endpoints/')) return send(200, {});
-    if (path.startsWith('billing_portal/configurations')) {
-      const id = path.split('/')[2];
-      const portal = portals.find((item) => item.id === id);
-      if (portal) portal.body = fields;
+    if (path === 'billing_portal/configurations') {
+      // Made through the API, a configuration is never the default.
+      const portal: Portal = { id: `bpc_${portals.length + 1}`, is_default: false, ...nested(fields) };
+      portals.push(portal);
+      return send(200, portal);
+    }
+    if (path.startsWith('billing_portal/configurations/')) {
+      const portal = portals.find((item) => item.id === path.split('/')[2]);
+      if (portal) {
+        const changed = nested(fields) as Partial<Portal>;
+        Object.assign(portal, changed, { metadata: { ...portal.metadata, ...changed.metadata } });
+      }
       return send(200, portal ?? {});
     }
     return send(404, { error: { message: 'unknown' } });
@@ -116,10 +169,12 @@ afterAll(() => {
 });
 beforeEach(() => {
   // As the sandbox stood on 13 November 2026: Developer in dollars, no Team, no webhook.
-  products = [{ id: 'prod_dev', name: 'Slotlock Developer', tax_code: 'txcd_10103001', metadata: {} }];
+  // The monthly dollar price is the product's default, and an overage price is metered.
+  products = [{ id: 'prod_dev', name: 'Slotlock Developer', tax_code: 'txcd_10103001', metadata: {}, default_price: 'price_usd_m' }];
   prices = [
     { id: 'price_usd_m', product: 'prod_dev', unit_amount: 1000, currency: 'usd', recurring: { interval: 'month', usage_type: 'licensed' }, lookup_key: 'slotlock_developer_monthly', active: true },
     { id: 'price_usd_y', product: 'prod_dev', unit_amount: 10000, currency: 'usd', recurring: { interval: 'year', usage_type: 'licensed' }, lookup_key: 'slotlock_developer_yearly', active: true },
+    { id: 'price_overage', product: 'prod_dev', unit_amount: 0, currency: 'usd', recurring: { interval: 'month', usage_type: 'metered' }, lookup_key: null, active: true },
   ];
   endpoints = [];
   portals = [{ id: 'bpc_1', is_default: true }];
@@ -156,11 +211,14 @@ describe('configure-stripe.mjs', () => {
     const result = await run(['--dashboard-worker', 'slotlock-dashboard'], { SLOTLOCK_WRANGLER: wrangler });
     expect(result.code, result.output).toBe(0);
     // Developer kept and tagged; Team created with the SaaS tax code.
-    expect(products.map((product) => [product.name, product.tax_code])).toEqual([
-      ['Slotlock Developer', 'txcd_10103001'],
-      ['Slotlock Team', 'txcd_10103001'],
+    // Each product's default price is its monthly one.
+    expect(products.map((product) => [product.name, product.tax_code, product.default_price])).toEqual([
+      ['Slotlock Developer', 'txcd_10103001', 'price_4'],
+      ['Slotlock Team', 'txcd_10103001', 'price_6'],
     ]);
-    const active = prices.filter((price) => price.active).map((price) => [price.lookup_key, price.unit_amount, price.currency, price.recurring.interval]);
+    const active = prices
+      .filter((price) => price.active && price.recurring.usage_type === 'licensed')
+      .map((price) => [price.lookup_key, price.unit_amount, price.currency, price.recurring.interval]);
     expect(active).toEqual([
       ['slotlock_developer_monthly', 500, 'gbp', 'month'],
       ['slotlock_developer_yearly', 5000, 'gbp', 'year'],
@@ -168,9 +226,11 @@ describe('configure-stripe.mjs', () => {
       ['slotlock_team_yearly', 15000, 'gbp', 'year'],
     ]);
     // The dollar prices lost their lookup keys and were archived, not deleted.
+    // The metered overage price is left alone.
     expect(prices.filter((price) => price.currency === 'usd').map((price) => [price.id, price.lookup_key, price.active])).toEqual([
       ['price_usd_m', null, false],
       ['price_usd_y', null, false],
+      ['price_overage', null, true],
     ]);
     expect(endpoints).toEqual([
       {
@@ -191,17 +251,49 @@ describe('configure-stripe.mjs', () => {
     expect(call()).toEqual({ args: ['secret', 'put', 'STRIPE_WEBHOOK_SECRET', '--name', 'slotlock-dashboard'], input: SIGNING_SECRET });
     expect(result.output).not.toContain(SIGNING_SECRET);
     expect(result.output).not.toContain(KEY);
-    expect(portals[0]?.body).toMatchObject({
-      default_return_url: 'https://app.slotlock.pylota.io/dashboard',
-      'features[subscription_cancel][mode]': 'at_period_end',
-      'features[invoice_history][enabled]': 'true',
+    // The default configuration offers no switching; each plan's switches between its own prices
+    // only: Developer never to Team, nor Team to Developer.
+    expect(portals.map((portal) => [portal.id, portal.is_default, portal.metadata?.slotlock_plan, portal.features?.subscription_update])).toEqual([
+      ['bpc_1', true, undefined, { enabled: false, products: '' }],
+      [
+        'bpc_2',
+        false,
+        'developer',
+        expect.objectContaining({
+          enabled: true,
+          products: [{ product: 'prod_dev', prices: ['price_4', 'price_5'], adjustable_quantity: { enabled: false } }],
+          proration_behavior: 'always_invoice',
+        }),
+      ],
+      [
+        'bpc_3',
+        false,
+        'team',
+        expect.objectContaining({
+          enabled: true,
+          products: [{ product: 'prod_2', prices: ['price_6', 'price_7'], adjustable_quantity: { enabled: false } }],
+          proration_behavior: 'always_invoice',
+        }),
+      ],
+    ]);
+    for (const portal of portals) {
+      expect(portal).toMatchObject({
+        default_return_url: 'https://app.slotlock.pylota.io/dashboard',
+        features: { subscription_cancel: { mode: 'at_period_end' }, invoice_history: { enabled: true } },
+      });
+    }
+    // Yearly to monthly waits for the end of the year paid for.
+    expect(portals[1]?.features?.subscription_update).toMatchObject({
+      schedule_at_period_end: { conditions: [{ type: 'decreasing_item_amount' }, { type: 'shortening_interval' }] },
     });
     // The variables the dashboard Worker needs.
     for (const line of [
-      'SLOTLOCK_STRIPE_PRICE_MONTHLY=price_3',
-      'SLOTLOCK_STRIPE_PRICE_YEARLY=price_4',
-      'SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY=price_5',
-      'SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY=price_6',
+      'SLOTLOCK_STRIPE_PRICE_MONTHLY=price_4',
+      'SLOTLOCK_STRIPE_PRICE_YEARLY=price_5',
+      'SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY=price_6',
+      'SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY=price_7',
+      'SLOTLOCK_STRIPE_PORTAL_DEVELOPER=bpc_2',
+      'SLOTLOCK_STRIPE_PORTAL_TEAM=bpc_3',
     ]) {
       expect(result.output).toContain(line);
     }
@@ -212,17 +304,40 @@ describe('configure-stripe.mjs', () => {
     writes.length = 0;
     const again = await run([]);
     expect(again.code, again.output).toBe(0);
-    // Only the portal is written again; no product, price or webhook.
-    expect(writes.map((write) => write.path)).toEqual(['billing_portal/configurations/bpc_1']);
-    expect(again.output).toContain('kept the price slotlock_team_yearly (price_6): £150 a year');
+    expect(writes).toEqual([]);
+    expect(again.output).toContain('kept the price slotlock_team_yearly (price_7): £150 a year');
     expect(again.output).toContain('kept the webhook endpoint https://app.slotlock.pylota.io/stripe/webhook (we_1)');
+    expect(again.output).toContain('kept the Slotlock Team customer portal configuration (bpc_3)');
+    expect(again.output).toContain('Everything was already set.');
+    expect(again.output).toContain('SLOTLOCK_STRIPE_PORTAL_TEAM=bpc_3');
+  });
+
+  it('puts a plan\'s portal back to its own prices when they change, and never makes a default', async () => {
+    portals = [];
+    await run([]);
+    // Only the Dashboard makes the default: the script says so rather than adding one each run.
+    expect(portals.map((portal) => portal.metadata?.slotlock_plan)).toEqual(['developer', 'team']);
+    // Someone offers Team in the Developer portal by hand: the next run takes it out again.
+    const developer = portals[0] as Portal;
+    developer.features = { ...developer.features, subscription_update: { enabled: true, products: [{ product: 'prod_2', prices: ['price_6'] }] } };
+    writes.length = 0;
+    const again = await run([]);
+    expect(again.output).toContain('note: the account has no default customer portal configuration');
+    expect(again.output).toContain(`update the Slotlock Developer customer portal configuration (${developer.id})`);
+    expect(writes.map((write) => write.path)).toEqual([`billing_portal/configurations/${developer.id}`]);
+    expect(developer.features?.subscription_update?.products).toEqual([
+      { product: 'prod_dev', prices: ['price_4', 'price_5'], adjustable_quantity: { enabled: false } },
+    ]);
   });
 
   it('changes nothing on --dry-run, and says where the secret is without a dashboard Worker', async () => {
     const dry = await run(['--dry-run']);
     expect(dry.code, dry.output).toBe(0);
-    expect(dry.output).toContain('would create the price slotlock_developer_monthly: £5 a month, moving its lookup key from price_usd_m (10 USD), which is archived');
+    expect(dry.output).toContain('would create the price slotlock_developer_monthly: £5 a month, moving its lookup key from price_usd_m (10 USD)');
+    expect(dry.output).toContain('would archive the price price_usd_m of Slotlock Developer (10 USD a month)');
+    expect(dry.output).not.toContain('price_overage');
     expect(dry.output).toContain('would create the product Slotlock Team');
+    expect(dry.output).toContain('would create the Slotlock Team customer portal configuration');
     expect(dry.output).toContain('Nothing was changed.');
     expect(writes).toEqual([]);
     const real = await run([]);

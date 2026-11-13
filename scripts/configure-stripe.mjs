@@ -8,15 +8,22 @@
 //        slotlock_developer_monthly  £5 a month    slotlock_team_monthly  £15 a month
 //        slotlock_developer_yearly   £50 a year    slotlock_team_yearly   £150 a year
 //      A lookup key held by a price of another amount or currency moves to a new price
-//      (transfer_lookup_key), and the old price is archived: subscriptions on it carry on, and no
-//      one new can buy it.
+//      (transfer_lookup_key). Each product's default price becomes its monthly one, and every other
+//      licensed price of the product is archived: subscriptions on it carry on, and no one new can
+//      buy it. Metered prices (overage) are left alone.
 //   3. The webhook endpoint at <dashboard>/stripe/webhook, with every event the dashboard acts on.
 //      Its signing secret exists only when Stripe creates the endpoint: with --dashboard-worker
 //      <name>, it goes to that Worker as STRIPE_WEBHOOK_SECRET through `wrangler secret put`, on
 //      stdin; without, the script says where Stripe shows it. It is never printed.
-//   4. The customer portal's default configuration: invoices, payment methods and cancelling at the
-//      end of the period. Changing plan stays on the dashboard's Plan page.
-// Then it prints the four price ids for the dashboard Worker's SLOTLOCK_STRIPE_PRICE_* variables.
+//   4. The customer portal. One configuration for each plan, found by its `slotlock_plan` metadata:
+//      invoices, payment methods, cancelling at the end of the period, and switching between that
+//      plan's own monthly and yearly prices, never to the other plan (a Team is a shared
+//      workspace's, Developer a person's). Monthly to yearly is charged at once, less the unused
+//      part of the month; yearly to monthly waits for the end of the year paid for (TERMS.md: no
+//      refunds for part of a period). The account's default configuration, used by any session that
+//      names none, offers no switching at all.
+// Then it prints the dashboard Worker's variables: the four SLOTLOCK_STRIPE_PRICE_* price ids and
+// the two SLOTLOCK_STRIPE_PORTAL_* configuration ids.
 //
 //   STRIPE_SECRET_KEY=<sk_test_… or sk_live_…> node scripts/configure-stripe.mjs [--dry-run]
 //     [--dashboard https://app.slotlock.pylota.io] [--dashboard-worker slotlock-dashboard]
@@ -120,6 +127,8 @@ async function main() {
 
   const products = (await stripe('GET', 'products?limit=100&active=true')).data ?? [];
   const ids = {};
+  /** Each plan's product id, and its prices' ids by interval, for the portal configurations. */
+  const catalog = {};
   for (const spec of PLANS) {
     let product =
       products.find((item) => item.metadata?.slotlock_plan === spec.plan) ?? products.find((item) => item.name === spec.name);
@@ -164,9 +173,9 @@ async function main() {
         continue;
       }
       const created = await change(
-        `create the price ${price.lookup}: £${price.amount / 100} a ${price.interval}${held ? `, moving its lookup key from ${held.id} (${held.unit_amount / 100} ${held.currency.toUpperCase()}), which is archived` : ''}`,
-        async () => {
-          const made = await stripe('POST', 'prices', {
+        `create the price ${price.lookup}: £${price.amount / 100} a ${price.interval}${held ? `, moving its lookup key from ${held.id} (${held.unit_amount / 100} ${held.currency.toUpperCase()})` : ''}`,
+        () =>
+          stripe('POST', 'prices', {
             product: product.id,
             currency: CURRENCY,
             unit_amount: price.amount,
@@ -176,13 +185,33 @@ async function main() {
             transfer_lookup_key: true,
             nickname: price.nickname,
             metadata: { slotlock_plan: spec.plan },
-          });
-          if (held?.active) await stripe('POST', `prices/${held.id}`, { active: false });
-          return made;
-        },
+          }),
       );
       ids[price.variable] = created?.id ?? `(new ${price.lookup})`;
     }
+    if (product) {
+      // Stripe archives no product's default price: the monthly one becomes the default first.
+      const monthly = ids[spec.prices[0].variable];
+      const current = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
+      if (current !== monthly) {
+        await change(`make ${spec.prices[0].lookup} the default price of ${spec.name}`, () =>
+          stripe('POST', `products/${product.id}`, { default_price: monthly }),
+        );
+      }
+      const wantedIds = spec.prices.map((price) => ids[price.variable]);
+      const others = (await stripe('GET', `prices?product=${encodeURIComponent(product.id)}&active=true&limit=100`)).data ?? [];
+      for (const old of others) {
+        if (wantedIds.includes(old.id) || !old.recurring || old.recurring.usage_type === 'metered') continue;
+        await change(
+          `archive the price ${old.id} of ${spec.name} (${old.unit_amount / 100} ${old.currency.toUpperCase()} a ${old.recurring.interval}): subscriptions on it carry on`,
+          () => stripe('POST', `prices/${old.id}`, { active: false }),
+        );
+      }
+    }
+    catalog[spec.plan] = {
+      product: product?.id ?? `(new ${spec.name})`,
+      prices: spec.prices.map((price) => ids[price.variable]),
+    };
   }
 
   // The webhook endpoint.
@@ -207,42 +236,119 @@ async function main() {
     }
   }
 
-  await portal();
+  const portalIds = await portals(catalog);
 
   console.log(`\n${dryRun ? 'Nothing was changed.' : `${changes.length ? 'Done.' : 'Everything was already set.'}`} The dashboard Worker's variables (${mode}):`);
   for (const spec of PLANS) for (const price of spec.prices) console.log(`  ${price.variable}=${ids[price.variable]}`);
+  for (const spec of PLANS) console.log(`  ${portalVariable(spec.plan)}=${portalIds[spec.plan]}`);
 }
 
-/** The customer portal's default configuration. */
-async function portal() {
-  const configurations = (await stripe('GET', 'billing_portal/configurations?limit=10')).data ?? [];
-  const current = configurations.find((item) => item.is_default) ?? configurations[0];
-  const wanted = {
-    business_profile: { headline: 'Slotlock Cloud: your plan and invoices' },
+const portalVariable = (plan) => `SLOTLOCK_STRIPE_PORTAL_${plan.toUpperCase()}`;
+
+/** A portal configuration: everything but switching, which only a plan's own configuration offers. */
+function portalConfiguration(headline, subscriptionUpdate) {
+  return {
+    business_profile: { headline },
     default_return_url: `${dashboard}/dashboard`,
     features: {
-      customer_update: { enabled: true, allowed_updates: ['email', 'address', 'tax_id'] },
+      customer_update: { enabled: true, allowed_updates: ['address', 'email', 'tax_id'] },
       invoice_history: { enabled: true },
       payment_method_update: { enabled: true },
       subscription_cancel: { enabled: true, mode: 'at_period_end', proration_behavior: 'none' },
-      // Plan changes stay on the dashboard's Plan page, which knows whose workspace each plan is
-      // for; the portal does not offer them.
-      subscription_update: { enabled: false },
+      subscription_update: subscriptionUpdate,
     },
   };
-  if (!current) {
-    await change('create the customer portal configuration', () => stripe('POST', 'billing_portal/configurations', wanted));
-    return;
+}
+
+/** What a configuration does, in a form that compares equal however Stripe orders it. */
+function portalShape(configuration) {
+  const features = configuration?.features ?? {};
+  const update = features.subscription_update ?? {};
+  const cancel = features.subscription_cancel ?? {};
+  return JSON.stringify({
+    headline: configuration?.business_profile?.headline ?? null,
+    returnUrl: configuration?.default_return_url ?? null,
+    customer: features.customer_update?.enabled ? [...(features.customer_update.allowed_updates ?? [])].sort() : null,
+    invoices: Boolean(features.invoice_history?.enabled),
+    paymentMethods: Boolean(features.payment_method_update?.enabled),
+    cancel: cancel.enabled ? [cancel.mode, cancel.proration_behavior] : null,
+    update: update.enabled
+      ? {
+          allowed: [...(update.default_allowed_updates ?? [])].sort(),
+          proration: update.proration_behavior ?? null,
+          products: (update.products ?? []).map((item) => [item.product, [...(item.prices ?? [])].sort(), Boolean(item.adjustable_quantity?.enabled)]),
+          atPeriodEnd: (update.schedule_at_period_end?.conditions ?? []).map((condition) => condition.type).sort(),
+        }
+      : null,
+  });
+}
+
+/**
+ * The customer portal: the account's default configuration, without switching, and one
+ * configuration for each plan that switches between that plan's prices only. Returns each plan's
+ * configuration id.
+ */
+async function portals(catalog) {
+  // Stripe leaves out each configuration's products unless asked for them.
+  const configurations =
+    (await stripe('GET', 'billing_portal/configurations?limit=100&active=true&expand[]=data.features.subscription_update.products')).data ?? [];
+  const wanted = [
+    {
+      what: 'the default customer portal configuration',
+      current: configurations.find((item) => item.is_default),
+      // Only a session that names no configuration gets it: one the dashboard did not open.
+      // An empty `products` clears any list it had: Stripe checks one even when switching is off.
+      body: portalConfiguration('Slotlock Cloud: your plan and invoices', { enabled: false, products: '' }),
+    },
+    ...PLANS.map((spec) => ({
+      plan: spec.plan,
+      what: `the ${spec.name} customer portal configuration`,
+      current: configurations.find((item) => item.metadata?.slotlock_plan === spec.plan),
+      body: {
+        ...portalConfiguration(`${spec.name}: your plan and invoices`, {
+          enabled: true,
+          default_allowed_updates: ['price'],
+          // One of a plan, not two: Stripe offers the quantity unless told not to.
+          products: [{ product: catalog[spec.plan].product, prices: catalog[spec.plan].prices, adjustable_quantity: { enabled: false } }],
+          // Monthly to yearly is charged at once, less what is left of the month.
+          proration_behavior: 'always_invoice',
+          // Yearly to monthly waits for the end of the year paid for: nothing is refunded.
+          schedule_at_period_end: { conditions: [{ type: 'decreasing_item_amount' }, { type: 'shortening_interval' }] },
+        }),
+        metadata: { slotlock_plan: spec.plan },
+      },
+    })),
+  ];
+  const ids = {};
+  for (const { plan, what, current, body } of wanted) {
+    if (!current && !plan) {
+      // Only the Dashboard makes the default: one created here would not be, and the next run
+      // would create another. The dashboard's sessions name a plan's configuration, so this is
+      // only for sessions that name none.
+      console.log(
+        `note: the account has no default customer portal configuration. Save the portal settings once in Stripe (Settings > Billing > Customer portal), with switching plans off, and run this again.`,
+      );
+      continue;
+    }
+    if (!current) {
+      const made = await change(`create ${what}`, () => stripe('POST', 'billing_portal/configurations', body));
+      if (plan) ids[plan] = made?.id ?? `(new ${plan} configuration)`;
+      continue;
+    }
+    if (plan) ids[plan] = current.id;
+    if (portalShape(current) === portalShape(body)) {
+      console.log(`kept ${what} (${current.id})`);
+      continue;
+    }
+    await change(`update ${what} (${current.id})`, () => stripe('POST', `billing_portal/configurations/${current.id}`, body));
   }
-  await change(`update the customer portal configuration (${current.id})`, () =>
-    stripe('POST', `billing_portal/configurations/${current.id}`, wanted),
-  );
+  return ids;
 }
 
 function storeSecret(secret) {
   if (!dashboardWorker) {
     console.log(
-      `  Its signing secret is shown once, in Stripe: Developers > Webhooks > ${dashboard}/stripe/webhook > Signing secret. Set it as the dashboard Worker's STRIPE_WEBHOOK_SECRET.`,
+      `  Stripe shows its signing secret at Developers > Webhooks > ${dashboard}/stripe/webhook > Signing secret. Set it as the dashboard Worker's STRIPE_WEBHOOK_SECRET.`,
     );
     return;
   }
