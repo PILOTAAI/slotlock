@@ -651,7 +651,7 @@ export const source = {
 /** What a plan costs, in words, from facts.plans; "free while in preview" before plans exist. */
 const priceAnswer =
   developerPlan && teamPlan
-    ? `Slotlock Cloud starts free, with no card. Developer is ${developerPlan.symbol}${developerPlan.monthly} a month and Team ${teamPlan.symbol}${teamPlan.monthly} a month for the whole organization; running it yourself costs nothing ([pricing](/pricing/)).`
+    ? `Slotlock Cloud starts free, with no card. Developer is ${developerPlan.symbol}${developerPlan.monthly} a month and Team ${teamPlan.symbol}${teamPlan.monthly} a month for a whole team workspace or organization; running it yourself costs nothing ([pricing](/pricing/)).`
     : 'Slotlock Cloud is free while it is in preview, and running it yourself costs nothing ([pricing](/pricing/)).';
 
 /**

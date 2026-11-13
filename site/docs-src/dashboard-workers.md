@@ -52,18 +52,41 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 | --- | --- | --- | --- | --- |
 | Free | 10 | 10 | 2 | Free |
 | Developer | 100 | 100 | 10 | £5 a month or £50 a year |
-| Team (an organization's) | 500 | 100 | 25 | £15 a month or £150 a year, for the organization |
+| Team (a shared workspace's) | 500 | 100 | 25 | £15 a month or £150 a year, for the workspace |
 | Custom | Your servers | | | Talk to the founder |
 
-With `STRIPE_SECRET_KEY`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_YEARLY` (the
-Developer prices' ids), the dashboard's **Usage** page sells plans: **Upgrade**
-(a Stripe Checkout with Managed Payments, Stripe as merchant of record) and **Manage billing** (the
-Stripe customer portal). Point a Stripe webhook endpoint at `<SLOTLOCK_PUBLIC_URL>/stripe/webhook`
-with the `checkout.session.completed` and `customer.subscription.*` events and store its signing
-secret as `STRIPE_WEBHOOK_SECRET`. Each signed event makes the Worker read the subscription from
-Stripe and set the tenant's plan: `active` or `trialing` gives Developer, `past_due` keeps it while
-Stripe retries, anything else returns the tenant to Free. Nothing is deleted when a plan ends; the
-tenant cannot add more until it is under the Free limits.
+`scripts/configure-stripe.mjs` sets up the Stripe account, the same way in the sandbox and in live
+mode, and changes only what differs when run again: the Developer and Team products (with the tax
+code Managed Payments needs), their four prices in pounds by lookup key, the webhook endpoint, and a
+customer portal configuration for each plan. It prints the Worker's `SLOTLOCK_STRIPE_PRICE_*` and
+`SLOTLOCK_STRIPE_PORTAL_*` values; with `--dashboard-worker`, it stores the new webhook endpoint's
+signing secret on the Worker through `wrangler secret put`, and never prints it. Its key needs write
+access to Products, Prices, Webhook Endpoints and the customer portal; the Worker's key does not.
+
+```sh
+STRIPE_SECRET_KEY=sk_live_… node scripts/configure-stripe.mjs --dry-run   # what it would change
+STRIPE_SECRET_KEY=sk_live_… node scripts/configure-stripe.mjs --dashboard-worker slotlock-dashboard
+```
+
+With `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and
+`SLOTLOCK_STRIPE_PRICE_YEARLY` (the Developer prices' ids), the dashboard's **Usage** page sells
+plans: **Upgrade** (a Stripe Checkout with Managed Payments, Stripe as merchant of record) and
+**Manage billing** (the Stripe customer portal). The Worker refuses to start with the key and prices
+but without `STRIPE_WEBHOOK_SECRET`, since a buyer would then be charged and stay on Free. The
+webhook endpoint is `<SLOTLOCK_PUBLIC_URL>/stripe/webhook`, with the events
+`checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`,
+`customer.subscription.deleted`, `invoice.paid` and `invoice.payment_failed`. Each signed event
+makes the Worker read the subscription from Stripe and set the tenant's plan: `active` or
+`trialing` gives the plan, `past_due` keeps it while Stripe retries (a failed payment is shown to
+the people who run the service, and closed when it is paid), anything else returns the tenant to
+Free. A customer with a subscription that is live or `unpaid` cannot start a second one. Nothing is
+deleted when a plan ends; the tenant cannot add more until it is under the Free limits.
+
+`SLOTLOCK_STRIPE_PORTAL_DEVELOPER` and `SLOTLOCK_STRIPE_PORTAL_TEAM` (portal configuration ids,
+`bpc_…`) open **Manage billing** in the plan's own configuration. It switches between that plan's
+monthly and yearly prices only, never to the other plan: to yearly at once, less what is left of the
+month; to monthly at the end of the year paid for. It cancels at the end of the period. Without
+them, the account's default configuration applies, which the script leaves without switching.
 
 **Metered overage for Developer** is off. Stripe's test mode takes it: a Managed Payments Checkout
 Session with the Developer price and a metered price on a Billing Meter is created, with Managed
@@ -88,14 +111,18 @@ never billed twice (a run that stops halfway bills too little, and the next run 
 on it). An event Stripe already took, whose answer was lost, counts as sent when it is sent again.
 It exits 1 while an event was not taken; run it again.
 
-The Team plan is an organization's (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`): 500
-resources, 100 keys and 25 webhook endpoints, and monthly quotas its members share (2,000,000
-operations and 100,000 bookings, stopping at 110%), for £15 a month or £150 a year whatever the
-number of members. It is offered once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and
-`SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price ids) are set; `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and
-`SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the prices shown (£15 and £150 by default); an
-organization's owner then sees Upgrade to Team instead of Developer, and a subscription at a Team
-price gives Team, including one changed to it in the customer portal.
+The Team plan is a shared workspace's: a team workspace (`SLOTLOCK_DASHBOARD_TEAM_WORKSPACES`) or
+an organization (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`). It has 500 resources, 100 keys
+and 25 webhook endpoints, and monthly quotas its members share (2,000,000 operations and 100,000
+bookings, stopping at 110%), for £15 a month or £150 a year whatever the number of members. It is
+sold once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price
+ids) are set; `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and `SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the
+prices shown (£15 and £150 by default). A shared workspace is offered Team only, never Developer,
+whose limits are a person's: without the Team prices its owners are asked to get in touch, and a
+checkout is refused. A subscription gives Team when its price is one of those ids, or says it is
+Team's (a lookup key starting `slotlock_team_`, or `slotlock_plan: team` in its or its product's
+metadata, as the script sets), so a Team price made later still gives Team. Only Team lifts a team
+workspace's limit of 3 people, and a person's limit of one team workspace.
 
 Without Stripe, **Usage** still shows each tenant's plan, limits and use (with `SLOTLOCK_USAGE` and
 `SLOTLOCK_QUOTAS`, as on the server), and an owner asks for another plan at `SLOTLOCK_PLAN_CONTACT`.

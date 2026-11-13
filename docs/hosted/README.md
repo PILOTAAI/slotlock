@@ -45,13 +45,13 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 | Webhook endpoints | 2 | 10 | 25 | |
 | Operations a month | 25,000 | 500,000 | 2,000,000, shared | |
 | Bookings a month | 1,000 | 25,000 | 100,000, shared | |
-| People in a team workspace | Up to 3, open invitations included | | No limit | |
+| People in a team workspace | Up to 3, open invitations included | Up to 3, as on Free | No limit | |
 
 **Team** is for a shared workspace: a team workspace you create on the dashboard's **Teams** page,
 or a GitHub organization an owner has turned Slotlock on for (the dashboard's Teams
 page). Everyone in it shares its resources, keys and history, and its price does not change with how
 many people use it. On Free, each person may create one team workspace, with up to 3 people, open
-invitations included; Team lifts that limit. Only the workspace's Owners and Billing managers buy or
+invitations included; Developer, a person's plan, does not change that, and Team lifts the limit. Only the workspace's Owners and Billing managers buy or
 manage it.
 
 Every account starts on Free. Upgrade on the dashboard's **Plan** page: Stripe takes the payment as

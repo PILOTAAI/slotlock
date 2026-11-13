@@ -121,7 +121,7 @@ export function offers() {
       '@type': 'Offer',
       name: 'Self-hosted (Apache-2.0)',
       price: '0',
-      priceCurrency: plans[0]?.currency ?? 'USD',
+      priceCurrency: plans[0]?.currency ?? 'GBP',
       url: `${SITE}/open-source/`,
     },
   ];
