@@ -17,6 +17,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+// The version goes into every registry's URL: it must be a plain semantic version.
+if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/.test(version)) {
+  console.error(`package.json's version is not a semantic version: ${JSON.stringify(version)}`);
+  process.exit(2);
+}
+/** A post's slug, as post-format.ts allows it: the only file names that go into a URL. */
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const OWNER = 'PILOTAAI';
 const REPO = 'slotlock';
 const URLS = {
@@ -204,6 +211,10 @@ await check('status', async () => {
 const blog = join(root, 'site', 'content', 'blog');
 for (const file of readdirSync(blog).filter((name) => name.endsWith('.md')).sort()) {
   const slug = file.slice(0, -'.md'.length);
+  if (!SLUG.test(slug)) {
+    fail('blog', `content/blog/${file} is not named as a post slug`);
+    continue;
+  }
   const text = readFileSync(join(blog, file), 'utf8');
   const head = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1] ?? '';
   const status = /^status:[ \t]*(\S+)/m.exec(head)?.[1];
@@ -262,7 +273,14 @@ const failed = results.filter((result) => result.state === 'FAIL').length;
 const warned = results.filter((result) => result.state === 'WARN').length;
 console.log(`\n${results.length} checks against ${version}: ${failed} failed, ${warned} warnings.`);
 if (process.env.GITHUB_STEP_SUMMARY) {
-  const rows = results.map(({ state, area, detail }) => `| ${state} | ${area} | ${detail.replaceAll('|', '\\|')} |`);
+  // Details carry text from the network (an issue's title, a registry's answer): one line, at most
+  // 300 characters, with no Markdown that could add a link, an image or HTML to the summary.
+  const cell = (text) =>
+    text
+      .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+      .slice(0, 300)
+      .replace(/[\\|<>[\]()!`*_]/g, (character) => `\\${character}`);
+  const rows = results.map(({ state, area, detail }) => `| ${state} | ${cell(area)} | ${cell(detail)} |`);
   appendFileSync(
     process.env.GITHUB_STEP_SUMMARY,
     [`### Launch check against ${version}`, '', '| | Area | Detail |', '| --- | --- | --- |', ...rows, ''].join('\n'),

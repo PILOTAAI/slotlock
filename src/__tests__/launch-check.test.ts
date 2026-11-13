@@ -1,7 +1,8 @@
 // scripts/check-launch.mjs against a stand-in for every service it asks: it passes when all agree
 // with the release, and names each thing that does not.
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { type IncomingMessage, type Server, createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ interface World {
   mcpOpen: boolean;
   probeSkipped: boolean;
   incidents: number;
+  incidentTitle: string;
   livemode: boolean;
   events: string[];
   rejectToken: boolean;
@@ -37,6 +39,7 @@ const healthy = (): World => ({
   mcpOpen: false,
   probeSkipped: false,
   incidents: 0,
+  incidentTitle: 'Hosted Slotlock API is down',
   livemode: true,
   events: EVENTS,
   rejectToken: false,
@@ -93,7 +96,7 @@ function answer(request: IncomingMessage): [number, unknown] {
       }
       if (path.endsWith('/actions/runs/9/jobs')) return [200, { jobs: [{ conclusion: world.probeSkipped ? 'skipped' : 'success' }] }];
       if (path.endsWith('/issues')) {
-        return [200, Array.from({ length: world.incidents }, (_, index) => ({ number: 100 + index, title: 'Hosted Slotlock API is down' }))];
+        return [200, Array.from({ length: world.incidents }, (_, index) => ({ number: 100 + index, title: world.incidentTitle }))];
       }
       return [404, {}];
     case 'stripe':
@@ -202,6 +205,22 @@ describe('check-launch.mjs', () => {
     expect(result.output).toContain(`WARN api: Slotlock Cloud runs 0.0.1; the latest release is ${version}`);
     expect(result.output).toContain('WARN status: open incidents: #100 Hosted Slotlock API is down');
     expect(result.code).toBe(1);
+  });
+
+  it('writes the run summary as one plain line a check, whatever the network said', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-launch-check-'));
+    try {
+      const summary = join(dir, 'summary.md');
+      world = { ...healthy(), incidents: 1, incidentTitle: 'Down\n| x | ![beacon](https://evil.test/p.png) <b>' };
+      await run({ GITHUB_STEP_SUMMARY: summary });
+      const text = readFileSync(summary, 'utf8');
+      const line = text.split('\n').find((row) => row.startsWith('| WARN | status |')) ?? '';
+      expect(line).toContain('Down \\| x \\| \\!\\[beacon\\]\\(https://evil.test/p.png\\) \\<b\\>');
+      expect(text).not.toContain('![beacon]');
+      expect(text).not.toContain('<b>');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('skips Stripe without a key, and reads GitHub without a token GitHub refuses', async () => {
