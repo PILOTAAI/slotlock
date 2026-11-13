@@ -116,11 +116,15 @@ async function statusPage(before) {
     homepageLink: 'https://slotlock.pylota.io',
     subscription: true,
     noIndex: false,
-    sort: 'friendlyName',
+    // How the page orders its monitors: 1 is by name, A to Z (UptimeRobot takes 1 to 4 only).
+    sort: 1,
   };
   let answer = await api('POST', '/psps', { ...page, customDomain: STATUS_DOMAIN });
   let custom = true;
-  if (answer.status !== 201 && answer.status !== 200) {
+  // Only a refusal of the domain itself (a plan without custom domains) falls back to UptimeRobot's
+  // own address; any other error is the page's, and is reported as it is.
+  const aboutDomain = /domain|plan|upgrade|not allowed/i.test(JSON.stringify(answer.json?.message ?? answer.text));
+  if (answer.status !== 201 && answer.status !== 200 && aboutDomain) {
     console.log(`note:    UptimeRobot answered ${answer.status} to the custom domain (${(answer.json?.message ?? answer.text).toString().slice(0, 160)}); publishing at its own address instead.`);
     custom = false;
     answer = await api('POST', '/psps', page);

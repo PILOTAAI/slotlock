@@ -46,8 +46,12 @@ beforeAll(async () => {
     }
     if (request.method === 'GET' && url.pathname === '/v3/psps') return send(200, { data: pages, nextLink: null });
     if (request.method === 'POST' && url.pathname === '/v3/psps') {
-      const spec = (await body(request)) as { friendlyName: string; customDomain?: string; monitorIds: number[] };
-      if (spec.customDomain && refuseCustomDomain) return send(403, { message: 'Custom domains need a paid plan' });
+      const spec = (await body(request)) as { friendlyName: string; customDomain?: string; monitorIds: number[]; sort?: unknown };
+      // As UptimeRobot: the order is a number from 1 to 4, checked before the domain.
+      if (![1, 2, 3, 4].includes(spec.sort as number)) {
+        return send(400, { message: ['sort must be one of the following values: 1, 2, 3, 4'], error: 'Bad Request', statusCode: 400 });
+      }
+      if (spec.customDomain && refuseCustomDomain) return send(403, { message: 'You are not allowed to use some settings with your current plan.' });
       const page = { id: 70 + pages.length, friendlyName: spec.friendlyName, customDomain: spec.customDomain ?? null, urlKey: 'AbC123', monitorIds: spec.monitorIds };
       pages.push(page);
       return send(201, page);
