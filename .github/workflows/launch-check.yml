@@ -1,0 +1,48 @@
+# Checks, from outside, that everything Slotlock's launch depends on is live and agrees with the
+# release (scripts/check-launch.mjs): the site, the API and the dashboard; npm, PyPI, crates.io,
+# NuGet, the Go proxy, Maven Central, the MCP Registry and ghcr.io at the package's version; the
+# repository's topics, the status probe and open incidents; the blog's scheduled posts; and Stripe's
+# live prices and webhook. A failed check fails the run, and GitHub tells the owner. The run's
+# summary lists every check.
+#
+# Optional repository secret:
+#   SLOTLOCK_CHECK_STRIPE_KEY  a restricted live key with Read on Products, Prices and Webhook
+#                              Endpoints, and nothing else (Stripe > Developers > API keys > Create
+#                              restricted key). Without it, the Stripe checks are skipped.
+# Every action is pinned to a full commit SHA.
+name: Launch check
+
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launch-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check the live service and the registries
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SLOTLOCK_CHECK_STRIPE_KEY: ${{ secrets.SLOTLOCK_CHECK_STRIPE_KEY }}
+        run: node scripts/check-launch.mjs
