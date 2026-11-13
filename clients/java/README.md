@@ -10,7 +10,8 @@ server:
 implementation("io.pylota:slotlock:<version>")
 ```
 
-Java: published to Maven Central by hand after each release; if a version 404s there
+Java: published to Maven Central with each release from 0.11.0; 0.7.0 to 0.10.x were not, and
+0.10.2 is being published by hand. If a version 404s there
 (`https://repo1.maven.org/maven2/io/pylota/slotlock/<version>/`), it is pending.
 
 ```java

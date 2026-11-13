@@ -72,7 +72,8 @@ OWNER=PILOTAAI
 REPO=slotlock
 API_VERSION=2026-03-10
 HOMEPAGE=https://slotlock.pylota.io
-TOPICS='["agents","calendar","mcp","a2a","postgresql","scheduling","availability","booking"]'
+# What people search GitHub for (RFC 0005, 0.8): the MCP and agent terms first.
+TOPICS='["mcp","mcp-server","model-context-protocol","ai-agents","agents","a2a","booking","booking-api","scheduling","scheduling-api","calendar","availability","reservation-system","postgresql"]'
 
 # The checks a pull request must pass: ci.yml's "CI passed", which passes only when every other CI
 # job did (the suites on each Node.js and PostgreSQL, the image, the language clients and the
@@ -714,6 +715,10 @@ print_checklist() {
     Settings > General > Features > Discussions: https://github.com/$OWNER/$REPO/settings
     (gh repo edit $OWNER/$REPO --enable-discussions does it through a has_discussions field
     that gh 2.83.2 sends to the same endpoint, outside the documented body.)
+
+[ ] Upload the social preview (GitHub has no API for it): Settings > General > Social preview,
+    https://github.com/$OWNER/$REPO/settings. site/public/og/landing.png (1200 x 630, the
+    landing page's link preview) is above GitHub's 640 x 320 minimum and fits as it is.
 
 [ ] Create the release app once. Release a version opens and merges release pull requests with
     it, and their checks run without anyone approving them; GITHUB_TOKEN may not open them unless

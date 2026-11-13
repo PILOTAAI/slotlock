@@ -216,8 +216,8 @@ jobs:
   # only once the suite has passed and a maintainer has approved its environment
   # (scripts/configure-github.sh). PyPI, crates.io and NuGet trust this workflow and environment by
   # OIDC (trusted publishing), so no token is stored for them; Maven Central has none, so a user
-  # token in the maven-central environment uploads a deployment that a maintainer then publishes in
-  # the Central Portal; a Go module version is its tag. docs/release/clients.md has each registry's
+  # token in the maven-central environment uploads a deployment that publishes itself once Central
+  # has validated it, and the job waits until it has; a Go module version is its tag. docs/release/clients.md has each registry's
   # one-time setup, and what to do when a first publish needs it.
   pypi:
     name: PyPI (slotlock)
@@ -322,7 +322,8 @@ jobs:
     name: Maven Central (io.pylota:slotlock)
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Validation and publishing take minutes; central-bundle.sh waits up to 30 for Central's verdict.
+    timeout-minutes: 45
     environment: maven-central
     permissions:
       contents: read
@@ -343,7 +344,7 @@ jobs:
           MAVEN_SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
           MAVEN_SIGNING_PASSWORD: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
         run: gradle publishMavenPublicationToBundleRepository --console=plain
-      - name: Upload it as a deployment a maintainer publishes
+      - name: Publish it, and wait until Maven Central has it
         env:
           CENTRAL_PORTAL_TOKEN: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
           VERSION: ${{ github.ref_name }}

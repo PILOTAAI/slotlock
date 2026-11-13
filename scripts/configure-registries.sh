@@ -325,8 +325,7 @@ step_rerun() {
   [ -z "$site" ] || gh run rerun "$site" --failed --repo "$OWNER/$REPO"
   note 'Each registry job waits for your approval of its environment:'
   note "https://github.com/$OWNER/$REPO/actions${run:+/runs/$run}"
-  note 'Maven Central then holds a deployment for you to publish:'
-  note 'https://central.sonatype.com/publishing/deployments'
+  note 'Once approved, the Maven Central job publishes and waits until Central has it.'
 }
 
 wants pypi && step_pypi

@@ -7,6 +7,18 @@ versioning.
 
 ### Added
 
+- **Posts merged ahead of their date publish themselves.** The site builds a post only once its
+  `publishAt` has passed, and nothing rebuilt it at that time. `scheduled-posts.yml` checks every
+  fifteen minutes for posts that are due but not live, and starts the Site workflow when it finds
+  one (`scripts/publish-due-posts.mjs`).
+- **A launch check** (`scripts/check-launch.mjs`, run every three hours by `launch-check.yml`). It
+  checks the site, the API and the dashboard, and that every registry has the package's version:
+  npm, PyPI, crates.io, NuGet, Go, Maven Central, the MCP Registry and ghcr.io. It also checks the
+  repository's topics, the status probe, open incidents and the blog's scheduled posts. Given a
+  restricted read-only key, it checks Stripe's live prices and webhook events too. A failed check
+  fails the run.
+- **The launch post**, "Introducing Slotlock: the calendar AI agents can't double-book", published
+  at 13:00 UTC on 16 November 2026.
 - **Staff for the admin console** ([RFC 0006](docs/rfc/0006-admin-console.md), not yet live).
   `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL` grants the console's own role the admin
   functions and no table. `slotlock staff list|add|role|reset|remove`, run as the schema owner,
@@ -82,6 +94,15 @@ versioning.
 
 ### Changed
 
+- **The Java client reaches Maven Central with each release.** The release's `maven-central` job
+  now uploads a deployment that publishes itself once Central has validated it, and waits until
+  Central says it is published; it fails if Central refuses it. Approving the environment stays the
+  human gate, as for PyPI, crates.io and NuGet. Before, each deployment waited for a second click in
+  the Central Portal, and 0.7.0 to 0.10.2 were never published: Maven Central's latest is 0.6.0.
+- **`scripts/configure-github.sh` sets the topics people search GitHub for** (RFC 0005, 0.8):
+  `mcp-server`, `model-context-protocol`, `ai-agents`, `booking-api`, `scheduling-api` and
+  `reservation-system` join the eight already there. Its checklist now says how to upload the
+  social preview, which GitHub has no API for.
 - **The dashboard's brand link has a name on a phone**, where only the logo shows (axe found it
   nameless).
 - **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with

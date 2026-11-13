@@ -1,0 +1,56 @@
+# Publishes blog posts merged ahead of their date. The site builds a post only once its publishAt has
+# passed (site/src/lib/posts.ts), and nothing else rebuilds the site when that time comes. Every
+# fifteen minutes, scripts/publish-due-posts.mjs lists the posts that are due but that the live site
+# does not serve yet. If there are any, this starts the Site workflow on main, which builds and
+# deploys as it does after a merge. A post scheduled in the admin console is merged by the CMS App
+# at its time instead (cms-schedule.yml); this covers posts merged to main with a later publishAt.
+#
+# It needs no secret: GITHUB_TOKEN may start a workflow_dispatch run, and the `site` environment has
+# no reviewers (scripts/configure-github.sh). Every action is pinned to a full commit SHA, the same
+# as site.yml's.
+name: Scheduled posts
+
+on:
+  schedule:
+    - cron: "4,19,34,49 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-posts
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish posts whose time has come
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Find posts due but not live
+        id: due
+        run: |
+          slugs=$(node scripts/publish-due-posts.mjs)
+          printf 'slugs=%s\n' "$(printf '%s' "$slugs" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          if [ -n "$slugs" ]; then
+            printf '### Due and not live yet\n\n%s\n' "$slugs" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Rebuild and deploy the site
+        if: steps.due.outputs.slugs != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLUGS: ${{ steps.due.outputs.slugs }}
+        run: |
+          gh workflow run site.yml --ref main --repo "$GITHUB_REPOSITORY"
+          echo "Started the Site workflow for: $SLUGS" >> "$GITHUB_STEP_SUMMARY"
