@@ -127,6 +127,9 @@ versioning.
 
 ### Changed
 
+- **Slotlock Cloud has a public status page**, <https://stats.uptimerobot.com/F7RQohQzXM>: uptime by day for the API, the
+  dashboard and the site, checked every five minutes from outside, with incidents and
+  announcements. The site's footer and the hosted service pages link to it.
 - **Manage billing opens each plan's own portal configuration**
   (`SLOTLOCK_STRIPE_PORTAL_DEVELOPER` and `SLOTLOCK_STRIPE_PORTAL_TEAM`). A customer switches
   between their own plan's monthly and yearly prices, never to the other plan, and buys one at a

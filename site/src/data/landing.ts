@@ -752,7 +752,8 @@ export const footer = {
       links: [
         { label: 'Pricing', href: '/pricing/' },
         { label: 'Hosted Slotlock', href: '/docs/hosted/' },
-        { label: 'Status', href: '/docs/status/' },
+        // The public status page (scripts/configure-uptime.mjs); how it is checked is at /docs/status/.
+        { label: 'Status', href: 'https://stats.uptimerobot.com/F7RQohQzXM' },
         { label: 'Privacy notice', href: '/docs/privacy/' },
         { label: 'Terms of Service', href: '/docs/terms/' },
         { label: 'Acceptable use', href: '/docs/acceptable-use/' },

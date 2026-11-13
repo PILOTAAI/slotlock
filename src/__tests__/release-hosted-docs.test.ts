@@ -470,13 +470,15 @@ describe('the site', () => {
     expect(landing).not.toContain('`Not yet.');
     for (const href of [
       '/docs/hosted/',
-      '/docs/status/',
+      // Status is the public status page itself; how it is checked is linked from the hosted page.
+      'https://stats.uptimerobot.com/F7RQohQzXM',
       '/docs/privacy/',
       '/docs/terms/',
       '/docs/acceptable-use/',
     ]) {
       expect(landing).toContain(`href: '${href}'`);
     }
+    expect(read('docs/hosted/README.md')).toContain('[how they are raised](/docs/hosted/status.md)');
   });
 
   it('is rebuilt when any document it includes changes', () => {
