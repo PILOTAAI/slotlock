@@ -24,7 +24,7 @@ interface Price {
   lookup_key: string | null;
   active: boolean;
 }
-let products: { id: string; name: string; tax_code: string | null; metadata: Record<string, string>; default_price?: string | null }[] = [];
+let products: { id: string; name: string; tax_code: string | null; metadata: Record<string, string>; default_price?: string | null | undefined }[] = [];
 let prices: Price[] = [];
 let endpoints: { id: string; url: string; status: string; enabled_events: string[] }[] = [];
 interface Portal {
