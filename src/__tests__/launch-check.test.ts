@@ -30,6 +30,8 @@ interface World {
   incidentTitle: string;
   livemode: boolean;
   events: string[];
+  /** Events Stripe has not delivered to every endpoint: type, and age in minutes. */
+  undelivered: { type: string; minutes: number }[];
   rejectToken: boolean;
 }
 const healthy = (): World => ({
@@ -42,6 +44,11 @@ const healthy = (): World => ({
   incidentTitle: 'Hosted Slotlock API is down',
   livemode: true,
   events: EVENTS,
+  // Still within Stripe's retries, and not a payment event: neither counts.
+  undelivered: [
+    { type: 'invoice.paid', minutes: 3 },
+    { type: 'customer.created', minutes: 600 },
+  ],
   rejectToken: false,
 });
 let world = healthy();
@@ -119,6 +126,12 @@ function answer(request: IncomingMessage): [number, unknown] {
       if (path === '/v1/webhook_endpoints') {
         return [200, { data: [{ url: `${base}/dash/stripe/webhook`, status: 'enabled', enabled_events: world.events }] }];
       }
+      if (path === '/v1/events') {
+        const query = new URL(request.url ?? '/', base).searchParams;
+        if (query.get('delivery_success') !== 'false') return [400, { error: { message: 'expected delivery_success=false' } }];
+        const now = Math.floor(Date.now() / 1000);
+        return [200, { data: world.undelivered.map(({ type, minutes }) => ({ type, created: now - minutes * 60 })) }];
+      }
       return [404, {}];
     default:
       return [404, {}];
@@ -171,6 +184,7 @@ describe('check-launch.mjs', () => {
       'ok   status: no open incident',
       'ok   Stripe: Team yearly: price_ty',
       `ok   Stripe: the webhook at ${base}/dash/stripe/webhook gets every event it needs`,
+      'ok   Stripe: every payment event of the last three days reached the webhook',
     ]) {
       expect(result.output).toContain(line);
     }
@@ -184,6 +198,10 @@ describe('check-launch.mjs', () => {
       mcpOpen: true,
       probeSkipped: true,
       events: EVENTS.filter((event) => event !== 'invoice.paid'),
+      undelivered: [
+        { type: 'checkout.session.completed', minutes: 120 },
+        { type: 'invoice.paid', minutes: 30 },
+      ],
     };
     const result = await run();
     expect(result.code).toBe(1);
@@ -193,6 +211,7 @@ describe('check-launch.mjs', () => {
       'FAIL api: /mcp answers 200 to a call without a key, not 401',
       'FAIL status: the status probe is off: set SLOTLOCK_STATUS_PROBE to on',
       `FAIL Stripe: the webhook at ${base}/dash/stripe/webhook does not get: invoice.paid`,
+      'FAIL Stripe: 2 payment event(s) of the last three days did not reach the webhook, the oldest a checkout.session.completed 2 hour(s) ago',
     ]) {
       expect(result.output).toContain(line);
     }

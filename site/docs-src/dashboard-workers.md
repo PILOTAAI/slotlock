@@ -58,14 +58,29 @@ Hosted Slotlock sells plans; self-hosted Slotlock writes no plan and keeps the s
 `scripts/configure-stripe.mjs` sets up the Stripe account, the same way in the sandbox and in live
 mode, and changes only what differs when run again: the Developer and Team products (with the tax
 code Managed Payments needs), their four prices in pounds by lookup key, the webhook endpoint, and a
-customer portal configuration for each plan. It prints the Worker's `SLOTLOCK_STRIPE_PRICE_*` and
-`SLOTLOCK_STRIPE_PORTAL_*` values; with `--dashboard-worker`, it stores the new webhook endpoint's
-signing secret on the Worker through `wrangler secret put`, and never prints it. Its key needs write
-access to Products, Prices, Webhook Endpoints and the customer portal; the Worker's key does not.
+customer portal configuration for each plan, with the cancellation survey. It prints the Worker's
+`SLOTLOCK_STRIPE_PRICE_*` and `SLOTLOCK_STRIPE_PORTAL_*` values.
+
+With `--dashboard-worker <name>` it stores them on the Worker as secrets, which a deploy keeps, in
+one `wrangler secret bulk`, so billing never runs half set up. The new webhook endpoint's signing
+secret goes with them. So does the dashboard's own key, given as `SLOTLOCK_WORKER_STRIPE_KEY`, once
+it has passed its checks: it reads subscriptions and the portal, and opens and expires a Checkout
+Session with Managed Payments (nothing is charged, and it shows Managed Payments is on). That key is
+stored only if the Worker has, or is given, `STRIPE_WEBHOOK_SECRET`. The script then asks the
+dashboard whether it sells. `SLOTLOCK_CHECK_STRIPE_KEY`, once it reads what the launch check reads,
+goes to GitHub with `gh secret set`. Run in a terminal, the script asks for any key not set, without
+showing it, and no key is printed. Make three restricted keys in Stripe (Developers > API keys >
+Create restricted key):
+
+| Key | Permissions | Where it goes |
+| --- | --- | --- |
+| Setup (`STRIPE_SECRET_KEY` for the script) | Write: Products, Prices, Webhook Endpoints, Customer portal. Read: Balance | Your terminal only; delete it after |
+| Dashboard (`SLOTLOCK_WORKER_STRIPE_KEY`) | Write: Checkout Sessions, Customer portal. Read: Subscriptions | The Worker's `STRIPE_SECRET_KEY` |
+| Launch check (`SLOTLOCK_CHECK_STRIPE_KEY`) | Read: Products, Prices, Webhook Endpoints, Events | The repository's Actions secret |
 
 ```sh
-STRIPE_SECRET_KEY=sk_live_… node scripts/configure-stripe.mjs --dry-run   # what it would change
-STRIPE_SECRET_KEY=sk_live_… node scripts/configure-stripe.mjs --dashboard-worker slotlock-dashboard
+node scripts/configure-stripe.mjs --dry-run                                  # what it would change
+node scripts/configure-stripe.mjs --dashboard-worker slotlock-dashboard      # asks for the three keys
 ```
 
 With `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `SLOTLOCK_STRIPE_PRICE_MONTHLY` and

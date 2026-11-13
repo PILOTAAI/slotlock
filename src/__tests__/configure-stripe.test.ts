@@ -1,9 +1,12 @@
 // scripts/configure-stripe.mjs against a stand-in for Stripe's API: it creates the two products, the
 // four GBP prices by lookup key, the webhook and a portal configuration for each plan once; moves a
 // lookup key off a price of the old amount and archives that price; keeps everything on a second
-// run; changes nothing on --dry-run; and never prints the webhook's signing secret.
+// run; changes nothing on --dry-run; and never prints the webhook's signing secret. With
+// --dashboard-worker it stores everything on the Worker in one `wrangler secret bulk`, the
+// dashboard's key only once that key has done what the dashboard does and the Worker has the
+// webhook's secret, and the launch check's key on GitHub once it reads what the check reads.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type IncomingMessage, type Server, createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -13,6 +16,19 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(root, 'scripts', 'configure-stripe.mjs');
 const KEY = 'sk_test_configure';
+/** Restricted keys, each allowed what its name says (paths below). */
+const WORKER_KEY = 'rk_live_worker';
+const CHECK_KEY = 'rk_live_check';
+const ALLOWED: Record<string, string[]> = {
+  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions'],
+  rk_live_nocheckout: ['GET subscriptions', 'GET billing_portal/configurations'],
+  [CHECK_KEY]: ['GET products', 'GET prices', 'GET webhook_endpoints', 'GET events'],
+  rk_live_noevents: ['GET products', 'GET prices', 'GET webhook_endpoints'],
+};
+let livemode = false;
+/** What the dashboard answers an unsigned delivery: 404 with billing off, 400 with it on. */
+let dashboardAnswer = 400;
+const checkouts: { body: Record<string, string>; expired: boolean }[] = [];
 const SIGNING_SECRET = 'whsec_test_secret_value';
 
 interface Price {
@@ -73,11 +89,30 @@ beforeAll(async () => {
   server = createServer(async (request, response) => {
     const send = (status: number, payload: unknown) =>
       response.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(payload));
-    if (request.headers.authorization !== `Bearer ${KEY}`) return send(401, { error: { message: 'Invalid API Key provided' } });
     const url = new URL(request.url ?? '/', 'http://stub');
+    // The dashboard itself, when --dashboard points here.
+    if (url.pathname === '/stripe/webhook') return response.writeHead(dashboardAnswer).end('Bad signature.');
     const path = url.pathname.replace(/^\/v1\//, '');
+    const bearer = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
+    const allowed = ALLOWED[bearer];
+    if (allowed) {
+      if (!allowed.some((grant) => `${request.method} ${path}`.startsWith(grant))) {
+        return send(403, { error: { message: 'The provided key does not have the required permissions for this endpoint.' } });
+      }
+      if (request.method === 'POST' && path === 'checkout/sessions') {
+        checkouts.push({ body: await body(request), expired: false });
+        return send(200, { id: `cs_live_${checkouts.length}`, url: 'https://checkout.stripe.com/c/pay/cs_live' });
+      }
+      if (request.method === 'POST' && path.endsWith('/expire')) {
+        const session = checkouts[Number(path.split('/')[2]?.split('_')[2]) - 1];
+        if (session) session.expired = true;
+        return send(200, { status: 'expired' });
+      }
+      return send(200, { data: [] });
+    }
+    if (bearer !== KEY) return send(401, { error: { message: 'Invalid API Key provided' } });
     if (request.method === 'GET') {
-      if (path === 'balance') return send(200, { object: 'balance', livemode: false });
+      if (path === 'balance') return send(200, { object: 'balance', livemode });
       if (path === 'products') return send(200, { data: products.filter(() => true) });
       if (path === 'prices' && url.searchParams.has('product')) {
         const product = url.searchParams.get('product');
@@ -179,24 +214,48 @@ beforeEach(() => {
   endpoints = [];
   portals = [{ id: 'bpc_1', is_default: true }];
   writes.length = 0;
+  livemode = false;
+  dashboardAnswer = 400;
+  checkouts.length = 0;
 });
 
-/** A wrangler that records its arguments and stdin. */
-function fakeWrangler() {
+/**
+ * A command that records its arguments and stdin. As wrangler, `secret list` prints the Worker's
+ * secret names and `secret bulk` adds the keys of the JSON it is given.
+ */
+function fakeTool(secrets: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'slotlock-stripe-'));
   scratch.push(dir);
-  const wrangler = join(dir, 'wrangler');
+  const tool = join(dir, 'tool');
+  const store = join(dir, 'secrets.json');
+  writeFileSync(store, JSON.stringify(secrets));
   writeFileSync(
-    wrangler,
-    `#!${process.execPath}\nconst fs = require('node:fs');\nlet input = '';\nprocess.stdin.on('data', (d) => (input += d)).on('end', () => fs.writeFileSync(${JSON.stringify(join(dir, 'call.json'))}, JSON.stringify({ args: process.argv.slice(2), input })));\n`,
+    tool,
+    [
+      `#!${process.execPath}`,
+      "const fs = require('node:fs');",
+      'const args = process.argv.slice(2);',
+      "let input = '';",
+      "process.stdin.on('data', (d) => (input += d)).on('end', () => {",
+      `  fs.appendFileSync(${JSON.stringify(join(dir, 'calls.jsonl'))}, JSON.stringify({ args, input }) + '\\n');`,
+      `  const names = JSON.parse(fs.readFileSync(${JSON.stringify(store)}, 'utf8'));`,
+      "  if (args[1] === 'list') process.stdout.write(JSON.stringify(names.map((name) => ({ name, type: 'secret_text' }))));",
+      `  if (args[1] === 'bulk') fs.writeFileSync(${JSON.stringify(store)}, JSON.stringify([...names, ...Object.keys(JSON.parse(input))]));`,
+      '});',
+    ].join('\n'),
     { mode: 0o755 },
   );
-  return { wrangler, call: () => JSON.parse(readFileSync(join(dir, 'call.json'), 'utf8')) as { args: string[]; input: string } };
+  const calls = () => {
+    const file = join(dir, 'calls.jsonl');
+    if (!existsSync(file)) return [];
+    return readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { args: string[]; input: string });
+  };
+  return { tool, calls };
 }
 
 function run(args: string[], env: Record<string, string> = {}) {
   const child = spawn(process.execPath, [script, ...args], {
-    env: { PATH: process.env.PATH ?? '', SLOTLOCK_STRIPE_API: base, STRIPE_SECRET_KEY: KEY, ...env },
+    env: { PATH: process.env.PATH ?? '', SLOTLOCK_STRIPE_API: base, STRIPE_SECRET_KEY: KEY, SLOTLOCK_STORE_WAIT_MS: '1500', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -207,7 +266,7 @@ function run(args: string[], env: Record<string, string> = {}) {
 
 describe('configure-stripe.mjs', () => {
   it('sets up both plans in pounds, the webhook and the portal, and archives the dollar prices', async () => {
-    const { wrangler, call } = fakeWrangler();
+    const { tool: wrangler, calls } = fakeTool();
     const result = await run(['--dashboard-worker', 'slotlock-dashboard'], { SLOTLOCK_WRANGLER: wrangler });
     expect(result.code, result.output).toBe(0);
     // Developer kept and tagged; Team created with the SaaS tax code.
@@ -248,7 +307,19 @@ describe('configure-stripe.mjs', () => {
       },
     ]);
     // The signing secret goes to the dashboard Worker on stdin, and is never printed.
-    expect(call()).toEqual({ args: ['secret', 'put', 'STRIPE_WEBHOOK_SECRET', '--name', 'slotlock-dashboard'], input: SIGNING_SECRET });
+    // The signing secret and the six ids go to the dashboard Worker in one bulk, on stdin; without the
+    // dashboard's own key, billing stays off.
+    expect(calls().map((call) => call.args)).toEqual([['secret', 'bulk', '--name', 'slotlock-dashboard']]);
+    expect(JSON.parse(calls()[0]?.input ?? '{}')).toEqual({
+      STRIPE_WEBHOOK_SECRET: SIGNING_SECRET,
+      SLOTLOCK_STRIPE_PRICE_MONTHLY: 'price_4',
+      SLOTLOCK_STRIPE_PRICE_YEARLY: 'price_5',
+      SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY: 'price_6',
+      SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY: 'price_7',
+      SLOTLOCK_STRIPE_PORTAL_DEVELOPER: 'bpc_2',
+      SLOTLOCK_STRIPE_PORTAL_TEAM: 'bpc_3',
+    });
+    expect(result.output).toContain('Billing starts once slotlock-dashboard has STRIPE_SECRET_KEY');
     expect(result.output).not.toContain(SIGNING_SECRET);
     expect(result.output).not.toContain(KEY);
     // The default configuration offers no switching; each plan's switches between its own prices
@@ -279,7 +350,11 @@ describe('configure-stripe.mjs', () => {
     for (const portal of portals) {
       expect(portal).toMatchObject({
         default_return_url: 'https://app.slotlock.pylota.io/dashboard',
-        features: { subscription_cancel: { mode: 'at_period_end' }, invoice_history: { enabled: true } },
+        // With the survey the owner turned on, in every configuration.
+        features: {
+          subscription_cancel: { mode: 'at_period_end', cancellation_reason: { enabled: true, options: expect.arrayContaining(['too_expensive', 'other']) } },
+          invoice_history: { enabled: true },
+        },
       });
     }
     // Yearly to monthly waits for the end of the year paid for.
@@ -352,5 +427,68 @@ describe('configure-stripe.mjs', () => {
     expect(writes.some((write) => write.path === 'webhook_endpoints/we_9')).toBe(true);
     expect((await run([], { STRIPE_SECRET_KEY: '' })).code).toBe(2);
     expect((await run([], { STRIPE_SECRET_KEY: 'sk_test_wrong' })).code).toBe(1);
+  });
+
+  it('stores the dashboard\'s key and the launch check\'s once each does its job, and asks the dashboard whether it sells', async () => {
+    livemode = true;
+    // A run before made the endpoint; the Worker kept its signing secret.
+    endpoints = [{ id: 'we_1', url: `${base}/stripe/webhook`, status: 'enabled', enabled_events: ['*'] }];
+    const wrangler = fakeTool(['STRIPE_WEBHOOK_SECRET']);
+    const gh = fakeTool();
+    const result = await run(['--dashboard', base, '--dashboard-worker', 'slotlock-dashboard'], {
+      SLOTLOCK_WRANGLER: wrangler.tool,
+      SLOTLOCK_GH: gh.tool,
+      SLOTLOCK_WORKER_STRIPE_KEY: WORKER_KEY,
+      SLOTLOCK_CHECK_STRIPE_KEY: CHECK_KEY,
+    });
+    expect(result.code, result.output).toBe(0);
+    // The dashboard's key opened a Checkout Session with Managed Payments, and expired it.
+    expect(checkouts).toEqual([
+      { body: expect.objectContaining({ mode: 'subscription', 'line_items[0][price]': 'price_4', 'managed_payments[enabled]': 'true' }), expired: true },
+    ]);
+    // Then the key and the ids went to the Worker in one version, after it was seen to have the
+    // webhook's secret.
+    expect(wrangler.calls().map((call) => call.args)).toEqual([
+      ['secret', 'list', '--name', 'slotlock-dashboard', '--format', 'json'],
+      ['secret', 'bulk', '--name', 'slotlock-dashboard'],
+    ]);
+    const bundle = JSON.parse(wrangler.calls()[1]?.input ?? '{}') as Record<string, string>;
+    expect(bundle).toMatchObject({ STRIPE_SECRET_KEY: WORKER_KEY, SLOTLOCK_STRIPE_PRICE_MONTHLY: 'price_4', SLOTLOCK_STRIPE_PORTAL_TEAM: 'bpc_3' });
+    expect(Object.keys(bundle)).toHaveLength(7);
+    expect(result.output).toContain('The dashboard sells now');
+    // The check's key went to GitHub, on stdin.
+    expect(gh.calls()).toEqual([{ args: ['secret', 'set', 'SLOTLOCK_CHECK_STRIPE_KEY', '--repo', 'PILOTAAI/slotlock'], input: CHECK_KEY }]);
+    for (const secret of [KEY, WORKER_KEY, CHECK_KEY]) expect(result.output).not.toContain(secret);
+  });
+
+  it('stores no key that cannot do its job, nor one the Worker could not use', async () => {
+    livemode = true;
+    endpoints = [{ id: 'we_1', url: `${base}/stripe/webhook`, status: 'enabled', enabled_events: ['*'] }];
+    const attempt = async (env: Record<string, string>, secrets = ['STRIPE_WEBHOOK_SECRET']) => {
+      const wrangler = fakeTool(secrets);
+      const gh = fakeTool();
+      const result = await run(['--dashboard', base, '--dashboard-worker', 'slotlock-dashboard'], { SLOTLOCK_WRANGLER: wrangler.tool, SLOTLOCK_GH: gh.tool, ...env });
+      const stored = wrangler.calls().filter((call) => call.args[1] === 'bulk').length + gh.calls().length;
+      return { ...result, stored };
+    };
+    // The account's own secret key, or a test key against live: refused before anything is sent.
+    expect(await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: 'sk_live_everything' })).toMatchObject({ code: 1, stored: 0, output: expect.stringContaining('must be a restricted key') });
+    expect(await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: 'rk_test_worker' })).toMatchObject({ code: 1, stored: 0, output: expect.stringContaining('is a test-mode key') });
+    // A key that cannot open a Checkout Session (or Managed Payments is off).
+    expect(await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: 'rk_live_nocheckout' })).toMatchObject({
+      code: 1,
+      stored: 0,
+      output: expect.stringContaining('cannot open a Checkout Session with Managed Payments'),
+    });
+    // A Worker without the webhook's secret would refuse billing: nothing is stored.
+    expect(await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: WORKER_KEY }, [])).toMatchObject({ code: 1, stored: 0, output: expect.stringContaining('has no STRIPE_WEBHOOK_SECRET') });
+    // A dashboard that answers 503 once the key is on: said, and the run fails.
+    dashboardAnswer = 503;
+    expect(await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: WORKER_KEY })).toMatchObject({ code: 1, output: expect.stringContaining('answers 503') });
+    // A check key that cannot read events stays off GitHub.
+    dashboardAnswer = 400;
+    expect(await attempt({ SLOTLOCK_CHECK_STRIPE_KEY: 'rk_live_noevents' })).toMatchObject({ code: 1, output: expect.stringContaining('cannot read Events') });
+    livemode = false;
+    expect(await attempt({ SLOTLOCK_CHECK_STRIPE_KEY: CHECK_KEY })).toMatchObject({ code: 1, output: expect.stringContaining('reads live mode') });
   });
 });

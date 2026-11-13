@@ -675,17 +675,17 @@ second region and a track record. None of those is code in this repository.
 
 ## Launch checklist (owner, outside the code)
 
-- [ ] Stripe live mode: Managed Payments activated, then `scripts/configure-stripe.mjs` with the
-      live key and `--dashboard-worker` (both products, four GBP prices, the webhook for its six
-      events, a portal configuration per plan; tested in the sandbox on 13 November 2026 by
-      `billing.stripe-sandbox.integration.test.ts`), and one real Checkout and cancellation end
-      to end.
-- [ ] Worker secrets `STRIPE_SECRET_KEY` (restricted), `STRIPE_WEBHOOK_SECRET`,
-      `SLOTLOCK_ASSISTANT_SECRET`; variables `SLOTLOCK_STRIPE_PRICE_MONTHLY`,
-      `SLOTLOCK_STRIPE_PRICE_YEARLY`, `SLOTLOCK_STRIPE_PORTAL_DEVELOPER`,
-      `SLOTLOCK_STRIPE_PORTAL_TEAM`, `SLOTLOCK_PLAN_CONTACT`. Not `SLOTLOCK_FREE_PLAN_FROM`, which
-      the Worker now refuses (503): the default plan is set once with `slotlock plan default free
-      --from 2026-11-16`.
+- [ ] Stripe live mode: Managed Payments activated, the Customer portal saved once, Smart Retries
+      then cancel; three restricted keys; then `scripts/configure-stripe.mjs --dashboard-worker
+      slotlock-dashboard`. It sets up both products, four GBP prices, the webhook for its six
+      events and a portal configuration per plan (tested in the sandbox on 13 November 2026 by
+      `billing.stripe-sandbox.integration.test.ts`). It stores the Worker's Stripe secrets (its
+      key, the webhook's secret, the price and portal ids) and the launch check's key.
+- [ ] One real Checkout and cancellation end to end, paid with a real card; the launch check then
+      fails if any payment event did not reach the webhook.
+- [ ] Worker secret `SLOTLOCK_ASSISTANT_SECRET`; variable `SLOTLOCK_PLAN_CONTACT`. Not
+      `SLOTLOCK_FREE_PLAN_FROM`, which the Worker now refuses (503): the default plan is set once
+      with `slotlock plan default free --from 2026-11-16`.
 - [ ] A lawyer reviews the Terms and privacy changes of PR #161 and of parts 3 and 4, and the
       partner agreement.
 - [x] The quotas in the Terms (from 16 November 2026, launch day: the owner's decision of 13

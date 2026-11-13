@@ -6,9 +6,10 @@
 # summary lists every check.
 #
 # Optional repository secret:
-#   SLOTLOCK_CHECK_STRIPE_KEY  a restricted live key with Read on Products, Prices and Webhook
-#                              Endpoints, and nothing else (Stripe > Developers > API keys > Create
-#                              restricted key). Without it, the Stripe checks are skipped.
+#   SLOTLOCK_CHECK_STRIPE_KEY  a restricted live key with Read on Products, Prices, Webhook
+#                              Endpoints and Events, and nothing else (Stripe > Developers > API keys
+#                              > Create restricted key; scripts/configure-stripe.mjs stores it).
+#                              Without it, the Stripe checks are skipped.
 # Every action is pinned to a full commit SHA.
 name: Launch check
 

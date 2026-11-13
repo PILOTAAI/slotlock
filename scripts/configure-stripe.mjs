@@ -25,12 +25,28 @@
 // Then it prints the dashboard Worker's variables: the four SLOTLOCK_STRIPE_PRICE_* price ids and
 // the two SLOTLOCK_STRIPE_PORTAL_* configuration ids.
 //
-//   STRIPE_SECRET_KEY=<sk_test_… or sk_live_…> node scripts/configure-stripe.mjs [--dry-run]
-//     [--dashboard https://app.slotlock.pylota.io] [--dashboard-worker slotlock-dashboard]
-// The key needs write access to Products, Prices, Webhook Endpoints and the customer portal; use
-// the account's secret key, or a restricted key with those. It goes only to Stripe.
-// Tests only: SLOTLOCK_STRIPE_API replaces Stripe's address, SLOTLOCK_WRANGLER the wrangler command.
+// With --dashboard-worker <name>, it also stores them on that Worker, in one `wrangler secret bulk`
+// (one new version, so billing never runs half set up; secrets, so a deploy keeps them), with:
+//   - the webhook endpoint's signing secret, when Stripe has just made the endpoint;
+//   - SLOTLOCK_WORKER_STRIPE_KEY as STRIPE_SECRET_KEY: the dashboard's restricted key (rk_…), with
+//     Write on Checkout Sessions and Customer portal and Read on Subscriptions. It is checked
+//     first: it reads a subscription and the portal, and opens a Checkout Session with Managed
+//     Payments and expires it at once (nothing is charged), which also shows Managed Payments is
+//     on. It is stored only if the Worker has, or is given, STRIPE_WEBHOOK_SECRET: without one the
+//     Worker refuses billing (503). Then the script asks the dashboard whether it now sells.
+// SLOTLOCK_CHECK_STRIPE_KEY, a restricted live key with Read on Products, Prices, Webhook Endpoints
+// and Events, goes to GitHub as the launch check's secret (`gh secret set`, on stdin), once
+// checked. Run in a terminal, the script asks for any key not set, without showing it.
+//
+//   node scripts/configure-stripe.mjs [--dry-run] [--dashboard https://app.slotlock.pylota.io]
+//     [--dashboard-worker slotlock-dashboard] [--github-repo PILOTAAI/slotlock]
+// STRIPE_SECRET_KEY, the key it sets Stripe up with, needs Write on Products, Prices, Webhook
+// Endpoints and Customer portal and Read on Balance: the account's secret key, or a restricted
+// key with those. Every key goes only to Stripe and where it is stored, and is never printed.
+// Tests only: SLOTLOCK_STRIPE_API replaces Stripe's address, SLOTLOCK_WRANGLER the wrangler
+// command and SLOTLOCK_GH the gh command.
 import { spawnSync } from 'node:child_process';
+import { createInterface } from 'node:readline';
 
 const API = (process.env.SLOTLOCK_STRIPE_API ?? 'https://api.stripe.com').replace(/\/+$/, '');
 const VERSION = '2026-04-22.dahlia';
@@ -42,7 +58,9 @@ const option = (name) => {
 };
 const dashboard = (option('--dashboard') ?? 'https://app.slotlock.pylota.io').replace(/\/+$/, '');
 const dashboardWorker = option('--dashboard-worker');
+const githubRepo = option('--github-repo') ?? 'PILOTAAI/slotlock';
 const WRANGLER = process.env.SLOTLOCK_WRANGLER ?? 'npx';
+const GH = process.env.SLOTLOCK_GH ?? 'gh';
 
 /** The SaaS, business use tax code: Managed Payments sells only eligible products. */
 const TAX_CODE = 'txcd_10103001';
@@ -67,6 +85,8 @@ const PLANS = [
   },
 ];
 const CURRENCY = 'gbp';
+/** The reasons the cancellation survey offers (Stripe's own list). */
+const CANCEL_REASONS = ['customer_service', 'low_quality', 'missing_features', 'other', 'switched_service', 'too_complex', 'too_expensive', 'unused'];
 /** What the dashboard's webhook acts on (src/billing.ts). */
 const EVENTS = [
   'checkout.session.completed',
@@ -79,10 +99,20 @@ const EVENTS = [
 
 class Failure extends Error {}
 
-const key = process.env.STRIPE_SECRET_KEY?.trim();
-if (!key) {
-  console.error('error: set STRIPE_SECRET_KEY to the account\'s secret key (sk_test_… for the sandbox, sk_live_… for live).');
-  process.exit(2);
+let key = process.env.STRIPE_SECRET_KEY?.trim();
+
+/** Asks for a key in a terminal, without showing what is typed; '' when not in a terminal. */
+async function askSecret(question) {
+  if (!process.stdin.isTTY) return '';
+  const prompt = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  // Echo the question only, never the key.
+  prompt._writeToOutput = (text) => {
+    if (text.includes(question)) process.stdout.write(question);
+  };
+  const answer = await new Promise((resolve) => prompt.question(question, resolve));
+  prompt.close();
+  process.stdout.write('\n');
+  return answer.trim();
 }
 
 /** Stripe's form encoding, nested keys included: a[b][0][c]=… */
@@ -95,21 +125,26 @@ function form(value, prefix = '', out = new URLSearchParams()) {
 }
 
 async function stripe(method, path, body) {
+  const { status, json } = await probe(key, method, path, body);
+  if (status < 200 || status > 299) {
+    throw new Failure(`Stripe answered ${status} to ${method} /v1/${path.split('?')[0]}: ${json?.error?.message ?? ''}`);
+  }
+  return json;
+}
+
+/** A request with the given key; its status and body, whatever Stripe answers. */
+async function probe(withKey, method, path, body) {
   const response = await fetch(`${API}/v1/${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${key}`,
+      authorization: `Bearer ${withKey}`,
       'stripe-version': VERSION,
       ...(body ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
     },
     ...(body ? { body: form(body).toString() } : {}),
     signal: AbortSignal.timeout(30_000),
   });
-  const json = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Failure(`Stripe answered ${response.status} to ${method} /v1/${path.split('?')[0]}: ${json?.error?.message ?? ''}`);
-  }
-  return json;
+  return { status: response.status, json: await response.json().catch(() => ({})) };
 }
 
 const changes = [];
@@ -121,6 +156,11 @@ async function change(what, run) {
 }
 
 async function main() {
+  key ||= await askSecret('Stripe key to set the account up with (sk_… or rk_…): ');
+  if (!key) {
+    console.error('error: set STRIPE_SECRET_KEY to the account\'s secret key, or a restricted key (…_test_… for the sandbox, …_live_… for live).');
+    process.exit(2);
+  }
   const account = await stripe('GET', 'balance');
   const mode = account.livemode ? 'LIVE' : 'sandbox (test mode)';
   console.log(`Stripe account: ${mode}${dryRun ? ', dry run' : ''}\n`);
@@ -214,7 +254,8 @@ async function main() {
     };
   }
 
-  // The webhook endpoint.
+  // The webhook endpoint. Stripe gives its signing secret only when it makes one.
+  let webhookSecret = null;
   const url = `${dashboard}/stripe/webhook`;
   const endpoints = (await stripe('GET', 'webhook_endpoints?limit=100')).data ?? [];
   const endpoint = endpoints.find((item) => item.url === url);
@@ -222,7 +263,7 @@ async function main() {
     const made = await change(`create the webhook endpoint ${url} for ${EVENTS.length} events`, () =>
       stripe('POST', 'webhook_endpoints', { url, enabled_events: EVENTS, description: 'Slotlock Cloud dashboard', api_version: VERSION }),
     );
-    if (made?.secret) storeSecret(made.secret);
+    if (made?.secret) webhookSecret = made.secret;
   } else {
     const events = endpoint.enabled_events ?? [];
     const missing = events.includes('*') ? [] : EVENTS.filter((event) => !events.includes(event));
@@ -239,8 +280,19 @@ async function main() {
   const portalIds = await portals(catalog);
 
   console.log(`\n${dryRun ? 'Nothing was changed.' : `${changes.length ? 'Done.' : 'Everything was already set.'}`} The dashboard Worker's variables (${mode}):`);
-  for (const spec of PLANS) for (const price of spec.prices) console.log(`  ${price.variable}=${ids[price.variable]}`);
-  for (const spec of PLANS) console.log(`  ${portalVariable(spec.plan)}=${portalIds[spec.plan]}`);
+  const values = {};
+  for (const spec of PLANS) for (const price of spec.prices) values[price.variable] = ids[price.variable];
+  for (const spec of PLANS) values[portalVariable(spec.plan)] = portalIds[spec.plan];
+  for (const [name, value] of Object.entries(values)) console.log(`  ${name}=${value}`);
+
+  const live = Boolean(account.livemode);
+  if (dashboardWorker) await storeOnWorker({ values, webhookSecret, live, checkoutPrice: values.SLOTLOCK_STRIPE_PRICE_MONTHLY });
+  else if (webhookSecret) {
+    console.log(
+      `\nStripe shows the new webhook endpoint's signing secret at Developers > Webhooks > ${url} > Signing secret. Set it as the dashboard Worker's STRIPE_WEBHOOK_SECRET.`,
+    );
+  }
+  await storeCheckKey(live);
 }
 
 const portalVariable = (plan) => `SLOTLOCK_STRIPE_PORTAL_${plan.toUpperCase()}`;
@@ -254,7 +306,12 @@ function portalConfiguration(headline, subscriptionUpdate) {
       customer_update: { enabled: true, allowed_updates: ['address', 'email', 'tax_id'] },
       invoice_history: { enabled: true },
       payment_method_update: { enabled: true },
-      subscription_cancel: { enabled: true, mode: 'at_period_end', proration_behavior: 'none' },
+      subscription_cancel: {
+        enabled: true,
+        mode: 'at_period_end',
+        proration_behavior: 'none',
+        cancellation_reason: { enabled: true, options: CANCEL_REASONS },
+      },
       subscription_update: subscriptionUpdate,
     },
   };
@@ -272,6 +329,7 @@ function portalShape(configuration) {
     invoices: Boolean(features.invoice_history?.enabled),
     paymentMethods: Boolean(features.payment_method_update?.enabled),
     cancel: cancel.enabled ? [cancel.mode, cancel.proration_behavior] : null,
+    survey: cancel.cancellation_reason?.enabled ? [...(cancel.cancellation_reason.options ?? [])].sort() : null,
     update: update.enabled
       ? {
           allowed: [...(update.default_allowed_updates ?? [])].sort(),
@@ -345,23 +403,139 @@ async function portals(catalog) {
   return ids;
 }
 
-function storeSecret(secret) {
-  if (!dashboardWorker) {
-    console.log(
-      `  Stripe shows its signing secret at Developers > Webhooks > ${dashboard}/stripe/webhook > Signing secret. Set it as the dashboard Worker's STRIPE_WEBHOOK_SECRET.`,
-    );
-    return;
-  }
-  const result = spawnSync(WRANGLER, [...(WRANGLER === 'npx' ? ['wrangler'] : []), 'secret', 'put', 'STRIPE_WEBHOOK_SECRET', '--name', dashboardWorker], {
-    input: secret,
+/** Runs wrangler (through npx unless SLOTLOCK_WRANGLER names it), with `input` on stdin. */
+function wrangler(args, input) {
+  return spawnSync(WRANGLER, [...(WRANGLER === 'npx' ? ['wrangler'] : []), ...args], {
+    input: input ?? '',
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  console.log(
-    result.status === 0
-      ? `  Stored its signing secret as ${dashboardWorker}'s STRIPE_WEBHOOK_SECRET.`
-      : `  Could not store the signing secret with wrangler (${(result.stderr || '').trim().slice(0, 200)}): copy it from Stripe, Developers > Webhooks, into ${dashboardWorker}'s STRIPE_WEBHOOK_SECRET.`,
-  );
+}
+
+/** What a tool said, short and on one line, with no key in it. */
+function said(result, ...secrets) {
+  let text = `${result.stderr || ''} ${result.stdout || ''}`.replace(/\s+/g, ' ').trim();
+  for (const secret of secrets) if (secret) text = text.replaceAll(secret, '…');
+  return text.slice(0, 300) || `exit ${result.status}`;
+}
+
+/** Whether a key is a restricted key of the account's mode, or why not. */
+function restrictedKeyProblem(value, name, live) {
+  if (!/^rk_(live|test)_[A-Za-z0-9]+$/.test(value)) return `${name} must be a restricted key (rk_live_… or rk_test_…), not the account's secret key`;
+  if (value.startsWith('rk_live_') !== live) return `${name} is a ${live ? 'test-mode' : 'live'} key, and this account is ${live ? 'live' : 'a sandbox'}`;
+  return null;
+}
+
+/**
+ * Stores the dashboard's Stripe settings on its Worker in one version: the new webhook secret, the
+ * price and portal ids, and the dashboard's own restricted key once it has passed its checks.
+ */
+async function storeOnWorker({ values, webhookSecret, live, checkoutPrice }) {
+  let workerKey = process.env.SLOTLOCK_WORKER_STRIPE_KEY?.trim();
+  if (!workerKey && !dryRun) workerKey = await askSecret(`The dashboard's restricted key, for ${dashboardWorker}'s STRIPE_SECRET_KEY (rk_…; Enter to skip): `);
+  const bundle = { ...values };
+  if (webhookSecret) bundle.STRIPE_WEBHOOK_SECRET = webhookSecret;
+  if (workerKey) {
+    const problem = restrictedKeyProblem(workerKey, 'SLOTLOCK_WORKER_STRIPE_KEY', live);
+    if (problem) throw new Failure(problem);
+    if (!dryRun) await checkWorkerKey(workerKey, checkoutPrice);
+    if (!webhookSecret) {
+      // Without the webhook's secret the Worker refuses billing: the key waits for it.
+      const listed = wrangler(['secret', 'list', '--name', dashboardWorker, '--format', 'json']);
+      let names = null;
+      try {
+        names = JSON.parse(listed.stdout).map((item) => item.name);
+      } catch {}
+      if (listed.status !== 0 || !Array.isArray(names)) throw new Failure(`wrangler could not list ${dashboardWorker}'s secrets: ${said(listed)}`);
+      if (!names.includes('STRIPE_WEBHOOK_SECRET')) {
+        throw new Failure(
+          `${dashboardWorker} has no STRIPE_WEBHOOK_SECRET, and Stripe gives an endpoint's signing secret only when it makes the endpoint. Copy it from Stripe (Developers > Webhooks > ${dashboard}/stripe/webhook > Signing secret) with \`npx wrangler secret put STRIPE_WEBHOOK_SECRET --name ${dashboardWorker}\`, then run this again. Nothing was stored.`,
+        );
+      }
+    }
+    bundle.STRIPE_SECRET_KEY = workerKey;
+  }
+  const names = Object.keys(bundle).sort();
+  if (dryRun) {
+    console.log(`\nwould store on ${dashboardWorker}, as secrets: ${names.join(', ')}`);
+    return;
+  }
+  const stored = wrangler(['secret', 'bulk', '--name', dashboardWorker], JSON.stringify(bundle));
+  if (stored.status !== 0) {
+    throw new Failure(`wrangler could not store the secrets on ${dashboardWorker}: ${said(stored, webhookSecret, workerKey)}`);
+  }
+  console.log(`\nStored on ${dashboardWorker}, as secrets (a deploy keeps them): ${names.join(', ')}`);
+  if (!workerKey) {
+    console.log(`  Billing starts once ${dashboardWorker} has STRIPE_SECRET_KEY: run this again with SLOTLOCK_WORKER_STRIPE_KEY.`);
+    return;
+  }
+  // The new version takes a few seconds to reach every location: ask until the dashboard sells.
+  const started = Date.now();
+  let answer = 0;
+  while (Date.now() - started < Number(process.env.SLOTLOCK_STORE_WAIT_MS ?? 60_000)) {
+    answer = await fetch(`${dashboard}/stripe/webhook`, { method: 'POST', body: '{}', signal: AbortSignal.timeout(15_000) })
+      .then((response) => response.status)
+      .catch(() => 0);
+    // An unsigned delivery is refused (400) only once billing is on.
+    if (answer === 400 || answer === 503) break;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+  if (answer === 400) console.log(`  The dashboard sells now: ${dashboard}/stripe/webhook takes only Stripe's signed events.`);
+  else if (answer === 503) throw new Failure(`${dashboard} answers 503: see ${dashboardWorker}'s logs (npx wrangler tail ${dashboardWorker}) for the setting it refuses.`);
+  else console.log(`  ${dashboard}/stripe/webhook still answers ${answer || 'nothing'}: check that ${dashboard} is ${dashboardWorker}, then look again in a minute.`);
+}
+
+/** That the dashboard's key does what the dashboard does with it, and that Managed Payments is on. */
+async function checkWorkerKey(workerKey, price) {
+  const need = async (what, method, path, body) => {
+    const { status, json } = await probe(workerKey, method, path, body);
+    if (status < 200 || status > 299) {
+      throw new Failure(`SLOTLOCK_WORKER_STRIPE_KEY cannot ${what} (Stripe answered ${status}: ${json?.error?.message ?? ''}). Nothing was stored.`);
+    }
+    return json;
+  };
+  await need('read subscriptions (Read on Subscriptions)', 'GET', 'subscriptions?limit=1');
+  await need('read the customer portal (Write on Customer portal)', 'GET', 'billing_portal/configurations?limit=1');
+  const session = await need('open a Checkout Session with Managed Payments (Write on Checkout Sessions, and Managed Payments activated)', 'POST', 'checkout/sessions', {
+    mode: 'subscription',
+    line_items: [{ price, quantity: 1 }],
+    managed_payments: { enabled: true },
+    success_url: `${dashboard}/dashboard/plan`,
+    cancel_url: `${dashboard}/dashboard/plan`,
+    metadata: { slotlock_check: 'configure-stripe' },
+  });
+  await need('expire the Checkout Session it opened', 'POST', `checkout/sessions/${session.id}/expire`);
+  console.log('\nThe dashboard\'s key reads subscriptions and the portal, and opened (then expired) a Checkout Session with Managed Payments.');
+}
+
+/** Stores the launch check's read-only key as a GitHub Actions secret, once it reads what the check reads. */
+async function storeCheckKey(live) {
+  let checkKey = process.env.SLOTLOCK_CHECK_STRIPE_KEY?.trim();
+  if (!checkKey && !dryRun && live) checkKey = await askSecret(`The launch check's read-only key, for ${githubRepo}'s SLOTLOCK_CHECK_STRIPE_KEY (rk_live_…; Enter to skip): `);
+  if (!checkKey) return;
+  if (!live) throw new Failure('SLOTLOCK_CHECK_STRIPE_KEY is for the launch check, which reads live mode: run this with the live account\'s keys.');
+  const problem = restrictedKeyProblem(checkKey, 'SLOTLOCK_CHECK_STRIPE_KEY', live);
+  if (problem) throw new Failure(problem);
+  for (const [what, path] of [
+    ['Products', 'products?limit=1'],
+    ['Prices', 'prices?limit=1'],
+    ['Webhook Endpoints', 'webhook_endpoints?limit=1'],
+    ['Events', 'events?limit=1'],
+  ]) {
+    const { status } = await probe(checkKey, 'GET', path);
+    if (status !== 200) throw new Failure(`SLOTLOCK_CHECK_STRIPE_KEY cannot read ${what} (Stripe answered ${status}): give it Read on ${what}. It was not stored.`);
+  }
+  if (dryRun) {
+    console.log(`would store SLOTLOCK_CHECK_STRIPE_KEY as a GitHub Actions secret of ${githubRepo}`);
+    return;
+  }
+  const stored = spawnSync(GH, ['secret', 'set', 'SLOTLOCK_CHECK_STRIPE_KEY', '--repo', githubRepo], {
+    input: checkKey,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  if (stored.status !== 0) throw new Failure(`gh could not store SLOTLOCK_CHECK_STRIPE_KEY on ${githubRepo}: ${said(stored, checkKey)}`);
+  console.log(`Stored SLOTLOCK_CHECK_STRIPE_KEY on ${githubRepo}: the launch check now reads Stripe's live prices, webhook and deliveries.`);
 }
 
 main().catch((error) => {

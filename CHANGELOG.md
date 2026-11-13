@@ -12,8 +12,16 @@ versioning.
   with the tax code Managed Payments needs, and the four prices in pounds by lookup key; older
   prices are archived, and subscriptions on them carry on. It also creates the webhook endpoint for
   the six events the dashboard acts on, and a customer portal configuration for each plan. It
-  prints the dashboard Worker's price and portal variables, and stores a new endpoint's signing
-  secret on the Worker without printing it.
+  prints the dashboard Worker's price and portal variables. With `--dashboard-worker`, it stores
+  them on the Worker as secrets in one `wrangler secret bulk`, with the new endpoint's signing
+  secret. It also stores the dashboard's restricted key, once that key has opened (and expired) a
+  Checkout Session with Managed Payments and the Worker is seen to have the webhook's secret, and
+  then asks the dashboard whether it sells. The launch check's read-only key goes to GitHub with
+  `gh secret set`. It asks for keys it is not given, without showing them, and prints none. The
+  portal configurations carry the cancellation survey.
+- **The launch check fails when Stripe cannot deliver payment events to the webhook**: an event of
+  the last three days, other than the last 15 minutes', that has not reached it. Its key now needs
+  Read on Events, and the check warns without it.
 - **A billing test against the Stripe sandbox** (`billing.stripe-sandbox.integration.test.ts`, run
   only with a test-mode key). It opens Checkout with Managed Payments for both plans. Then, on a
   Stripe test clock, it runs a Developer subscription through a failed renewal and its recovery, a
@@ -154,6 +162,10 @@ versioning.
 
 ### Fixed
 
+- **`scripts/configure-uptime.mjs` creates the status page.** UptimeRobot refused it with 400: the
+  page's order must be a number from 1 to 4, and the script sent `friendlyName`. It took that
+  400 for a refused custom domain too; it now falls back to UptimeRobot's address only when the
+  domain or the plan is refused.
 - **Payment events now reach the plan.** At the pinned Stripe API version, an invoice names its
   subscription under `parent.subscription_details`. The webhook looked only at `subscription`, so
   it ignored `invoice.paid` and `invoice.payment_failed`: a failed renewal raised no alert, and a
