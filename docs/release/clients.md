@@ -15,15 +15,19 @@ every client's manifest and User-Agent constant to the release (`scripts/client-
 | Java | Maven Central, `io.pylota:slotlock` | `maven-central` | Central Portal user token and a signing key, in the environment |
 | Go | `github.com/PILOTAAI/slotlock/clients/go` | `go-module` | `GITHUB_TOKEN` pushes the `clients/go/v<version>` tag |
 
-Approving an environment is the human gate for PyPI, crates.io, NuGet and Go: once approved, the
-job publishes. Maven Central has a second gate: the job uploads a deployment that waits in the
-Central Portal until a maintainer publishes it there.
+Approving an environment is the human gate for every registry: once approved, the job publishes.
+For Maven Central, the job uploads a deployment that publishes itself once Central has validated it
+(`publishingType=AUTOMATIC`), and waits until Central says `PUBLISHED`; the job fails if Central
+refuses it, or if publishing has not started within 30 minutes.
 
-Maven Central holds 0.3.0 only (checked 2026-10-29: `https://repo1.maven.org/maven2/io/pylota/slotlock/maven-metadata.xml`
-lists 0.3.0, and `…/0.4.0/` and `…/0.5.3/` answer 404): the 0.4.x and 0.5.x deployments were
-uploaded but never published in the Central Portal. Until the one-time setup below is done for a
-registry, its job fails at the publish step and the other jobs carry on; re-run the failed job once
-the setup is in place.
+Until 0.10.2 the deployment waited for a second click in the Central Portal, and it was missed again
+and again (0.4.x and 0.5.x were never published either). On 2026-11-13, Maven Central had 0.6.0 as
+its latest, while 0.7.0 to 0.10.2 had been uploaded and validated but never published. Publish
+0.10.2 by hand once (Publishing > Deployments > `slotlock-0.10.2` > **Publish**), and drop the older
+deployments; every release after it publishes itself.
+
+Until the one-time setup below is done for a registry, its job fails at the publish step and the
+other jobs carry on; re-run the failed job once the setup is in place.
 
 ## After each release
 
@@ -31,9 +35,8 @@ Do these for every version `<v>`, once its Release run has finished:
 
 1. Approve the `pypi`, `crates-io`, `nuget`, `maven-central` and `go-module` environments in the
    Release run, and check each job passed.
-2. Publish the Central Portal deployment: central.sonatype.com > Publishing > Deployments, check
-   `slotlock-<v>` validated, and click **Publish**. `scripts/central-bundle.sh` uploads it as
-   `USER_MANAGED`, so nothing reaches Maven Central until you do.
+2. Nothing to click for Maven Central: the `maven-central` job publishes the deployment and waits
+   for Central. If it failed, its summary gives Central's reasons.
 3. Verify Maven Central serves it: `curl -sI https://repo1.maven.org/maven2/io/pylota/slotlock/<v>/`
    returns 200. Central can take up to an hour after publishing; until it does, the Java client of
    `<v>` is pending, not released.
@@ -104,8 +107,8 @@ Maven Central has no trusted publishing; the Central Portal takes a user token
    `CENTRAL_PORTAL_TOKEN` (the base64 of `<username>:<password>` of the token),
    `MAVEN_SIGNING_KEY` (`gpg --armor --export-secret-keys <fingerprint>`) and
    `MAVEN_SIGNING_PASSWORD`.
-4. At each release, publish the deployment and verify it, as [After each release](#after-each-release)
-   steps 2 and 3 say.
+4. At each release, approve the environment; the job publishes and waits for Central. Verify it as
+   [After each release](#after-each-release) step 3 says.
 
 ### Go
 

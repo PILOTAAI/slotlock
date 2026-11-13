@@ -82,6 +82,15 @@ versioning.
 
 ### Changed
 
+- **The Java client reaches Maven Central with each release.** The release's `maven-central` job
+  now uploads a deployment that publishes itself once Central has validated it, and waits until
+  Central says it is published; it fails if Central refuses it. Approving the environment stays the
+  human gate, as for PyPI, crates.io and NuGet. Before, each deployment waited for a second click in
+  the Central Portal, and 0.7.0 to 0.10.2 were never published: Maven Central's latest is 0.6.0.
+- **`scripts/configure-github.sh` sets the topics people search GitHub for** (RFC 0005, 0.8):
+  `mcp-server`, `model-context-protocol`, `ai-agents`, `booking-api`, `scheduling-api` and
+  `reservation-system` join the eight already there. Its checklist now says how to upload the
+  social preview, which GitHub has no API for.
 - **The dashboard's brand link has a name on a phone**, where only the logo shows (axe found it
   nameless).
 - **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
