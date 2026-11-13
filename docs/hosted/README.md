@@ -61,13 +61,13 @@ A cancelled plan runs to the end of the period it was paid for. When a plan ends
 made, the account returns to Free: nothing is deleted, but nothing more can be added while it holds
 more than Free allows. Archived resources count until they are deleted. The limits hold however you
 add things: in the dashboard, over the API or from the language clients. Accounts created before
-9 November 2026 move to the Free limits on 9 December 2026. An account on Developer is erased only
+9 November 2026 move to the Free limits on 16 November 2026. An account on Developer is erased only
 once its plan is cancelled, so it is never charged again. Custom is Slotlock on your own
 infrastructure, under its own agreement.
 
 ### Monthly allowances
 
-From 10 December 2026, each plan allows so many operations and bookings a calendar month, in UTC:
+From 16 November 2026, each plan allows so many operations and bookings a calendar month, in UTC:
 
 - **An operation** is a call that runs: an MCP tool call, an A2A task or a REST request, the
   assistant's included. A request refused before it runs (bad arguments, a rate limit) is not one.

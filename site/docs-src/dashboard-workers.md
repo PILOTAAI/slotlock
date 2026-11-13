@@ -136,7 +136,7 @@ The plan a tenant without one of its own is on is kept in the database, so `slot
 Worker enforce the same limits whichever one a write comes through. Set it once, as the schema owner:
 
 ```sh
-slotlock plan default free --from 2026-12-09   # every tenant without a plan is on Free from then
+slotlock plan default free --from 2026-11-16   # every tenant without a plan is on Free from then
 slotlock plan status                           # the default, and SLOTLOCK_TENANT's own plan
 ```
 

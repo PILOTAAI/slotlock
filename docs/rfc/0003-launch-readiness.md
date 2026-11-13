@@ -685,12 +685,12 @@ second region and a track record. None of those is code in this repository.
       `SLOTLOCK_STRIPE_PRICE_YEARLY`, `SLOTLOCK_STRIPE_PORTAL_DEVELOPER`,
       `SLOTLOCK_STRIPE_PORTAL_TEAM`, `SLOTLOCK_PLAN_CONTACT`. Not `SLOTLOCK_FREE_PLAN_FROM`, which
       the Worker now refuses (503): the default plan is set once with `slotlock plan default free
-      --from 2026-12-09`.
+      --from 2026-11-16`.
 - [ ] A lawyer reviews the Terms and privacy changes of PR #161 and of parts 3 and 4, and the
       partner agreement.
-- [x] The quotas in the Terms (from 10 December 2026, so the 30 days' notice covers every
-      account), pending the lawyer's review; turn on `SLOTLOCK_QUOTAS=on` for serve and the Worker
-      on that day, not before.
+- [x] The quotas in the Terms (from 16 November 2026, launch day: the owner's decision of 13
+      November, in place of 10 December), pending the lawyer's review; turn on `SLOTLOCK_QUOTAS=on`
+      for serve and the Worker on that day, not before.
 - [ ] Teams and the Team plan: `SLOTLOCK_DASHBOARD_ORGS=enabled` on the Worker and on serve (the
       hosted page describes it), the Team product and its £15 monthly and £150 yearly prices (made
       by `scripts/configure-stripe.mjs`), and their ids in `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and

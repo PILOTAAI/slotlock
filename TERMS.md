@@ -29,8 +29,8 @@ it yourself, and nothing here limits your rights under that licence.
 ## Plans and payment
 
 - **Free** costs nothing and has the limits shown on the [hosted service page](docs/hosted/README.md#plans).
-  Accounts created before 9 November 2026 move to those limits on 9 December 2026.
-- From 10 December 2026, each plan also allows a number of operations (calls to the API, the
+  Accounts created before 9 November 2026 move to those limits on 16 November 2026.
+- From 16 November 2026, each plan also allows a number of operations (calls to the API, the
   assistant's included) and bookings each calendar month, shown on the
   [hosted service page](docs/hosted/README.md#monthly-allowances). We tell you in your account's
   change feed and on the Plan page when you have used 80% and 100% of either. On Free, calls past an

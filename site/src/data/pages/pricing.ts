@@ -100,7 +100,7 @@ export const pricingPage: MarketingPage = {
             'A booking is a reservation, a calendar event (a whole recurring series is one) or a confirmed hold.',
             'At 80% and 100% of either allowance, your change feed records `usage.threshold_reached`, your webhooks receive it, and the dashboard says so.',
             'On Free, calls past an allowance are refused with `429 quota_exceeded` until the month ends. You can still read your usage, read your bookings and cancel. On Developer and Team the same happens at 110%.',
-            'Nothing is ever charged for use past an allowance. The monthly allowances apply from 10 December 2026.',
+            'Nothing is ever charged for use past an allowance. The monthly allowances apply from 16 November 2026.',
           ],
         },
       ],
