@@ -22,7 +22,8 @@ interface Monitor {
 let monitors: Monitor[] = [];
 let created: Record<string, unknown>[] = [];
 let refuseHeartbeat = false;
-let refuseCustomDomain = false;
+/** A free plan: no custom domain, no email subscriptions. */
+let freePlan = false;
 let pages: { id: number; friendlyName: string; customDomain: string | null; urlKey: string; monitorIds: number[] }[] = [];
 let server: Server;
 let base = '';
@@ -46,13 +47,22 @@ beforeAll(async () => {
     }
     if (request.method === 'GET' && url.pathname === '/v3/psps') return send(200, { data: pages, nextLink: null });
     if (request.method === 'POST' && url.pathname === '/v3/psps') {
-      const spec = (await body(request)) as { friendlyName: string; customDomain?: string; monitorIds: number[]; sort?: unknown };
+      const spec = (await body(request)) as { friendlyName: string; customDomain?: string; monitorIds: number[]; sort?: unknown; subscription?: boolean };
       // As UptimeRobot: the order is a number from 1 to 4, checked before the domain.
       if (![1, 2, 3, 4].includes(spec.sort as number)) {
         return send(400, { message: ['sort must be one of the following values: 1, 2, 3, 4'], error: 'Bad Request', statusCode: 400 });
       }
-      if (spec.customDomain && refuseCustomDomain) return send(403, { message: 'You are not allowed to use some settings with your current plan.' });
-      const page = { id: 70 + pages.length, friendlyName: spec.friendlyName, customDomain: spec.customDomain ?? null, urlKey: 'AbC123', monitorIds: spec.monitorIds };
+      // As UptimeRobot answered on 13 November 2026, one feature at a time.
+      if (spec.customDomain && freePlan) return send(403, { message: 'Feature ownDomain is not enabled in your plan.', code: '000-003' });
+      if (spec.subscription && freePlan) return send(403, { message: 'Feature subscribers is not enabled in your plan.', code: '000-003' });
+      const page = {
+        id: 70 + pages.length,
+        friendlyName: spec.friendlyName,
+        customDomain: spec.customDomain ?? null,
+        subscription: spec.subscription ?? false,
+        urlKey: 'AbC123',
+        monitorIds: spec.monitorIds,
+      };
       pages.push(page);
       return send(201, page);
     }
@@ -82,7 +92,7 @@ beforeEach(() => {
   monitors = [];
   created = [];
   refuseHeartbeat = false;
-  refuseCustomDomain = false;
+  freePlan = false;
   pages = [];
 });
 
@@ -138,9 +148,10 @@ describe('configure-uptime.mjs', () => {
     ]);
     expect(result.output).not.toContain(HEARTBEAT);
     expect(result.output).not.toContain(KEY);
-    // The public status page shows the three service monitors, at the custom domain.
+    // The public status page shows the three service monitors, at the custom domain, with email
+    // subscriptions where the plan has them.
     expect(pages).toEqual([
-      { id: 70, friendlyName: 'Slotlock status', customDomain: 'status.slotlock.pylota.io', urlKey: 'AbC123', monitorIds: [901, 902, 903] },
+      { id: 70, friendlyName: 'Slotlock status', customDomain: 'status.slotlock.pylota.io', subscription: true, urlKey: 'AbC123', monitorIds: [901, 902, 903] },
     ]);
     expect(result.output).toContain('created: Slotlock status (status page 70): https://status.slotlock.pylota.io');
     expect(result.output).toContain('status.slotlock.pylota.io CNAME stats.uptimerobot.com, DNS only');
@@ -169,15 +180,17 @@ describe('configure-uptime.mjs', () => {
     expect(calls()).toEqual([]);
   });
 
-  it('publishes the status page at UptimeRobot\'s own address when the plan refuses a custom domain', async () => {
-    refuseCustomDomain = true;
+  it('publishes the status page on a free plan, without the custom domain and email subscriptions it refuses', async () => {
+    freePlan = true;
     const { gh } = fakeGh();
     const result = await run([], { UPTIMEROBOT_API_KEY: KEY, SLOTLOCK_GH: gh });
     expect(result.code, result.output).toBe(0);
-    expect(result.output).toContain('note:    UptimeRobot answered 403 to the custom domain');
+    expect(result.output).toContain("note:    UptimeRobot's plan has no custom domains (ownDomain)");
+    expect(result.output).toContain("note:    UptimeRobot's plan has no email subscriptions (subscribers)");
     expect(result.output).toContain('created: Slotlock status (status page 70): https://stats.uptimerobot.com/AbC123');
     expect(result.output).not.toContain('CNAME');
-    expect(pages[0]).toMatchObject({ customDomain: null, monitorIds: [901, 902, 903] });
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ customDomain: null, subscription: false, monitorIds: [901, 902, 903] });
   });
 
   it('changes nothing on --dry-run, and refuses to start without a key or with a wrong one', async () => {

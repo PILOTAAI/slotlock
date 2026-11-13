@@ -11,12 +11,13 @@
 //                            the SLOTLOCK_STATUS_HEARTBEAT_URL secret of the `site` environment, and
 //                            the Status Worker workflow is started so the Worker gets it.
 // It also publishes the public status page, "Slotlock status", from the three service monitors:
-// uptime by day for each, incidents as they happen, and announcements people can subscribe to by
-// email. It asks for the custom domain status.slotlock.pylota.io (a CNAME to stats.uptimerobot.com
-// in Cloudflare, DNS only), and takes UptimeRobot's own address where the plan refuses one.
+// uptime by day for each, incidents as they happen, and announcements, with email subscriptions
+// where the plan has them. It asks for the custom domain status.slotlock.pylota.io (a CNAME to
+// stats.uptimerobot.com in Cloudflare, DNS only), and takes UptimeRobot's own address where the
+// plan refuses one.
 // A monitor or status page of the same name is kept as it is, so the script is safe to run again.
-// UptimeRobot may keep heartbeat monitors and custom domains to paid plans; when it refuses one,
-// the script says so and goes on.
+// UptimeRobot may keep heartbeat monitors, custom domains and email subscriptions to paid plans;
+// when it refuses one, the script says so and carries on without it.
 //
 //   UPTIMEROBOT_API_KEY=<key> node scripts/configure-uptime.mjs [--dry-run]
 // The key: UptimeRobot > Integrations & API > API > Main API key. It is read from the environment
@@ -119,24 +120,34 @@ async function statusPage(before) {
     // How the page orders its monitors: 1 is by name, A to Z (UptimeRobot takes 1 to 4 only).
     sort: 1,
   };
-  let answer = await api('POST', '/psps', { ...page, customDomain: STATUS_DOMAIN });
-  let custom = true;
-  // Only a refusal of the domain itself (a plan without custom domains) falls back to UptimeRobot's
-  // own address; any other error is the page's, and is reported as it is.
-  const aboutDomain = /domain|plan|upgrade|not allowed/i.test(JSON.stringify(answer.json?.message ?? answer.text));
-  if (answer.status !== 201 && answer.status !== 200 && aboutDomain) {
-    console.log(`note:    UptimeRobot answered ${answer.status} to the custom domain (${(answer.json?.message ?? answer.text).toString().slice(0, 160)}); publishing at its own address instead.`);
-    custom = false;
-    answer = await api('POST', '/psps', page);
+  // A feature the plan lacks is refused by its name ("Feature ownDomain is not enabled in your
+  // plan."): the page is asked for again without it. Any other refusal is reported as it is.
+  let wanted = { ...page, customDomain: STATUS_DOMAIN };
+  let answer;
+  for (;;) {
+    answer = await api('POST', '/psps', wanted);
+    if (answer.status === 201 || answer.status === 200) break;
+    const refused = /Feature (\w+) is not enabled/.exec(JSON.stringify(answer.json?.message ?? answer.text))?.[1];
+    const feature = refused ? PAID_PAGE_FEATURES[refused] : undefined;
+    if (!feature || !(feature.field in wanted)) break;
+    console.log(`note:    UptimeRobot's plan has no ${feature.what} (${refused}): the status page goes without ${feature.it}.`);
+    const { [feature.field]: _refused, ...rest } = wanted;
+    wanted = rest;
   }
   if (answer.status !== 201 && answer.status !== 200) {
     throw new Failure(`UptimeRobot answered ${answer.status} creating the status page: ${answer.text.slice(0, 300)}`);
   }
   console.log(`created: ${STATUS_PAGE} (status page ${answer.json?.id}): ${pageUrl(answer.json ?? {})}`);
-  if (custom) {
+  if ('customDomain' in wanted) {
     console.log(`         In Cloudflare, add the DNS record: ${STATUS_DOMAIN} CNAME stats.uptimerobot.com, DNS only (grey cloud).`);
   }
 }
+
+/** The status page's paid features, by the name UptimeRobot refuses them under. */
+const PAID_PAGE_FEATURES = {
+  ownDomain: { field: 'customDomain', what: 'custom domains', it: `${STATUS_DOMAIN}, at UptimeRobot's own address` },
+  subscribers: { field: 'subscription', what: 'email subscriptions', it: 'them: people follow it on the page itself' },
+};
 
 function pageUrl(page) {
   return page.customDomain ? `https://${page.customDomain}` : `https://stats.uptimerobot.com/${page.urlKey ?? '?'}`;
