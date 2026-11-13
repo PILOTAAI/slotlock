@@ -1028,13 +1028,13 @@ export interface SlotlockDashboardBilling {
     successUrl: string;
     cancelUrl: string;
   }): Promise<string>;
-  /** A billing portal URL for the tenant's customer. */
-  portal(input: { customer: string; returnUrl: string }): Promise<string>;
+  /** A billing portal URL for the tenant's customer, in the portal configuration of its kind of plan. */
+  portal(input: { customer: string; returnUrl: string; plan?: 'developer' | 'team' }): Promise<string>;
   /** The Developer plan's prices as shown, such as `£5`. */
   prices: { month: string; year: string };
   /**
-   * The Team plan's prices as shown (Teams on Cloud). With them, an organization's workspace is
-   * offered Team instead of Developer.
+   * The Team plan's prices as shown (Teams on Cloud). A shared workspace (an organization's or a
+   * team's) is offered Team only, never Developer: without them it is offered Team by asking.
    */
   teamPrices?: { month: string; year: string };
   /**
@@ -5853,9 +5853,10 @@ ${
     const { plan, paying, admin, used, month, resets, keys } = standing;
     const token = csrfToken(session);
     const keyName = new Map(keys.map((key) => [key.id, key.name]));
-    // An organization is offered Team (where billing sells it, or by asking); a person, Developer.
-    const offered: 'developer' | 'team' =
-      sharedWorkspace(session) && (billing ? Boolean(billing.teamPrices) : true) ? 'team' : 'developer';
+    // A shared workspace is offered Team (where billing sells it, else by asking), never Developer,
+    // whose limits are a person's; a person is offered Developer.
+    const offered: 'developer' | 'team' = sharedWorkspace(session) ? 'team' : 'developer';
+    const sells = billing !== undefined && (offered === 'developer' || billing.teamPrices !== undefined);
     const contact = plans.contact ?? billing?.contact;
     const manage =
       billing && plan?.stripeCustomer && admin
@@ -5889,7 +5890,7 @@ ${
     if (!paying) {
       if (!admin) {
         upgrade = html`<p class="fine">An owner of this organization can change its plan.</p>`;
-      } else if (billing) {
+      } else if (billing && sells) {
         const offeredPrices = offered === 'team' ? (billing.teamPrices as { month: string; year: string }) : billing.prices;
         upgrade = html`<section class="panel" id="upgrade">
 <h2>${PLAN_NAMES[offered]}</h2>
@@ -5936,6 +5937,11 @@ ${
     // A team being deleted takes no plan: kept first, so it is never billed while it waits to go.
     if (deletingOf.has(session)) return planPage(session, 409, 'This team is being deleted. Keep it on Settings, Team before choosing a plan.');
     const interval = form.get('interval') === 'year' ? 'year' : 'month';
+    // A shared workspace buys Team only: Developer's limits are a person's.
+    const shared = sharedWorkspace(session);
+    if (shared && !billing.teamPrices) {
+      return planPage(session, 409, 'Team is not on sale here yet: ask us about it, and we will set it up.');
+    }
     const tenantRef = tenantOf(session);
     const plan = await billing.plan(tenantRef);
     if (plan && plan.plan !== 'free') {
@@ -5946,7 +5952,7 @@ ${
       url = await billing.checkout({
         tenantRef,
         interval,
-        ...(sharedWorkspace(session) && billing.teamPrices ? { plan: 'team' as const } : {}),
+        ...(shared ? { plan: 'team' as const } : {}),
         customer: plan?.stripeCustomer ?? null,
         successUrl: `${publicRoot}/plan?checkout=done`,
         cancelUrl: `${publicRoot}/plan`,
@@ -5974,7 +5980,11 @@ ${
     if (!plan?.stripeCustomer) return planPage(session, 409, 'There is no billing to manage yet.');
     let url: string;
     try {
-      url = await billing.portal({ customer: plan.stripeCustomer, returnUrl: `${publicRoot}/plan` });
+      url = await billing.portal({
+        customer: plan.stripeCustomer,
+        returnUrl: `${publicRoot}/plan`,
+        plan: sharedWorkspace(session) ? 'team' : 'developer',
+      });
     } catch (error) {
       ignoreRejection(options.onError?.(error));
       return planPage(session, 502, 'Billing did not open. Try again in a minute.');
@@ -6842,7 +6852,8 @@ ${
   async function memberCapOf(tenantRef: string): Promise<number | null> {
     if (!plans) return null;
     const plan = await plans.plan(tenantRef);
-    return plan === null || plan.plan === 'free' || plan.status === 'canceled' ? FREE_TEAM_MEMBERS : null;
+    // Only Team lifts a team workspace's limits (the Terms and the hosted page say so).
+    return plan !== null && plan.plan === 'team' && plan.status !== 'canceled' ? null : FREE_TEAM_MEMBERS;
   }
 
   /** The session moved into a workspace (its own when `team` is undefined), Live or Test as it was. */

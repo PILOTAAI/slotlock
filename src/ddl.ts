@@ -1582,7 +1582,7 @@ BEGIN
     SELECT count(*) INTO free_count FROM slotlock.workspaces ws
      WHERE ws.created_by = requested_person AND ws.status = 'active'
        AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans paid
-                        WHERE paid.tenant_ref = ws.tenant_ref AND paid.plan <> 'free' AND paid.status <> 'canceled');
+                        WHERE paid.tenant_ref = ws.tenant_ref AND paid.plan = 'team' AND paid.status <> 'canceled');
     IF free_count >= requested_cap THEN
       RETURN QUERY SELECT NULL::text, 'team_limit'::text;
       RETURN;

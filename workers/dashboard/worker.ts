@@ -205,6 +205,25 @@ function readBilling(vars: SlotlockEnv) {
   const month = vars.SLOTLOCK_STRIPE_PRICE_MONTHLY?.trim();
   const year = vars.SLOTLOCK_STRIPE_PRICE_YEARLY?.trim();
   if (!secretKey || !month || !year) return null;
+  // Without the webhook's secret, a payment never reaches the dashboard: the buyer would be charged
+  // and stay on Free. Billing is all or nothing.
+  const webhookSecret = vars.STRIPE_WEBHOOK_SECRET?.trim();
+  if (!webhookSecret) {
+    throw new SlotlockConfigError(
+      'Stripe billing needs STRIPE_WEBHOOK_SECRET, the signing secret of the webhook endpoint at <SLOTLOCK_PUBLIC_URL>/stripe/webhook',
+    );
+  }
+  // Each plan's customer portal configuration (bpc_…), from scripts/configure-stripe.mjs.
+  const portalConfigurations: Partial<Record<'developer' | 'team', string>> = {};
+  for (const [plan, name] of [
+    ['developer', 'SLOTLOCK_STRIPE_PORTAL_DEVELOPER'],
+    ['team', 'SLOTLOCK_STRIPE_PORTAL_TEAM'],
+  ] as const) {
+    const value = vars[name]?.trim();
+    if (!value) continue;
+    if (!/^bpc_[A-Za-z0-9]{1,250}$/.test(value)) throw new SlotlockConfigError(`${name} must be a portal configuration id (bpc_…)`);
+    portalConfigurations[plan] = value;
+  }
   // The Worker no longer reads it: a deployment that still sets it would believe it does.
   if (vars.SLOTLOCK_FREE_PLAN_FROM?.trim()) {
     throw new SlotlockConfigError(
@@ -234,6 +253,7 @@ function readBilling(vars: SlotlockEnv) {
       secretKey,
       prices: { month, year },
       ...(teamPrices ? { teamPrices } : {}),
+      ...(Object.keys(portalConfigurations).length ? { portalConfigurations } : {}),
       ...(overage !== undefined && overagePrice ? { overagePrice } : {}),
       ...(apiVersion ? { apiVersion } : {}),
     }),
@@ -242,7 +262,7 @@ function readBilling(vars: SlotlockEnv) {
     ...(overage !== undefined
       ? { overage: { price: vars.SLOTLOCK_PLAN_PRICE_OVERAGE?.trim() || 'the metered price', stopPercent: overage } }
       : {}),
-    webhookSecret: vars.STRIPE_WEBHOOK_SECRET?.trim() || null,
+    webhookSecret,
     contact: vars.SLOTLOCK_PLAN_CONTACT?.trim() || SLOTLOCK_DEFAULT_PLAN_CONTACT,
     prices: {
       month: vars.SLOTLOCK_PLAN_PRICE_MONTHLY?.trim() || '£5',
