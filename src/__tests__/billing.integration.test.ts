@@ -6,10 +6,12 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_STRIPE_API_VERSION,
+  type SlotlockStripePrice,
   type SlotlockStripeSubscription,
   createSlotlockStripe,
   handleSlotlockStripeWebhook,
   slotlockPlanOfSubscription,
+  slotlockPriceIsTeam,
   verifySlotlockStripeSignature,
 } from '../billing.js';
 import { readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../plans.js';
@@ -59,6 +61,7 @@ function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>) {
     secretKey: 'rk_test_fake',
     prices: { month: 'price_month', year: 'price_year' },
     teamPrices: { month: 'price_team_month', year: 'price_team_year' },
+    portalConfigurations: { developer: 'bpc_Developer1', team: 'bpc_Team1' },
     fetch: fetch as typeof globalThis.fetch,
   });
   return { stripe, calls };
@@ -95,8 +98,17 @@ describe('Stripe signatures and plans', () => {
     expect(at('price_team_month', 'past_due')).toEqual({ plan: 'team', status: 'past_due' });
     expect(at({ id: 'price_year' })).toEqual({ plan: 'developer', status: 'active' });
     expect(at({ id: 'price_team_year' }, 'canceled')).toEqual({ plan: 'free', status: 'canceled' });
-    // Without Team prices, every paid subscription is Developer.
+    // Without Team prices, a price known only by its id is Developer.
     expect(slotlockPlanOfSubscription({ id: 'sub_1', status: 'active', customer: 'cus_1', items: { data: [{ price: 'price_team_year' }] } })).toMatchObject({ plan: 'developer' });
+    // A Team price says so itself (scripts/configure-stripe.mjs): by its lookup key, its metadata or
+    // its product's, so a Team price that replaced the configured ids still gives Team.
+    const plain = (price: SlotlockStripePrice) =>
+      slotlockPlanOfSubscription({ id: 'sub_1', status: 'active', customer: 'cus_1', items: { data: [{ price }] } }).plan;
+    expect(plain({ id: 'price_new', lookup_key: 'slotlock_team_monthly' })).toBe('team');
+    expect(plain({ id: 'price_new', metadata: { slotlock_plan: 'team' } })).toBe('team');
+    expect(plain({ id: 'price_new', product: { id: 'prod_T', metadata: { slotlock_plan: 'team' } } })).toBe('team');
+    expect(plain({ id: 'price_new', lookup_key: 'slotlock_developer_yearly', metadata: { slotlock_plan: 'developer' } })).toBe('developer');
+    expect(slotlockPriceIsTeam({ id: 'price_new', product: 'prod_T' })).toBe(false);
   });
 
   it('adds the metered overage price to a Developer checkout only, when overage is on', async () => {
@@ -167,6 +179,8 @@ describe('Stripe signatures and plans', () => {
     expect(Object.fromEntries(new URLSearchParams(sent('/v1/billing_portal/sessions')?.body ?? ''))).toEqual({
       customer: 'cus_Old',
       return_url: 'https://app.example.com/dashboard/plan',
+      // Developer's own portal configuration: it switches between Developer's prices only.
+      configuration: 'bpc_Developer1',
     });
     await expect(stripe.subscription('sub_../x')).rejects.toThrow('Not a subscription id');
   });
@@ -187,6 +201,27 @@ describe('Stripe signatures and plans', () => {
     await expect(stripe.liveSubscriptionsOfTenant("github:42' OR 'x")).rejects.toThrow(
       'Not a searchable tenant',
     );
+  });
+
+  it('opens no second Checkout while an unpaid subscription could still be paid', async () => {
+    const unpaid: SlotlockStripeSubscription = { id: 'sub_Unpaid', status: 'unpaid', customer: 'cus_Owes' };
+    const { stripe, calls } = fakeStripe(new Map([['sub_Unpaid', unpaid]]));
+    const checkout = { tenantRef: 'github:43', interval: 'month' as const, customer: 'cus_Owes', successUrl: 'https://app.example.com/plan', cancelUrl: 'https://app.example.com/plan' };
+    await expect(stripe.checkout(checkout)).rejects.toMatchObject({ code: 'subscription_exists', status: 409 });
+    expect(calls.some((call) => call.url.endsWith('/v1/checkout/sessions'))).toBe(false);
+    // An unpaid subscription gives no plan, though: it is not live.
+    expect(await stripe.liveSubscriptionsOfCustomer('cus_Owes')).toEqual([]);
+  });
+
+  it("opens each plan's own portal configuration", async () => {
+    const { stripe, calls } = fakeStripe(new Map());
+    await stripe.portal({ customer: 'cus_A', returnUrl: 'https://app.example.com/plan' });
+    await stripe.portal({ customer: 'cus_B', returnUrl: 'https://app.example.com/plan', plan: 'team' });
+    const bodies = calls.filter((call) => call.url.endsWith('/v1/billing_portal/sessions')).map((call) => new URLSearchParams(call.body ?? ''));
+    expect(bodies.map((body) => [body.get('customer'), body.get('configuration')])).toEqual([
+      ['cus_A', 'bpc_Developer1'],
+      ['cus_B', 'bpc_Team1'],
+    ]);
   });
 });
 
@@ -358,7 +393,10 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
         type: 'invoice.payment_failed',
         data: {
           object: {
-            object: 'invoice', id: invoice, subscription: 'sub_L1', amount_due: 1200, currency: 'usd',
+            // As Stripe sends it at the pinned API version (2026-04-22.dahlia): since 2025-03-31.basil an
+            // invoice names its subscription under parent.subscription_details, not `subscription`.
+            object: 'invoice', id: invoice, amount_due: 500, currency: 'gbp',
+            parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_L1' } },
             attempt_count: 2, customer_email: 'ada@example.com', customer_address: { line1: '1 Main St' },
           },
         },
@@ -371,14 +409,17 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
       expect(alert).toEqual({
         kind: 'payment_failed',
         stripe_ref: invoice,
-        detail: { amount_due: 1200, currency: 'usd', attempt_count: 2, next_payment_attempt: null, subscription: 'sub_L1' },
+        detail: { amount_due: 500, currency: 'gbp', attempt_count: 2, next_payment_attempt: null, subscription: 'sub_L1' },
         resolved_by: null,
       });
       // Never the customer's email or address.
       expect(JSON.stringify(alert)).not.toMatch(/ada@|Main St/);
 
       subscriptions.set('sub_L1', owing('active'));
-      await deliver({ type: 'invoice.paid', data: { object: { object: 'invoice', id: 'in_L2', subscription: 'sub_L1' } } });
+      await deliver({
+        type: 'invoice.paid',
+        data: { object: { object: 'invoice', id: 'in_L2', parent: { subscription_details: { subscription: { id: 'sub_L1' } } } } },
+      });
       expect((await sql`SELECT resolved_by FROM slotlock.billing_alerts WHERE tenant_ref = ${late}`)[0]?.resolved_by).toBe('stripe');
     } finally {
       // Erasure refuses a live subscription; the test's plan goes first.

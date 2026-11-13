@@ -603,6 +603,34 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(full).not.toContain('action="/dashboard/members/invite"');
   });
 
+  it('holds a team on Developer to 3 people, as on Free: only Team lifts the limit', async () => {
+    let plan: 'team' | 'developer' = 'developer';
+    const planned = build({
+      plans: {
+        plan: async () => ({
+          plan,
+          status: 'active',
+          limits: { resources: 100, apiKeys: 100, webhookEndpoints: 10 },
+          stripeCustomer: null,
+          stripeSubscription: null,
+          currentPeriodEnd: null,
+        }),
+      },
+    });
+    const hal = new Browser(planned);
+    await signIn(hal, 'hal');
+    await hal.post('/dashboard/teams', '/teams/create', { name: 'On Developer' });
+    tenants.push(await teamOf(hal));
+    for (const email of ['one@clinic.example', 'two@clinic.example']) {
+      await hal.post('/dashboard/settings/members', '/members/invite', { email, role: 'member' });
+    }
+    const full = await (await hal.get('/dashboard/settings/members')).text();
+    expect(full).toContain('<strong>3 of 3 people</strong>');
+    expect(full).not.toContain('action="/dashboard/members/invite"');
+    plan = 'team';
+    expect(await (await hal.get('/dashboard/settings/members')).text()).toContain('action="/dashboard/members/invite"');
+  });
+
   it('exports the audit log on Team, as CSV a spreadsheet will not run and as JSON with its chain', async () => {
     let plan: 'team' | 'free' = 'free';
     const planned = build({

@@ -106,10 +106,13 @@ describe.skipIf(!url)('team workspaces, invitations and members (real Postgres)'
     for (const result of made) created.push(result.tenantRef);
     expect(made).toHaveLength(1);
     expect(results.filter((result) => 'refusal' in result && result.refusal === 'team_limit')).toHaveLength(4);
-    // On a paid plan it no longer counts against the free cap.
+    // On Developer (an override, say) it still counts: only Team lifts a team workspace's limits.
     await admin`
       INSERT INTO slotlock.tenant_plans (tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints)
-      VALUES (${made[0]?.tenantRef as string}, 'team', 'active', 100, 20, 10)`;
+      VALUES (${made[0]?.tenantRef as string}, 'developer', 'active', 100, 100, 10)`;
+    expect(await teams.create(lou, 'Second', handle(), 1)).toEqual({ refusal: 'team_limit' });
+    // On Team it no longer counts against the free cap.
+    await admin`UPDATE slotlock.tenant_plans SET plan = 'team' WHERE tenant_ref = ${made[0]?.tenantRef as string}`;
     const second = await teams.create(lou, 'Second', handle(), 1);
     expect(second).toHaveProperty('tenantRef');
     if ('tenantRef' in second) created.push(second.tenantRef);

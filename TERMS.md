@@ -36,12 +36,12 @@ it yourself, and nothing here limits your rights under that licence.
   change feed and on the Plan page when you have used 80% and 100% of either. On Free, calls past an
   allowance are refused until the month ends; on Developer and Team, calls past 110% of it are. Use
   past an allowance is never charged for.
-- **Developer** costs $10 a month or $100 a year, shown at checkout in your currency with any sales
+- **Developer** costs £5 a month or £50 a year, shown at checkout in your currency with any sales
   tax or VAT added. Stripe sells it to you as merchant of record: Stripe takes the payment, charges
   the tax and issues the invoices, under its own terms for buyers, which it shows at checkout. These
   terms cover the service itself.
 - **Team** is for a shared workspace: a team workspace, or a GitHub organization that an owner has
-  turned Slotlock on for. It costs $40 a month or $400 a year for the whole workspace, however many
+  turned Slotlock on for. It costs £15 a month or £150 a year for the whole workspace, however many
   people use it, and is bought, sold and taxed as Developer is. Only the workspace's Owners and
   Billing managers can buy, change or cancel it. If Slotlock is turned off for an organization, its
   plan continues until it is cancelled. On Free, a team workspace has up to 3 people, open

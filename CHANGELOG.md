@@ -7,6 +7,18 @@ versioning.
 
 ### Added
 
+- **`scripts/configure-stripe.mjs` sets up Stripe for both paid plans**, in the sandbox or in live
+  mode, and changes only what differs when run again. It creates the Developer and Team products
+  with the tax code Managed Payments needs, and the four prices in pounds by lookup key; older
+  prices are archived, and subscriptions on them carry on. It also creates the webhook endpoint for
+  the six events the dashboard acts on, and a customer portal configuration for each plan. It
+  prints the dashboard Worker's price and portal variables, and stores a new endpoint's signing
+  secret on the Worker without printing it.
+- **A billing test against the Stripe sandbox** (`billing.stripe-sandbox.integration.test.ts`, run
+  only with a test-mode key). It opens Checkout with Managed Payments for both plans. Then, on a
+  Stripe test clock, it runs a Developer subscription through a failed renewal and its recovery, a
+  switch to yearly and a cancellation at the end of the period, and a Team subscription through a
+  switch and a cancellation. Every event Stripe sends goes through the webhook to Postgres.
 - **A status Worker that runs on time** (`workers/status`, deployed by `status-worker.yml`). GitHub
   ran the ten-minute status probe every 3.5 to 10.5 hours, and the scheduled-post workflow likewise.
   The Worker runs every five minutes on a Cloudflare Cron Trigger. It checks the API, the dashboard
@@ -16,6 +28,9 @@ versioning.
 - **`scripts/configure-uptime.mjs`** sets up UptimeRobot monitors for the API (`"status":"ready"`),
   the dashboard and the site, plus a heartbeat for the status Worker, through UptimeRobot's v3 API.
   It is safe to run again. It stores the heartbeat URL as a `site` environment secret, on stdin.
+  It also publishes a public status page, "Slotlock status", from the three service monitors: uptime
+  by day, incidents, and announcements people can subscribe to. It asks for the custom domain
+  `status.slotlock.pylota.io`, and falls back to UptimeRobot's own address where the plan refuses one.
 - **Posts merged ahead of their date publish themselves.** The site builds a post only once its
   `publishAt` has passed, and nothing rebuilt it at that time. `scheduled-posts.yml` checks every
   fifteen minutes for posts that are due but not live, and starts the Site workflow when it finds
@@ -103,6 +118,22 @@ versioning.
 
 ### Changed
 
+- **Manage billing opens each plan's own portal configuration**
+  (`SLOTLOCK_STRIPE_PORTAL_DEVELOPER` and `SLOTLOCK_STRIPE_PORTAL_TEAM`). A customer switches
+  between their own plan's monthly and yearly prices, never to the other plan, and buys one at a
+  time. Monthly to yearly is charged at once, less what is left of the month; yearly to monthly
+  waits for the end of the year paid for.
+- **A shared workspace is sold Team only**, never Developer, whose limits are a person's. Without
+  the Team prices, its owners are offered Team by asking, and a checkout is refused.
+- **The dashboard Worker no longer sells without `STRIPE_WEBHOOK_SECRET`.** With the Stripe key
+  and prices but no secret, a buyer would be charged and stay on Free, so it answers 503 and says
+  why. Set the secret before deploying this.
+- **Slotlock Cloud's prices are in pounds, and lower.** Developer is £5 a month or £50 a year
+  (was $10 or $100), and Team £15 a month or £150 a year (was $40 or $400). Stripe still shows
+  each buyer their own currency at checkout. The Plans table in `docs/hosted/README.md` stays the
+  source: the site's build now reads the currency from it too, so the pricing page, the landing
+  page, the comparisons and the structured data (`priceCurrency`) follow it. The Terms, the
+  dashboard Worker's default price labels, its guide and the launch check say the same.
 - **Hosted Slotlock's plan limits and monthly allowances start on 16 November 2026**, launch day,
   instead of 9 and 10 December: the Terms, the hosted service page and the pricing page say so.
   Accounts created before 9 November move to the Free limits that day too.
@@ -120,6 +151,21 @@ versioning.
 - **The new Slotlock logo** (the Slotlock design system): a padlock whose keyhole is a slot, ink with
   a lime slot on light surfaces and lime on dark ones. It is on the site, the docs, the favicon,
   the touch icon, the structured-data logo, every link preview, the dashboard and the admin console.
+
+### Fixed
+
+- **Payment events now reach the plan.** At the pinned Stripe API version, an invoice names its
+  subscription under `parent.subscription_details`. The webhook looked only at `subscription`, so
+  it ignored `invoice.paid` and `invoice.payment_failed`: a failed renewal raised no alert, and a
+  recovery closed none. Confirmed with Stripe's own events in the sandbox.
+- **Only Team lifts a team workspace's limits**, as the Terms say. Before, any paid plan lifted the
+  3-person limit and the one-workspace-per-person limit.
+- **An `unpaid` subscription stops a second Checkout.** Paying the old invoice later would
+  otherwise have left one tenant with two subscriptions.
+- **A Team price is known by its lookup key and metadata**, as well as by the configured ids, so a
+  Team subscription stays Team when the prices change.
+- **The pricing page**: its currency answer said US dollars, and Team's description left out team
+  workspaces.
 
 ### Security
 

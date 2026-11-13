@@ -22,6 +22,8 @@ interface Monitor {
 let monitors: Monitor[] = [];
 let created: Record<string, unknown>[] = [];
 let refuseHeartbeat = false;
+let refuseCustomDomain = false;
+let pages: { id: number; friendlyName: string; customDomain: string | null; urlKey: string; monitorIds: number[] }[] = [];
 let server: Server;
 let base = '';
 const scratch: string[] = [];
@@ -41,6 +43,14 @@ beforeAll(async () => {
     if (request.method === 'GET' && url.pathname === '/v3/monitors') return send(200, { data: monitors, nextLink: null });
     if (request.method === 'GET' && url.pathname === '/v3/user/alert-contacts') {
       return send(200, [{ id: 501, friendlyName: 'owner', type: 'Email' }]);
+    }
+    if (request.method === 'GET' && url.pathname === '/v3/psps') return send(200, { data: pages, nextLink: null });
+    if (request.method === 'POST' && url.pathname === '/v3/psps') {
+      const spec = (await body(request)) as { friendlyName: string; customDomain?: string; monitorIds: number[] };
+      if (spec.customDomain && refuseCustomDomain) return send(403, { message: 'Custom domains need a paid plan' });
+      const page = { id: 70 + pages.length, friendlyName: spec.friendlyName, customDomain: spec.customDomain ?? null, urlKey: 'AbC123', monitorIds: spec.monitorIds };
+      pages.push(page);
+      return send(201, page);
     }
     if (request.method === 'POST' && url.pathname === '/v3/monitors') {
       const spec = (await body(request)) as Record<string, unknown>;
@@ -68,6 +78,8 @@ beforeEach(() => {
   monitors = [];
   created = [];
   refuseHeartbeat = false;
+  refuseCustomDomain = false;
+  pages = [];
 });
 
 /** A gh that records each call's arguments and stdin. */
@@ -122,6 +134,12 @@ describe('configure-uptime.mjs', () => {
     ]);
     expect(result.output).not.toContain(HEARTBEAT);
     expect(result.output).not.toContain(KEY);
+    // The public status page shows the three service monitors, at the custom domain.
+    expect(pages).toEqual([
+      { id: 70, friendlyName: 'Slotlock status', customDomain: 'status.slotlock.pylota.io', urlKey: 'AbC123', monitorIds: [901, 902, 903] },
+    ]);
+    expect(result.output).toContain('created: Slotlock status (status page 70): https://status.slotlock.pylota.io');
+    expect(result.output).toContain('status.slotlock.pylota.io CNAME stats.uptimerobot.com, DNS only');
   });
 
   it('keeps the monitors that exist on a second run, and stores the heartbeat again', async () => {
@@ -132,6 +150,8 @@ describe('configure-uptime.mjs', () => {
     expect(again.code, again.output).toBe(0);
     expect(created).toEqual([]);
     expect(again.output).toContain('kept:    Slotlock API (monitor 901)');
+    expect(again.output).toContain('kept:    Slotlock status: https://status.slotlock.pylota.io');
+    expect(pages).toHaveLength(1);
     expect(calls().filter((call) => call.args[0] === 'secret')).toHaveLength(2);
   });
 
@@ -145,13 +165,26 @@ describe('configure-uptime.mjs', () => {
     expect(calls()).toEqual([]);
   });
 
+  it('publishes the status page at UptimeRobot\'s own address when the plan refuses a custom domain', async () => {
+    refuseCustomDomain = true;
+    const { gh } = fakeGh();
+    const result = await run([], { UPTIMEROBOT_API_KEY: KEY, SLOTLOCK_GH: gh });
+    expect(result.code, result.output).toBe(0);
+    expect(result.output).toContain('note:    UptimeRobot answered 403 to the custom domain');
+    expect(result.output).toContain('created: Slotlock status (status page 70): https://stats.uptimerobot.com/AbC123');
+    expect(result.output).not.toContain('CNAME');
+    expect(pages[0]).toMatchObject({ customDomain: null, monitorIds: [901, 902, 903] });
+  });
+
   it('changes nothing on --dry-run, and refuses to start without a key or with a wrong one', async () => {
     const { gh, calls } = fakeGh();
     const dry = await run(['--dry-run'], { UPTIMEROBOT_API_KEY: KEY, SLOTLOCK_GH: gh });
     expect(dry.code, dry.output).toBe(0);
     expect(dry.output).toContain('would create: Slotlock API (KEYWORD https://slotlock-api.pylota.io/healthz), every 5 minutes');
+    expect(dry.output).toContain('would create: Slotlock status, a public status page of the API, the dashboard and the site, at https://status.slotlock.pylota.io');
     expect(dry.output).toContain('Nothing was changed.');
     expect(created).toEqual([]);
+    expect(pages).toEqual([]);
     expect(calls()).toEqual([]);
     expect((await run([], { SLOTLOCK_GH: gh })).code).toBe(2);
     const wrong = await run([], { UPTIMEROBOT_API_KEY: 'not-the-key', SLOTLOCK_GH: gh });

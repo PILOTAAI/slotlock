@@ -362,14 +362,21 @@ async function readPlans() {
       'the Price row of the Plans table in docs/hosted/README.md',
     ),
   );
-  const plans = Object.keys(limits).map((plan) => {
+  // Prices read "£5 a month, or £50 a year": one currency for every paid plan, which Free shows too.
+  const CURRENCIES = { '£': 'GBP', $: 'USD', '€': 'EUR' };
+  const symbols = new Set();
+  const priced = Object.keys(limits).map((plan) => {
     const column = names.indexOf(plan);
     const price = must(column > 0 ? prices[column] : undefined, `${plan}'s price in docs/hosted/README.md`);
-    const money = /\$([0-9,]+) a month, or \$([0-9,]+) a year/.exec(price);
+    const money = /([£$€])([0-9,]+) a month, or ([£$€])([0-9,]+) a year/.exec(price);
+    if (money) symbols.add(money[1]).add(money[3]);
     const amount = (index) =>
       plan === 'free' ? 0 : must(money && Number(money[index].replace(/,/g, '')), `${plan}'s price`);
-    return { id: plan, monthly: amount(1), yearly: amount(2), ...limits[plan], ...(quotas[plan] ?? {}) };
+    return { id: plan, monthly: amount(2), yearly: amount(4), ...limits[plan], ...(quotas[plan] ?? {}) };
   });
+  if (symbols.size !== 1) fail(`the Plans table in docs/hosted/README.md prices plans in ${symbols.size} currencies: use one`);
+  const symbol = [...symbols][0];
+  const plans = priced.map((plan) => ({ ...plan, currency: CURRENCIES[symbol], symbol }));
   const custom = names.indexOf('custom');
   const link = custom > 0 ? /^\[([^\]]+)\]\((mailto:[^)\s]+)\)$/.exec(prices[custom] ?? '') : null;
   return { plans, contact: link ? { label: link[1], href: link[2] } : null };

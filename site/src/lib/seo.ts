@@ -89,25 +89,27 @@ interface HostedPlan {
   id: string;
   monthly: number;
   yearly: number;
+  currency: string;
+  symbol: string;
 }
 
 const PLAN_NAMES: Record<string, string> = { free: 'Free', developer: 'Developer', team: 'Team' };
 const plans = ((facts as { plans?: HostedPlan[] | null }).plans ?? []) as HostedPlan[];
 
-/** One Offer per hosted plan (monthly price, USD), plus self-hosting at no charge. */
+/** One Offer per hosted plan (monthly price, in the plans' currency), plus self-hosting at no charge. */
 export function offers() {
   const hosted = plans.map((plan) => ({
     '@type': 'Offer',
     name: `Slotlock Cloud ${PLAN_NAMES[plan.id] ?? plan.id}`,
     price: String(plan.monthly),
-    priceCurrency: 'USD',
+    priceCurrency: plan.currency,
     url: `${SITE}/pricing/`,
     ...(plan.monthly > 0
       ? {
           priceSpecification: {
             '@type': 'UnitPriceSpecification',
             price: String(plan.monthly),
-            priceCurrency: 'USD',
+            priceCurrency: plan.currency,
             unitText: 'MONTH',
           },
         }
@@ -119,7 +121,7 @@ export function offers() {
       '@type': 'Offer',
       name: 'Self-hosted (Apache-2.0)',
       price: '0',
-      priceCurrency: 'USD',
+      priceCurrency: plans[0]?.currency ?? 'GBP',
       url: `${SITE}/open-source/`,
     },
   ];

@@ -5,8 +5,8 @@ import facts from '../../generated/facts.json';
 import type { Comparison } from './compare';
 
 const CHECKED = '11 November 2026';
-const plans = ((facts as { plans?: { id: string; monthly: number }[] | null }).plans ?? []).filter((p) => p.monthly > 0);
-const paid = plans.map((p) => `$${p.monthly}`).join(' or ');
+const plans = ((facts as { plans?: { id: string; monthly: number; symbol: string }[] | null }).plans ?? []).filter((p) => p.monthly > 0);
+const paid = plans.map((p) => `${p.symbol}${p.monthly}`).join(' or ');
 
 /** Slotlock's side of the rows every comparison shares, from the docs. */
 const US = {

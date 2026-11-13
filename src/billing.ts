@@ -47,6 +47,12 @@ export interface SlotlockStripeOptions {
    * Developer checkout so operations above the quota can be billed. Off without it.
    */
   overagePrice?: string;
+  /**
+   * The customer portal configuration (bpc_…) each plan's customers get: each lets them switch
+   * between its own plan's monthly and yearly prices, and no further. Without one, the account's
+   * default configuration applies.
+   */
+  portalConfigurations?: Readonly<Partial<Record<'developer' | 'team', string>>>;
   /** Sent as Stripe-Version; SLOTLOCK_STRIPE_API_VERSION when unset. */
   apiVersion?: string;
   apiBase?: string;
@@ -61,7 +67,15 @@ export interface SlotlockStripeSubscription {
   customer: string | { id: string };
   metadata?: Record<string, string>;
   current_period_end?: number | null;
-  items?: { data?: Array<{ current_period_end?: number | null; price?: { id?: string } | string | null }> };
+  items?: { data?: Array<{ current_period_end?: number | null; price?: SlotlockStripePrice | string | null }> };
+}
+
+/** The parts of a subscription item's price the plan is read from. */
+export interface SlotlockStripePrice {
+  id?: string;
+  lookup_key?: string | null;
+  metadata?: Record<string, string> | null;
+  product?: string | { id?: string; metadata?: Record<string, string> | null } | null;
 }
 
 export interface SlotlockStripe {
@@ -75,8 +89,11 @@ export interface SlotlockStripe {
     successUrl: string;
     cancelUrl: string;
   }): Promise<string>;
-  /** A customer portal URL, to change or cancel the subscription and see invoices. */
-  portal(input: { customer: string; returnUrl: string }): Promise<string>;
+  /**
+   * A customer portal URL, to change the subscription's interval or cancel it and see invoices, in
+   * the plan's own portal configuration when there is one.
+   */
+  portal(input: { customer: string; returnUrl: string; plan?: 'developer' | 'team' }): Promise<string>;
   subscription(id: string): Promise<SlotlockStripeSubscription>;
   /** The customer's subscriptions that give a plan (`active`, `trialing`, `past_due`). */
   liveSubscriptionsOfCustomer(customer: string): Promise<SlotlockStripeSubscription[]>;
@@ -91,6 +108,11 @@ export interface SlotlockStripe {
 
 /** Statuses in which a subscription gives its tenant the Developer plan (slotlockPlanOfSubscription). */
 const LIVE = new Set(['active', 'trialing', 'past_due']);
+/**
+ * Statuses that stop a new checkout: the live ones, and `unpaid`, whose invoice can still be paid
+ * and would then make two live subscriptions for one tenant.
+ */
+const OWED = new Set([...LIVE, 'unpaid']);
 
 /** Whether the subscription gives its tenant a plan. */
 export function slotlockSubscriptionIsLive(subscription: SlotlockStripeSubscription): boolean {
@@ -136,14 +158,19 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
     return parsed;
   }
 
-  async function liveSubscriptionsOfCustomer(customer: string): Promise<SlotlockStripeSubscription[]> {
+  /** The customer's subscriptions that are not canceled. */
+  async function subscriptionsOfCustomer(customer: string): Promise<SlotlockStripeSubscription[]> {
     if (!STRIPE_ID.test(customer)) throw new SlotlockBillingError('Not a customer id');
     // Without a status, Stripe lists every subscription that is not canceled.
     const page = await call<{ data?: SlotlockStripeSubscription[] }>(
       'GET',
       `/v1/subscriptions?${new URLSearchParams({ customer, limit: '100' }).toString()}`,
     );
-    return (page.data ?? []).filter(slotlockSubscriptionIsLive);
+    return page.data ?? [];
+  }
+
+  async function liveSubscriptionsOfCustomer(customer: string): Promise<SlotlockStripeSubscription[]> {
+    return (await subscriptionsOfCustomer(customer)).filter(slotlockSubscriptionIsLive);
   }
 
   return {
@@ -152,7 +179,7 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
       const price = plan === 'team' ? (options.teamPrices as Record<SlotlockBillingInterval, string>)[interval] : options.prices[interval];
       // A customer who already pays changes the plan in the portal: a second Checkout would charge
       // twice for one tenant. (A first purchase has no customer yet; the webhook catches that case.)
-      if (customer && (await liveSubscriptionsOfCustomer(customer)).length > 0) {
+      if (customer && (await subscriptionsOfCustomer(customer)).some((found) => OWED.has(found.status))) {
         throw new SlotlockBillingError('The customer has a live subscription already', 409, 'subscription_exists');
       }
       const form = new URLSearchParams({
@@ -173,12 +200,11 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
       if (!session.url) throw new SlotlockBillingError('Stripe gave no Checkout URL');
       return session.url;
     },
-    async portal({ customer, returnUrl }) {
-      const session = await call<{ url?: string }>(
-        'POST',
-        '/v1/billing_portal/sessions',
-        new URLSearchParams({ customer, return_url: returnUrl }),
-      );
+    async portal({ customer, returnUrl, plan = 'developer' }) {
+      const form = new URLSearchParams({ customer, return_url: returnUrl });
+      const configuration = options.portalConfigurations?.[plan];
+      if (configuration) form.set('configuration', configuration);
+      const session = await call<{ url?: string }>('POST', '/v1/billing_portal/sessions', form);
       if (!session.url) throw new SlotlockBillingError('Stripe gave no portal URL');
       return session.url;
     },
@@ -234,6 +260,20 @@ export function verifySlotlockStripeSignature(
   );
 }
 
+/** Whether a subscription item's price is the Team plan's. */
+export function slotlockPriceIsTeam(
+  price: SlotlockStripePrice | string | null | undefined,
+  teamPrices?: Readonly<Record<SlotlockBillingInterval, string>>,
+): boolean {
+  if (!price) return false;
+  const id = typeof price === 'string' ? price : price.id;
+  if (teamPrices !== undefined && (id === teamPrices.month || id === teamPrices.year)) return true;
+  if (typeof price === 'string') return false;
+  if (price.metadata?.slotlock_plan === 'team') return true;
+  if (typeof price.lookup_key === 'string' && price.lookup_key.startsWith('slotlock_team_')) return true;
+  return typeof price.product === 'object' && price.product?.metadata?.slotlock_plan === 'team';
+}
+
 /** The plan a subscription gives its tenant. */
 export function slotlockPlanOfSubscription(
   subscription: SlotlockStripeSubscription,
@@ -242,13 +282,10 @@ export function slotlockPlanOfSubscription(
   plan: SlotlockPlan;
   status: SlotlockPlanStatus;
 } {
-  // Team when any item is at a Team price: changed to it in the portal, or bought as it.
-  const team =
-    teamPrices !== undefined &&
-    (subscription.items?.data ?? []).some((item) => {
-      const id = typeof item.price === 'string' ? item.price : item.price?.id;
-      return id === teamPrices.month || id === teamPrices.year;
-    });
+  // Team when any item is at a Team price: one of the configured ids, or a price that says it is
+  // Team's (scripts/configure-stripe.mjs sets the lookup key and metadata), so a Team price that
+  // is replaced later, or bought before the ids changed, still gives Team.
+  const team = (subscription.items?.data ?? []).some((item) => slotlockPriceIsTeam(item.price, teamPrices));
   const paid: SlotlockPlan = team ? 'team' : 'developer';
   switch (subscription.status) {
     case 'active':
@@ -307,9 +344,14 @@ function subscriptionOf(event: unknown): string | null {
   const object = (event as { data?: { object?: Record<string, unknown> } })?.data?.object;
   if (!object) return null;
   if (object.object === 'subscription' && typeof object.id === 'string') return object.id;
-  const field = object.subscription;
-  if (typeof field === 'string') return field;
-  if (field && typeof (field as { id?: unknown }).id === 'string') return (field as { id: string }).id;
+  // An invoice names it under parent.subscription_details from API version 2025-03-31.basil (the
+  // version pinned here); older versions, and other objects, name it as `subscription`.
+  const parent = (object.parent as { subscription_details?: { subscription?: unknown } } | null | undefined)?.subscription_details
+    ?.subscription;
+  for (const field of [parent, object.subscription]) {
+    if (typeof field === 'string') return field;
+    if (field && typeof (field as { id?: unknown }).id === 'string') return (field as { id: string }).id;
+  }
   return null;
 }
 

@@ -1619,8 +1619,15 @@ describe('organizations', () => {
     const owner = orgDashboard([{ ...ACME, role: 'admin' }], { billing });
     const signedIn = (await signIn(owner)).session;
     const ownerPage = await (await get(owner, '/base/dashboard/plan', signedIn)).text();
-    expect(ownerPage).toContain('Upgrade to Developer');
+    // Without Team prices an organization is offered Team by asking, never Developer, whose
+    // limits are a person's; and a checkout for it is refused.
+    expect(ownerPage).not.toContain('Upgrade to Developer');
+    expect(ownerPage).toContain('Talk to us about Team');
     expect(ownerPage).toContain('Manage billing');
+    const refused = await post(owner, '/base/dashboard/plan/upgrade', { csrf: await csrf(owner, signedIn), interval: 'month' }, signedIn);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('Team is not on sale here yet');
+    expect(billing.checkout).not.toHaveBeenCalled();
   });
 
   it("offers an organization's owner Team where the deployment sells it, and a person Developer", async () => {
@@ -3240,7 +3247,7 @@ describe('the plan page', () => {
     const manage = await post(target, '/base/dashboard/plan/manage', { csrf: await csrf(target, session) }, session);
     expect(manage.headers.get('location')).toBe('https://billing.stripe.com/p/session/test_1');
     expect(calls).toEqual([
-      { kind: 'portal', input: { customer: 'cus_Test1', returnUrl: `${DASHBOARD}/plan` } },
+      { kind: 'portal', input: { customer: 'cus_Test1', returnUrl: `${DASHBOARD}/plan`, plan: 'developer' } },
     ]);
     const again = await post(target, '/base/dashboard/plan/upgrade', { csrf: await csrf(target, session) }, session);
     expect(again.status).toBe(409);

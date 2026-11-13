@@ -106,13 +106,13 @@ function answer(request: IncomingMessage): [number, unknown] {
           id,
           livemode: world.livemode,
           unit_amount: amount,
-          currency: 'usd',
+          currency: 'gbp',
           recurring: { interval },
         });
         return [
           200,
           {
-            data: [price('price_dm', 1000, 'month'), price('price_dy', 10000, 'year'), price('price_tm', 4000, 'month'), price('price_ty', 40000, 'year')],
+            data: [price('price_dm', 500, 'month'), price('price_dy', 5000, 'year'), price('price_tm', 1500, 'month'), price('price_ty', 15000, 'year')],
           },
         ];
       }
