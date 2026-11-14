@@ -325,7 +325,7 @@ interface OverrideRow {
   state: string;
 }
 
-interface CaseRow {
+interface CaseRow extends Named {
   id: string;
   account_ref: string | null;
   source: string;
@@ -337,6 +337,13 @@ interface CaseRow {
   opened_at: Date;
   updated_at: Date;
 }
+
+/** What a row's account is called, as the admin functions give it beside the reference (staff_directory). */
+interface Named {
+  account_name?: string | null;
+  account_display?: string | null;
+}
+const namedOf = (row: Named) => ({ name: row.account_name ?? null, display: row.account_display ?? null });
 
 interface Session {
   /** staff_ref: github:<id> */
@@ -754,7 +761,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           ? html`<section class="box c4" aria-labelledby="cases-title">
               <header class="section-head"><h2 id="cases-title">Cases</h2><a class="section-aside" href="/cases">All</a></header>
               ${openCases.length
-                ? html`<ul class="list">${openCases.map((item) => html`<li><span class="grow"><a href="/cases/${item.id}">#${item.id} ${item.summary}</a><span class="sub">${item.account_ref ?? 'No account'} · ${day(item.opened_at)}</span></span>${pill('Open', 'warn')}</li>`)}</ul>`
+                ? html`<ul class="list">${openCases.map((item) => html`<li><span class="grow"><a href="/cases/${item.id}">#${item.id} ${item.summary}</a>${item.account_ref
+                    ? accountOf(session, item.account_ref, { ...namedOf(item), compact: true })
+                    : html`<span class="sub">No account</span>`}</span>${pill('Open', 'warn')}</li>`)}</ul>`
                 : emptyState('Nothing open.')}
             </section>`
           : ''}
@@ -818,7 +827,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       const found = await sql<AccountRow[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${q}, ${null}, ${null}, ${null}, ${8})`;
       return json(found.map((row) => {
         const shown = slotlockShownPerson({ ref: row.account_ref, name: row.name, display: row.display ?? null });
-        return { ref: row.account_ref, label: shown.primary, initials: shown.initials, kind: row.kind };
+        // As the account cell draws it: initials on its colour (none for a bare reference), and the rest.
+        const named = shown.primary !== row.account_ref;
+        return { ref: row.account_ref, label: shown.primary, sub: shown.secondary, initials: named ? shown.initials : null, tone: shown.tone, kind: row.kind };
       }));
     }
     if (view === 'near_quota') return nearQuota(session, url, q);
@@ -1157,7 +1168,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         ${rows.length
           ? html`<ul class="queue">${rows.map((row) => html`<li><a href="/cases/${row.id}"${item?.id === row.id ? new Html(' aria-current="page"') : ''}>
               <span class="q-title">#${row.id} ${row.summary}</span>${row.status === 'open' ? pill('Open', 'warn') : pill('Closed', 'muted')}
-              <span class="sub">${row.account_ref ?? 'No account'} · ${row.source === 'report' ? 'A report' : 'Staff'} · ${day(row.opened_at)}</span></a></li>`)}</ul>`
+              ${row.account_ref ? accountCell({ ref: row.account_ref, ...namedOf(row), compact: true }) : ''}
+              <span class="sub">${row.account_ref ? '' : 'No account · '}${row.source === 'report' ? 'A report' : 'Staff'} · ${day(row.opened_at)}</span></a></li>`)}</ul>`
           : emptyState(status === 'open' ? 'No open cases.' : 'No cases.')}
         ${rows.length === PAGE && last ? html`<div class="table-foot"><span></span><a class="btn sm" href="/cases?${new URLSearchParams({ status, after: last }).toString()}">Older</a></div>` : ''}
       </div>
@@ -1206,7 +1218,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       <aside class="inspector" aria-label="Details">
         <section>
           ${facts([
-            ['Account', account_ ? accountOf(session, account_) : 'Not named'],
+            ['Account', account_ ? accountOf(session, account_, namedOf(found as Named)) : 'Not named'],
             ['Came from', found.source === 'report' ? 'A report' : 'Staff'],
             ['Done', CASE_ACTION_WORDS[String(found.action_taken)] ?? String(found.action_taken)],
             ['Opened', html`${when(found.opened_at as string)}<span class="sub">${names[0] ?? String(found.opened_by)}</span>`],
@@ -1225,7 +1237,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   // ---------- Privacy (RFC 0006, M7) ----------
-  interface PrivacyRow {
+  interface PrivacyRow extends Named {
     id: string;
     account_ref: string | null;
     kind: string;
@@ -1289,7 +1301,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         ${rows.length
           ? html`<ul class="queue">${rows.map((row) => html`<li><a href="/privacy/${row.id}"${item?.id === row.id ? new Html(' aria-current="page"') : ''}>
               <span class="q-title">#${row.id} ${PRIVACY_KIND_WORDS[row.kind] ?? row.kind}</span>${row.status === 'open' ? dueBadge(row.due_on) : privacyStatusPill(row.status)}
-              <span class="sub">${row.account_ref ?? 'Erased'} · ${progress(row)}</span></a></li>`)}</ul>`
+              ${row.account_ref ? accountCell({ ref: row.account_ref, ...namedOf(row), compact: true }) : ''}
+              <span class="sub">${row.account_ref ? '' : 'Erased · '}${progress(row)}</span></a></li>`)}</ul>`
           : emptyState(all ? 'No requests yet.' : 'No open requests.')}
         ${all && rows.length === PAGE && last ? html`<div class="table-foot"><span></span><a class="btn sm" href="/privacy?${new URLSearchParams({ status: 'all', before: last }).toString()}">Older</a></div>` : ''}
       </div>
@@ -1440,7 +1453,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       </div>
       <aside class="inspector" aria-label="Details">
         <section>${facts([
-          ['Account', account_ ? accountOf(session, account_) : 'Erased'],
+          ['Account', account_ ? accountOf(session, account_, namedOf(found as Named)) : 'Erased'],
           ['About', aboutAccount ? 'The account holder' : 'One of the account’s customers'],
           ['Arrived', day(String(found.received_on))],
           ['Due', html`${day(String(found.due_on))}`],
@@ -1490,7 +1503,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   ]);
 
   async function staffLog(session: Session, url: URL): Promise<Response> {
-    type LogRow = { chain_index: string; occurred_at: Date; staff_ref: string; staff_login: string | null; action: string; account_ref: string | null; target: string | null; reason: string | null; metadata?: Record<string, unknown> | null };
+    type LogRow = { chain_index: string; occurred_at: Date; staff_ref: string; staff_login: string | null; action: string; account_ref: string | null; target: string | null; reason: string | null; metadata?: Record<string, unknown> | null } & Named;
     const before = /^[1-9][0-9]{0,18}$/.test(url.searchParams.get('before') ?? '') ? BigInt(url.searchParams.get('before') as string) : null;
     // Narrowed by who, action, account and days, in the database, from the query; views only when asked.
     const filters = slotlockStaffLogFilters(url.searchParams);
@@ -1533,7 +1546,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             ['When', `${when(entry.occurred_at)} UTC`],
             ['Who', html`${slotlockStaffActor(entry.staff_ref, entry.staff_login).name}<span class="sub mono">${entry.staff_ref}</span>`],
             ['Action', html`${slotlockStaffActionLabel(entry.action)}<span class="sub mono">${entry.action}</span>`],
-            entry.account_ref ? ['Account', accountOf(session, entry.account_ref)] : null,
+            entry.account_ref ? ['Account', accountOf(session, entry.account_ref, namedOf(entry))] : null,
             entry.target ? ['Target', html`<code>${entry.target}</code>`] : null,
             entry.reason ? ['Reason', entry.reason] : null,
           ])}
@@ -1544,6 +1557,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const option = (name: string, value: string, label: string, current: string | null) => ({ label, href: withParams(url, { [name]: value, entry: null }), current: current === value });
     const today = Date.parse(`${new Date(now()).toISOString().slice(0, 10)}T00:00:00Z`);
     const sinceDay = (days: number) => new Date(today - days * DAY_MS).toISOString().slice(0, 10);
+    const accountLabels = new Map(rows.flatMap((row) => (row.account_ref ? [[row.account_ref, slotlockShownPerson({ ref: row.account_ref, ...namedOf(row) }).primary] as const] : [])));
     const accountsSeen = [...new Set([...rows.map((row) => row.account_ref).filter((ref): ref is string => Boolean(ref)), ...(filters.account ? [filters.account] : [])])].slice(0, 20);
     const actions = Object.entries(SLOTLOCK_STAFF_ACTION_LABELS).sort((a, b) => a[1].localeCompare(b[1]));
     const body = html`
@@ -1561,7 +1575,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         ], withParams(url, { from: null, to: null, entry: null }))}
         ${filterChip('Who', [...members.map((member) => option('who', member.staff_ref, member.login ?? member.staff_ref, filters.who)), option('who', 'cli', 'Command line', filters.who)], withParams(url, { who: null, entry: null }))}
         ${filterChip('Action', actions.map(([code, label]) => option('action', code, label, filters.action)), withParams(url, { action: null, entry: null }))}
-        ${filterChip('Account', accountsSeen.map((ref) => option('account', ref, ref, filters.account)), withParams(url, { account: null, entry: null }))}
+        ${filterChip('Account', accountsSeen.map((ref) => option('account', ref, accountLabels.get(ref) ?? ref, filters.account)), withParams(url, { account: null, entry: null }))}
         <span class="grow"></span>
         <a class="btn sm" href="${withParams(url, { format: 'csv', entry: null })}" download>${icon('download')}Export CSV</a>
       </div>
@@ -1572,7 +1586,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           html`${when(row.occurred_at)}`,
           html`<span class="ac">${avatar(actor.name, 'sm', row.staff_ref)}<a href="/staff/log?${slotlockStaffLogQuery({ ...filters, who: actor.command ? 'cli' : row.staff_ref }).toString()}">${actor.name}</a></span>`,
           html`<span title="${row.action}">${slotlockStaffActionLabel(row.action)}</span>${row.target ? html`<span class="sub mono">${row.target}</span>` : ''}${row.reason ? html`<span class="sub">${row.reason}</span>` : ''}`,
-          row.account_ref ? html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>` : html`–`,
+          row.account_ref ? accountOf(session, row.account_ref, namedOf(row)) : html`–`,
         ];
       }), filters.views
         ? 'Nothing in the log matches.'
@@ -1843,9 +1857,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const showAll = url.searchParams.get('alerts') === 'all';
     const [[summaryRow], alerts, overrides, partners] = await Promise.all([
       sql<{ billing: Record<string, unknown> }[]>`SELECT slotlock.admin_billing(${session.t}) AS billing`,
-      sql<{ id: string; kind: string; account_ref: string; stripe_ref: string; detail: Record<string, unknown>; created_at: Date; resolved_at: Date | null; resolved_by: string | null }[]>`
+      sql<({ id: string; kind: string; account_ref: string; stripe_ref: string; detail: Record<string, unknown>; created_at: Date; resolved_at: Date | null; resolved_by: string | null } & Named)[]>`
         SELECT * FROM slotlock.admin_billing_alerts(${session.t}, ${!showAll}, ${null}, ${50})`,
-      sql<{ id: string; account_ref: string; plan: string | null; starts_at: Date; ends_at: Date; reason: string; created_by: string; approved_by: string | null; state: string }[]>`
+      sql<({ id: string; account_ref: string; plan: string | null; starts_at: Date; ends_at: Date; reason: string; created_by: string; approved_by: string | null; state: string } & Named)[]>`
         SELECT * FROM slotlock.admin_overrides(${session.t})`,
       sql<{ id: string; name: string; status: string; accounts: string; last_month: Date | null; closed_at: Date | null; webhook_status: number | null; invoiced: string | null; currency: string | null; unsent: string; mismatched_days: string }[]>`
         SELECT * FROM slotlock.admin_partners(${session.t})`,
@@ -1855,7 +1869,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const runs = (billing.runs ?? {}) as Record<string, { started_at: string; finished_at: string; attention: boolean; actor: string; summary: { lines?: unknown[] } & Record<string, unknown> }>;
     // Slotlock's subscriptions only, by the rule the database counts paying plans by (stripe.ts).
     const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:slotlock', () => stripe.revenue()) : null;
-    const ending = slotlockEndingRows((billing.ending ?? []) as { account_ref: string; plan: string | null; ends_at: string }[], revenue);
+    const recordedEnding = (billing.ending ?? []) as { account_ref: string; plan: string | null; ends_at: string; name?: string | null; display?: string | null }[];
+    const ending = slotlockEndingRows(recordedEnding, revenue);
+    // What each is called, from the database's rows (one Stripe alone knows of goes by its reference).
+    const endingNames = new Map(recordedEnding.map((row) => [row.account_ref, { name: row.name ?? null, display: row.display ?? null }]));
     const askers = await staffNames(session, overrides.map((item) => item.created_by));
     const may = (capability: SlotlockStaffCapability) => slotlockStaffMay(session.r, capability);
     const csrf = html`${csrfField(session)}<input type="hidden" name="back" value="/billing">`;
@@ -1865,7 +1882,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail);
     const mrr = revenue ? slotlockMoneyByCurrency(revenue.mrr) : null;
     const payingTotal = Object.values(paying).reduce((sum, value) => sum + Number(value), 0);
-    const account = (ref: string) => accountOf(session, ref);
+    const account = (row: { account_ref: string } & Named) => accountOf(session, row.account_ref, namedOf(row));
+    const shownAs = (row: { account_ref: string } & Named) => slotlockShownPerson({ ref: row.account_ref, ...namedOf(row) }).primary;
     const overview = html`<div class="grid">
       <section class="box c8" aria-labelledby="mrr-title">
         <header class="section-head"><h2 id="mrr-title"><span class="stat-label">Monthly recurring revenue</span></h2>${revenue
@@ -1899,18 +1917,18 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       <section class="box c6" aria-labelledby="alerts-preview">
         <header class="section-head"><h2 id="alerts-preview">Needs a person</h2><a class="section-aside" href="#alerts">All alerts</a></header>
         ${openAlerts.length
-          ? html`<ul class="list">${openAlerts.slice(0, 5).map((alert) => html`<li>${dot(alert.kind === 'payment_failed' ? 'bad' : 'warn')}<span class="grow">${alertWords(alert).title}<span class="sub mono">${alert.account_ref}</span></span><span class="muted tnum">${day(alert.created_at)}</span></li>`)}</ul>`
+          ? html`<ul class="list">${openAlerts.slice(0, 5).map((alert) => html`<li>${account(alert)}<span class="li-end"><span class="li-what">${dot(alert.kind === 'payment_failed' ? 'bad' : 'warn')}${alertWords(alert).title}</span><span class="sub tnum">${day(alert.created_at)}</span></span></li>`)}</ul>`
           : emptyState('Nothing needs a person.')}
       </section>
       <section class="box c6" aria-labelledby="overrides-preview">
         <header class="section-head"><h2 id="overrides-preview">Overrides</h2><a class="section-aside" href="#overrides">All overrides</a></header>
         ${overrides.length
-          ? html`<ul class="list">${overrides.slice(0, 5).map((item) => html`<li><span class="grow">${item.plan ? slotlockPlanName(item.plan) : 'Limits'} until ${day(item.ends_at)}<span class="sub mono">${item.account_ref}</span></span>${OVERRIDE_STATE[item.state] ?? pill(item.state, 'muted')}</li>`)}</ul>`
+          ? html`<ul class="list">${overrides.slice(0, 5).map((item) => html`<li>${account(item)}<span class="li-end">${OVERRIDE_STATE[item.state] ?? pill(item.state, 'muted')}<span class="sub">${item.plan ? slotlockPlanName(item.plan) : 'Limits'} until ${day(item.ends_at)}</span></span></li>`)}</ul>`
           : emptyState('No overrides in force.')}
       </section>
     </div>
     ${section('Ending', table('Ending', ['Account', 'Plan', { label: 'A month', num: true }, 'Ends'], ending.map((row) => [
-      account(row.account),
+      accountOf(session, row.account, endingNames.get(row.account) ?? {}),
       html`${row.plan ? slotlockPlanName(row.plan) : '–'}`,
       html`${row.monthly === null ? '–' : slotlockMoney(row.monthly, row.currency)}`,
       html`${slotlockShortDate(row.endsAt, now())}`,
@@ -1922,13 +1940,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ], 'views')}<span class="grow"></span>
       ${may('billing.act') && openAlerts.length
         ? popover('Resolve an alert', html`<form class="form" method="post" action="/billing/alerts/resolve">${csrf}
-            ${formField({ id: 'alert-id', label: 'Alert', control: html`<select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alertWords(alert).title} · ${alert.account_ref} · ${alert.stripe_ref}</option>`)}</select>` })}
+            ${formField({ id: 'alert-id', label: 'Alert', control: html`<select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alertWords(alert).title} · ${shownAs(alert)} · ${alert.stripe_ref}</option>`)}</select>` })}
             ${formField({ id: 'alert-reason', label: 'What was done', control: html`<input id="alert-reason" name="reason" required maxlength="200" autocomplete="off">` })}
             <div class="form-actions"><button class="btn primary" type="submit">Resolve</button></div></form>`, { size: 'sm' })
         : ''}</div>
       ${table('Billing alerts', ['Alert', 'Account', 'In Stripe', 'When', 'State'], alerts.map((alert) => [
         html`${alertWords(alert).title}${alertWords(alert).detail ? html`<span class="sub">${alertWords(alert).detail}</span>` : ''}`,
-        account(alert.account_ref),
+        account(alert),
         html`<a class="mono" href="${stripeLink(alert.stripe_ref)}" rel="noreferrer">${alert.stripe_ref}</a>`,
         html`${when(alert.created_at)}`,
         alert.resolved_at ? html`${pill('Resolved', 'muted')}<span class="sub mono">${alert.resolved_by ?? ''}</span>` : pill('Open', 'warn'),
@@ -1937,17 +1955,17 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       <div class="toolbar"><span class="grow"></span>
       ${may('plans.approve') && approvable.length
         ? popover('Approve an override', html`<form class="form" method="post" action="/overrides/approve">${csrf}
-            ${formField({ id: 'approve-id', label: 'Override', extra: info('Four eyes', 'The Owner who asked cannot approve it.'), control: html`<select id="approve-id" name="override">${approvable.map((item) => html`<option value="${item.id}">${item.account_ref} · ${item.plan ?? 'its own plan'} until ${day(item.ends_at)} · ${item.reason}</option>`)}</select>` })}
+            ${formField({ id: 'approve-id', label: 'Override', extra: info('Four eyes', 'The Owner who asked cannot approve it.'), control: html`<select id="approve-id" name="override">${approvable.map((item) => html`<option value="${item.id}">${shownAs(item)} · ${item.plan ?? 'its own plan'} until ${day(item.ends_at)} · ${item.reason}</option>`)}</select>` })}
             <div class="form-actions"><button class="btn primary" type="submit">Approve</button></div></form>`, { tone: 'primary', size: 'sm' })
         : ''}
       ${may('billing.act') && overrides.length
         ? popover('End or withdraw an override', html`<form class="form" method="post" action="/overrides/end">${csrf}
-            ${formField({ id: 'end-override', label: 'Override', control: html`<select id="end-override" name="override">${overrides.map((item) => html`<option value="${item.id}">${item.account_ref} · ${item.plan ?? 'its own plan'} until ${day(item.ends_at)}</option>`)}</select>` })}
+            ${formField({ id: 'end-override', label: 'Override', control: html`<select id="end-override" name="override">${overrides.map((item) => html`<option value="${item.id}">${shownAs(item)} · ${item.plan ?? 'its own plan'} until ${day(item.ends_at)}</option>`)}</select>` })}
             ${reasonField('end-override-reason', { public: true })}
             <div class="form-actions"><button class="btn danger" type="submit">End override</button></div></form>`, { tone: 'danger', size: 'sm' })
         : ''}</div>
       ${table('Plan overrides', ['Account', 'Plan', 'Ends', 'Reason', 'Asked by', 'State'], overrides.map((item, index) => [
-        account(item.account_ref),
+        account(item),
         html`${item.plan ? slotlockPlanName(item.plan) : 'Its own'}`,
         html`${day(item.ends_at)}`,
         html`${item.reason}`,
@@ -1992,7 +2010,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
   /** The accounts using most of their monthly quotas, worst first. */
   async function quotaLeaders(session: Session) {
-    const leaders = await options.sql()<{ account_ref: string; plan: string | null; operations: string; bookings: string; quota_operations: string | null; quota_bookings: string | null; quota_stop_percent: number | null }[]>`
+    const leaders = await options.sql()<{ account_ref: string; plan: string | null; operations: string; bookings: string; quota_operations: string | null; quota_bookings: string | null; quota_stop_percent: number | null; name?: string | null; display?: string | null }[]>`
       SELECT * FROM slotlock.admin_usage_accounts(${session.t})`;
     const share = (used: number, quota: number | null) => (quota ? Math.round((used / quota) * 100) : null);
     return leaders.map((row) => {
@@ -2010,7 +2028,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         ? html`<span class="cell-meter"><span>${count(value)} <span class="muted">· ${String(percent ?? 0)}%</span></span>${meter(Number(value), quota)}</span>`
         : html`${count(value)}<span class="sub">No quota</span>`;
     return table('Accounts by share of quota', ['Account', 'Plan', 'Operations', 'Bookings'], rows.map(({ row, operations, bookings, opsQuota, bookingsQuota }) => [
-      accountOf(session, row.account_ref),
+      accountOf(session, row.account_ref, { name: row.name ?? null, display: row.display ?? null }),
       planPill(row.plan),
       used(row.operations, opsQuota, operations),
       used(row.bookings, bookingsQuota, bookings),

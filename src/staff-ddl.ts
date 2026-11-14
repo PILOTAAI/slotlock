@@ -709,10 +709,12 @@ END
 $slotlock_admin_case_update$;
 
 -- Cases, newest first, a page at a time (after: a case id): open, closed or all, for one account
--- or every one.
+-- or every one, with what the account is called (staff_directory).
+${reshaped('slotlock.admin_cases(text, text, text, bigint, integer)', 'account_name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_cases(actor text, status_filter text, account text, after bigint, page_size integer)
 RETURNS TABLE (id bigint, account_ref text, source text, summary text, policy_section text, action_taken text,
-               status text, opened_by text, opened_at timestamptz, updated_at timestamptz)
+               status text, opened_by text, opened_at timestamptz, updated_at timestamptz, account_name text,
+               account_display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -726,8 +728,9 @@ BEGIN
     jsonb_strip_nulls(jsonb_build_object('status', status_filter)));
   RETURN QUERY
   SELECT opened.id, opened.account_ref, opened.source, opened.summary, opened.policy_section, opened.action_taken,
-         opened.status, opened.opened_by, opened.opened_at, opened.updated_at
+         opened.status, opened.opened_by, opened.opened_at, opened.updated_at, named.name, named.display
     FROM slotlock.abuse_cases opened
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = opened.account_ref
    WHERE (status_filter IS NULL OR opened.status = status_filter)
      AND (account IS NULL OR opened.account_ref = account)
      AND (after IS NULL OR opened.id < after)
@@ -736,8 +739,8 @@ BEGIN
 END
 $slotlock_admin_cases$;
 
--- One case, with its evidence and outcome, and its history from the staff log. NULL for no such
--- case.
+-- One case, with its evidence and outcome, its history from the staff log, and what its account is
+-- called (staff_directory). NULL for no such case.
 CREATE OR REPLACE FUNCTION slotlock.admin_case(actor text, case_id bigint)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -752,9 +755,12 @@ BEGIN
            SELECT coalesce(jsonb_agg(jsonb_build_object(
                     'occurred_at', event.occurred_at, 'staff_ref', event.staff_ref, 'action', event.action,
                     'reason', event.reason) ORDER BY event.chain_index), '[]'::jsonb)
-             FROM slotlock.staff_audit_events event WHERE event.target = 'case:' || case_id))
+             FROM slotlock.staff_audit_events event WHERE event.target = 'case:' || case_id),
+         'account_name', named.name, 'account_display', named.display)
     INTO result
-    FROM slotlock.abuse_cases opened WHERE opened.id = case_id;
+    FROM slotlock.abuse_cases opened
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = opened.account_ref
+   WHERE opened.id = case_id;
   PERFORM slotlock.staff_log(actor, CASE WHEN result IS NULL THEN 'case.not_found' ELSE 'case.viewed' END,
     result ->> 'account_ref', 'case:' || case_id, NULL, '{}'::jsonb);
   RETURN result;
@@ -1015,10 +1021,12 @@ BEGIN
 END
 $slotlock_admin_account_overrides$;
 
--- Overrides in force or waiting for approval, across accounts, newest first.
+-- Overrides in force or waiting for approval, across accounts, newest first, with what each
+-- account is called (staff_directory).
+${reshaped('slotlock.admin_overrides(text)', 'account_name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_overrides(actor text)
 RETURNS TABLE (id bigint, account_ref text, plan text, starts_at timestamptz, ends_at timestamptz, reason text,
-               created_by text, approved_by text, state text)
+               created_by text, approved_by text, state text, account_name text, account_display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -1029,8 +1037,9 @@ BEGIN
   PERFORM slotlock.staff_log(actor, 'overrides.listed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
   SELECT given.id, given.tenant_ref, given.plan, given.starts_at, given.ends_at, given.reason, given.created_by,
-         given.approved_by, ${overrideState('given')}
+         given.approved_by, ${overrideState('given')}, named.name, named.display
     FROM slotlock.tenant_plan_overrides given
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = given.tenant_ref
    WHERE given.ended_at IS NULL AND given.ends_at > statement_timestamp()
    ORDER BY given.id DESC
    LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT};
@@ -1057,11 +1066,13 @@ BEGIN
                   WHERE held.paying GROUP BY held.plan) paid),
     'trialing', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.trialing),
     'ending', (SELECT coalesce(jsonb_agg(jsonb_build_object('account_ref', ends.tenant_ref, 'plan', ends.plan,
-                                                            'ends_at', ends.ends_at) ORDER BY ends.ends_at, ends.tenant_ref),
+                                                            'ends_at', ends.ends_at, 'name', named.name,
+                                                            'display', named.display) ORDER BY ends.ends_at, ends.tenant_ref),
                                '[]'::jsonb)
                  FROM (SELECT held.tenant_ref, held.plan, held.ends_at FROM slotlock.staff_subscribed_plans() held
                         WHERE NOT held.trialing AND held.ends_at IS NOT NULL
-                        ORDER BY held.ends_at, held.tenant_ref LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT}) ends),
+                        ORDER BY held.ends_at, held.tenant_ref LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT}) ends
+                 LEFT JOIN slotlock.staff_directory() named ON named.account_ref = ends.tenant_ref),
     'ending_total', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held
                       WHERE NOT held.trialing AND held.ends_at IS NOT NULL),
     'past_due', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.status = 'past_due'),
@@ -1084,10 +1095,12 @@ BEGIN
 END
 $slotlock_admin_billing$;
 
--- Billing alerts, newest first, a page at a time (after: an alert id): open ones, or all.
+-- Billing alerts, newest first, a page at a time (after: an alert id): open ones, or all, with what
+-- each account is called (staff_directory).
+${reshaped('slotlock.admin_billing_alerts(text, boolean, bigint, integer)', 'account_name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_billing_alerts(actor text, open_only boolean, after bigint, page_size integer)
 RETURNS TABLE (id bigint, kind text, account_ref text, stripe_ref text, detail jsonb, created_at timestamptz,
-               resolved_at timestamptz, resolved_by text)
+               resolved_at timestamptz, resolved_by text, account_name text, account_display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -1101,8 +1114,9 @@ BEGIN
     jsonb_build_object('open_only', coalesce(open_only, true)));
   RETURN QUERY
   SELECT seen.id, seen.kind, seen.tenant_ref, seen.stripe_ref, seen.detail, seen.created_at, seen.resolved_at,
-         seen.resolved_by
+         seen.resolved_by, named.name, named.display
     FROM slotlock.billing_alerts seen
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = seen.tenant_ref
    WHERE (NOT coalesce(open_only, true) OR seen.resolved_at IS NULL)
      AND (after IS NULL OR seen.id < after)
    ORDER BY seen.id DESC
@@ -1158,10 +1172,12 @@ END
 $slotlock_admin_usage$;
 
 -- The accounts using most this month, with the quotas they are held to: their own or an
--- override's (null quotas are the plan's, plans.ts SLOTLOCK_PLAN_QUOTAS).
+-- override's (null quotas are the plan's, plans.ts SLOTLOCK_PLAN_QUOTAS), and what each is called
+-- (staff_directory).
+${reshaped('slotlock.admin_usage_accounts(text)', 'name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_usage_accounts(actor text)
 RETURNS TABLE (account_ref text, plan text, operations bigint, bookings bigint, quota_operations bigint,
-               quota_bookings bigint, quota_stop_percent integer)
+               quota_bookings bigint, quota_stop_percent integer, name text, display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -1184,9 +1200,10 @@ BEGIN
      LIMIT 50
   )
   SELECT month.tenant_ref, quotas.plan, coalesce(month.operations, 0), coalesce(month.bookings, 0),
-         quotas.operations, quotas.bookings, quotas.stop_percent
+         quotas.operations, quotas.bookings, quotas.stop_percent, named.name, named.display
     FROM month
     LEFT JOIN LATERAL (SELECT * FROM slotlock.tenant_plan_quotas(month.tenant_ref)) quotas ON true
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = month.tenant_ref
    ORDER BY 3 DESC;
 END
 $slotlock_admin_usage_accounts$;
@@ -1459,11 +1476,13 @@ EXCEPTION WHEN check_violation OR not_null_violation THEN
 END
 $slotlock_admin_privacy_open$;
 
--- The queue (privacy.act): open requests by due date, or every request, newest first.
+-- The queue (privacy.act): open requests by due date, or every request, newest first, with what
+-- each account is called while it is kept (staff_directory).
+${reshaped('slotlock.admin_privacy_requests(text, boolean, bigint, integer)', 'account_name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_privacy_requests(actor text, open_only boolean, before bigint, page_limit integer)
 RETURNS TABLE (id bigint, account_ref text, kind text, concerns text, received_on date, due_on date,
                status text, verified boolean, exporting boolean, erasure_asked boolean, erasure_approved boolean,
-               opened_by text, opened_at timestamptz, closed_at timestamptz)
+               opened_by text, opened_at timestamptz, closed_at timestamptz, account_name text, account_display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -1474,8 +1493,10 @@ BEGIN
   RETURN QUERY
   SELECT asked.id, asked.account_ref, asked.kind, asked.concerns, asked.received_on, asked.due_on, asked.status,
          asked.verified_at IS NOT NULL, asked.export_id IS NOT NULL, asked.erasure_asked_at IS NOT NULL,
-         asked.erasure_approved_at IS NOT NULL, asked.opened_by, asked.opened_at, asked.closed_at
+         asked.erasure_approved_at IS NOT NULL, asked.opened_by, asked.opened_at, asked.closed_at, named.name,
+         named.display
     FROM slotlock.privacy_requests asked
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = asked.account_ref
    WHERE (NOT coalesce(open_only, false) OR asked.status = 'open')
      AND (before IS NULL OR asked.id < before)
    ORDER BY CASE WHEN coalesce(open_only, false) THEN asked.due_on END, asked.id DESC
@@ -1484,8 +1505,9 @@ END
 $slotlock_admin_privacy_requests$;
 
 -- One request (privacy.act), with what its steps need: the key that would verify it, the export
--- made for it (its counts by table, never its rows), the account's plan and Stripe ids, and the
--- receipt once erased. Null when there is no such request.
+-- made for it (its counts by table, never its rows), the account's plan and Stripe ids, what the
+-- account is called while it is kept (staff_directory), and the receipt once erased. Null when
+-- there is no such request.
 CREATE OR REPLACE FUNCTION slotlock.admin_privacy_request(actor text, request_id bigint)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1500,6 +1522,8 @@ DECLARE
   plan jsonb;
   proof jsonb;
   receipt jsonb;
+  account_name text;
+  account_display text;
 BEGIN
   actor := slotlock.staff_session(actor, 'privacy.act', false);
   SELECT * INTO asked FROM slotlock.privacy_requests found WHERE found.id = request_id;
@@ -1508,6 +1532,8 @@ BEGIN
   END IF;
   account := asked.account_ref;
   IF account IS NOT NULL THEN
+    SELECT listed.name, listed.display INTO account_name, account_display
+      FROM slotlock.staff_directory() listed WHERE listed.account_ref = account;
     SELECT jsonb_build_object('plan', held.plan, 'status', held.status, 'stripe_customer', held.stripe_customer,
                               'stripe_subscription', held.stripe_subscription,
                               'live', held.stripe_subscription IS NOT NULL)
@@ -1530,6 +1556,7 @@ BEGIN
   PERFORM slotlock.staff_log(actor, 'privacy.viewed', account, 'privacy:' || asked.id, NULL, '{}'::jsonb);
   RETURN (to_jsonb(asked) - 'account_digest')
     || jsonb_build_object('export', made, 'plan', plan, 'proof', proof, 'receipt', receipt,
+                          'account_name', account_name, 'account_display', account_display,
                           'export_kept', CASE WHEN asked.export_id IS NULL THEN NULL ELSE made IS NOT NULL END);
 END
 $slotlock_admin_privacy_request$;
@@ -2056,11 +2083,13 @@ END
 $slotlock_note_maintenance_round$;
 
 -- Announcements (system.read), soonest to end first: those running or to come, and with ended_too
--- the last 100 that ended or ran out too, each with its state.
+-- the last 100 that ended or ran out too, each with its state, and what its account (if it is for
+-- one) is called (staff_directory).
+${reshaped('slotlock.admin_announcements(text, boolean)', 'account_name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_announcements(actor text, ended_too boolean)
 RETURNS TABLE (id bigint, audience text, plan text, account_ref text, kind text, message text, link text,
                starts_at timestamptz, ends_at timestamptz, created_by text, created_at timestamptz,
-               ended_by text, ended_at timestamptz, state text)
+               ended_by text, ended_at timestamptz, state text, account_name text, account_display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -2076,8 +2105,10 @@ BEGIN
          CASE WHEN listed.ended_at IS NOT NULL THEN 'ended'
               WHEN listed.ends_at <= statement_timestamp() THEN 'over'
               WHEN listed.starts_at > statement_timestamp() THEN 'scheduled'
-              ELSE 'live' END
+              ELSE 'live' END,
+         named.name, named.display
     FROM slotlock.announcements listed
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = listed.tenant_ref
    WHERE coalesce(ended_too, false) OR (listed.ended_at IS NULL AND listed.ends_at > statement_timestamp())
    ORDER BY (listed.ended_at IS NULL AND listed.ends_at > statement_timestamp()) DESC,
             CASE WHEN listed.ended_at IS NULL AND listed.ends_at > statement_timestamp() THEN listed.starts_at END,
@@ -2163,16 +2194,20 @@ BEGIN
   SELECT jsonb_build_object(
     'flags', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                 'id', given.id, 'flag', given.flag, 'plan', given.plan, 'account_ref', given.tenant_ref,
-                'enabled', given.enabled, 'reason', given.reason, 'set_by', given.set_by, 'set_at', given.set_at)
+                'enabled', given.enabled, 'reason', given.reason, 'set_by', given.set_by, 'set_at', given.set_at,
+                'account_name', named.name, 'account_display', named.display)
                 ORDER BY given.flag, given.plan NULLS LAST, given.tenant_ref), '[]'::jsonb)
-                FROM slotlock.feature_flags given),
+                FROM slotlock.feature_flags given
+                LEFT JOIN slotlock.staff_directory() named ON named.account_ref = given.tenant_ref),
     'history', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                   'occurred_at', changed.occurred_at, 'staff_ref', changed.staff_ref, 'action', changed.action,
-                  'account_ref', changed.account_ref, 'reason', changed.reason, 'metadata', changed.metadata)
+                  'account_ref', changed.account_ref, 'reason', changed.reason, 'metadata', changed.metadata,
+                  'account_name', named.name, 'account_display', named.display)
                   ORDER BY changed.chain_index DESC), '[]'::jsonb)
                   FROM (SELECT logged.* FROM slotlock.staff_audit_events logged
                          WHERE logged.action IN ('flag.set', 'flag.cleared')
-                         ORDER BY logged.chain_index DESC LIMIT 50) changed)
+                         ORDER BY logged.chain_index DESC LIMIT 50) changed
+                  LEFT JOIN slotlock.staff_directory() named ON named.account_ref = changed.account_ref)
   ) INTO result;
   PERFORM slotlock.staff_log(actor, 'flag.list_viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN result;
@@ -2313,10 +2348,12 @@ BEGIN
                                                              'first_failed_at', failed.first_failed_at,
                                                              'last_failed_at', failed.last_failed_at,
                                                              'failures', failed.failures, 'error', failed.error,
-                                                             'code', failed.code, 'message', failed.message)
+                                                             'code', failed.code, 'message', failed.message,
+                                                             'account_name', named.name, 'account_display', named.display)
                                           ORDER BY failed.last_failed_at DESC), '[]'::jsonb)
                   FROM (SELECT kept.* FROM slotlock.maintenance_failures kept
-                         ORDER BY kept.last_failed_at DESC LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT}) failed),
+                         ORDER BY kept.last_failed_at DESC LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT}) failed
+                  LEFT JOIN slotlock.staff_directory() named ON named.account_ref = failed.tenant_ref),
     'failing_total', (SELECT count(*) FROM slotlock.maintenance_failures),
     'jobs', (SELECT coalesce(jsonb_object_agg(last.job, jsonb_build_object('finished_at', last.finished_at,
                                                                            'attention', last.attention)), '{}'::jsonb)
@@ -3253,15 +3290,16 @@ END
 $slotlock_admin_staff$;
 
 -- The staff log, newest first, a page at a time (before: a chain index), with each member's GitHub
--- login as they last signed in. Narrowed to one member (who: a staff reference, or 'cli' for every
+-- login as they last signed in and what each account is called (staff_directory). Narrowed to one member (who: a staff reference, or 'cli' for every
 -- deployment-role command), one action, one account and a time range [since, until); views (a
 -- page or list opened, a search: SLOTLOCK_STAFF_VIEW_ACTION_PATTERN) only with with_views. Owner
 -- only. The form before the filters is dropped: the console asks with them.
 DROP FUNCTION IF EXISTS slotlock.admin_staff_log(text, bigint, integer);
+${reshaped('slotlock.admin_staff_log(text, bigint, integer, text, text, text, timestamptz, timestamptz, boolean)', 'account_name')}
 CREATE OR REPLACE FUNCTION slotlock.admin_staff_log(actor text, before bigint, page_size integer, who text,
   wanted_action text, account text, since timestamptz, until timestamptz, with_views boolean)
 RETURNS TABLE (chain_index bigint, occurred_at timestamptz, staff_ref text, staff_login text, action text,
-               account_ref text, target text, reason text, metadata jsonb)
+               account_ref text, target text, reason text, metadata jsonb, account_name text, account_display text)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -3271,20 +3309,25 @@ DECLARE
   shown integer := least(greatest(coalesce(page_size, 50), 1), ${SLOTLOCK_ADMIN_PAGE_LIMIT});
 BEGIN
   actor := slotlock.staff_session(actor, 'staff.log', false);
+  -- The page first, then its accounts' names: the log is read newest first by its index.
   RETURN QUERY
-  SELECT event.chain_index, event.occurred_at, event.staff_ref, member.login, event.action, event.account_ref,
-         event.target, event.reason, event.metadata
-    FROM slotlock.staff_audit_events event
-    LEFT JOIN slotlock.staff_members member ON member.staff_ref = event.staff_ref
-   WHERE (before IS NULL OR event.chain_index < before)
-     AND (who IS NULL OR event.staff_ref = who OR (who = 'cli' AND event.staff_ref LIKE 'cli:%'))
-     AND (wanted_action IS NULL OR event.action = wanted_action)
-     AND (account IS NULL OR event.account_ref = account)
-     AND (since IS NULL OR event.occurred_at >= since)
-     AND (until IS NULL OR event.occurred_at < until)
-     AND (coalesce(with_views, false) OR event.action !~ '${SLOTLOCK_STAFF_VIEW_ACTION_PATTERN}')
-   ORDER BY event.chain_index DESC
-   LIMIT shown;
+  SELECT page.chain_index, page.occurred_at, page.staff_ref, page.login, page.action, page.account_ref,
+         page.target, page.reason, page.metadata, named.name, named.display
+    FROM (SELECT event.chain_index, event.occurred_at, event.staff_ref, member.login, event.action, event.account_ref,
+                 event.target, event.reason, event.metadata
+            FROM slotlock.staff_audit_events event
+            LEFT JOIN slotlock.staff_members member ON member.staff_ref = event.staff_ref
+           WHERE (before IS NULL OR event.chain_index < before)
+             AND (who IS NULL OR event.staff_ref = who OR (who = 'cli' AND event.staff_ref LIKE 'cli:%'))
+             AND (wanted_action IS NULL OR event.action = wanted_action)
+             AND (account IS NULL OR event.account_ref = account)
+             AND (since IS NULL OR event.occurred_at >= since)
+             AND (until IS NULL OR event.occurred_at < until)
+             AND (coalesce(with_views, false) OR event.action !~ '${SLOTLOCK_STAFF_VIEW_ACTION_PATTERN}')
+           ORDER BY event.chain_index DESC
+           LIMIT shown) page
+    LEFT JOIN slotlock.staff_directory() named ON named.account_ref = page.account_ref
+   ORDER BY page.chain_index DESC;
 END
 $slotlock_admin_staff_log$;
 

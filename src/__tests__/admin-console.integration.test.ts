@@ -765,7 +765,8 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const found = await browser.request('/accounts?format=json&q=424242');
     expect(found.headers.get('content-type')).toContain('application/json');
     // No name or display kept for this person yet: the reference.
-    expect(await found.json()).toEqual([{ ref: PERSON, label: PERSON, initials: '4', kind: 'person' }]);
+    // A bare reference: no initials (the list shows a person instead), and nothing more to say.
+    expect(await found.json()).toEqual([{ ref: PERSON, label: PERSON, sub: null, initials: null, tone: expect.any(Number), kind: 'person' }]);
     // Export: the rows on the screen, as CSV, a cell that would start a formula quoted as text.
     const exported = await browser.request('/accounts?view=paying&format=csv');
     expect(exported.headers.get('content-type')).toBe('text/csv; charset=utf-8');

@@ -163,7 +163,7 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
       }
       return reply({ has_more: false, data: [
         // Slotlock's, as Checkout tags them: paying, one set to end, one in a trial, one past due, one ended.
-        ...Array.from({ length: 14 }, (_, index) => ({ id: `sub_d${index}`, status: 'active', created: month - index * 2_000_000, current_period_end: month + 2_000_000, cancel_at_period_end: index === 3, metadata: { tenant_ref: `github:${BASE + 10 + index}` }, items: { data: [{ price: price(1900, 'month'), quantity: 1 }] } })),
+        ...Array.from({ length: 14 }, (_, index) => ({ id: `sub_d${index}`, status: 'active', created: month - index * 2_000_000, current_period_end: month + 2_000_000, cancel_at_period_end: index === 3, metadata: { tenant_ref: index === 3 ? (TEAMS[1]?.ref ?? '') : `github:${BASE + 10 + index}` }, items: { data: [{ price: price(1900, 'month'), quantity: 1 }] } })),
         ...Array.from({ length: 5 }, (_, index) => ({ id: `sub_t${index}`, status: index === 4 ? 'past_due' : index === 3 ? 'trialing' : 'active', created: month - index * 3_000_000, current_period_end: month + 2_000_000, metadata: { tenant_ref: `github:${BASE + 30 + index}` }, items: { data: [{ price: price(4900, 'month'), quantity: 1 }] } })),
         { id: 'sub_c1', status: 'canceled', created: 1, canceled_at: month, ended_at: month, metadata: { tenant_ref: `github:${BASE + 40}` }, items: { data: [{ price: price(1900, 'month') }] } },
       ] });
@@ -264,7 +264,8 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
     await superuser`
       INSERT INTO slotlock.billing_alerts (kind, tenant_ref, stripe_ref, detail)
       VALUES ('payment_failed', ${`github:${BASE + 2}`}, 'in_1FailedA', '{"amount_due": 1900, "currency": "eur", "attempt_count": 2}'::jsonb),
-             ('duplicate_subscription', ${GRACE}, 'sub_1Second', '{"first": "sub_GraceHopper02"}'::jsonb)`;
+             ('duplicate_subscription', ${GRACE}, 'sub_1Second', '{"first": "sub_GraceHopper02"}'::jsonb),
+             ('refunded_plan_active', ${ADA}, 'ch_1PartRefund', '{"amount": 1900, "amount_refunded": 500, "currency": "eur", "refunded": false}'::jsonb)`;
     for (let hour = 7; hour >= 0; hour -= 1) {
       const finished = new Date(clock - hour * 3_600_000);
       await superuser`

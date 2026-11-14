@@ -281,7 +281,16 @@ export interface AccountLike {
   href?: string | null;
   /** A second line instead of the reference. */
   sub?: Html | string | null;
+  /**
+   * On one line, with a small avatar and only the reference beside the name: an account under what a
+   * list row is about (a case, a request).
+   */
+  compact?: boolean;
 }
+
+/** A long reference (a team's is 41 characters) by its start and end; the whole in its title. */
+const REF_SHOWN = 24;
+const shortRef = (ref: string) => (ref.length > REF_SHOWN ? `${ref.slice(0, 13)}…${ref.slice(-6)}` : ref);
 
 /**
  * An account (or a staff member) in a table or a list: initials on its colour, then name ?? display
@@ -294,9 +303,16 @@ export function accountCell(account: AccountLike): Html {
     ? named
       ? html`<a href="${account.href}">${shown.primary}</a>`
       : html`<a href="${account.href}" class="mono">${account.ref}</a>`
-    : html`<span class="${named ? '' : 'mono'}">${shown.primary}</span>`;
-  const second = account.sub ?? shown.secondary;
-  return html`<span class="ac">${avatar(shown.primary, 'md', account.ref)}<span class="ac-text">${link}${second ? html`<span class="sub">${second}</span>` : ''}</span></span>`;
+    : named ? html`<span>${shown.primary}</span>` : html`<span class="mono">${shown.primary}</span>`;
+  const rest = account.compact ? (named ? account.ref : null) : shown.secondary;
+  const line = account.sub
+    ? html`<span class="sub">${account.sub}</span>`
+    : !rest
+      ? ''
+      : account.ref.length > REF_SHOWN && rest.includes(account.ref)
+        ? html`<span class="sub short" title="${rest}">${rest.replace(account.ref, shortRef(account.ref))}</span>`
+        : html`<span class="sub">${rest}</span>`;
+  return html`<span class="ac${account.compact ? ' compact' : ''}">${avatar(shown.primary, account.compact ? 'sm' : 'md', account.ref)}<span class="ac-text">${link}${line}</span></span>`;
 }
 
 /** A copy button for a value: shown once the script runs. */
@@ -874,6 +890,13 @@ ${Array.from({ length: SLOTLOCK_AVATAR_TONES }, (_, tone) => `.avatar-t${tone}{b
 .ac-text{display:flex;flex-direction:column;min-width:0}
 .ac-text>a,.ac-text>span:first-child{color:var(--ink);font-weight:500;overflow-wrap:anywhere}
 .ac-text>a.mono,.ac-text>span.mono{font-weight:500}
+.ac-text>.sub.short{white-space:nowrap}
+.ac.compact{gap:8px}
+.ac.compact .avatar{width:20px;height:20px;font-size:9px}
+.ac.compact .avatar.glyph .ico{width:12px;height:12px}
+.ac.compact .ac-text{flex-direction:row;align-items:baseline;gap:6px}
+.ac.compact .ac-text>a,.ac.compact .ac-text>span:first-child{flex:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.ac.compact .sub{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sub{display:block;color:var(--ink-2);font-size:12px;line-height:16px;font-weight:400}
 .sub.mono,.sub .mono{font-size:11.5px}
 .muted{color:var(--ink-2)}
@@ -949,6 +972,10 @@ details.info>.pop{left:-8px;right:auto;font-size:12.5px;line-height:19px;color:v
 .list>li:last-child{border-bottom:0}
 .list .grow{flex:1;min-width:0}
 .list a{color:var(--ink);font-weight:500}
+.list>li>.ac{flex:1}
+.list .grow>.ac{margin-top:4px}
+.li-end{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none;max-width:55%;text-align:right}
+.li-what{display:inline-flex;align-items:center;gap:6px;font-weight:500}
 .notes>li{display:block;padding:10px 0}
 
 /* Stat strip: joined tiles */
@@ -1117,7 +1144,8 @@ td details.menu>summary:hover,td details.menu[open]>summary{background:var(--fil
 .queue>li>a:hover{background:var(--fill);text-decoration:none}
 .queue>li>a[aria-current]{background:var(--fill-2)}
 .queue .q-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.queue .sub{grid-column:1/-1}
+.queue .sub,.queue .ac{grid-column:1/-1}
+.queue .ac .sub{grid-column:auto}
 .steps{list-style:none;margin:0;padding:0;display:grid;gap:0}
 .step{display:grid;grid-template-columns:28px minmax(0,1fr);gap:12px;padding:12px 0;border-bottom:1px solid var(--line-2)}
 .step:last-child{border-bottom:0}
@@ -1436,17 +1464,33 @@ export const SLOTLOCK_ADMIN_JS = `(() => {
         item.setAttribute('role', 'option');
         item.id = list.id + '-' + index;
         item.setAttribute('data-ref', row.ref);
+        // The account cell (ui.ts accountCell), drawn here: initials on the account's colour, or a
+        // person or a group for a bare reference; its name, and the rest on a muted line.
         const mark = document.createElement('span');
-        mark.className = 'avatar sm';
-        mark.textContent = row.initials;
+        mark.className = 'avatar sm avatar-t' + (Number(row.tone) || 0) + (row.initials ? '' : ' glyph');
+        mark.setAttribute('aria-hidden', 'true');
+        if (row.initials) mark.textContent = row.initials;
+        else {
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.setAttribute('class', 'ico');
+          svg.setAttribute('viewBox', '0 0 16 16');
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', /^(team|github-org|partner):/.test(row.ref) ? ${JSON.stringify(ICON_PATHS.accounts ?? '')} : ${JSON.stringify(ICON_PATHS.staff ?? '')});
+          svg.append(path);
+          mark.append(svg);
+        }
         const text = document.createElement('span');
         text.className = 'ac-text';
         const name = document.createElement('span');
         name.textContent = row.label;
-        const ref = document.createElement('span');
-        ref.className = 'sub mono';
-        ref.textContent = row.ref;
-        text.append(name, ref);
+        if (!row.initials) name.className = 'mono';
+        text.append(name);
+        if (row.sub) {
+          const sub = document.createElement('span');
+          sub.className = 'sub';
+          sub.textContent = row.sub;
+          text.append(sub);
+        }
         item.append(mark, text);
         item.addEventListener('mousedown', (event) => { event.preventDefault(); choose(item); });
         list.append(item);

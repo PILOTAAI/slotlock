@@ -54,8 +54,53 @@ async function shapeAsRelease0110(sql: postgres.Sql) {
       RETURNS TABLE (staff_ref text, role text, status text, added_by text, added_at timestamptz,
                      last_seen_at timestamptz, passkeys integer, enrolling boolean)
       LANGUAGE sql AS $$ SELECT NULL, NULL, NULL, NULL, NULL::timestamptz, NULL::timestamptz, NULL::integer, NULL::boolean WHERE false $$;
+    DROP FUNCTION slotlock.admin_cases(text, text, text, bigint, integer);
+    CREATE FUNCTION slotlock.admin_cases(actor text, status_filter text, account text, after bigint, page_size integer)
+      RETURNS TABLE (id bigint, account_ref text, source text, summary text, policy_section text, action_taken text,
+                     status text, opened_by text, opened_at timestamptz, updated_at timestamptz)
+      LANGUAGE sql AS $$ SELECT NULL::bigint, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL::timestamptz, NULL::timestamptz WHERE false $$;
+    DROP FUNCTION slotlock.admin_overrides(text);
+    CREATE FUNCTION slotlock.admin_overrides(actor text)
+      RETURNS TABLE (id bigint, account_ref text, plan text, starts_at timestamptz, ends_at timestamptz, reason text,
+                     created_by text, approved_by text, state text)
+      LANGUAGE sql AS $$ SELECT NULL::bigint, NULL, NULL, NULL::timestamptz, NULL::timestamptz, NULL, NULL, NULL, NULL WHERE false $$;
+    DROP FUNCTION slotlock.admin_billing_alerts(text, boolean, bigint, integer);
+    CREATE FUNCTION slotlock.admin_billing_alerts(actor text, open_only boolean, after bigint, page_size integer)
+      RETURNS TABLE (id bigint, kind text, account_ref text, stripe_ref text, detail jsonb, created_at timestamptz,
+                     resolved_at timestamptz, resolved_by text)
+      LANGUAGE sql AS $$ SELECT NULL::bigint, NULL, NULL, NULL, NULL::jsonb, NULL::timestamptz, NULL::timestamptz, NULL WHERE false $$;
+    DROP FUNCTION slotlock.admin_usage_accounts(text);
+    CREATE FUNCTION slotlock.admin_usage_accounts(actor text)
+      RETURNS TABLE (account_ref text, plan text, operations bigint, bookings bigint, quota_operations bigint,
+                     quota_bookings bigint, quota_stop_percent integer)
+      LANGUAGE sql AS $$ SELECT NULL, NULL, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::integer WHERE false $$;
+    DROP FUNCTION slotlock.admin_privacy_requests(text, boolean, bigint, integer);
+    CREATE FUNCTION slotlock.admin_privacy_requests(actor text, open_only boolean, before bigint, page_limit integer)
+      RETURNS TABLE (id bigint, account_ref text, kind text, concerns text, received_on date, due_on date,
+                     status text, verified boolean, exporting boolean, erasure_asked boolean, erasure_approved boolean,
+                     opened_by text, opened_at timestamptz, closed_at timestamptz)
+      LANGUAGE sql AS $$ SELECT NULL::bigint, NULL, NULL, NULL, NULL::date, NULL::date, NULL, NULL::boolean, NULL::boolean,
+                                NULL::boolean, NULL::boolean, NULL, NULL::timestamptz, NULL::timestamptz WHERE false $$;
+    DROP FUNCTION slotlock.admin_announcements(text, boolean);
+    CREATE FUNCTION slotlock.admin_announcements(actor text, ended_too boolean)
+      RETURNS TABLE (id bigint, audience text, plan text, account_ref text, kind text, message text, link text,
+                     starts_at timestamptz, ends_at timestamptz, created_by text, created_at timestamptz,
+                     ended_by text, ended_at timestamptz, state text)
+      LANGUAGE sql AS $$ SELECT NULL::bigint, NULL, NULL, NULL, NULL, NULL, NULL, NULL::timestamptz, NULL::timestamptz, NULL,
+                                NULL::timestamptz, NULL, NULL::timestamptz, NULL WHERE false $$;
   `);
 }
+
+/** The functions that name the accounts in their results, and the column each gained. */
+const NAMING = Object.freeze([
+  ['slotlock.admin_cases(text, text, text, bigint, integer)', 'account_name'],
+  ['slotlock.admin_overrides(text)', 'account_name'],
+  ['slotlock.admin_billing_alerts(text, boolean, bigint, integer)', 'account_name'],
+  ['slotlock.admin_usage_accounts(text)', 'name'],
+  ['slotlock.admin_privacy_requests(text, boolean, bigint, integer)', 'account_name'],
+  ['slotlock.admin_announcements(text, boolean)', 'account_name'],
+  ['slotlock.admin_staff_log(text, bigint, integer, text, text, text, timestamptz, timestamptz, boolean)', 'account_name'],
+] as const);
 
 describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing figures and names', () => {
   const suffix = randomBytes(6).toString('hex');
@@ -136,6 +181,9 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
     expect(await resultColumns('slotlock.admin_accounts(text, text, text, text, text, integer)')).toEqual(expect.arrayContaining(['display', 'plan_ends_at']));
     expect(await resultColumns('slotlock.admin_staff(text)')).toContain('login');
     expect(await oidOf('slotlock.admin_staff_log(text, bigint, integer)')).toBeNull();
+    for (const [signature, column] of NAMING) {
+      expect(await resultColumns(signature), signature).toContain(column);
+    }
     for (const signature of [
       'slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean)',
       'slotlock.tenant_plans_of_customer(text)',
@@ -152,6 +200,9 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
       SELECT account_ref, display, plan_ends_at FROM slotlock.admin_accounts(${session}, '@upgraded', NULL, NULL, NULL, 10)`;
     expect(listed).toEqual([{ account_ref: 'github:7001', display: '@upgraded', plan_ends_at: null }]);
     expect(await adminSql`SELECT staff_ref, login FROM slotlock.admin_staff(${session})`).toEqual([{ staff_ref: 'github:7101', login: null }]);
+    expect(await adminSql`SELECT account_ref, account_name, account_display FROM slotlock.admin_billing_alerts(${session}, true, NULL, 10) WHERE stripe_ref = 'in_Up1'`).toEqual([
+      { account_ref: 'github:7001', account_name: null, account_display: '@upgraded' },
+    ]);
   });
 
   it('clears a name kept under the earlier, looser check that the stricter one refuses, then validates it', async () => {
@@ -181,6 +232,7 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
       'slotlock.staff_directory()',
       'slotlock.admin_accounts(text, text, text, text, text, integer)',
       'slotlock.admin_staff(text)',
+      ...NAMING.map(([signature]) => signature),
     ];
     const before = await Promise.all(signatures.map(oidOf));
     await createSlotlockStore(sql).applySchema();

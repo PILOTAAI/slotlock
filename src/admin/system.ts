@@ -216,7 +216,14 @@ export interface SlotlockAnnouncementRow {
   created_by: string;
   ended_at: Date | null;
   state: 'live' | 'scheduled' | 'ended' | 'over';
+  /** What its account is called (staff_directory), for one to one account. */
+  account_name?: string | null;
+  account_display?: string | null;
 }
+
+/** An account by what the admin function says it is called, beside its reference. */
+const namedCell = (row: { account_ref: string; account_name?: string | null; account_display?: string | null }, accountHref: (ref: string) => string) =>
+  accountCell({ ref: row.account_ref, name: row.account_name ?? null, display: row.account_display ?? null, href: accountHref(row.account_ref) });
 
 export interface SlotlockCommunicationsPageData {
   csrf: string;
@@ -248,7 +255,7 @@ const audienceText = (row: SlotlockAnnouncementRow, accountHref: (ref: string) =
     ? html`Every account`
     : row.audience === 'plan'
       ? html`${chip(PLAN_WORDS[row.plan ?? ''] ?? row.plan ?? '', 'info')} plan`
-      : accountCell({ ref: row.account_ref ?? '', href: accountHref(row.account_ref ?? ''), sub: 'Service notice' });
+      : namedCell({ ...row, account_ref: row.account_ref ?? '' }, accountHref);
 
 /** A datetime-local value, in UTC as the form says. */
 const minuteInput = (ms: number) => new Date(ms).toISOString().slice(0, 16);
@@ -364,15 +371,15 @@ export interface SlotlockSystemData {
   rounds: { started_at: string; finished_at: string; attention: boolean; summary: Record<string, number> }[];
   failing: {
     account_ref: string; first_failed_at: string; last_failed_at: string; failures: number; error: string;
-    code: string | null; message: string | null;
+    code: string | null; message: string | null; account_name?: string | null; account_display?: string | null;
   }[];
   failing_total: number;
   jobs: Record<string, { finished_at: string; attention: boolean }>;
 }
 
 export interface SlotlockFlagsData {
-  flags: { id: string; flag: SlotlockFeatureFlag; plan: string | null; account_ref: string | null; enabled: boolean; reason: string; set_by: string; set_at: string }[];
-  history: { occurred_at: string; staff_ref: string; action: string; account_ref: string | null; reason: string | null; metadata: { flag?: string; plan?: string | null; from?: boolean | null; to?: boolean | null } }[];
+  flags: { id: string; flag: SlotlockFeatureFlag; plan: string | null; account_ref: string | null; enabled: boolean; reason: string; set_by: string; set_at: string; account_name?: string | null; account_display?: string | null }[];
+  history: { occurred_at: string; staff_ref: string; action: string; account_ref: string | null; reason: string | null; metadata: { flag?: string; plan?: string | null; from?: boolean | null; to?: boolean | null }; account_name?: string | null; account_display?: string | null }[];
 }
 
 export interface SlotlockSystemPageData {
@@ -416,7 +423,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
       ? section('Remove', html`<form class="form" method="post" action="/system/flags/clear">${csrf}<input type="hidden" name="flag" value="${editing.id}">${reasonField(`clear-drawer-${editing.id}`, { public: Boolean(editing.account_ref) })}<div class="form-actions"><button class="btn danger" type="submit">Remove flag</button></div></form>`, { level: 3 })
       : ''}`;
   const flagDrawer = data.panel?.kind === 'flag' && data.mayAct
-    ? drawer(editing ? `${flagName(editing.flag)}, ${editing.account_ref ?? `the ${editing.plan ?? ''} plan`}` : 'Set a flag', flagForm, '/system#flags')
+    ? drawer(editing ? `${flagName(editing.flag)}, ${editing.account_ref ? (editing.account_name || editing.account_display || editing.account_ref) : `the ${editing.plan ?? ''} plan`}` : 'Set a flag', flagForm, '/system#flags')
     : null;
   const body = html`
     <nav class="anchors" aria-label="On this page"><a href="#hosts">Hosts</a><a href="#maintenance">Maintenance</a><a href="#webhooks">Webhooks</a><a href="#deploys">Deploys</a><a href="#flags">Flags</a><a href="#configuration">Configuration</a></nav>
@@ -435,7 +442,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
       ])}
       ${hourSince !== null && hourSince > 3 * 3_600_000 ? html`<div class="callout warn section"><p>No server has recorded maintenance for ${Math.floor(hourSince / 3_600_000)} hours. Check that <code>slotlock serve</code> is running.</p></div>` : ''}
       ${section('Accounts whose maintenance is failing', table('Accounts whose maintenance is failing', ['Account', 'Failing since', 'Last failed', { label: 'Failures', num: true }, 'Error'], system.failing.map((row) => [
-        accountCell({ ref: row.account_ref, href: accountHref(row.account_ref) }),
+        namedCell(row, accountHref),
         html`${when(row.first_failed_at)}`,
         html`${when(row.last_failed_at)}`,
         html`${count(row.failures)}`,
@@ -469,7 +476,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
     ${section('Feature flags', html`
       ${table('Feature flags', ['Feature', 'Scope', 'State', 'Reason', { label: 'Actions', quiet: true }], data.flags.flags.map((flag) => [
         html`${flagName(flag.flag)}`,
-        flag.account_ref ? accountCell({ ref: flag.account_ref, href: accountHref(flag.account_ref) }) : html`${chip(PLAN_WORDS[flag.plan ?? ''] ?? flag.plan ?? '', 'info')} plan`,
+        flag.account_ref ? namedCell({ ...flag, account_ref: flag.account_ref }, accountHref) : html`${chip(PLAN_WORDS[flag.plan ?? ''] ?? flag.plan ?? '', 'info')} plan`,
         flag.enabled ? pill('On', 'good') : pill('Off', 'warn'),
         html`${flag.reason}<span class="sub">${data.names.get(flag.set_by) ?? flag.set_by} · ${when(flag.set_at)}</span>`,
         data.mayAct
@@ -482,7 +489,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
       ${section('Changes', table('Feature flag changes', ['When', 'Who', 'Feature', 'Change', 'Why'], data.flags.history.map((event) => [
         html`${when(event.occurred_at)}`,
         html`${data.names.get(event.staff_ref) ?? event.staff_ref}`,
-        html`${flagName(event.metadata.flag ?? '')}<span class="sub">${event.account_ref ? event.account_ref : `the ${event.metadata.plan ?? ''} plan`}</span>`,
+        html`${flagName(event.metadata.flag ?? '')}<span class="sub">${event.account_ref ? (event.account_name || event.account_display || event.account_ref) : `the ${event.metadata.plan ?? ''} plan`}</span>`,
         html`${onOff(event.metadata.from)} → ${event.action === 'flag.cleared' ? 'as configured' : onOff(event.metadata.to)}`,
         html`${event.reason ?? ''}`,
       ]), 'No changes yet.'), { level: 3 })}`, {
