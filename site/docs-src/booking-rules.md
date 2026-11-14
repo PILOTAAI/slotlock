@@ -88,18 +88,25 @@ slotlock rules clear --resource vehicle-42
   too, read within a day, of the slot and its turnaround, so it offers no slot they leave unproven.
 - A series is judged on its first occurrence for notice and advance, and on every occurrence for
   step and hours. Imported calendar events are not checked: they happened elsewhere.
+- A series is held to the cutoffs and fee by its next occurrence not yet started, or, with none
+  left, the one under way. Changing its times, zone or exceptions is a move.
 - An agent cannot get round the cutoffs and fee another way. Inside the reschedule cutoff, making a
-  one-off a series counts as a move. Making a booked one-off transparent, which lets its time go,
+  one-off a series counts as a move. Making a booked event transparent, which lets its time go,
   counts as a cancellation: it is refused inside the cancel cutoff, or once a cancellation fee is
   due, since cancelling it records the fee (`booking_rule_cancel_cutoff`).
-- Nor by moving it. A booking or event moved when cancelling it would already be late (inside the
-  cancel cutoff, or once its fee is due) keeps the start it had then: a later cancellation is
-  judged from it, however far the move took it.
+- Nor by moving it. A booking or event moved, or made a series, when cancelling it would already be
+  late (inside the cancel cutoff, or once its fee is due) keeps the start it had then: a later
+  cancellation is judged from it, however far the move took it. An agent's event that late cannot
+  move to another resource, which would leave the rules that make it late
+  (`booking_rule_cancel_cutoff`).
 - An agent never sets a price. On a resource with `holdPrice`, an agent's hold waits for that
   payment whether or not it asked to (`payment_required` and `payment_amount` say so), a `payment`
   it names that is not the price is refused (`409 payment_price_mismatch`, as any `payment` is where
   the resource has no price), and booking the resource without a paid hold of it is refused
-  (`409 payment_required`). Your own systems, through the application API, set their own price.
+  (`409 payment_required`). That is any time an agent's write adds there: a new event, one moved
+  onto the resource, one made opaque, or occurrences the event did not already hold (a longer or
+  moved time, a series grown). Its details, or less of its time, change freely. Your own systems,
+  through the application API, set their own price.
 - A key's caps on what its agent holds (`max_holds`, `max_held_hours`) count the time its
   approvals hold while a person decides, as its own holds.
 - Searches (`slotlock_find_next_available`, `slotlock_find_available_slots`, `findNextAvailableFor`)
