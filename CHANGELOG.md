@@ -14,6 +14,9 @@ versioning.
   customer dashboard does: other sites still get no referrer. The editor's browser test now passes on
   the Origin Chromium really sends, so it fails if this comes back. Uploads and passkeys use `fetch`,
   which keeps its Origin, so they worked throughout.
+- An Owner reviews their own posts, so for them the post editor's "Submit for review" reads "Ready
+  to publish", as do the post's status ("In review" before) and the notices about that step. An Editor,
+  who cannot publish, still submits a post for an Owner's review.
 - The admin console's tabs show Slotlock's mark: it serves the site's own `favicon.svg` and
   `apple-touch-icon.png`, byte for byte, and every page links them.
 - `scripts/check-launch.mjs` fails when a page of the site (home, pricing, the quickstart, the blog)

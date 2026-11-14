@@ -683,6 +683,33 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect(repo.text('main', 'site/public/_redirects')).toContain(`/blog/${SLUG}/ /blog/${to}/ 301\n/blog/${SLUG}.md /blog/${to}.md 301\n`);
   });
 
+  it('tells an Owner, who reviews their own posts, that a post is ready to publish; an Editor still submits it for review', async () => {
+    const own = 'calendars-an-owner-writes';
+    const marked = await form(ownerBrowser, '/content/new', { ...postFields(own), intent: 'submit' });
+    expect(marked.headers.get('location')).toBe(`/content/${own}?done=ready`);
+    const page = await (await ownerBrowser.request(`/content/${own}?done=ready`)).text();
+    expect(page).toContain('Ready to publish. Publish it once the checks on GitHub pass.');
+    expect(page).toContain('value="submit">Ready to publish</button>');
+    expect(page).not.toMatch(/Submit for review|In review/);
+    const list = await (await ownerBrowser.request('/content')).text();
+    expect(list).toContain('Ready to publish');
+    expect(list).not.toContain('In review');
+    const failing = await form(ownerBrowser, `/content/${own}`, { ...postFields(own, { description: 'Too short.' }), head: headOf(own), intent: 'submit' });
+    expect(await failing.text()).toContain('Not ready: fix the checks marked ✗, or save it as a draft.');
+
+    // An Editor cannot publish: for them it is still a review an Owner does.
+    const seen = await (await editor.request(`/content/${own}`)).text();
+    expect(seen).toContain('value="submit">Submit for review</button>');
+    expect(seen).toContain('In review');
+
+    // Publishing a draft names the step as the Owner sees it.
+    const draft = 'calendars-an-owner-drafts';
+    await form(ownerBrowser, '/content/new', { ...postFields(draft), intent: 'save' });
+    const early = await form(ownerBrowser, `/content/${draft}/publish`, { sha: headOf(draft) }, `/content/${draft}`);
+    expect(early.headers.get('location')).toBe(`/content/${draft}?error=not_submitted`);
+    expect(await (await ownerBrowser.request(`/content/${draft}?error=not_submitted`)).text()).toContain('It is still a draft. Choose Ready to publish first.');
+  });
+
   it('says what to set when the CMS App is not configured', async () => {
     const bare = createSlotlockAdmin({
       sql: () => adminSql,
