@@ -49,9 +49,13 @@ export function slotlockBillingAlertWords(kind: string, detail: Record<string, u
   if (kind === 'refunded_plan_active') {
     const refunded = typeof detail.amount_refunded === 'number' ? slotlockMoney(detail.amount_refunded, currency) : null;
     const of = typeof detail.amount === 'number' ? slotlockMoney(detail.amount, currency) : null;
+    const amounts = refunded ? `${refunded}${of ? ` of ${of}` : ''} refunded` : null;
+    // Part of a payment refunded (Stripe's `refunded` is true only once all of it is) says only that:
+    // a partial refund is often meant to leave the plan as it is.
+    if (detail.refunded === false) return { title: 'Partly refunded', detail: amounts };
     return {
       title: 'Refunded, plan still active',
-      detail: refunded ? `${refunded}${of ? ` of ${of}` : ''} refunded: end the plan, or say why not` : 'End the plan, or say why not',
+      detail: amounts ? `${amounts}: end the plan, or say why not` : 'End the plan, or say why not',
     };
   }
   if (kind === 'duplicate_subscription') {

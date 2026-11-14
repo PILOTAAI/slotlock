@@ -20,7 +20,7 @@ const KEY = 'sk_test_configure';
 const WORKER_KEY = 'rk_live_worker';
 const CHECK_KEY = 'rk_live_check';
 const ALLOWED: Record<string, string[]> = {
-  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions', 'GET prices'],
+  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions', 'GET prices', 'GET invoice_payments'],
   rk_live_noprices: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions'],
   rk_live_nocheckout: ['GET subscriptions', 'GET billing_portal/configurations'],
   [CHECK_KEY]: ['GET products', 'GET prices', 'GET webhook_endpoints', 'GET events'],
@@ -520,6 +520,11 @@ describe('configure-stripe.mjs', () => {
     const noPrices = await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: 'rk_live_noprices' });
     expect(noPrices).toMatchObject({ code: 0, stored: 1 });
     expect(noPrices.output).toContain("note: the dashboard's key cannot read Prices");
+    // Nor invoice payments: stored, and said, as a refund is then matched to no account.
+    expect(noPrices.output).toContain("note: the dashboard's key cannot read invoice payments");
+    const full = await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: WORKER_KEY });
+    expect(full).toMatchObject({ code: 0, stored: 1 });
+    expect(full.output).not.toContain('cannot read invoice payments');
     // A check key that cannot read events stays off GitHub.
     dashboardAnswer = 400;
     expect(await attempt({ SLOTLOCK_CHECK_STRIPE_KEY: 'rk_live_noevents' })).toMatchObject({ code: 1, output: expect.stringContaining('cannot read Events') });

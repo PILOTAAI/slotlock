@@ -281,6 +281,15 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   ...SLOTLOCK_SCIM_TABLES,
 ] as const);
 
+/**
+ * What a person's kept name may not hold beyond ASCII, as a PostgreSQL regular expression for a
+ * UTF-8 database: C1 controls, and Unicode's format characters (Cf: the bidirectional controls,
+ * zero-width characters, the soft hyphen, the byte order mark, tags) and line and paragraph
+ * separators (Zl, Zp), as Unicode 17 has them. The dashboard removes the same, and ASCII's controls
+ * (workspaces.ts slotlockPersonName); workspaces-names.unit.test.ts keeps the two the same.
+ */
+export const SLOTLOCK_NAME_UNSHOWN_PATTERN = String.raw`[\u0080-\u009F\u00AD\u0600-\u0605\u061C\u06DD\u070F\u0890-\u0891\u08E2\u180E\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB\U000110BD\U000110CD\U00013430-\U0001343F\U0001BCA0-\U0001BCA3\U0001D173-\U0001D17A\U000E0001\U000E0020-\U000E007F]`;
+
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
 export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.use_dashboard_token(text, bytea, timestamptz, bytea)',
@@ -429,6 +438,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   // it; and the plans a Stripe customer pays for, for a refund (billing.ts).
   'slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean)',
   'slotlock.tenant_plans_of_customer(text)',
+  // A person's sign-in record, for their account's export (a subject access request).
+  'slotlock.tenant_export_person(text)',
   // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
   // 0006, M10 and M11; staff-ddl.ts).
   ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
@@ -1482,9 +1493,10 @@ $slotlock_people_display$;
 -- The name the person's provider gives (GitHub's profile name, Google's name claim), as they last
 -- signed in, for the staff console to show an account by: never an identifier, and gone with the
 -- person's row when they are erased (erase_tenant). The dashboard cleans it (workspaces.ts
--- slotlockPersonName: no control or bidirectional-text characters, trimmed, 80 characters) and
--- dashboard_name keeps only a name that passes; this check holds what reads the same in any
--- encoding (no ASCII control character).
+-- slotlockPersonName: no control, format, bidirectional-text or separator characters, trimmed, 80
+-- characters) and dashboard_name keeps only a name that passes. This check holds the same: ASCII's
+-- controls in any encoding, and the rest (SLOTLOCK_NAME_UNSHOWN_PATTERN) in a UTF-8 database, where
+-- a pattern sees characters; in another, dashboard_name keeps only plain ASCII.
 ALTER TABLE slotlock.dashboard_people ADD COLUMN IF NOT EXISTS name text;
 DO $slotlock_people_name$
 BEGIN
@@ -1492,11 +1504,20 @@ BEGIN
     SELECT 1 FROM pg_constraint
      WHERE conname = 'slotlock_dashboard_people_name_valid'
        AND conrelid = 'slotlock.dashboard_people'::regclass
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%getdatabaseencoding%'
   ) THEN
-    -- NOT VALID: the column is new, and DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after.
+    -- A name kept under an earlier, looser check that this one refuses is cleared (the next sign-in
+    -- keeps it again, cleaned), so the check can be validated over every row.
+    UPDATE slotlock.dashboard_people person SET name = NULL
+     WHERE person.name ~ '[\\u0001-\\u001F\\u007F]'
+        OR (pg_catalog.getdatabaseencoding() = 'UTF8' AND person.name ~ '${SLOTLOCK_NAME_UNSHOWN_PATTERN}');
+    ALTER TABLE slotlock.dashboard_people DROP CONSTRAINT IF EXISTS slotlock_dashboard_people_name_valid;
+    -- NOT VALID: DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after the migration.
     ALTER TABLE slotlock.dashboard_people ADD CONSTRAINT slotlock_dashboard_people_name_valid
       CHECK (name IS NULL OR (char_length(name) BETWEEN 1 AND 80 AND name = btrim(name)
-                              AND name !~ '[\\u0001-\\u001F\\u007F]')) NOT VALID;
+                              AND name !~ '[\\u0001-\\u001F\\u007F]'
+                              AND (pg_catalog.getdatabaseencoding() <> 'UTF8'
+                                   OR name !~ '${SLOTLOCK_NAME_UNSHOWN_PATTERN}'))) NOT VALID;
   END IF;
 END
 $slotlock_people_name$;
@@ -1580,7 +1601,8 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[9]} FROM PUBLIC;
 
 -- A person's name as their provider gives it, cleaned by the dashboard (slotlockPersonName), at
 -- sign-in; none clears it. A name that is not clean is kept as none, never refused, so sign-in
--- cannot fail on it: over 80 characters, or holding a control or bidirectional-text character. In
+-- cannot fail on it: over 80 characters, or holding a control, format (bidirectional, zero-width,
+-- soft hyphen, byte order mark, tag) or line or paragraph separator character. In
 -- a UTF-8 database a pattern sees characters; in another (SQL_ASCII) it sees bytes, where only
 -- plain ASCII can be told apart, so only such a name is kept there. Nothing is cut here: in a
 -- database of another encoding, cutting could split a character.
@@ -1596,7 +1618,7 @@ DECLARE
 BEGIN
   IF kept IS NOT NULL AND (char_length(kept) > 80 OR kept ~ '[\\u0001-\\u001F\\u007F]'
       OR CASE WHEN pg_catalog.getdatabaseencoding() = 'UTF8'
-              THEN kept ~ '[\\u0080-\\u009F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]'
+              THEN kept ~ '${SLOTLOCK_NAME_UNSHOWN_PATTERN}'
               ELSE kept ~ '[^\\u0020-\\u007E]' END) THEN
     kept := NULL;
   END IF;
@@ -2843,7 +2865,7 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[23]} FROM PUBLIC;
 
 -- What the Stripe webhook saw that needs a person (RFC 0006, M4): a payment that failed, a second
 -- subscription bought by the same account (for a refund), and a refund that left the account's
--- plan running (to end it, or say why not). One row per Stripe object, so a
+-- plan running (to end it, or say why not). One row per account and Stripe object, so a
 -- retried delivery adds nothing; resolved by staff, or by Stripe when the account's subscription is
 -- paid again.
 CREATE TABLE IF NOT EXISTS slotlock.billing_alerts (
@@ -2863,7 +2885,7 @@ CREATE TABLE IF NOT EXISTS slotlock.billing_alerts (
     AND (resolved_at IS NULL) = (resolved_by IS NULL)
     AND (resolved_by IS NULL OR octet_length(resolved_by) BETWEEN 1 AND 100)
   ),
-  CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, stripe_ref)
+  CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, tenant_ref, stripe_ref)
 );
 CREATE INDEX IF NOT EXISTS slotlock_billing_alerts_open_idx
   ON slotlock.billing_alerts (created_at DESC) WHERE resolved_at IS NULL;
@@ -2890,6 +2912,21 @@ BEGIN
   END IF;
 END
 $slotlock_billing_alerts_refunds$;
+-- One alert per account and Stripe object, no longer per object alone: one payment can pay two
+-- accounts' invoices (a customer who pays for their own account and a team's), and a refund of it
+-- tells each. The wider key holds every row the narrower one did.
+DO $slotlock_billing_alerts_per_account$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.billing_alerts'::regclass AND conname = 'slotlock_billing_alerts_once'
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%tenant_ref%'
+  ) THEN
+    ALTER TABLE slotlock.billing_alerts DROP CONSTRAINT IF EXISTS slotlock_billing_alerts_once;
+    ALTER TABLE slotlock.billing_alerts ADD CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, tenant_ref, stripe_ref);
+  END IF;
+END
+$slotlock_billing_alerts_per_account$;
 REVOKE ALL ON slotlock.billing_alerts FROM PUBLIC;
 
 -- The webhook's record (the serving role's): payment_failed, duplicate_subscription and
@@ -3380,6 +3417,22 @@ AS $slotlock_tenant_plans_of_customer$
    LIMIT 10;
 $slotlock_tenant_plans_of_customer$;
 REVOKE ALL ON FUNCTION slotlock.tenant_plans_of_customer(text) FROM PUBLIC;
+
+-- What the dashboard keeps of a person, for their own account's export (store.ts, a subject access
+-- request): the name and display it shows them by, and when they last signed in. Never their
+-- session's epoch. A person's own account only: no other account's export holds it.
+CREATE OR REPLACE FUNCTION slotlock.tenant_export_person(requested_tenant_ref text)
+RETURNS TABLE (name text, display text, last_sign_in_at timestamptz)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_export_person$
+  SELECT person.name, person.display, person.last_sign_in_at
+    FROM slotlock.dashboard_people person
+   WHERE person.person_ref = requested_tenant_ref;
+$slotlock_tenant_export_person$;
+REVOKE ALL ON FUNCTION slotlock.tenant_export_person(text) FROM PUBLIC;
 
 -- A tenant's use of the service (usage.ts), by UTC day: operations its keys and the assistant ran
 -- (recorded by the servers), and the bookings and holds it committed (rolled up from its feed). By

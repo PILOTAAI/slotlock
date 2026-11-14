@@ -202,6 +202,14 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     expect(alerts).toContain('£5.00 of £5.00 refunded');
     expect(alerts).toContain('https://dashboard.stripe.com/payments/ch_Refund1');
     expect(await text(staff.billing, '/')).toContain('1 billing alert');
+    // Part of a payment refunded says only that: the plan may well be meant to carry on.
+    await superuser`SELECT slotlock.note_billing_event('refunded_plan_active', ${PAYING}, 'ch_Refund2',
+      ${superuser.json({ amount: 500, amount_refunded: 200, currency: 'gbp', refunded: false, subscription: 'sub_Pay' })})`;
+    const partly = await text(staff.billing, '/billing');
+    const table = partly.slice(partly.indexOf('<table', partly.indexOf('id="alerts"')));
+    const row = table.slice(table.lastIndexOf('<tr', table.indexOf('ch_Refund2')), table.indexOf('</tr>', table.indexOf('ch_Refund2')));
+    expect(row).toContain('Partly refunded<span class="sub">£2.00 of £5.00 refunded</span>');
+    expect(row).not.toContain('end the plan');
   });
 
   it("shows people by their provider's name, else display, else reference, with initials and no style attribute", async () => {
@@ -245,9 +253,13 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     expect(found).toContain(`href="/accounts/${encodeURIComponent(NOBODY)}"`);
     expect(found).toContain(`GitHub account <strong>someone</strong> is id <code>${BASE + 2}</code>`);
     expect(github).toEqual(['/users/someone']);
-    const [lookup] = await superuser<{ target: string }[]>`
-      SELECT target FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY chain_index DESC LIMIT 1`;
-    expect(lookup?.target).toBe('someone');
+    // Recorded, but the login only as a keyed digest (staff_search_record), as a search by name is.
+    const [lookup] = await superuser<{ target: string | null; metadata: Record<string, string> }[]>`
+      SELECT target, metadata FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY chain_index DESC LIMIT 1`;
+    expect(lookup).toEqual({ target: null, metadata: { query_digest: expect.stringMatching(/^[0-9a-f]{64}$/), query_kind: 'text' } });
+    const searched = await superuser<{ metadata: Record<string, string> }[]>`
+      SELECT metadata FROM slotlock.staff_audit_events WHERE action IN ('accounts.searched', 'search.github_lookup')`;
+    expect(JSON.stringify(searched)).not.toMatch(/someone|lovelace|navy/i);
   });
 
   it('names staff by the login they last signed in with, and the command line as such', async () => {
@@ -267,7 +279,12 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
 
   it('shows the staff log by login and in words, hides views unless asked, and filters', async () => {
     await superuser`SELECT slotlock.staff_operator_record('cli:node', 'account.suspended', ${PAYING}, 'Chargeback')`;
+    const listed = async () => (await superuser`SELECT 1 FROM slotlock.staff_audit_events WHERE action = 'staff.list_viewed'`).length;
+    const listedBefore = await listed();
     const log = await text(staff.owner, '/staff/log');
+    // Its filter's member list is read without a record of its own: reading the log is not one.
+    expect(await listed()).toBe(listedBefore);
+    expect(log).toMatch(/<a class="menu-item" href="[^"]*who=github%3A1003[^"]*">octo-billing<\/a>/);
     // Only Staff log is the current page in the sidebar, not Staff as well.
     expect(log).toContain('<a href="/staff/log" aria-current="page">');
     expect(log).not.toMatch(/<a href="\/staff" aria-current/);

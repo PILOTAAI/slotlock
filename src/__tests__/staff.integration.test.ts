@@ -212,6 +212,9 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     expect(no?.opened).toBeNull();
     const log = await adminSql<{ staff_ref: string; action: string }[]>`
       SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20, NULL, NULL, NULL, NULL, NULL, true)`;
+    // The whole staff list, for the log's filter, only to those who may read the log.
+    expect((await adminSql`SELECT * FROM slotlock.admin_staff_logins(${await as(OWNER)}, NULL)`).length).toBeGreaterThanOrEqual(3);
+    await expect(adminSql`SELECT * FROM slotlock.admin_staff_logins(${await as(SUPPORT)}, NULL)`).rejects.toMatchObject({ code: '42501' });
     expect(log).toEqual(
       expect.arrayContaining([
         { staff_ref: OWNER, action: 'staff.signed_in' },
@@ -315,6 +318,36 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
       SELECT metadata FROM slotlock.staff_audit_events
        WHERE action = 'accounts.searched' AND metadata->>'query' LIKE 'slk_%' ORDER BY id DESC LIMIT 1`;
     expect(logged?.metadata.query).toBe('slk_AbCd1234');
+
+    // The staff log is kept six years, past any erasure: a search is kept as typed only when it is
+    // a reference, an id, a key prefix or a customer; a name, a login or an email only as a digest
+    // keyed with the deployment's secret, which shows two searches were the same and nothing more.
+    const logOf = async (query: string) => {
+      await search(query);
+      const [row] = await superuser<{ metadata: Record<string, string> }[]>`
+        SELECT metadata FROM slotlock.staff_audit_events WHERE action = 'accounts.searched' ORDER BY id DESC LIMIT 1`;
+      return row?.metadata;
+    };
+    for (const query of ['cus_TEST123', '424242', 'github:51', 'google:1234567', 'team:0b9e', 'github-org:77~test']) {
+      expect(await logOf(query), query).toEqual({ query });
+    }
+    const [digest] = await superuser<{ ada: string }[]>`SELECT slotlock.privacy_digest('ada lovelace') AS ada`;
+    for (const query of ['Ada Lovelace', 'ada LOVELACE']) {
+      expect(await logOf(query), query).toEqual({ query_digest: digest?.ada, query_kind: 'text' });
+    }
+    for (const query of ['ada@example.com', '@ada', 'octocat', 'Acme Rentals']) {
+      const kept = await logOf(query);
+      expect(kept?.query_kind, query).toBe('text');
+      expect(kept?.query_digest, query).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(kept)).not.toContain(query.slice(1, 4));
+    }
+    // The console's own record of a search: the same rule.
+    const support2 = await as(SUPPORT);
+    await adminSql`SELECT slotlock.admin_record(${support2}, 'search.github_lookup', NULL, 'octocat', NULL, '{}'::jsonb)`;
+    const [lookup] = await superuser<{ target: string | null; metadata: Record<string, string> }[]>`
+      SELECT target, metadata FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY id DESC LIMIT 1`;
+    const [octocat] = await superuser<{ digest: string }[]>`SELECT slotlock.privacy_digest('octocat') AS digest`;
+    expect(lookup).toEqual({ target: null, metadata: { query_digest: octocat?.digest, query_kind: 'text' } });
   });
 
   it('shows one account with its counts read under its own row security, then puts the setting back', async () => {

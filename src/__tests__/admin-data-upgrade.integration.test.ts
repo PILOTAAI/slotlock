@@ -24,6 +24,8 @@ async function shapeAsRelease0110(sql: postgres.Sql) {
       AND jsonb_typeof(detail) = 'object' AND pg_column_size(detail) <= 2048
       AND (resolved_at IS NULL) = (resolved_by IS NULL)
       AND (resolved_by IS NULL OR octet_length(resolved_by) BETWEEN 1 AND 100));
+    ALTER TABLE slotlock.billing_alerts DROP CONSTRAINT slotlock_billing_alerts_once;
+    ALTER TABLE slotlock.billing_alerts ADD CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, stripe_ref);
     ALTER TABLE slotlock.dashboard_people DROP COLUMN name;
     ALTER TABLE slotlock.staff_members DROP COLUMN login;
     DROP FUNCTION slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean);
@@ -118,6 +120,10 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
     // The wider check holds every alert from before, and takes a refund's, validated after the migration.
     await sql`INSERT INTO slotlock.billing_alerts (kind, tenant_ref, stripe_ref) VALUES ('refunded_plan_active', 'github:7001', 'ch_Up1')`;
     expect((await sql`SELECT kind FROM slotlock.billing_alerts ORDER BY id`).map((row) => row.kind)).toEqual(['payment_failed', 'refunded_plan_active']);
+    // One alert per account and Stripe object: one payment for two accounts tells both, once each.
+    await sql`SELECT slotlock.note_billing_event('refunded_plan_active', 'github:7002', 'ch_Up1', '{}'::jsonb)`;
+    await sql`SELECT slotlock.note_billing_event('refunded_plan_active', 'github:7002', 'ch_Up1', '{}'::jsonb)`;
+    expect((await sql`SELECT tenant_ref FROM slotlock.billing_alerts WHERE stripe_ref = 'ch_Up1' ORDER BY tenant_ref`).map((row) => row.tenant_ref)).toEqual(['github:7001', 'github:7002']);
     const unchecked = await sql`
       SELECT conname FROM pg_constraint WHERE connamespace = 'slotlock'::regnamespace AND NOT convalidated
          AND conname IN ('slotlock_billing_alerts_valid', 'slotlock_dashboard_people_name_valid', 'slotlock_staff_members_login_valid')`;
@@ -146,6 +152,28 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
       SELECT account_ref, display, plan_ends_at FROM slotlock.admin_accounts(${session}, '@upgraded', NULL, NULL, NULL, 10)`;
     expect(listed).toEqual([{ account_ref: 'github:7001', display: '@upgraded', plan_ends_at: null }]);
     expect(await adminSql`SELECT staff_ref, login FROM slotlock.admin_staff(${session})`).toEqual([{ staff_ref: 'github:7101', login: null }]);
+  });
+
+  it('clears a name kept under the earlier, looser check that the stricter one refuses, then validates it', async () => {
+    // As the first form of this release's check left it: ASCII's controls only.
+    await sql.unsafe(`
+      ALTER TABLE slotlock.dashboard_people DROP CONSTRAINT slotlock_dashboard_people_name_valid;
+      ALTER TABLE slotlock.dashboard_people ADD CONSTRAINT slotlock_dashboard_people_name_valid
+        CHECK (name IS NULL OR (char_length(name) BETWEEN 1 AND 80 AND name = btrim(name)
+                                AND name !~ '[\\u0001-\\u001F\\u007F]'))`);
+    await sql`INSERT INTO slotlock.dashboard_people (person_ref, display, name) VALUES
+      ('github:7002', '@hidden', ${'Ada\u200BLovelace'}), ('github:7003', '@kept', 'Grace Hopper')`;
+    await createSlotlockStore(sql).applySchema();
+    expect(await sql`SELECT person_ref, name FROM slotlock.dashboard_people WHERE person_ref IN ('github:7002', 'github:7003') ORDER BY person_ref`).toEqual([
+      { person_ref: 'github:7002', name: null },
+      { person_ref: 'github:7003', name: 'Grace Hopper' },
+    ]);
+    const [check] = await sql<{ valid: boolean; definition: string }[]>`
+      SELECT convalidated AS valid, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+       WHERE conname = 'slotlock_dashboard_people_name_valid'`;
+    expect(check?.valid).toBe(true);
+    expect(check?.definition).toContain('getdatabaseencoding');
+    await expect(sql`UPDATE slotlock.dashboard_people SET name = ${'Ada\u00ADLovelace'} WHERE person_ref = 'github:7003'`).rejects.toMatchObject({ code: '23514' });
   });
 
   it('changes nothing when it runs again: no function is dropped and made again', async () => {

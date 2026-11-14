@@ -202,6 +202,11 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     githubNames.set('gus', '  Gus \u202Egnihtemos\u202C Gibbs\u0007  ');
     await signIn(new Browser(dashboard), 'gus');
     expect(await shown(gus)).toEqual({ display: '@gus', name: 'Gus gnihtemos Gibbs' });
+    // Nor format characters (zero-width ones, the soft hyphen, the byte order mark, tags) or line and
+    // paragraph separators, which hide text or break the line it is shown on.
+    githubNames.set('gus', '\uFEFFGus\u200B \u00ADGib\u2060bs\u{E0041}\u{E007F}\u2028\u2029');
+    await signIn(new Browser(dashboard), 'gus');
+    expect((await shown(gus))?.name).toBe('Gus Gibbs');
     githubNames.set('gus', `Gus ${'x'.repeat(100)}`);
     await signIn(new Browser(dashboard), 'gus');
     expect((await shown(gus))?.name).toBe(`Gus ${'x'.repeat(76)}`);
@@ -221,7 +226,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const [encoding] = await admin<{ utf8: boolean }[]>`SELECT getdatabaseencoding() = 'UTF8' AS utf8`;
     await admin`SELECT slotlock.dashboard_name(${gus}, ${'Zoë Ōkubo'})`;
     expect((await shown(gus))?.name).toBe(encoding?.utf8 ? 'Zoë Ōkubo' : null);
-    for (const unclean of ['Gus\u0007', 'Gus \u202Egnihtemos', 'y'.repeat(81)]) {
+    for (const unclean of ['Gus\u0007', 'Gus \u202Egnihtemos', 'y'.repeat(81), 'Gus\u200B', 'Gu\u00ADs', '\uFEFFGus', 'Gus\u{E0041}', 'Gus\u2028Gibbs', 'Gus\u0085']) {
       await admin`SELECT slotlock.dashboard_name(${gus}, ${unclean})`;
       expect((await shown(gus))?.name, JSON.stringify(unclean)).toBeNull();
     }

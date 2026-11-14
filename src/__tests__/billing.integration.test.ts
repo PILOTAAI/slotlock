@@ -30,6 +30,12 @@ function sign(body: string, at = NOW, secret = SECRET) {
   return `t=${String(t)},v1=${v1}`;
 }
 
+/**
+ * What each payment (a PaymentIntent) paid, as Stripe's invoice payments list it: the
+ * subscriptions whose invoices it paid; 'refused' answers 403, as a key without Read on Invoices.
+ */
+const invoicePayments = new Map<string, string[] | 'refused'>();
+
 function fakeStripe(
   subscriptions: Map<string, SlotlockStripeSubscription>,
   refusePrices = false,
@@ -56,6 +62,23 @@ function fakeStripe(
         data: [...subscriptions.values()].filter(
           (found) => found.customer === customer && found.status !== 'canceled',
         ),
+      });
+    }
+    // GET /v1/invoice_payments?payment[type]=payment_intent&payment[payment_intent]=pi_…, each
+    // invoice expanded (expand[]=data.invoice), as Stripe's API reference has it (read 2026-11-14).
+    if (new URL(target).pathname === '/v1/invoice_payments') {
+      expect(query.get('payment[type]')).toBe('payment_intent');
+      expect(query.getAll('expand[]')).toEqual(['data.invoice']);
+      const paid = invoicePayments.get(query.get('payment[payment_intent]') ?? '') ?? [];
+      if (paid === 'refused') return Response.json({ error: { type: 'invalid_request_error', code: 'secret_key_required' } }, { status: 403 });
+      return Response.json({
+        object: 'list',
+        data: paid.map((subscription, index) => ({
+          object: 'invoice_payment',
+          invoice: { object: 'invoice', id: `in_Paid${index}`, parent: { type: 'subscription_details', subscription_details: { subscription } } },
+          payment: { type: 'payment_intent', payment_intent: query.get('payment[payment_intent]') },
+          status: 'paid',
+        })),
       });
     }
     // Search by metadata: metadata['tenant_ref']:'<tenant>'.
@@ -554,74 +577,112 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
     }
   });
 
-  it('notes a refund that left the plan running, once, from what Stripe holds now', async () => {
-    const refunded = `billing-refunded-${randomUUID()}`;
+  it('notes a refund that left a plan running, for the account the refunded payment paid, once', async () => {
+    // One Stripe customer who pays for two accounts (a person's own, and a team they bought for).
+    const person = `billing-refunded-${randomUUID()}`;
+    const team = `billing-refunded-team-${randomUUID()}`;
     const customer = `cus_Refund${randomUUID().replaceAll('-', '').slice(0, 12)}`;
-    const charge = (id: string, extra: Record<string, unknown> = {}) => ({
+    const errors: unknown[] = [];
+    const charge = (id: string, paymentIntent: string | null, extra: Record<string, unknown> = {}) => ({
       id: `evt_${id}`,
       type: 'charge.refunded',
-      // A Charge as Stripe's API reference describes it (read 2026-11-14); the billing details and
-      // card are never kept.
+      // A Charge as Stripe's API reference describes it (read 2026-11-14): at this API version it
+      // names no invoice, only the PaymentIntent that paid it. Billing details and card are never kept.
       data: {
         object: {
-          object: 'charge', id, customer, amount: 500, amount_refunded: 500, refunded: true, currency: 'gbp',
+          object: 'charge', id, customer, payment_intent: paymentIntent, amount: 500, amount_refunded: 500, refunded: true, currency: 'gbp',
           billing_details: { email: 'ada@example.com', name: 'Ada Lovelace' }, payment_method_details: { card: { last4: '4242' } },
           ...extra,
         },
       },
     });
+    const send = async (event: unknown) => {
+      const body = JSON.stringify(event);
+      const response = await handleSlotlockStripeWebhook(
+        new Request('https://app.example.com/stripe/webhook', { method: 'POST', headers: { 'stripe-signature': sign(body) }, body }),
+        { secret: SECRET, stripe, sql, now: () => NOW, onError: (error) => errors.push(error) },
+      );
+      return { status: response.status, text: await response.text() };
+    };
     const alerts = async () =>
-      sql<{ kind: string; stripe_ref: string; detail: Record<string, unknown> }[]>`
-        SELECT kind, stripe_ref, detail FROM slotlock.billing_alerts WHERE tenant_ref = ${refunded} ORDER BY id`;
-    const theirs = (status: string, extra: Partial<SlotlockStripeSubscription> = {}): SlotlockStripeSubscription => ({
-      ...subscription('sub_R1', status),
+      sql<{ tenant_ref: string; stripe_ref: string; detail: Record<string, unknown> }[]>`
+        SELECT tenant_ref, stripe_ref, detail FROM slotlock.billing_alerts
+         WHERE kind = 'refunded_plan_active' AND tenant_ref IN (${person}, ${team}) ORDER BY id`;
+    const theirs = (id: string, tenant: string, status: string, extra: Partial<SlotlockStripeSubscription> = {}): SlotlockStripeSubscription => ({
+      ...subscription(id, status),
       customer,
-      metadata: { tenant_ref: refunded },
+      metadata: { tenant_ref: tenant },
       ...extra,
     });
     try {
-      // Not a customer of any plan: nothing to note.
-      expect(await (await deliver(charge('ch_R0'))).text()).toBe('Ignored.');
-      subscriptions.set('sub_R1', theirs('active'));
+      // Not a customer of any plan yet: nothing to note.
+      invoicePayments.set('pi_R0', ['sub_R1']);
+      expect(await send(charge('ch_R0', 'pi_R0'))).toEqual({ status: 200, text: 'Ignored.' });
+      subscriptions.set('sub_R1', theirs('sub_R1', person, 'active'));
+      subscriptions.set('sub_R2', theirs('sub_R2', team, 'active'));
       await deliver({ data: { object: { object: 'subscription', id: 'sub_R1' } } });
-      // Refunded in full, and the plan still renews: a person ends it, or says why not.
-      expect((await deliver(charge('ch_R1'))).status).toBe(200);
-      expect((await deliver(charge('ch_R1'))).status).toBe(200);
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_R2' } } });
+
+      // Refunded in full, and the plan it paid for still renews: that account alone needs a person.
+      invoicePayments.set('pi_R1', ['sub_R1']);
+      expect(await send(charge('ch_R1', 'pi_R1'))).toEqual({ status: 200, text: 'Noted.' });
+      expect(await send(charge('ch_R1', 'pi_R1'))).toEqual({ status: 200, text: 'Noted.' });
       expect(await alerts()).toEqual([
         {
-          kind: 'refunded_plan_active',
+          tenant_ref: person,
           stripe_ref: 'ch_R1',
           detail: { amount: 500, amount_refunded: 500, currency: 'gbp', refunded: true, subscription: 'sub_R1' },
         },
       ]);
       expect(JSON.stringify(await alerts())).not.toMatch(/ada@|Lovelace|4242/);
+      // One payment for both accounts' invoices: each account is told, under the same charge.
+      invoicePayments.set('pi_RB', ['sub_R1', 'sub_R2']);
+      await send(charge('ch_RB', 'pi_RB'));
+      expect((await alerts()).filter((alert) => alert.stripe_ref === 'ch_RB').map((alert) => alert.tenant_ref).sort()).toEqual([person, team].sort());
       // Part of a charge refunded: noted too, saying how much.
-      await deliver(charge('ch_R2', { amount_refunded: 200, refunded: false }));
-      expect((await alerts()).at(-1)).toMatchObject({ stripe_ref: 'ch_R2', detail: { amount_refunded: 200, refunded: false } });
+      invoicePayments.set('pi_R2', ['sub_R2']);
+      await send(charge('ch_R2', 'pi_R2', { amount_refunded: 200, refunded: false }));
+      expect((await alerts()).at(-1)).toMatchObject({ tenant_ref: team, stripe_ref: 'ch_R2', detail: { amount_refunded: 200, refunded: false } });
+      const noted = (await alerts()).length;
+
       // Cancelled in Stripe as it was refunded, before that event arrived: Stripe's word, not the
       // database's, decides, so nothing needs a person.
-      subscriptions.set('sub_R1', theirs('active', { cancel_at_period_end: true }));
-      await deliver(charge('ch_R3'));
-      subscriptions.set('sub_R1', theirs('canceled'));
-      await deliver(charge('ch_R4'));
-      expect((await alerts()).map((alert) => alert.stripe_ref)).toEqual(['ch_R1', 'ch_R2']);
-      // Set to end, as the database knows: nothing either.
-      subscriptions.set('sub_R1', theirs('active', { cancel_at_period_end: true }));
-      await deliver({ data: { object: { object: 'subscription', id: 'sub_R1' } } });
-      subscriptions.set('sub_R1', theirs('active'));
-      await deliver(charge('ch_R5'));
-      expect((await alerts()).map((alert) => alert.stripe_ref)).toEqual(['ch_R1', 'ch_R2']);
-      // Not a charge, or not one Stripe could have sent: ignored.
-      expect(await (await deliver({ type: 'charge.refunded', data: { object: { object: 'charge', id: "ch_'; DROP", customer } } })).text()).toBe('Ignored.');
-      expect(await (await deliver({ type: 'charge.refunded', data: { object: { object: 'refund', id: 're_1', customer } } })).text()).toBe('Ignored.');
-      // Unsigned: refused.
-      expect((await deliver(charge('ch_R6'), 't=1,v1=00')).status).toBe(400);
-      expect((await alerts()).map((alert) => alert.stripe_ref)).toEqual(['ch_R1', 'ch_R2']);
+      subscriptions.set('sub_R1', theirs('sub_R1', person, 'active', { cancel_at_period_end: true }));
+      invoicePayments.set('pi_R3', ['sub_R1']);
+      await send(charge('ch_R3', 'pi_R3'));
+      subscriptions.set('sub_R1', theirs('sub_R1', person, 'canceled'));
+      await send(charge('ch_R4', 'pi_R3'));
+      subscriptions.set('sub_R1', theirs('sub_R1', person, 'active'));
+      // A payment of no subscription's invoice, or no payment to follow: nothing to match it to.
+      invoicePayments.set('pi_R5', []);
+      expect(await send(charge('ch_R5', 'pi_R5'))).toEqual({ status: 200, text: 'Ignored.' });
+      expect(await send(charge('ch_R6', null))).toEqual({ status: 200, text: 'Ignored.' });
+      // A subscription another customer's account holds is never told of this customer's refund.
+      subscriptions.set('sub_Other', { ...subscription('sub_Other', 'active'), customer: 'cus_Someone', metadata: { tenant_ref: `billing-other-${randomUUID()}` } });
+      invoicePayments.set('pi_R7', ['sub_Other']);
+      expect(await send(charge('ch_R7', 'pi_R7'))).toEqual({ status: 200, text: 'Ignored.' });
+      expect((await alerts()).length).toBe(noted);
+
+      // A key that cannot read invoice payments: said once, and not retried for days.
+      invoicePayments.set('pi_R8', 'refused');
+      expect(await send(charge('ch_R8', 'pi_R8'))).toEqual({ status: 200, text: 'Ignored.' });
+      expect(errors).toHaveLength(1);
+      expect(String((errors[0] as Error).message)).toContain('403');
+      // Not a charge, or not one Stripe could have sent: ignored. Unsigned: refused.
+      expect((await send({ type: 'charge.refunded', data: { object: { object: 'charge', id: "ch_'; DROP", customer } } })).text).toBe('Ignored.');
+      expect((await send({ type: 'charge.refunded', data: { object: { object: 'refund', id: 're_1', customer } } })).text).toBe('Ignored.');
+      expect((await deliver(charge('ch_R9', 'pi_R1'), 't=1,v1=00')).status).toBe(400);
+      expect((await alerts()).length).toBe(noted);
     } finally {
       subscriptions.delete('sub_R1');
-      await sql`DELETE FROM slotlock.billing_alerts WHERE tenant_ref = ${refunded}`;
-      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${refunded}`;
-      await sql`SELECT * FROM slotlock.erase_tenant(${refunded}::text)`;
+      subscriptions.delete('sub_R2');
+      subscriptions.delete('sub_Other');
+      invoicePayments.clear();
+      for (const tenant of [person, team]) {
+        await sql`DELETE FROM slotlock.billing_alerts WHERE tenant_ref = ${tenant}`;
+        await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${tenant}`;
+        await sql`SELECT * FROM slotlock.erase_tenant(${tenant}::text)`;
+      }
     }
   });
 

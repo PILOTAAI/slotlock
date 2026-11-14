@@ -274,6 +274,7 @@ const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_session_raise(bytea)',
   'slotlock.staff_directory()',
   'slotlock.staff_subscribed_plans()',
+  'slotlock.staff_search_record(text)',
   'slotlock.staff_account_known(text)',
   'slotlock.staff_reason_valid(text)',
   'slotlock.staff_customer_audit(text, text, text, text, text, text)',
@@ -2757,6 +2758,33 @@ AS $slotlock_staff_subscribed_plans$
      AND planned.tenant_ref !~ '~test$';
 $slotlock_staff_subscribed_plans$;
 
+-- What the staff log keeps of a search (accounts.searched, search.*), which it keeps six years and
+-- past any erasure: the query as typed only when it names an account by reference, a GitHub or
+-- Google id, a key's prefix (never the rest of a pasted key) or a Stripe customer; anything else (a
+-- name, a login, an email) only as its digest keyed with the deployment's secret (privacy_digest),
+-- which shows two searches were for the same words and nothing more. PL/pgSQL, so privacy_digest
+-- (made later in this schema) is looked up when it runs.
+CREATE OR REPLACE FUNCTION slotlock.staff_search_record(wanted text)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_search_record$
+BEGIN
+  IF wanted IS NULL OR wanted = '' THEN
+    RETURN '{}'::jsonb;
+  ELSIF wanted ~ '^slk_test_[0-9A-Za-z]{8}' THEN
+    RETURN jsonb_build_object('query', left(wanted, 17));
+  ELSIF wanted ~ '^slk_[0-9A-Za-z]{8}' THEN
+    RETURN jsonb_build_object('query', left(wanted, 12));
+  ELSIF wanted ~ '^cus_[A-Za-z0-9]{1,250}$' OR wanted ~ '^[1-9][0-9]{0,19}$'
+     OR wanted ~ '^(github|github-org|google|sso|team|partner):[A-Za-z0-9._:~-]{0,255}$' THEN
+    RETURN jsonb_build_object('query', wanted);
+  END IF;
+  RETURN jsonb_build_object('query_digest', slotlock.privacy_digest(lower(wanted)), 'query_kind', 'text');
+END
+$slotlock_staff_search_record$;
+
 -- Signing in to the console, once GitHub named the member: with the console's key, a session at
 -- the 'github' stage (enough for the passkey step, for 15 minutes) and the member's role, as
 -- {"role", "session"}; NULL for anyone who is not active staff. Both are recorded. Without the
@@ -2885,6 +2913,7 @@ $slotlock_staff_session_raise$;
 
 -- What the console itself records: a sign-out, a passkey refused, a page refused, a lookup. Only
 -- staff, and only staff., page. and search. events: an account action is recorded by its function.
+-- A search's words (detail) are kept as staff_search_record keeps an account search's.
 CREATE OR REPLACE FUNCTION slotlock.admin_record(actor text, happened text, account text, detail text, why text, extra jsonb)
 RETURNS void
 LANGUAGE plpgsql
@@ -2895,6 +2924,10 @@ BEGIN
   actor := slotlock.staff_session(actor, 'home', true);
   IF happened IS NULL OR happened !~ '^(staff|page|search)\\.' THEN
     RAISE EXCEPTION 'admin_record_action' USING ERRCODE = '22023';
+  END IF;
+  IF happened ~ '^search\\.' THEN
+    extra := coalesce(extra, '{}'::jsonb) || slotlock.staff_search_record(detail);
+    detail := NULL;
   END IF;
   PERFORM slotlock.staff_log(actor, happened, account, detail, why, extra);
 END
@@ -3003,8 +3036,9 @@ BEGIN
   ELSIF wanted ~ '^slk_[0-9A-Za-z]{8}' THEN
     key_prefix := left(wanted, 12);
   END IF;
-  PERFORM slotlock.staff_log(actor, 'accounts.searched', NULL, NULL, NULL, jsonb_strip_nulls(jsonb_build_object(
-    'query', coalesce(key_prefix, wanted), 'plan', plan_filter, 'status', status_filter, 'after', after)));
+  PERFORM slotlock.staff_log(actor, 'accounts.searched', NULL, NULL, NULL,
+    slotlock.staff_search_record(wanted)
+      || jsonb_strip_nulls(jsonb_build_object('plan', plan_filter, 'status', status_filter, 'after', after)));
   RETURN QUERY
   WITH found AS (
     SELECT listed.account_ref, listed.kind, listed.name, listed.display, listed.created_at
@@ -3294,7 +3328,9 @@ END
 $slotlock_admin_staff_login$;
 
 -- Staff members' GitHub logins, for the few references a page names (who wrote a note, asked for
--- an override, set a flag): at most a page's worth, members only. Not recorded: the page is.
+-- an override, set a flag): at most a page's worth, members only. With no references, every
+-- member (with or without a login), for the Staff log's filter: those who may read the log only.
+-- Not recorded: the page is, and reading the log is not.
 CREATE OR REPLACE FUNCTION slotlock.admin_staff_logins(actor text, refs text[])
 RETURNS TABLE (staff_ref text, login text)
 LANGUAGE plpgsql
@@ -3304,6 +3340,13 @@ AS $slotlock_admin_staff_logins$
 #variable_conflict use_column
 BEGIN
   actor := slotlock.staff_session(actor, 'home', false);
+  IF refs IS NULL THEN
+    PERFORM slotlock.staff_require(actor, 'staff.log');
+    RETURN QUERY
+    SELECT member.staff_ref, member.login FROM slotlock.staff_members member
+     ORDER BY member.status, member.added_at;
+    RETURN;
+  END IF;
   IF cardinality(refs) > ${SLOTLOCK_ADMIN_PAGE_LIMIT} THEN
     RAISE EXCEPTION 'admin_staff_logins' USING ERRCODE = '22023';
   END IF;

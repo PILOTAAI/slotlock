@@ -35,23 +35,33 @@ versioning.
   the workflows that deploy (`dashboard-deploy.yml`, `site.yml`, `status-worker.yml`, besides the
   image and releases), not `dashboard.yml`, which only bundles the Workers.
 - The sidebar marks only Staff log on the Staff log page, not Staff as well.
+- The staff log, kept six years and past any erasure, keeps an account search's words only when they
+  name an account by reference, an id, a key's prefix or a Stripe customer; a search by name, login
+  or email (the console's GitHub lookup included) is kept as a digest keyed with the deployment's
+  secret (`slotlock.staff_search_record`). Entries written before this change stay as they were.
 
 ### Added
 
-- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`:
-  when the refunded charge's customer still has a plan that Stripe says renews, Billing's Needs a
-  person shows "Refunded, plan still active" with the amount, linked to the payment in Stripe. Run
-  `node scripts/configure-stripe.mjs` (it adds the event to an existing endpoint and keeps its
-  others), and `slotlock migrate`; the launch check now expects the event.
+- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`
+  and follows the refunded payment to the subscriptions whose invoices it paid (Stripe's invoice
+  payments): for each that Stripe says still renews, of an account whose plan names that customer,
+  Billing's Needs a person shows "Refunded, plan still active" with the amount, or "Partly refunded",
+  linked to the payment in Stripe. Alerts are kept once per account and Stripe object. Give the
+  dashboard's Stripe key Read on Invoices, run `node scripts/configure-stripe.mjs` (it adds the
+  event to an existing endpoint, keeps its others, and says when the key cannot read invoice
+  payments), and `slotlock migrate`; the launch check now expects the event.
 - **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
-  Google gives is kept beside the login or email (`dashboard_people.name`, without control or
-  text-direction characters, at most 80 characters) and erased with the person. Google sign-in asks
+  Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
+  (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at
+  most 80 characters) and erased with the person. Google sign-in asks
   for the `profile` scope, which its name claim needs. The console shows each account by its name,
   else its login or email, else its reference, with initials and a second line, and finds accounts
   by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched
   login the database does not hold. Staff are shown by the GitHub login kept at their last console
-  sign-in, and deployment-role commands as "Command line". PRIVACY.md says what is kept and when it
-  goes.
+  sign-in, and deployment-role commands as "Command line". A person's own account's export
+  (`POST /v1/tenant/exports`, and the one staff make for a privacy request) includes that name and
+  display and when they last signed in (`dashboard_people`, through `slotlock.tenant_export_person`,
+  which the dashboard asks for first). PRIVACY.md says what is kept and when it goes.
 - **The Staff log in words.** Each action has a plain-English label (its code in the label's title),
   views and searches are hidden unless asked (`?views=1`), and the log filters by who (`who=`, or
   `cli` for the command line), action, account and days (`from`, `to`). The hash chain is checked
