@@ -3328,7 +3328,9 @@ END
 $slotlock_admin_staff_login$;
 
 -- Staff members' GitHub logins, for the few references a page names (who wrote a note, asked for
--- an override, set a flag): at most a page's worth, members only. Not recorded: the page is.
+-- an override, set a flag): at most a page's worth, members only. With no references, every
+-- member (with or without a login), for the Staff log's filter: those who may read the log only.
+-- Not recorded: the page is, and reading the log is not.
 CREATE OR REPLACE FUNCTION slotlock.admin_staff_logins(actor text, refs text[])
 RETURNS TABLE (staff_ref text, login text)
 LANGUAGE plpgsql
@@ -3338,6 +3340,13 @@ AS $slotlock_admin_staff_logins$
 #variable_conflict use_column
 BEGIN
   actor := slotlock.staff_session(actor, 'home', false);
+  IF refs IS NULL THEN
+    PERFORM slotlock.staff_require(actor, 'staff.log');
+    RETURN QUERY
+    SELECT member.staff_ref, member.login FROM slotlock.staff_members member
+     ORDER BY member.status, member.added_at;
+    RETURN;
+  END IF;
   IF cardinality(refs) > ${SLOTLOCK_ADMIN_PAGE_LIMIT} THEN
     RAISE EXCEPTION 'admin_staff_logins' USING ERRCODE = '22023';
   END IF;

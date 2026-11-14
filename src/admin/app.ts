@@ -1166,7 +1166,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           ${filters.who}, ${filters.action}, ${filters.account}, ${since}, ${until}, ${filters.views})`,
       sql<{ chain: { checked: number; broken_at: number | null; head_index: number | null; head_hash: string | null } }[]>`
         SELECT slotlock.admin_staff_log_chain(${session.t}) AS chain`,
-      sql<{ staff_ref: string; login: string | null }[]>`SELECT staff_ref, login FROM slotlock.admin_staff(${session.t})`,
+      // Every member, for the filter, read without a record of its own (admin_staff records one).
+      sql<{ staff_ref: string; login: string | null }[]>`SELECT * FROM slotlock.admin_staff_logins(${session.t}, ${null}::text[])`,
     ]);
     const last = rows.at(-1)?.chain_index;
     const chain = chainRow?.chain;

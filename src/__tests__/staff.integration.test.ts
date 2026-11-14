@@ -212,6 +212,9 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     expect(no?.opened).toBeNull();
     const log = await adminSql<{ staff_ref: string; action: string }[]>`
       SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20, NULL, NULL, NULL, NULL, NULL, true)`;
+    // The whole staff list, for the log's filter, only to those who may read the log.
+    expect((await adminSql`SELECT * FROM slotlock.admin_staff_logins(${await as(OWNER)}, NULL)`).length).toBeGreaterThanOrEqual(3);
+    await expect(adminSql`SELECT * FROM slotlock.admin_staff_logins(${await as(SUPPORT)}, NULL)`).rejects.toMatchObject({ code: '42501' });
     expect(log).toEqual(
       expect.arrayContaining([
         { staff_ref: OWNER, action: 'staff.signed_in' },

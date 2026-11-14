@@ -278,7 +278,12 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
 
   it('shows the staff log by login and in words, hides views unless asked, and filters', async () => {
     await superuser`SELECT slotlock.staff_operator_record('cli:node', 'account.suspended', ${PAYING}, 'Chargeback')`;
+    const listed = async () => (await superuser`SELECT 1 FROM slotlock.staff_audit_events WHERE action = 'staff.list_viewed'`).length;
+    const listedBefore = await listed();
     const log = await text(staff.owner, '/staff/log');
+    // Its filter's member list is read without a record of its own: reading the log is not one.
+    expect(await listed()).toBe(listedBefore);
+    expect(log).toContain('<option value="github:1003" >octo-billing</option>');
     // Only Staff log is the current page in the sidebar, not Staff as well.
     expect(log).toContain('<a href="/staff/log" aria-current="page">');
     expect(log).not.toMatch(/<a href="\/staff" aria-current/);
