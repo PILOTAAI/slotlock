@@ -186,7 +186,7 @@ ${shell.script ? html`<script src="${shell.script}" defer></script>` : ''}
         <h1>${crumbs.map((crumb) => html`${crumb.href ? html`<a href="${crumb.href}">${crumb.label}</a>` : html`<span class="crumb">${crumb.label}</span>`}<span class="sep" aria-hidden="true">/</span>`)}<span class="here">${shell.title}</span></h1>
         ${shell.pills ? html`<span class="title-pills">${shell.pills}</span>` : ''}
       </div>
-      <form class="search" method="get" action="/search" role="search">
+      <form class="search" method="get" action="/search" role="search" aria-label="Find an account">
         ${icon('search')}
         <label class="sr-only" for="q">Find an account</label>
         <input id="q" name="q" type="search" value="${shell.query ?? ''}" placeholder="Find an account" autocomplete="off" spellcheck="false">
@@ -345,11 +345,14 @@ export function popover(summary: Html | string, body: Html, options: { tone?: 'd
   return html`<details class="popover${options.align === 'left' ? ' left' : ''}"><summary class="btn${tone}${options.size === 'sm' ? ' sm' : ''}">${summary}</summary><div class="pop">${body}</div></details>`;
 }
 
-/** A drawer over the page, from ?panel=…: closing it is a link back. */
+/**
+ * A drawer over the page, from ?panel=…: closing it is a link back. Its head is a div: a header in a
+ * dialog would be a second banner landmark beside the page's top bar.
+ */
 export function drawer(title: string, body: Html, closeHref: string): Html {
   return html`<a class="scrim" href="${closeHref}" tabindex="-1" aria-hidden="true"></a>
 <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" data-close="${closeHref}">
-  <header class="drawer-head"><h2 id="drawer-title">${title}</h2><a class="icon-btn ghost" href="${closeHref}">${icon('close', 'Close')}</a></header>
+  <div class="drawer-head"><h2 id="drawer-title">${title}</h2><a class="icon-btn ghost" href="${closeHref}">${icon('close', 'Close')}</a></div>
   <div class="drawer-body">${body}</div>
 </aside>`;
 }

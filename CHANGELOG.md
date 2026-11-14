@@ -125,6 +125,10 @@ versioning.
   it for a time. A plan set to end ("Developer · ends 2026-12-14"), Billing's Ending, the refund
   alert, the charts' dates and an announcement's time in the viewer's zone read "14 Dec" or
   "Sun, Nov 15" before. On a phone a chart shows three dates under it instead of five.
+- The console's landmarks are unique: each search is named ("Find an account", "Search accounts",
+  "Find a receipt"), and a drawer's head is no longer a second banner beside the top bar. The browser
+  test now fails on a moderate axe finding about landmarks too, not only on serious and critical
+  ones.
 
 ### Security
 

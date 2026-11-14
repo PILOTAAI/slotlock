@@ -1,7 +1,8 @@
 // Every page of the admin console in a real browser (Chromium, through Playwright), with fixture data
 // in real PostgreSQL: at 390, 1440 and 1920 pixels wide, in the dark and the light theme. Each page
 // must load under the console's own CSP with nothing refused, render in Inter, scroll no wider than a
-// phone's screen, and pass axe-core with no serious or critical violation. The screenshots go to
+// phone's screen, and pass axe-core with no serious or critical violation, and no moderate one about
+// landmarks. The screenshots go to
 // SLOTLOCK_ADMIN_SHOTS (a temporary directory otherwise), and the owner's review set (Home to the
 // staff log at 1440 and 1920, dark, at twice the pixels) beside them as <page>-<width>-dark@2x.png.
 //
@@ -434,7 +435,15 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
     { name: 'not-found', path: '/nowhere' },
   ];
 
-  it('renders every page under the CSP, in Inter, without a serious or critical axe violation or a sideways scroll', async (context) => {
+  /**
+   * The axe findings that fail the run: any serious or critical one, and a moderate one about
+   * landmarks (two banners, or two regions of one kind with no name to tell them apart), which a
+   * screen reader's list of landmarks would show.
+   */
+  const counts = (violation: Check['violations'][number]) =>
+    violation.impact === 'serious' || violation.impact === 'critical' || (violation.impact === 'moderate' && /^landmark-/.test(violation.id));
+
+  it('renders every page under the CSP, in Inter, without a serious, critical or landmark axe violation or a sideways scroll', async (context) => {
     if (!browser) context.skip();
     const problems: string[] = [];
     for (const width of [390, 1440, 1920]) {
@@ -445,10 +454,8 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
           await tab.evaluate('document.fonts.ready.then(() => true)');
           const found = await check(tab);
           const where = `${item.name} at ${width} ${theme}`;
-          for (const violation of found.violations) {
-            if (violation.impact === 'serious' || violation.impact === 'critical') {
-              problems.push(`${where}: ${violation.id} (${violation.impact}) ${JSON.stringify(violation.nodes.map((node) => node.target))}`);
-            }
+          for (const violation of found.violations.filter(counts)) {
+            problems.push(`${where}: ${violation.id} (${violation.impact}) ${JSON.stringify(violation.nodes.map((node) => node.target))}`);
           }
           if (found.refused.length) problems.push(`${where}: the CSP refused ${found.refused.join(', ')}`);
           if (found.overflow > 0) problems.push(`${where}: ${found.overflow}px wider than the screen`);
@@ -463,7 +470,7 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
     const { context: signedOut, tab } = await open(390, 'dark', 1, new Browser(() => admin));
     await tab.goto(`${ORIGIN}/sign-in`, { waitUntil: 'load' });
     const signIn = await check(tab);
-    for (const violation of signIn.violations.filter((item) => item.impact === 'serious' || item.impact === 'critical')) problems.push(`sign-in: ${violation.id}`);
+    for (const violation of signIn.violations.filter(counts)) problems.push(`sign-in: ${violation.id}`);
     await tab.screenshot({ path: join(SHOTS, 'all', 'sign-in-390-dark.png') });
     await signedOut.close();
     expect(problems).toEqual([]);

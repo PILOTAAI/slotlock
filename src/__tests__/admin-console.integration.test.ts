@@ -785,6 +785,10 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(csv).toContain('accounts.searched');
     const entry = await (await browser.request('/staff/log?entry=1')).text();
     expect(entry).toContain('role="dialog"');
+    // One banner, the top bar: a drawer's head is no second one. Each search is named apart.
+    expect(entry.match(/<header class="top">|<header(?! class="(?:section|chart)-head")[ >]/g)).toEqual(['<header class="top">']);
+    const accountsPage = await (await browser.request('/accounts')).text();
+    expect([...accountsPage.matchAll(/role="search"(?: aria-label="([^"]*)")?/g)].map((match) => match[1] ?? null)).toEqual(['Find an account', 'Search accounts']);
     expect(entry).toContain('Hash chain');
   });
 

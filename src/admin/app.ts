@@ -897,7 +897,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ${filterChip('Last active', [option('active', '7d', 'Last 7 days', active), option('active', '30d', 'Last 30 days', active), option('active', 'idle', 'Not for 30 days', active)], withParams(url, { active: null, from: null }))}`;
     const kept_ = (name: string, value: string | null) => (value ? html`<input type="hidden" name="${name}" value="${value}">` : '');
     const toolbar = html`<div class="toolbar">
-      <form class="find" method="get" action="/accounts" role="search">${icon('search')}<label class="sr-only" for="accounts-q">Search accounts</label><input id="accounts-q" name="q" type="search" value="${q}" placeholder="Search accounts" autocomplete="off" spellcheck="false">${kept_('view', view === 'all' ? null : view)}${kept_('plan', plan)}${kept_('kind', kind)}${kept_('created', created)}${kept_('active', active)}</form>
+      <form class="find" method="get" action="/accounts" role="search" aria-label="Search accounts">${icon('search')}<label class="sr-only" for="accounts-q">Search accounts</label><input id="accounts-q" name="q" type="search" value="${q}" placeholder="Search accounts" autocomplete="off" spellcheck="false">${kept_('view', view === 'all' ? null : view)}${kept_('plan', plan)}${kept_('kind', kind)}${kept_('created', created)}${kept_('active', active)}</form>
       ${chips}
       <span class="grow"></span>
       <a class="btn sm" href="${withParams(url, { format: 'csv' })}" download>${icon('download')}Export</a>
@@ -1317,7 +1317,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (days <= 7) return pill(days === 0 ? 'Due today' : `${days} ${days === 1 ? 'day' : 'days'}`, 'warn');
     return pill(`${days} days`, 'muted');
   }
-  const receiptLookup = html`<form class="form" method="get" action="/privacy/receipts" role="search">
+  const receiptLookup = html`<form class="form" method="get" action="/privacy/receipts" role="search" aria-label="Find a receipt">
     ${formField({ id: 'receipt-account', label: 'Account', control: html`<input id="receipt-account" name="account" required maxlength="500" autocomplete="off" spellcheck="false">` })}
     <div class="form-actions"><button class="btn" type="submit">Find receipt</button></div></form>`;
 
