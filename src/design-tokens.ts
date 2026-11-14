@@ -74,6 +74,8 @@ export const SLOTLOCK_CONSOLE_TOKENS = Object.freeze({
     'card-shadow': '0 0 0 1px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04)',
     'pop-shadow': '0 0 0 1px rgba(0,0,0,0.08), 0 16px 40px -8px rgba(0,0,0,0.18)',
     'logo-ink': '#0a0b0d', 'logo-slot': '#d9ff43',
+    // Avatar colours (people.ts picks one from a reference): a tint and its ink.
+    av0: '#e8edff', 'av0-ink': '#0e2d9e', av1: '#e4f3ec', 'av1-ink': '#145c45', av2: '#f7ebd6', 'av2-ink': '#7a4b0c', av3: '#f4e0df', 'av3-ink': '#8c2626', av4: '#eee4f8', 'av4-ink': '#5b2a8c', av5: '#dff1f5', 'av5-ink': '#145866', av6: '#f5e3ef', 'av6-ink': '#86245f', av7: '#ecebe6', 'av7-ink': '#45433e',
   }),
   dark: Object.freeze({
     page: SLOTLOCK_ZINC_DARK.page, card: SLOTLOCK_ZINC_DARK.card, raised: SLOTLOCK_ZINC_DARK.raised, sunken: '#0e0e11',
@@ -89,6 +91,7 @@ export const SLOTLOCK_CONSOLE_TOKENS = Object.freeze({
     'card-shadow': '0 0 0 1px rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.5)',
     'pop-shadow': '0 0 0 1px rgba(255,255,255,0.08), 0 16px 40px -8px rgba(0,0,0,0.6)',
     'logo-ink': '#f4f3ee', 'logo-slot': '#d9ff43',
+    av0: '#141b33', 'av0-ink': '#aac0ff', av1: '#0f2a21', 'av1-ink': '#7dd8b4', av2: '#2d2312', 'av2-ink': '#e8b76b', av3: '#2f1717', 'av3-ink': '#f09a9a', av4: '#24173a', 'av4-ink': '#c9a6f0', av5: '#10272d', 'av5-ink': '#7fcfe0', av6: '#2e1626', 'av6-ink': '#eba0cc', av7: '#1f1f1d', 'av7-ink': '#cfcdc6',
   }),
 });
 

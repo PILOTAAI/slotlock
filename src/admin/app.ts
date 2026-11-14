@@ -60,6 +60,24 @@ import {
   createSlotlockAdminStripe,
   slotlockMoney,
 } from './stripe.js';
+import {
+  slotlockBillingAlertWords,
+  slotlockEndingRows,
+  slotlockMoneyByCurrency,
+  slotlockPlanLabel,
+  slotlockPlanName,
+  slotlockShortDate,
+  slotlockStripeLink,
+} from './billing-figures.js';
+import { slotlockShownPerson } from './people.js';
+import {
+  SLOTLOCK_STAFF_ACTION_LABELS,
+  slotlockStaffActionLabel,
+  slotlockStaffActor,
+  slotlockStaffLogFilters,
+  slotlockStaffLogQuery,
+  slotlockStaffLogRange,
+} from './staff-log.js';
 import { SLOTLOCK_ADMIN_FONTS } from './fonts.js';
 import {
   type AccountLike,
@@ -134,7 +152,10 @@ export interface SlotlockAdminOptions {
    */
   access: { verify(request: Request): Promise<SlotlockAccessIdentity | null> } | null;
   insecureWithoutAccess?: boolean;
-  /** Reads GitHub's public profiles (logins by id and back); a token raises GitHub's rate limit. */
+  /**
+   * Reads a public GitHub profile by login, for a search by a login the database does not hold; a
+   * token raises GitHub's rate limit.
+   */
   githubToken?: string;
   /**
    * A restricted Stripe key that reads subscriptions and invoices (RFC 0006, 4.6): revenue on the
@@ -325,7 +346,7 @@ interface Session {
    * database, not this cookie, says who it is and whether it still holds.
    */
   t: string;
-  /** GitHub login, shown in the console only (never stored in the database). */
+  /** GitHub login, as GitHub gave it at sign-in: shown in the sidebar, and kept on the member's row. */
   l: string;
   r: SlotlockStaffRole;
   /** 'github' after GitHub, 'full' after a passkey. */
@@ -470,6 +491,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   // ---------- GitHub ----------
+  /**
+   * A public GitHub profile, by login: only for a search by a login no one signed in with since the
+   * database kept logins (accounts()). Pages never ask GitHub to name anyone.
+   */
   async function githubProfile(path: string): Promise<{ id: string; login: string; type: string } | null> {
     const cached = githubCache.get(path);
     if (cached && cached.until > now()) return cached.value;
@@ -505,11 +530,6 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     githubCache.set(path, { value, until: now() + GITHUB_CACHE_MS });
     return value;
   }
-  const loginOf = async (ref: string) => {
-    const id = /^(?:github|github-org):([1-9][0-9]{0,19})$/.exec(ref)?.[1];
-    return id ? ((await githubProfile(`/user/${id}`))?.login ?? null) : null;
-  };
-
   // ---------- Pages ----------
   const navFor = (session: Session) => [
     { href: '/', label: 'Home', icon: 'home' },
@@ -564,17 +584,29 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const back = undo?.[code];
     return back ? { ...found, undo: back } : found;
   };
-  /** GitHub logins for staff references (github:<id>); a cli:<user> stays as it is. */
-  const staffNames = async (refs: readonly string[]) => {
-    // Each member looked up once, however many rows name them.
-    const unique = [...new Set(refs)];
-    const names = new Map(await Promise.all(unique.map(async (ref) => [ref, ref.startsWith('github:') ? ((await loginOf(ref)) ?? ref) : ref] as const)));
-    return refs.map((ref) => names.get(ref) ?? ref);
+  /**
+   * Staff references by the GitHub login each member last signed in with, which the database keeps
+   * (one query, never GitHub); a deployment-role command (cli:<user>) as "Command line".
+   */
+  const staffNames = async (session: Session, refs: readonly string[]) => {
+    const members = [...new Set(refs)].filter((ref) => ref.startsWith('github:')).slice(0, 100);
+    const logins = new Map<string, string>();
+    if (members.length > 0) {
+      const sql = options.sql();
+      for (const row of await sql<{ staff_ref: string; login: string }[]>`
+        SELECT * FROM slotlock.admin_staff_logins(${session.t}, ${sql.array(members)}::text[])`) {
+        logins.set(row.staff_ref, row.login);
+      }
+    }
+    return refs.map((ref) => slotlockStaffActor(ref, logins.get(ref)).name);
   };
 
   const PLAN_WORDS: Readonly<Record<string, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
-  const kindPill = (kind: string) => chip(kind, kind === 'test' ? 'warn' : 'plain');
-  const planPill = (plan: string | null) => chip(PLAN_WORDS[plan ?? 'free'] ?? plan ?? 'Free', plan === 'team' || plan === 'developer' ? 'info' : 'plain');
+  const kindPill = (kind: string) =>
+    chip({ person: 'Person', team: 'Team', organization: 'Organization', partner: 'Partner', test: 'Test' }[kind] ?? kind, kind === 'test' ? 'warn' : 'plain');
+  /** A plan, with the day it ends when its subscription is set to end (the webhook keeps it). */
+  const planPill = (plan: string | null, endsAt?: Date | string | null) =>
+    chip(slotlockPlanLabel(plan, endsAt, now()), endsAt ? 'warn' : plan === 'team' || plan === 'developer' ? 'info' : 'plain');
   const statusPill = (suspended: boolean, planStatus: string | null) =>
     suspended ? pill('Suspended', 'bad') : planStatus === 'past_due' ? pill('Past due', 'warn') : pill('Active', 'good');
   const accountHref = (ref: string) => `/accounts/${encodeURIComponent(ref)}`;
@@ -642,7 +674,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       read ? platformUsage(session, Math.max(62, RANGE_DAYS[range])) : Promise.resolve([]),
       may('safety.act') ? sql<CaseRow[]>`SELECT * FROM slotlock.admin_cases(${session.t}, 'open', ${null}, ${null}, ${5})` : Promise.resolve([] as CaseRow[]),
       may('system.read') ? sql<SlotlockAnnouncementRow[]>`SELECT * FROM slotlock.admin_announcements(${session.t}, ${false})` : Promise.resolve([] as SlotlockAnnouncementRow[]),
-      stripe && may('billing.read') ? cached<SlotlockStripeRevenue>(session, 'revenue:summary', () => stripe.revenue()) : Promise.resolve(null),
+      stripe && may('billing.read') ? cached<SlotlockStripeRevenue>(session, 'revenue:slotlock', () => stripe.revenue()) : Promise.resolve(null),
     ]);
     const n = (key: string) => Number(row?.home[key] ?? 0);
     const signups = (row?.home.signups as { day: string; count: number }[] | undefined) ?? [];
@@ -678,12 +710,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const rolled = metric === 'accounts'
       ? { labels: lastDays(range === '7d' ? 7 : 30, now()), values: series }
       : rollup(chartDays, series, range);
-    const mrr = revenue ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(minor, currency)).join(' + ') || slotlockMoney(0, 'eur') : null;
+    const mrr = revenue ? slotlockMoneyByCurrency(revenue.mrr) : null;
     const metricHref = (value: string) => withParams(url, { metric: value });
     const tiles: Stat[] = [
       { label: 'Accounts', value: count(n('accounts')), note: `${count(n('people'))} people · ${count(n('teams'))} teams`, spark: accountsTrend, current: metric === 'accounts', href: metricHref('accounts') },
-      { label: 'Paying', value: count(n('paying')), ...(read ? { href: '/accounts?view=paying' } : {}) },
-      { label: 'MRR', value: mrr ?? '–', ...(revenue ? { note: `${count(revenue.live)} live subscriptions` } : may('billing.read') ? { note: stripe ? 'Stripe could not be read' : 'Stripe not connected' } : {}), ...(may('billing.read') ? { href: '/billing' } : {}) },
+      { label: 'Paying', value: count(n('paying')), note: `${count(n('trialing'))} in a trial, ${count(n('ending'))} ending`, ...(read ? { href: '/accounts?view=paying' } : {}) },
+      { label: 'MRR', value: mrr ?? '–', ...(revenue ? { note: `${count(revenue.paying)} paying in Stripe` } : may('billing.read') ? { note: stripe ? 'Stripe could not be read' : 'Stripe not connected' } : {}), ...(may('billing.read') ? { href: '/billing' } : {}) },
       { label: 'Operations', value: count(n('operations_month')), delta: change('operations'), note: 'this month', ...(read ? { spark: daily(usage, 'operations', month), href: metricHref('operations'), current: metric === 'operations' } : {}) },
       { label: 'Bookings', value: count(n('bookings_month')), delta: change('bookings'), note: 'this month', ...(read ? { spark: daily(usage, 'bookings', month), href: metricHref('bookings'), current: metric === 'bookings' } : {}) },
       { label: 'Active 7d', value: count(n('active_7_days')), ...(read ? { href: '/usage' } : {}) },
@@ -740,8 +772,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   interface AccountRow {
-    account_ref: string; kind: string; name: string | null; created_at: Date | null; last_active: Date | null;
-    plan: string; plan_status: string | null; suspended: boolean; stripe_customer?: string | null;
+    account_ref: string; kind: string; name: string | null; display?: string | null; created_at: Date | null; last_active: Date | null;
+    plan: string; plan_status: string | null; plan_ends_at?: Date | null; suspended: boolean; stripe_customer?: string | null;
     operations_month: string; bookings_month: string;
   }
   /** Saved views of the account list; the database filters plan and suspension, the console the rest. */
@@ -784,17 +816,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (format === 'json') {
       if (q.length < 2) return json([]);
       const found = await sql<AccountRow[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${q}, ${null}, ${null}, ${null}, ${8})`;
-      const logins = await Promise.all(found.map((row) => (row.name ? null : row.kind === 'person' && row.account_ref.startsWith('github:') ? loginOf(row.account_ref) : null)));
-      return json(found.map((row, index) => {
-        const label = row.name ?? logins[index] ?? row.account_ref;
-        return { ref: row.account_ref, label, initials: initials(label), kind: row.kind };
+      return json(found.map((row) => {
+        const shown = slotlockShownPerson({ ref: row.account_ref, name: row.name, display: row.display ?? null });
+        return { ref: row.account_ref, label: shown.primary, initials: shown.initials, kind: row.kind };
       }));
     }
     if (view === 'near_quota') return nearQuota(session, url, q);
-    // The login a search found, only when GitHub says that id is that login: a link cannot label an
-    // account with a login of its choosing.
-    const forLogin = url.searchParams.get('for');
-    const githubFor = forLogin && /^[1-9][0-9]{0,19}$/.test(q) && (await loginOf(`github:${q}`))?.toLowerCase() === forLogin.toLowerCase() ? forLogin : null;
     const prefix = q ? null : view === 'partners' ? (KIND_PREFIX.partner ?? null) : kind && kind !== 'person' ? (KIND_PREFIX[kind] ?? null) : null;
     const status = view === 'suspended' ? 'suspended' : legacy === 'active' ? 'active' : null;
     const cutoff = (days: number) => now() - days * DAY_MS;
@@ -811,22 +838,32 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const filtering = view === 'paying' || view === 'past_due' || view === 'test' || view === 'partners' || Boolean(kind || created || active);
     // A view the console filters reads the largest page the database gives, and shows what matches.
     const scan = filtering ? SLOTLOCK_ADMIN_PAGE_LIMIT : PAGE;
-    const [rows, [homeRow]] = await Promise.all([
-      view === 'test' && !q
+    const find = (query: string | null) =>
+      view === 'test' && !query
         ? Promise.resolve([] as AccountRow[])
-        : sql<AccountRow[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${q || prefix}, ${plan}, ${status}, ${after}, ${scan})`,
+        : sql<AccountRow[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${query || null}, ${plan}, ${status}, ${after}, ${scan})`;
+    let [rows, [homeRow]] = await Promise.all([
+      find(q || prefix),
       format === 'csv' ? Promise.resolve([] as { home: Record<string, number> }[]) : sql<{ home: Record<string, number> }[]>`SELECT slotlock.admin_home(${session.t}) AS home`,
     ]);
+    // People are found by the name and display they last signed in with. A GitHub login no one has
+    // signed in with since those were kept: GitHub says which id it is, and the id is searched.
+    let githubFor: { login: string; id: string } | null = null;
+    if (rows.length === 0 && q && !after && GITHUB_LOGIN.test(q) && !/^[0-9]+$/.test(q) && !/^(slk|cus)_/.test(q)) {
+      const profile = await githubProfile(`/users/${encodeURIComponent(q)}`);
+      if (profile) {
+        await record(session.t, 'search.github_lookup', null, q);
+        githubFor = { login: profile.login, id: profile.id };
+        rows = await find(profile.id);
+      }
+    }
     const kept = rows.filter(keep);
     const shown = kept.slice(0, PAGE);
     const nextAfter = kept.length > PAGE ? shown.at(-1)?.account_ref : rows.length === scan ? rows.at(-1)?.account_ref : null;
-    const logins = await Promise.all(
-      shown.map(async (row) => (row.name ? null : row.kind === 'person' && row.account_ref.startsWith('github:') && shown.length <= 10 ? await loginOf(row.account_ref) : null)),
-    );
     if (format === 'csv') {
       return csv('accounts.csv', [
         ['account', 'name', 'kind', 'plan', 'plan_status', 'suspended', 'operations_month', 'bookings_month', 'last_active', 'created'],
-        ...shown.map((row, index) => [row.account_ref, row.name ?? logins[index] ?? '', row.kind, row.plan, row.plan_status ?? '', row.suspended, Number(row.operations_month), Number(row.bookings_month), day(row.last_active), day(row.created_at)]),
+        ...shown.map((row) => [row.account_ref, row.name ?? row.display ?? '', row.kind, row.plan, row.plan_status ?? '', row.suspended, Number(row.operations_month), Number(row.bookings_month), day(row.last_active), day(row.created_at)]),
       ]);
     }
     const home_ = homeRow?.home ?? {};
@@ -858,14 +895,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const body = html`
       ${views}
       ${toolbar}
-      ${githubFor ? html`<p class="callout">GitHub account <strong>${githubFor}</strong> is id <code>${q}</code>.</p>` : ''}
+      ${githubFor ? html`<p class="callout">GitHub account <strong>${githubFor.login}</strong> is id <code>${githubFor.id}</code>.</p>` : ''}
       ${table(
         'Accounts',
         ['Account', { label: 'Kind', phone: false }, 'Plan', 'Status', { label: 'Operations', num: true }, { label: 'Bookings', num: true, phone: false }, 'Last active', { label: 'Created', phone: false }, { label: 'Actions', quiet: true, phone: false }],
-        shown.map((row, index) => [
-          accountCell({ ref: row.account_ref, name: row.name, display: logins[index] ?? null, href: accountHref(row.account_ref) }),
+        shown.map((row) => [
+          accountCell({ ref: row.account_ref, name: row.name, display: row.display ?? null, href: accountHref(row.account_ref) }),
           kindPill(row.kind),
-          planPill(row.plan),
+          planPill(row.plan, row.plan_ends_at ?? null),
           statusPill(row.suspended, row.plan_status),
           html`${count(row.operations_month)}`,
           html`${count(row.bookings_month)}`,
@@ -874,7 +911,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           menu([
             { label: 'Open', href: accountHref(row.account_ref) },
             ...(row.stripe_customer ? [{ label: 'Open in Stripe', href: `https://dashboard.stripe.com/customers/${encodeURIComponent(row.stripe_customer)}`, external: true }] : []),
-          ], `More for ${row.name ?? logins[index] ?? row.account_ref}`),
+          ], `More for ${row.name ?? row.display ?? row.account_ref}`),
         ]),
         q || !plainList ? html`${empty} <a href="/accounts">Clear filters</a>` : empty,
         {
@@ -909,13 +946,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const person = PERSON_REF.test(ref);
     const act = slotlockStaffMay(session.r, 'accounts.act');
     const safety = slotlockStaffMay(session.r, 'safety.act');
-    const [keys, usage, audit, login, sessions, notes, cases, overrides] = await Promise.all([
+    const [keys, usage, audit, sessions, notes, cases, overrides] = await Promise.all([
       sql<{ id: string; name: string; prefix: string; scopes: string[]; created_at: Date; expires_at: Date | null; last_used_at: Date | null; revoked_at: Date | null }[]>`
         SELECT * FROM slotlock.admin_account_keys(${session.t}, ${ref})`,
       sql<{ day: Date; metric: string; count: string }[]>`SELECT * FROM slotlock.admin_account_usage(${session.t}, ${ref}, ${Math.max(30, RANGE_DAYS[range])})`,
       sql<{ occurred_at: Date; action: string; actor_type: string; actor_ref: string; target_type: string | null; target_ref: string | null; outcome: string; reason: string | null }[]>`
         SELECT * FROM slotlock.admin_account_audit(${session.t}, ${ref}, 50)`,
-      loginOf(ref),
       person
         ? sql<{ handle: string; started_at: Date; last_seen_at: Date; expires_at: Date }[]>`
             SELECT * FROM slotlock.admin_account_sessions(${session.t}, ${ref})`
@@ -927,7 +963,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       sql<OverrideRow[]>`SELECT * FROM slotlock.admin_account_overrides(${session.t}, ${ref})`,
     ]);
     const plan = await planSection(session, ref, data, overrides);
-    const authors = await staffNames(notes.map((note) => note.staff_ref));
+    const suspender = typeof data.suspended_by === 'string' ? data.suspended_by : null;
+    const staffSaid = await staffNames(session, [...notes.map((note) => note.staff_ref), ...(suspender ? [suspender] : [])]);
+    const authors = staffSaid.slice(0, notes.length);
+    const suspendedBy = suspender ? staffSaid.at(-1) : null;
     // What it is held to now, an override included; else its plan row's.
     const held = (data.effective ?? null) as { max_resources: number; max_api_keys: number; max_webhook_endpoints: number } | null;
     const limits = held
@@ -938,8 +977,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const chartDays = lastDays(RANGE_DAYS[range], now());
     const series = rollup(chartDays, daily(usage, 'operations', chartDays), range);
     const quotas = plan.quotas;
-    const name = (data.name as string | null) ?? null;
-    const title = String(name ?? login ?? ref);
+    // A person by the name and display their provider gave at their last sign-in; else the reference.
+    const shown = slotlockShownPerson({
+      ref,
+      name: typeof data.name === 'string' ? data.name : null,
+      display: typeof data.display === 'string' ? data.display : null,
+    });
+    const title = shown.primary;
+    const endsAt = typeof data.plan_ends_at === 'string' ? data.plan_ends_at : null;
     const stripe = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
     const base = accountHref(ref);
     const csrf = csrfField(session);
@@ -1015,14 +1060,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     ];
     const inspector = html`<aside class="inspector" aria-label="Details">
       <section>
-        <div class="identity">${avatar(title)}<span class="ac-text"><strong>${title}</strong><span class="sub mono">${ref}</span></span>${copyButton(ref, 'Copy reference')}</div>
+        <div class="identity">${avatar(title, 'md', ref)}<span class="ac-text"><strong>${title}</strong><span class="sub">${shown.secondary ?? ref}</span></span>${copyButton(ref, 'Copy reference')}</div>
         ${facts([
           ['Kind', kindPill(String(data.kind))],
           ['Created', html`${when(data.created_at as string)}`],
           ['Last active', html`${day(data.last_active as string)}`],
           ['Members', count(Number(data.members ?? 0))],
           stripe ? ['Stripe', html`<code>${stripe}</code>${copyButton(stripe, 'Copy customer')}`] : null,
-          data.current_period_end ? ['Paid until', html`${day(data.current_period_end as string)}`] : null,
+          endsAt ? ['Ends', day(endsAt)] : data.current_period_end ? ['Paid until', html`${day(data.current_period_end as string)}`] : null,
           data.partner ? ['Partner', html`<code>${String(data.partner)}</code>`] : null,
         ])}
       </section>
@@ -1054,7 +1099,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const body = html`<div class="record">
       <div class="record-main">
         ${suspended
-          ? html`<div class="callout bad"><div><p><strong>Suspended ${when(data.suspended_at as string)}</strong>${data.suspended_by ? html` by <span class="mono">${String(data.suspended_by)}</span>` : ''}. It can read, writes nothing, and its keys are refused.</p>
+          ? html`<div class="callout bad"><div><p><strong>Suspended ${when(data.suspended_at as string)}</strong>${suspendedBy ? html` by ${suspendedBy}` : ''}. It can read, writes nothing, and its keys are refused.</p>
               ${data.suspension_reason ? html`<p>Reason: ${String(data.suspension_reason)}</p>` : ''}
               ${data.suspension_message ? html`<p>The customer sees: “${String(data.suspension_message)}”</p>` : ''}</div></div>`
           : ''}
@@ -1075,7 +1120,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       unsuspended: { href: `${base}?panel=suspend`, label: 'Undo' },
     } : {}), {
       crumbs: [{ label: 'Accounts', href: '/accounts' }],
-      pills: html`${planPill(String(data.plan))}${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
+      pills: html`${planPill(String(data.plan), endsAt)}${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
       ...(stripe ? { actions: html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe${icon('external')}</a>` } : {}),
       menu: menuItems,
       drawer: panelDrawer,
@@ -1134,7 +1179,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return missing(session, 'No such case', '/cases', `There is no case #${id}.`, 404, { crumbs: [{ label: 'Cases', href: '/cases' }] }, html`<a class="btn" href="/cases">All cases</a>`);
     }
     const history = (found.history ?? []) as { occurred_at: string; staff_ref: string; action: string; reason: string | null }[];
-    const names = await staffNames([String(found.opened_by), ...history.map((event) => event.staff_ref)]);
+    const names = await staffNames(session, [String(found.opened_by), ...history.map((event) => event.staff_ref)]);
     const open = found.status === 'open';
     const account_ = typeof found.account_ref === 'string' ? found.account_ref : null;
     const option = (value: string, label: string, current: unknown) =>
@@ -1278,7 +1323,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (!account) return redirect('/privacy');
     const rows = await options.sql()<{ request_id: string; erased_at: Date; rows_erased: string; asked_by: string; approved_by: string; erased_by: string }[]>`
       SELECT * FROM slotlock.admin_privacy_receipts(${session.t}, ${account})`;
-    const names = await staffNames(rows.flatMap((row) => [row.asked_by, row.approved_by, row.erased_by]));
+    const names = await staffNames(session, rows.flatMap((row) => [row.asked_by, row.approved_by, row.erased_by]));
     const body = html`
       <p class="muted section-lead">For <span class="mono">${account}</span> ${info('About receipts', 'A receipt names the account only by a digest, which this lookup matches.')}</p>
       ${table('Receipts', ['Request', 'Erased', { label: 'Rows', num: true }, 'Asked, approved and erased by'], rows.map((row, index) => [
@@ -1307,7 +1352,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const receipt = found.receipt as { rows: number; asked_by: string; approved_by: string; erased_by: string; erased_at: string; digest: string } | null;
     const people = [text('opened_by'), text('verified_by'), text('erasure_asked_by'), text('erasure_approved_by'), text('closed_by'),
       receipt?.erased_by ?? null].map((ref) => ref ?? '');
-    const names = await staffNames(people);
+    const names = await staffNames(session, people);
     const nameOf = (index: number) => names[index] || people[index] || '';
     const mayErase = slotlockStaffMay(session.r, 'privacy.erase');
     const csrf = csrfField(session);
@@ -1413,89 +1458,79 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   async function staff(session: Session, url: URL): Promise<Response> {
-    const rows = await options.sql()<{ staff_ref: string; role: string; status: string; added_by: string; added_at: Date; last_seen_at: Date | null; passkeys: number; enrolling: boolean }[]>`
+    const rows = await options.sql()<{ staff_ref: string; login?: string | null; role: string; status: string; added_by: string; added_at: Date; last_seen_at: Date | null; passkeys: number; enrolling: boolean }[]>`
       SELECT * FROM slotlock.admin_staff(${session.t})`;
     const removed = url.searchParams.get('status') === 'removed';
     const shown = rows.filter((row) => (row.status === 'active') !== removed);
-    const logins = await Promise.all(shown.map((row) => loginOf(row.staff_ref)));
+    // Each member by the login they last signed in with (kept at sign-in); who added them likewise.
+    const logins = new Map(rows.map((row) => [row.staff_ref, row.login ?? null]));
+    const addedBy = (ref: string) => slotlockStaffActor(ref, logins.get(ref));
     const body = html`
       ${tabs('Staff', [
         { label: 'Active', href: '/staff', current: !removed, count: rows.filter((row) => row.status === 'active').length },
         { label: 'Removed', href: '/staff?status=removed', current: removed, count: rows.filter((row) => row.status !== 'active').length },
       ], 'views')}
-      ${table('Staff', ['Member', 'Role', 'Status', { label: 'Passkeys', num: true }, 'Last seen', 'Added'], shown.map((row, index) => [
-        html`<span class="ac">${avatar(logins[index] ?? row.staff_ref)}<span class="ac-text"><span>${logins[index] ?? row.staff_ref}</span><span class="sub mono">${row.staff_ref}</span></span></span>`,
-        pill(row.role, row.role === 'owner' ? 'info' : 'muted'),
+      ${table('Staff', ['Member', 'Role', 'Status', { label: 'Passkeys', num: true }, 'Last seen', 'Added'], shown.map((row) => [
+        accountCell({ ref: row.staff_ref, display: row.login ?? null }),
+        pill(row.role.charAt(0).toUpperCase() + row.role.slice(1), row.role === 'owner' ? 'info' : 'muted'),
         row.status === 'active' ? pill('Active', 'good') : pill('Removed', 'muted'),
         html`${count(row.passkeys)}${row.enrolling ? html`<span class="sub">Code issued</span>` : ''}`,
         ago(row.last_seen_at, now()),
-        html`${day(row.added_at)}<span class="sub mono">${row.added_by}</span>`,
+        html`${day(row.added_at)}<span class="sub" title="${row.added_by}">${addedBy(row.added_by).name}</span>`,
       ]), removed ? 'No one has been removed.' : 'No staff.')}`;
     return page(session, 'Staff', '/staff', body, undefined, undefined, {
       pills: info('Adding staff', html`Add, change and remove staff with <code>slotlock staff</code>, as the schema owner.`),
     });
   }
 
-  /** What a staff log action is about, by its first word: the Action filter's groups. */
-  const LOG_GROUPS: Readonly<Record<string, string>> = Object.freeze({
-    staff: 'Sign-in and staff', page: 'Pages', home: 'Pages', account: 'Accounts', accounts: 'Accounts', search: 'Accounts', case: 'Cases', cases: 'Cases',
-    privacy: 'Privacy', billing: 'Billing', override: 'Billing', usage: 'Usage', content: 'Content', announcement: 'Communications',
-    status: 'Communications', flag: 'System', system: 'System',
-  });
-  const LOG_DATES: Readonly<Record<string, { label: string; days: number }>> = Object.freeze({
-    today: { label: 'Today', days: 1 }, '7d': { label: 'Last 7 days', days: 7 }, '30d': { label: 'Last 30 days', days: 30 },
-  });
+  /** The Date filter's choices: a first day, from today back. */
+  const LOG_SINCE: readonly { label: string; days: number }[] = Object.freeze([
+    { label: 'Today', days: 0 }, { label: 'Last 7 days', days: 6 }, { label: 'Last 30 days', days: 29 },
+  ]);
 
   async function staffLog(session: Session, url: URL): Promise<Response> {
-    type LogRow = { chain_index: string; occurred_at: Date; staff_ref: string; action: string; account_ref: string | null; target: string | null; reason: string | null; metadata?: Record<string, unknown> | null };
+    type LogRow = { chain_index: string; occurred_at: Date; staff_ref: string; staff_login: string | null; action: string; account_ref: string | null; target: string | null; reason: string | null; metadata?: Record<string, unknown> | null };
     const before = /^[1-9][0-9]{0,18}$/.test(url.searchParams.get('before') ?? '') ? BigInt(url.searchParams.get('before') as string) : null;
-    const who = url.searchParams.get('who')?.slice(0, 200) || null;
-    const group = Object.values(LOG_GROUPS).includes(url.searchParams.get('action') ?? '') ? (url.searchParams.get('action') as string) : null;
-    const accountFilter = url.searchParams.get('account')?.slice(0, 500) || null;
-    const since = Object.hasOwn(LOG_DATES, url.searchParams.get('date') ?? '') ? (url.searchParams.get('date') as string) : null;
-    const filtering = Boolean(who || group || accountFilter || since);
-    const scan = filtering ? SLOTLOCK_ADMIN_PAGE_LIMIT : PAGE;
+    // Narrowed by who, action, account and days, in the database, from the query; views only when asked.
+    const filters = slotlockStaffLogFilters(url.searchParams);
+    const { since, until } = slotlockStaffLogRange(filters);
     const sql = options.sql();
-    const rows = await sql<LogRow[]>`
-      SELECT * FROM slotlock.admin_staff_log(${session.t}, ${before === null ? null : before.toString()}, ${scan})`;
-    const groupOf = (action: string) => LOG_GROUPS[action.split('.')[0] ?? ''] ?? 'Other';
-    const sinceMs = since ? now() - (LOG_DATES[since]?.days ?? 0) * DAY_MS : null;
-    const kept = rows.filter((row) =>
-      (!who || row.staff_ref === who) && (!group || groupOf(row.action) === group) && (!accountFilter || row.account_ref === accountFilter)
-      && (sinceMs === null || new Date(row.occurred_at).getTime() >= (since === 'today' ? Date.parse(`${new Date(now()).toISOString().slice(0, 10)}T00:00:00Z`) : sinceMs)));
-    const shown = kept.slice(0, PAGE);
-    const last = kept.length > PAGE ? shown.at(-1)?.chain_index : rows.length === scan ? rows.at(-1)?.chain_index : null;
+    const [rows, [chainRow], members] = await Promise.all([
+      sql<LogRow[]>`
+        SELECT * FROM slotlock.admin_staff_log(${session.t}, ${before === null ? null : before.toString()}, ${PAGE},
+          ${filters.who}, ${filters.action}, ${filters.account}, ${since}, ${until}, ${filters.views})`,
+      sql<{ chain: { checked: number; broken_at: number | null; head_index: number | null; head_hash: string | null } }[]>`
+        SELECT slotlock.admin_staff_log_chain(${session.t}) AS chain`,
+      sql<{ staff_ref: string; login: string | null }[]>`SELECT staff_ref, login FROM slotlock.admin_staff(${session.t})`,
+    ]);
+    const last = rows.length === PAGE ? rows.at(-1)?.chain_index : null;
     if (url.searchParams.get('format') === 'csv') {
       return csv('staff-log.csv', [
         ['chain_index', 'occurred_at', 'staff', 'action', 'account', 'target', 'reason'],
-        ...shown.map((row) => [Number(row.chain_index), new Date(row.occurred_at).toISOString(), row.staff_ref, row.action, row.account_ref ?? '', row.target ?? '', row.reason ?? '']),
+        ...rows.map((row) => [Number(row.chain_index), new Date(row.occurred_at).toISOString(), row.staff_ref, row.action, row.account_ref ?? '', row.target ?? '', row.reason ?? '']),
       ]);
     }
-    const [chainRow] = await sql<{ chain: { checked: number; broken_at: number | null; head_index: number | null; head_hash: string | null } }[]>`
-      SELECT slotlock.admin_staff_log_chain(${session.t}) AS chain`;
     const chain = chainRow?.chain;
-    const names = await namesOf([...shown.map((row) => row.staff_ref), ...(who ? [who] : [])]);
     // The entry a row opens, in a drawer: from this page, or read on its own.
     const entryId = /^[1-9][0-9]{0,18}$/.test(url.searchParams.get('entry') ?? '') ? (url.searchParams.get('entry') as string) : null;
     let entry = entryId ? (rows.find((row) => row.chain_index === entryId) ?? null) : null;
     if (entryId && !entry) {
-      [entry = null] = await sql<LogRow[]>`SELECT * FROM slotlock.admin_staff_log(${session.t}, ${(BigInt(entryId) + 1n).toString()}, ${1})`;
+      [entry = null] = await sql<LogRow[]>`
+        SELECT * FROM slotlock.admin_staff_log(${session.t}, ${(BigInt(entryId) + 1n).toString()}, ${1}, ${null}, ${null}, ${null}, ${null}, ${null}, ${true})`;
       if (entry && entry.chain_index !== entryId) entry = null;
     }
-    const entryNames = entry ? await namesOf([entry.staff_ref]) : new Map<string, string>();
     const chainFacts = chain?.head_index
-      ? facts([
-          ['Checked', `The newest ${count(chain.checked)} entries`],
+      ? html`<p>The newest ${count(chain.checked)} entries check out.</p>${facts([
           ['Head', html`#${String(chain.head_index)}`],
           ['Head hash', html`<code class="mono">${chain.head_hash ?? ''}</code>${copyButton(chain.head_hash ?? '', 'Copy hash')}`],
-        ])
+        ])}`
       : html``;
     const entryDrawer = entry
-      ? drawer(`#${entry.chain_index} ${entry.action}`, html`
+      ? drawer(`#${entry.chain_index} ${slotlockStaffActionLabel(entry.action)}`, html`
           ${facts([
             ['When', `${when(entry.occurred_at)} UTC`],
-            ['Who', html`${entryNames.get(entry.staff_ref) ?? entry.staff_ref}<span class="sub mono">${entry.staff_ref}</span>`],
-            ['Action', html`<code>${entry.action}</code>`],
+            ['Who', html`${slotlockStaffActor(entry.staff_ref, entry.staff_login).name}<span class="sub mono">${entry.staff_ref}</span>`],
+            ['Action', html`${slotlockStaffActionLabel(entry.action)}<span class="sub mono">${entry.action}</span>`],
             entry.account_ref ? ['Account', accountOf(session, entry.account_ref)] : null,
             entry.target ? ['Target', html`<code>${entry.target}</code>`] : null,
             entry.reason ? ['Reason', entry.reason] : null,
@@ -1505,29 +1540,43 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           withParams(url, { entry: null }))
       : null;
     const option = (name: string, value: string, label: string, current: string | null) => ({ label, href: withParams(url, { [name]: value, entry: null }), current: current === value });
-    const people = [...new Set([...shown.map((row) => row.staff_ref), ...(who ? [who] : [])])];
-    const accountsSeen = [...new Set([...shown.map((row) => row.account_ref).filter((ref): ref is string => Boolean(ref)), ...(accountFilter ? [accountFilter] : [])])].slice(0, 20);
+    const today = Date.parse(`${new Date(now()).toISOString().slice(0, 10)}T00:00:00Z`);
+    const sinceDay = (days: number) => new Date(today - days * DAY_MS).toISOString().slice(0, 10);
+    const accountsSeen = [...new Set([...rows.map((row) => row.account_ref).filter((ref): ref is string => Boolean(ref)), ...(filters.account ? [filters.account] : [])])].slice(0, 20);
+    const actions = Object.entries(SLOTLOCK_STAFF_ACTION_LABELS).sort((a, b) => a[1].localeCompare(b[1]));
     const body = html`
       ${chain?.broken_at
         ? html`<div class="callout bad" role="status"><p><strong>The chain breaks at #${String(chain.broken_at)}.</strong> An entry was changed or removed outside the console. Compare with the last head you recorded, and run <code>slotlock staff verify-log</code>.</p></div>`
         : ''}
+      ${tabs('Views', [
+        { label: 'Actions', href: withParams(url, { views: null, entry: null }), current: !filters.views },
+        { label: 'With views', href: withParams(url, { views: '1', entry: null }), current: filters.views },
+      ], 'views')}
       <div class="toolbar">
-        ${filterChip('Date', Object.entries(LOG_DATES).map(([value, item]) => option('date', value, item.label, since)), withParams(url, { date: null }))}
-        ${filterChip('Who', people.map((ref) => option('who', ref, names.get(ref) ?? ref, who)), withParams(url, { who: null }))}
-        ${filterChip('Action', [...new Set(Object.values(LOG_GROUPS))].map((value) => option('action', value, value, group)), withParams(url, { action: null }))}
-        ${filterChip('Account', accountsSeen.map((ref) => option('account', ref, ref, accountFilter)), withParams(url, { account: null }))}
+        ${filterChip('Date', [
+          ...LOG_SINCE.map((choice) => ({ label: choice.label, href: withParams(url, { from: sinceDay(choice.days), to: null, entry: null }), current: filters.from === sinceDay(choice.days) && !filters.to })),
+          ...(filters.from && !LOG_SINCE.some((choice) => sinceDay(choice.days) === filters.from) || filters.to ? [{ label: `${filters.from ?? '…'} to ${filters.to ?? 'today'}`, href: url.pathname + url.search, current: true }] : []),
+        ], withParams(url, { from: null, to: null, entry: null }))}
+        ${filterChip('Who', [...members.map((member) => option('who', member.staff_ref, member.login ?? member.staff_ref, filters.who)), option('who', 'cli', 'Command line', filters.who)], withParams(url, { who: null, entry: null }))}
+        ${filterChip('Action', actions.map(([code, label]) => option('action', code, label, filters.action)), withParams(url, { action: null, entry: null }))}
+        ${filterChip('Account', accountsSeen.map((ref) => option('account', ref, ref, filters.account)), withParams(url, { account: null, entry: null }))}
         <span class="grow"></span>
         <a class="btn sm" href="${withParams(url, { format: 'csv', entry: null })}" download>${icon('download')}Export CSV</a>
       </div>
-      ${table('Staff log', [{ label: '#', num: true }, 'When', 'Who', 'Action', 'Account'], shown.map((row) => [
-        html`<a class="mono" href="${withParams(url, { entry: row.chain_index })}">${row.chain_index}</a>`,
-        html`${when(row.occurred_at)}`,
-        html`<span class="ac">${avatar(names.get(row.staff_ref) ?? row.staff_ref, 'sm')}<span>${names.get(row.staff_ref) ?? row.staff_ref}</span></span>`,
-        html`<code>${row.action}</code>${row.target ? html`<span class="sub mono">${row.target}</span>` : ''}${row.reason ? html`<span class="sub">${row.reason}</span>` : ''}`,
-        row.account_ref ? html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>` : html`–`,
-      ]), filtering ? html`Nothing on this page matches. <a href="/staff/log">Clear filters</a>` : 'The log is empty.', {
-        hrefs: shown.map((row) => withParams(url, { entry: row.chain_index })),
-        footer: shown.length ? html`<div class="table-foot"><span>${count(shown.length)} ${shown.length === 1 ? 'entry' : 'entries'}${before ? '' : ', newest first'}</span><span class="pager">${before ? html`<a class="btn sm" href="${withParams(url, { before: null, entry: null })}">Newest</a>` : ''}${last ? html`<a class="btn sm" href="${withParams(url, { entry: null })}${withParams(url, { entry: null }).includes('?') ? '&' : '?'}before=${last}">Older</a>` : ''}</span></div>` : null,
+      ${table('Staff log', [{ label: '#', num: true }, 'When', 'Who', 'Action', 'Account'], rows.map((row) => {
+        const actor = slotlockStaffActor(row.staff_ref, row.staff_login);
+        return [
+          html`<a class="mono" href="${withParams(url, { entry: row.chain_index })}">${row.chain_index}</a>`,
+          html`${when(row.occurred_at)}`,
+          html`<span class="ac">${avatar(actor.name, 'sm', row.staff_ref)}<a href="/staff/log?${slotlockStaffLogQuery({ ...filters, who: actor.command ? 'cli' : row.staff_ref }).toString()}">${actor.name}</a></span>`,
+          html`<span title="${row.action}">${slotlockStaffActionLabel(row.action)}</span>${row.target ? html`<span class="sub mono">${row.target}</span>` : ''}${row.reason ? html`<span class="sub">${row.reason}</span>` : ''}`,
+          row.account_ref ? html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>` : html`–`,
+        ];
+      }), filters.views
+        ? 'Nothing in the log matches.'
+        : html`Nothing but views matches. <a href="${withParams(url, { views: '1', entry: null })}">Show views</a>`, {
+        hrefs: rows.map((row) => withParams(url, { entry: row.chain_index })),
+        footer: rows.length ? html`<div class="table-foot"><span>${count(rows.length)} ${rows.length === 1 ? 'entry' : 'entries'}${before ? '' : ', newest first'}</span><span class="pager">${before ? html`<a class="btn sm" href="${withParams(url, { before: null, entry: null })}">Newest</a>` : ''}${last ? html`<a class="btn sm" href="/staff/log?${slotlockStaffLogQuery(filters, { before: last }).toString()}">Older</a>` : ''}</span></div>` : null,
       })}`;
     return page(session, 'Staff log', '/staff/log', body, undefined, undefined, {
       ...(chain?.broken_at
@@ -1539,18 +1588,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     });
   }
 
-  async function search(session: Session, url: URL): Promise<Response> {
+  /** The top bar's search: Accounts finds the account (by name, login, email, reference, key or customer). */
+  async function search(_session: Session, url: URL): Promise<Response> {
     const q = (url.searchParams.get('q') ?? '').trim().slice(0, 200);
-    if (!q) return redirect('/accounts');
-    // A GitHub login: the database keeps only ids, so ask GitHub which id the login is.
-    if (GITHUB_LOGIN.test(q) && !/^[0-9]+$/.test(q) && !/^(slk|cus)_/.test(q)) {
-      const profile = await githubProfile(`/users/${encodeURIComponent(q)}`);
-      if (profile) {
-        await record(session.t, 'search.github_lookup', null, q.slice(0, 200));
-        return redirect(`/accounts?${new URLSearchParams({ q: profile.id, for: profile.login }).toString()}`);
-      }
-    }
-    return redirect(`/accounts?${new URLSearchParams({ q }).toString()}`);
+    return redirect(q ? `/accounts?${new URLSearchParams({ q }).toString()}` : '/accounts');
   }
 
   // ---------- Sign-in ----------
@@ -1619,6 +1660,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (typeof role !== 'string' || !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(role) || typeof token !== 'string' || !SESSION_TOKEN.test(token)) {
       return refused('Not staff', `GitHub account ${user.login} is not on the Slotlock staff. The attempt was recorded.`);
     }
+    // The login GitHub just gave, kept so pages name this member without asking GitHub. Last, and
+    // never in the way: a database from before it lacks the function, and the sign-in stands.
+    await options.sql()`SELECT slotlock.admin_staff_login(${token}, ${user.login})`.catch((error: unknown) => {
+      console.error('slotlock-admin staff login not kept', (error as { code?: unknown } | null)?.code ?? 'unknown');
+    });
     // Half signed in: enough to reach the passkey step, for 15 minutes. The passkey starts the 8 hours.
     const session: Session = { s: staffRef, t: token, l: user.login, r: role as SlotlockStaffRole, st: 'github', iat: now(), seen: now(), exp: now() + FRESH_MS };
     return redirect('/passkey', [clear(OAUTH_COOKIE), sessionCookie(session)]);
@@ -1779,10 +1825,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
   }
 
-  const stripeLink = (ref: string) =>
-    ref.startsWith('in_')
-      ? `https://dashboard.stripe.com/invoices/${encodeURIComponent(ref)}`
-      : `https://dashboard.stripe.com/subscriptions/${encodeURIComponent(ref)}`;
+  const stripeLink = slotlockStripeLink;
   const OVERRIDE_STATE: Record<string, Html> = {
     in_force: pill('In force', 'good'),
     pending: pill('Waiting for approval', 'warn'),
@@ -1808,35 +1851,42 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const billing = summaryRow?.billing ?? {};
     const paying = (billing.paying ?? {}) as Record<string, number>;
     const runs = (billing.runs ?? {}) as Record<string, { started_at: string; finished_at: string; attention: boolean; actor: string; summary: { lines?: unknown[] } & Record<string, unknown> }>;
-    const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:summary', () => stripe.revenue()) : null;
-    const askers = await staffNames(overrides.map((item) => item.created_by));
+    // Slotlock's subscriptions only, by the rule the database counts paying plans by (stripe.ts).
+    const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:slotlock', () => stripe.revenue()) : null;
+    const ending = slotlockEndingRows((billing.ending ?? []) as { account_ref: string; plan: string | null; ends_at: string }[], revenue);
+    const askers = await staffNames(session, overrides.map((item) => item.created_by));
     const may = (capability: SlotlockStaffCapability) => slotlockStaffMay(session.r, capability);
     const csrf = html`${csrfField(session)}<input type="hidden" name="back" value="/billing">`;
     const openAlerts = alerts.filter((alert) => !alert.resolved_at);
     const pending = overrides.filter((item) => item.state === 'pending');
     const approvable = pending.filter((item) => item.created_by !== session.s);
-    const mrr = revenue ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(minor, currency)).join(' + ') || slotlockMoney(0, 'eur') : null;
+    const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail);
+    const mrr = revenue ? slotlockMoneyByCurrency(revenue.mrr) : null;
     const payingTotal = Object.values(paying).reduce((sum, value) => sum + Number(value), 0);
     const account = (ref: string) => accountOf(session, ref);
     const overview = html`<div class="grid">
       <section class="box c8" aria-labelledby="mrr-title">
-        <header class="section-head"><h2 id="mrr-title">Monthly recurring revenue</h2>${revenue
-          ? info('About this figure', html`Read from Stripe ${when(new Date(revenue.readAt))} UTC, and kept for an hour.${revenue.truncated ? ' Only the first 1,000 subscriptions were read.' : ''}`)
+        <header class="section-head"><h2 id="mrr-title"><span class="stat-label">Monthly recurring revenue</span></h2>${revenue
+          ? info('About this figure', html`Slotlock's subscriptions in Stripe, active or past due and not set to end. Read ${when(new Date(revenue.readAt))} UTC, and kept for an hour.${revenue.truncated ? ' Only the first 1,000 subscriptions were read.' : ''}`)
           : ''}</header>
-        <div class="headline"><span class="headline-figure">${mrr ?? '–'}</span>${revenue ? html`<span class="muted">${count(revenue.live)} live subscriptions</span>` : ''}</div>
+        <div class="headline"><strong class="stat-value">${mrr ?? '–'}</strong>${revenue
+          ? html`<span class="stat-note">${count(revenue.paying)} paying ${revenue.paying === 1 ? 'subscription' : 'subscriptions'} in Stripe</span>`
+          : html`<span class="stat-note">${stripe ? 'Stripe could not be read' : 'Stripe not connected'}</span>`}</div>
         ${revenue
           ? html`<dl class="mini">
-              <div><dt>Annual run rate</dt><dd>${Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(minor * 12, currency)).join(' + ') || '–'}</dd></div>
-              <div><dt>Per subscription</dt><dd>${Object.keys(revenue.mrr).length === 1 && revenue.live > 0 ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(Math.round(minor / revenue.live), currency)) : '–'}</dd></div>
-              <div><dt>Past due in Stripe</dt><dd>${count(revenue.pastDue)}</dd></div>
+              <div><dt>Annual run rate</dt><dd>${Object.keys(revenue.mrr).length ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(minor * 12, currency)).join(' + ') : '–'}</dd></div>
+              <div><dt>Per subscription</dt><dd>${Object.keys(revenue.mrr).length === 1 && revenue.paying > 0 ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(Math.round(minor / revenue.paying), currency)) : '–'}</dd></div>
+              <div><dt>Ending, a month</dt><dd>${revenue.ending.count ? slotlockMoneyByCurrency(revenue.ending.atRisk) : '–'}</dd></div>
             </dl>`
-          : html`<div class="callout">${stripe ? 'Stripe could not be read just now.' : html`Stripe is not connected. ${info('Connecting Stripe', html`Set <code>SLOTLOCK_ADMIN_STRIPE_KEY</code> to a restricted key that reads subscriptions and invoices.`)}`}</div>`}
-        ${section('Paying by plan', partsBar('Paying accounts by plan', Object.entries(paying).map(([name, value]) => ({ name: PLAN_WORDS[name] ?? name, value: Number(value) }))), { level: 3 })}
+          : stripe ? '' : html`<div class="callout">Connect Stripe for revenue. ${info('Connecting Stripe', html`Set <code>SLOTLOCK_ADMIN_STRIPE_KEY</code> to a restricted key that reads subscriptions and invoices.`)}</div>`}
+        ${section('Paying by plan', partsBar('Paying accounts by plan', Object.entries(paying).map(([name, value]) => ({ name: slotlockPlanName(name), value: Number(value) }))), { level: 3 })}
       </section>
       <section class="c4" aria-label="This month">
         ${stats([
-          { label: 'Paying', value: count(payingTotal), ...(may('accounts.read') ? { href: '/accounts?view=paying' } : {}) },
+          { label: 'Paying', value: count(payingTotal), note: `${count(paying.developer ?? 0)} Developer, ${count(paying.team ?? 0)} Team`, ...(may('accounts.read') ? { href: '/accounts?view=paying' } : {}) },
+          { label: 'In a trial', value: count(revenue ? revenue.trialing : Number(billing.trialing ?? 0)) },
           { label: 'Past due', value: count(Number(billing.past_due ?? 0)), ...(may('accounts.read') ? { href: '/accounts?view=past_due' } : {}) },
+          { label: 'Ending', value: count(revenue ? revenue.ending.count : Number(billing.ending_total ?? 0)), note: revenue ? `${slotlockMoneyByCurrency(revenue.ending.atRisk)} a month` : null, href: '#ending' },
           { label: 'New this month', value: revenue ? count(revenue.newThisMonth) : '–' },
           { label: 'Cancelled this month', value: revenue ? count(revenue.cancelledThisMonth) : count(Number(billing.canceled_month ?? 0)) },
           { label: 'Open alerts', value: count(Number(billing.alerts_open ?? 0)), href: '#alerts' },
@@ -1847,16 +1897,22 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       <section class="box c6" aria-labelledby="alerts-preview">
         <header class="section-head"><h2 id="alerts-preview">Needs a person</h2><a class="section-aside" href="#alerts">All alerts</a></header>
         ${openAlerts.length
-          ? html`<ul class="list">${openAlerts.slice(0, 5).map((alert) => html`<li>${dot(alert.kind === 'payment_failed' ? 'bad' : 'warn')}<span class="grow">${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'}<span class="sub mono">${alert.account_ref}</span></span><span class="muted tnum">${day(alert.created_at)}</span></li>`)}</ul>`
+          ? html`<ul class="list">${openAlerts.slice(0, 5).map((alert) => html`<li>${dot(alert.kind === 'payment_failed' ? 'bad' : 'warn')}<span class="grow">${alertWords(alert).title}<span class="sub mono">${alert.account_ref}</span></span><span class="muted tnum">${day(alert.created_at)}</span></li>`)}</ul>`
           : emptyState('Nothing needs a person.')}
       </section>
       <section class="box c6" aria-labelledby="overrides-preview">
         <header class="section-head"><h2 id="overrides-preview">Overrides</h2><a class="section-aside" href="#overrides">All overrides</a></header>
         ${overrides.length
-          ? html`<ul class="list">${overrides.slice(0, 5).map((item) => html`<li><span class="grow">${item.plan ? PLAN_WORDS[item.plan] ?? item.plan : 'Limits'} until ${day(item.ends_at)}<span class="sub mono">${item.account_ref}</span></span>${OVERRIDE_STATE[item.state] ?? pill(item.state, 'muted')}</li>`)}</ul>`
+          ? html`<ul class="list">${overrides.slice(0, 5).map((item) => html`<li><span class="grow">${item.plan ? slotlockPlanName(item.plan) : 'Limits'} until ${day(item.ends_at)}<span class="sub mono">${item.account_ref}</span></span>${OVERRIDE_STATE[item.state] ?? pill(item.state, 'muted')}</li>`)}</ul>`
           : emptyState('No overrides in force.')}
       </section>
-    </div>`;
+    </div>
+    ${section('Ending', table('Ending', ['Account', 'Plan', { label: 'A month', num: true }, 'Ends'], ending.map((row) => [
+      account(row.account),
+      html`${row.plan ? slotlockPlanName(row.plan) : '–'}`,
+      html`${row.monthly === null ? '–' : slotlockMoney(row.monthly, row.currency)}`,
+      html`${slotlockShortDate(row.endsAt, now())}`,
+    ]), 'No paying plan is set to end.', { hrefs: may('accounts.read') ? ending.map((row) => accountHref(row.account)) : [] }), { id: 'ending' })}`;
     const alertsPanel = html`
       <div class="toolbar">${tabs('Alerts', [
         { label: 'Open', href: '/billing#alerts', current: !showAll, count: Number(billing.alerts_open ?? 0) },
@@ -1864,12 +1920,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ], 'views')}<span class="grow"></span>
       ${may('billing.act') && openAlerts.length
         ? popover('Resolve an alert', html`<form class="form" method="post" action="/billing/alerts/resolve">${csrf}
-            ${formField({ id: 'alert-id', label: 'Alert', control: html`<select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'} · ${alert.account_ref} · ${alert.stripe_ref}</option>`)}</select>` })}
+            ${formField({ id: 'alert-id', label: 'Alert', control: html`<select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alertWords(alert).title} · ${alert.account_ref} · ${alert.stripe_ref}</option>`)}</select>` })}
             ${formField({ id: 'alert-reason', label: 'What was done', control: html`<input id="alert-reason" name="reason" required maxlength="200" autocomplete="off">` })}
             <div class="form-actions"><button class="btn primary" type="submit">Resolve</button></div></form>`, { size: 'sm' })
         : ''}</div>
       ${table('Billing alerts', ['Alert', 'Account', 'In Stripe', 'When', 'State'], alerts.map((alert) => [
-        html`${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'}${alert.kind === 'payment_failed' && typeof alert.detail.amount_due === 'number' ? html`<span class="sub">${slotlockMoney(alert.detail.amount_due, typeof alert.detail.currency === 'string' ? alert.detail.currency : null)}, attempt ${String(alert.detail.attempt_count ?? '?')}</span>` : alert.detail.first ? html`<span class="sub mono">besides ${String(alert.detail.first)}: refund one</span>` : ''}`,
+        html`${alertWords(alert).title}${alertWords(alert).detail ? html`<span class="sub">${alertWords(alert).detail}</span>` : ''}`,
         account(alert.account_ref),
         html`<a class="mono" href="${stripeLink(alert.stripe_ref)}" rel="noreferrer">${alert.stripe_ref}</a>`,
         html`${when(alert.created_at)}`,
@@ -1890,7 +1946,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         : ''}</div>
       ${table('Plan overrides', ['Account', 'Plan', 'Ends', 'Reason', 'Asked by', 'State'], overrides.map((item, index) => [
         account(item.account_ref),
-        html`${item.plan ? PLAN_WORDS[item.plan] ?? item.plan : 'Its own'}`,
+        html`${item.plan ? slotlockPlanName(item.plan) : 'Its own'}`,
         html`${day(item.ends_at)}`,
         html`${item.reason}`,
         html`${askers[index] ?? item.created_by}`,
@@ -1937,14 +1993,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const leaders = await options.sql()<{ account_ref: string; plan: string | null; operations: string; bookings: string; quota_operations: string | null; quota_bookings: string | null; quota_stop_percent: number | null }[]>`
       SELECT * FROM slotlock.admin_usage_accounts(${session.t})`;
     const share = (used: number, quota: number | null) => (quota ? Math.round((used / quota) * 100) : null);
-    const logins = await Promise.all(leaders.map((row, index) => (index < 20 && row.account_ref.startsWith('github:') ? loginOf(row.account_ref) : Promise.resolve(null))));
-    return leaders.map((row, index) => {
+    return leaders.map((row) => {
       const plan = row.plan && Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, row.plan) ? SLOTLOCK_PLAN_QUOTAS[row.plan as SlotlockPlan] : null;
       const opsQuota = row.quota_operations !== null ? Number(row.quota_operations) : (plan?.operations ?? null);
       const bookingsQuota = row.quota_bookings !== null ? Number(row.quota_bookings) : (plan?.bookings ?? null);
       const operations = share(Number(row.operations), opsQuota);
       const bookings = share(Number(row.bookings), bookingsQuota);
-      return { row, login: logins[index] ?? null, worst: Math.max(operations ?? 0, bookings ?? 0), operations, bookings, opsQuota, bookingsQuota };
+      return { row, worst: Math.max(operations ?? 0, bookings ?? 0), operations, bookings, opsQuota, bookingsQuota };
     }).sort((a, b) => b.worst - a.worst);
   }
   function quotaTable(session: Session, rows: Awaited<ReturnType<typeof quotaLeaders>>, empty: string): Html {
@@ -1952,8 +2007,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       quota
         ? html`<span class="cell-meter"><span>${count(value)} <span class="muted">· ${String(percent ?? 0)}%</span></span>${meter(Number(value), quota)}</span>`
         : html`${count(value)}<span class="sub">No quota</span>`;
-    return table('Accounts by share of quota', ['Account', 'Plan', 'Operations', 'Bookings'], rows.map(({ row, login, operations, bookings, opsQuota, bookingsQuota }) => [
-      accountOf(session, row.account_ref, { display: login }),
+    return table('Accounts by share of quota', ['Account', 'Plan', 'Operations', 'Bookings'], rows.map(({ row, operations, bookings, opsQuota, bookingsQuota }) => [
+      accountOf(session, row.account_ref),
       planPill(row.plan),
       used(row.operations, opsQuota, operations),
       used(row.bookings, bookingsQuota, bookings),
@@ -2025,7 +2080,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const inForce = overrides.find((item) => item.state === 'in_force');
     const live = overrides.filter((item) => item.state === 'in_force' || item.state === 'pending');
     const approvable = overrides.filter((item) => item.state === 'pending' && item.created_by !== session.s);
-    const names = await staffNames(overrides.map((item) => item.created_by));
+    const names = await staffNames(session, overrides.map((item) => item.created_by));
     const stripeCustomer = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
     const customer = stripe && stripeCustomer && may('accounts.read')
       ? await cached<SlotlockStripeCustomer>(session, `account:stripe:${stripeCustomer}`, () => stripe.customer(stripeCustomer))
@@ -2116,10 +2171,16 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     api: options.hosts?.api ?? 'https://slotlock-api.pylota.io/healthz',
     dashboard: options.hosts?.dashboard ?? 'https://app.slotlock.pylota.io/dashboard',
   };
-  /** The workflows whose runs on main the System page lists as deploys. */
+  /**
+   * The workflows whose runs on main the System page lists as deploys: those that deploy (the
+   * dashboard Worker, the site, the status page's Worker) and those that publish a release. The
+   * admin console deploys from its operator's own pipeline, and dashboard.yml only bundles the
+   * Workers to check they build.
+   */
   const DEPLOY_WORKFLOWS = [
+    { workflow: 'dashboard-deploy.yml', label: 'Dashboard Worker' },
     { workflow: 'site.yml', label: 'Site' },
-    { workflow: 'dashboard.yml', label: 'Dashboard and console Workers' },
+    { workflow: 'status-worker.yml', label: 'Status Worker' },
     { workflow: 'image.yml', label: 'Server image' },
     { workflow: 'release.yml', label: 'Releases' },
   ] as const;
@@ -2138,9 +2199,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return value === null ? { state: 'failed' } : { state: 'ok', value };
   }
   /** Staff references and their GitHub logins, for a page that names who did what. */
-  const namesOf = async (refs: readonly string[]) => {
+  const namesOf = async (session: Session, refs: readonly string[]) => {
     const unique = [...new Set(refs)];
-    const names = await staffNames(unique);
+    const names = await staffNames(session, unique);
     return new Map(unique.map((ref, index) => [ref, names[index] ?? ref]));
   };
 
@@ -2178,27 +2239,36 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       endedToo,
       account,
       incidents,
-      names: await namesOf(rows.map((row) => row.created_by)),
+      names: await namesOf(session, rows.map((row) => row.created_by)),
       now: now(),
     }, accountHref);
     return page(session, 'Communications', '/communications', parts.body, undefined, noticeOf(url), partsHead(parts));
   }
 
-  /** Each host as it answers now: the API's readiness and version, the dashboard's sign-in page. */
+  /**
+   * Each host as it answers now, with the version it runs: the API's readiness and version
+   * (/healthz), the dashboard's sign-in page and the version in its X-Slotlock-Version header, and
+   * the site's public facts.json, whose `version` the site was built from.
+   */
   async function hostHealth(): Promise<SlotlockHostHealth[]> {
-    const ask = async (name: string, target: string, api: boolean): Promise<SlotlockHostHealth> => {
+    const shownVersion = (value: unknown) => (typeof value === 'string' && /^[0-9A-Za-z.+-]{1,40}$/.test(value) ? value : null);
+    const ask = async (name: string, target: string, read: 'healthz' | 'header' | 'facts'): Promise<SlotlockHostHealth> => {
       const started = now();
       try {
-        const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { Accept: api ? 'application/json' : 'text/html' } });
+        const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { Accept: read === 'header' ? 'text/html' : 'application/json' } });
         let version: string | null = null;
         let up = response.status === 200;
         let answer = `HTTP ${response.status}`;
-        if (api) {
+        if (read === 'healthz') {
           const body = (await response.json().catch(() => ({}))) as { status?: unknown; version?: unknown };
-          version = typeof body.version === 'string' ? body.version.slice(0, 40) : null;
+          version = shownVersion(body.version);
           up = response.status === 200 && body.status === 'ready';
           if (!up && response.status === 200) answer = 'not ready';
+        } else if (read === 'facts') {
+          const body = (await response.json().catch(() => ({}))) as { version?: unknown };
+          version = up ? shownVersion(body.version) : null;
         } else {
+          version = up ? shownVersion(response.headers.get('x-slotlock-version')) : null;
           await response.body?.cancel();
         }
         return { name, url: target, up, answer: up ? 'ok' : answer, version, ms: now() - started };
@@ -2207,9 +2277,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       }
     };
     return Promise.all([
-      ask('API', hostUrls.api, true),
-      ask('Dashboard', hostUrls.dashboard, false),
-      ask('Site', `${siteUrl}/`, false),
+      ask('API', hostUrls.api, 'healthz'),
+      ask('Dashboard', hostUrls.dashboard, 'header'),
+      ask('Site', `${siteUrl}/facts.json`, 'facts'),
     ]);
   }
 
@@ -2245,7 +2315,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         { name: 'Bing Webmaster Tools', value: options.insights?.bing ? `connected to ${options.insights.bing.site}` : 'not set' },
         { name: 'Cloudflare Web Analytics', value: connected(options.insights?.cloudflare) },
       ],
-      names: await namesOf([...flags.flags.map((flag) => flag.set_by), ...flags.history.map((event) => event.staff_ref)]),
+      names: await namesOf(session, [...flags.flags.map((flag) => flag.set_by), ...flags.history.map((event) => event.staff_ref)]),
       now: now(),
       panel: url.searchParams.get('panel') === 'flag' ? { kind: 'flag', id: /^[1-9][0-9]{0,17}$/.test(url.searchParams.get('flag') ?? '') ? url.searchParams.get('flag') : null } : null,
     }, accountHref);

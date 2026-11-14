@@ -12,6 +12,7 @@
 // Mono, served by the console itself (src/admin/fonts.ts).
 import { SLOTLOCK_CONSOLE_TOKENS, SLOTLOCK_DASHBOARD_TOKENS, SLOTLOCK_ANNOUNCEMENT_BANNER_CSS, SLOTLOCK_BANNER_CSS, slotlockCssVars } from '../design-tokens.js';
 import { SLOTLOCK_ADMIN_FONTS } from './fonts.js';
+import { SLOTLOCK_AVATAR_TONES, slotlockShownPerson } from './people.js';
 
 /** Text that is already HTML: the template does not escape it again. */
 export class Html {
@@ -132,13 +133,22 @@ export interface Shell {
 }
 
 const isCurrent = (path: string, href: string) =>
-  href === '/' ? path === '/' : path === href || (path.startsWith(`${href}/`) && !(href === '/staff' && path.startsWith('/staff/log')));
+  href === '/' ? path === '/' : path === href || path.startsWith(`${href}/`);
+
+/**
+ * The nav item a page is in: the one whose href is the path, or the longest that is a section of
+ * it, so /staff/log marks Staff log alone and not Staff as well.
+ */
+export function currentNavHref(path: string, nav: readonly NavItem[]): string | null {
+  return nav.filter((item) => isCurrent(path, item.href)).reduce<string | null>((best, item) => (best === null || item.href.length > best.length ? item.href : best), null);
+}
 
 const FONT_PRELOAD = SLOTLOCK_ADMIN_FONTS[0]?.path ?? '';
 
 /** A page inside the console: sidebar, then one card with the top bar and the page. */
 export function layout(shell: Shell, body: Html): Html {
   const crumbs = shell.crumbs ?? [];
+  const current = currentNavHref(shell.path, shell.nav);
   return html`<!doctype html>
 <html lang="en-GB">
 <head>
@@ -158,11 +168,11 @@ ${shell.script ? html`<script src="${shell.script}" defer></script>` : ''}
     <a class="brand" href="/">${LOCKUP}<span class="badge">Admin</span></a>
     <nav class="nav" aria-label="Sections">
       ${shell.nav.map(
-        (item) => html`<a href="${item.href}"${item.group ? new Html(' class="gap"') : ''} ${isCurrent(shell.path, item.href) ? new Html('aria-current="page"') : ''}>${icon(item.icon ?? 'more')}<span>${item.label}</span>${item.count ? html`<span class="count">${item.count.toLocaleString('en-GB')}</span>` : ''}</a>`,
+        (item) => html`<a href="${item.href}"${item.group ? new Html(' class="gap"') : ''} ${item.href === current ? new Html('aria-current="page"') : ''}>${icon(item.icon ?? 'more')}<span>${item.label}</span>${item.count ? html`<span class="count">${item.count.toLocaleString('en-GB')}</span>` : ''}</a>`,
       )}
     </nav>
     <div class="side-foot">
-      ${avatar(shell.staff.login)}
+      <span class="avatar" aria-hidden="true">${initials(shell.staff.login)}</span>
       <p class="who"><strong>${shell.staff.login}</strong><span>${shell.staff.role}</span></p>
       <form method="post" action="/sign-out">
         <input type="hidden" name="csrf" value="${shell.csrf}">
@@ -242,22 +252,23 @@ export function chip(text: string, tone: 'plain' | 'info' | 'warn' = 'plain'): H
   return html`<span class="chip ${tone}">${text}</span>`;
 }
 
-/** Two letters for a name or a reference. */
+/** Two letters for a name or a reference: the first and last words' (people.ts). */
 export function initials(text: string): string {
-  const words = text
-    .replace(/^[a-z-]+:/i, '')
-    .split(/[\s._~:@/-]+/)
-    .filter(Boolean);
-  const letters = words.length >= 2 ? `${words[0]?.[0] ?? ''}${words[1]?.[0] ?? ''}` : (words[0] ?? text).slice(0, 2);
-  return letters.toUpperCase() || '·';
+  return slotlockShownPerson({ ref: text }).initials;
 }
 
-export function avatar(text: string, size: 'sm' | 'md' = 'md'): Html {
-  // A bare reference has no name to take letters from: a team, or a person.
+/**
+ * Initials on one of the avatar colours, picked from `key` (an account's or a member's reference)
+ * so the same one always looks the same; a bare reference, with no name to take letters from, shows
+ * a person or a team instead.
+ */
+export function avatar(text: string, size: 'sm' | 'md' = 'md', key: string = text): Html {
+  const tone = slotlockShownPerson({ ref: key }).tone;
+  const sized = size === 'sm' ? ' sm' : '';
   if (/^[a-z][a-z-]*:/.test(text)) {
-    return html`<span class="avatar ${size} glyph" aria-hidden="true">${icon(text.startsWith('team:') || text.startsWith('github-org:') || text.startsWith('partner:') ? 'accounts' : 'staff')}</span>`;
+    return html`<span class="avatar avatar-t${String(tone)}${sized} glyph" aria-hidden="true">${icon(text.startsWith('team:') || text.startsWith('github-org:') || text.startsWith('partner:') ? 'accounts' : 'staff')}</span>`;
   }
-  return html`<span class="avatar ${size}" aria-hidden="true">${initials(text)}</span>`;
+  return html`<span class="avatar avatar-t${String(tone)}${sized}" aria-hidden="true">${slotlockShownPerson({ ref: key, name: text }).initials}</span>`;
 }
 
 export interface AccountLike {
@@ -273,19 +284,19 @@ export interface AccountLike {
 }
 
 /**
- * An account in a table or a list: initials, its name (or, without one, its reference) and a muted
- * second line. name ?? display ?? reference, as everywhere in the console.
+ * An account (or a staff member) in a table or a list: initials on its colour, then name ?? display
+ * ?? reference (a link when it has a page), and a muted second line with the rest (people.ts).
  */
 export function accountCell(account: AccountLike): Html {
-  const label = account.name ?? account.display ?? null;
-  const shown = label ?? account.ref;
+  const shown = slotlockShownPerson({ ref: account.ref, name: account.name ?? null, display: account.display ?? null });
+  const named = shown.primary !== account.ref;
   const link = account.href
-    ? label
-      ? html`<a href="${account.href}">${label}</a>`
+    ? named
+      ? html`<a href="${account.href}">${shown.primary}</a>`
       : html`<a href="${account.href}" class="mono">${account.ref}</a>`
-    : html`<span class="${label ? '' : 'mono'}">${shown}</span>`;
-  const second = account.sub ?? (label ? html`<span class="mono">${account.ref}</span>` : null);
-  return html`<span class="ac">${avatar(shown)}<span class="ac-text">${link}${second ? html`<span class="sub">${second}</span>` : ''}</span></span>`;
+    : html`<span class="${named ? '' : 'mono'}">${shown.primary}</span>`;
+  const second = account.sub ?? shown.secondary;
+  return html`<span class="ac">${avatar(shown.primary, 'md', account.ref)}<span class="ac-text">${link}${second ? html`<span class="sub">${second}</span>` : ''}</span></span>`;
 }
 
 /** A copy button for a value: shown once the script runs. */
@@ -851,11 +862,12 @@ form.inline{display:inline;margin:0}
 .pill.warn{background:var(--warn-tint);color:var(--warn-ink)}.pill.warn::before{background:var(--warn)}
 .pill.bad{background:var(--bad-tint);color:var(--bad-ink)}.pill.bad::before{background:var(--bad)}
 .pill.info{background:var(--accent-tint);color:var(--accent-ink)}.pill.info::before{background:var(--accent)}
-.chip{display:inline-flex;align-items:center;height:20px;padding:0 6px;border-radius:var(--r-chip);background:var(--fill-2);color:var(--ink-2);font:500 11.5px/1 var(--font);white-space:nowrap;vertical-align:middle;text-transform:capitalize}
+.chip{display:inline-flex;align-items:center;height:20px;padding:0 6px;border-radius:var(--r-chip);background:var(--fill-2);color:var(--ink-2);font:500 11.5px/1 var(--font);white-space:nowrap;vertical-align:middle}
 .chip.info{background:var(--accent-tint);color:var(--accent-ink);text-transform:none}
 .chip.warn{background:var(--warn-tint);color:var(--warn-ink)}
 .avatar{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;border-radius:50%;background:var(--fill-2);color:var(--ink);font:600 11px/1 var(--font);letter-spacing:0}
 .avatar.sm{width:24px;height:24px;font-size:10px}
+${Array.from({ length: SLOTLOCK_AVATAR_TONES }, (_, tone) => `.avatar-t${tone}{background:var(--av${tone});color:var(--av${tone}-ink)}`).join('\n')}
 .avatar.glyph{color:var(--ink-2)}
 .avatar.glyph .ico{width:14px;height:14px}
 .ac{display:flex;align-items:center;gap:10px;min-width:0}
@@ -925,6 +937,9 @@ details.info>.pop{left:-8px;right:auto;font-size:12.5px;line-height:19px;color:v
 .callout p+p{margin-top:4px}
 .headline{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:24px}
 .headline-figure{font-size:40px;line-height:48px;font-weight:600;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.headline .stat-value{font-size:40px;line-height:48px;letter-spacing:-.03em}
+.headline .stat-note{font-size:13px;color:var(--ink-2)}
+.section-head h2 .stat-label{font:inherit;color:inherit;letter-spacing:inherit}
 .headline-text{font-size:20px;line-height:28px;font-weight:600;letter-spacing:-.02em}
 .anchors{position:sticky;top:0;z-index:2;display:flex;gap:4px;margin:-24px -24px 24px;padding:8px 24px;background:var(--card);border-bottom:1px solid var(--line-2);overflow-x:auto;scrollbar-width:none}
 .anchors a{display:inline-flex;align-items:center;height:28px;padding:0 10px;border-radius:999px;color:var(--ink-2);font-weight:500;white-space:nowrap}
@@ -950,7 +965,10 @@ details.info>.pop{left:-8px;right:auto;font-size:12.5px;line-height:19px;color:v
 .spark-area{fill:var(--accent-tint)}.spark-line{fill:none;stroke:var(--accent);stroke-width:1.5}
 .stats .meter{margin-top:8px}
 .stats.vertical{grid-template-columns:minmax(0,1fr)!important}
-.stats.vertical>li>a,.stats.vertical>li>div{flex-direction:row;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 12px;padding:12px 16px}
+.stats.vertical>li>a,.stats.vertical>li>div{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"label value" "foot value";align-items:center;gap:2px 12px;padding:12px 16px}
+.stats.vertical .stat-label{grid-area:label}
+.stats.vertical .stat-value{grid-area:value}
+.stats.vertical .stat-foot{grid-area:foot;min-height:0}
 .stats.vertical .stat-label{font-size:13px}
 .stats.vertical .stat-value{font-size:20px;line-height:28px}
 .pill.dot-only{width:8px;height:8px;padding:0;background:none;gap:0}
@@ -1048,7 +1066,7 @@ details.chip-filter>summary:hover{background:var(--fill)}
 details.chip-filter>summary .ico{width:14px;height:14px}
 details.chip-filter.on>summary{border-style:solid;background:var(--fill-2);color:var(--ink)}
 .chip-value{color:var(--accent-ink)}
-.chip-filter .menu-pop{min-width:200px}
+.chip-filter .menu-pop{min-width:200px;max-height:min(360px,60vh);overflow:auto}
 
 /* Records: the page, and an inspector beside it once the page is wide enough (1200px for a whole page) */
 .content,.split-item{container-type:inline-size}
@@ -1257,6 +1275,7 @@ tbody tr:hover td{background:none}
 .drawer{top:auto;left:0;right:0;bottom:0;width:auto;max-height:92vh;border-radius:var(--r-card) var(--r-card) 0 0}
 .split-item,.split-list{padding:16px}
 .headline-figure{font-size:32px;line-height:40px}
+.headline .stat-value{font-size:32px;line-height:40px}
 .toast{left:12px;right:12px;bottom:12px;max-width:none}
 }
 @media (prefers-reduced-motion:reduce){.toast.done{animation-duration:0s}}

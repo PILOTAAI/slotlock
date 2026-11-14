@@ -162,9 +162,10 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
         ] });
       }
       return reply({ has_more: false, data: [
-        ...Array.from({ length: 14 }, (_, index) => ({ id: `sub_d${index}`, status: 'active', created: month - index * 2_000_000, current_period_end: month + 2_000_000, items: { data: [{ price: price(1900, 'month'), quantity: 1 }] } })),
-        ...Array.from({ length: 5 }, (_, index) => ({ id: `sub_t${index}`, status: index === 4 ? 'past_due' : 'active', created: month - index * 3_000_000, current_period_end: month + 2_000_000, items: { data: [{ price: price(4900, 'month'), quantity: 1 }] } })),
-        { id: 'sub_c1', status: 'canceled', created: 1, canceled_at: month, items: { data: [{ price: price(1900, 'month') }] } },
+        // Slotlock's, as Checkout tags them: paying, one set to end, one in a trial, one past due, one ended.
+        ...Array.from({ length: 14 }, (_, index) => ({ id: `sub_d${index}`, status: 'active', created: month - index * 2_000_000, current_period_end: month + 2_000_000, cancel_at_period_end: index === 3, metadata: { tenant_ref: `github:${BASE + 10 + index}` }, items: { data: [{ price: price(1900, 'month'), quantity: 1 }] } })),
+        ...Array.from({ length: 5 }, (_, index) => ({ id: `sub_t${index}`, status: index === 4 ? 'past_due' : index === 3 ? 'trialing' : 'active', created: month - index * 3_000_000, current_period_end: month + 2_000_000, metadata: { tenant_ref: `github:${BASE + 30 + index}` }, items: { data: [{ price: price(4900, 'month'), quantity: 1 }] } })),
+        { id: 'sub_c1', status: 'canceled', created: 1, canceled_at: month, ended_at: month, metadata: { tenant_ref: `github:${BASE + 40}` }, items: { data: [{ price: price(1900, 'month') }] } },
       ] });
     }
     if (target.hostname === 'api.slotlock.test') return reply({ status: 'ready', version: '0.11.0', checks: ['database'] });
@@ -216,8 +217,10 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
     adminSql = postgres(Object.assign(new URL(target.href), { username: adminRole, password }).href, { max: 4, onnotice: () => undefined });
 
     // The accounts: five people and three teams, on every plan, one past due, with 90 days of use.
+    // People as their provider named them at their last sign-in: most with a name, one with a login only.
+    const NAMES = ['Ada Lovelace', 'Grace Hopper', 'Katherine Johnson', 'Alan Turing', null];
     for (const [index, person] of PEOPLE.entries()) {
-      await superuser`INSERT INTO slotlock.dashboard_people (person_ref, created_at) VALUES (${`github:${person.id}`}, ${new Date(clock - (index * 9 + 2) * 86_400_000)})`;
+      await superuser`INSERT INTO slotlock.dashboard_people (person_ref, created_at, name, display) VALUES (${`github:${person.id}`}, ${new Date(clock - (index * 9 + 2) * 86_400_000)}, ${NAMES[index] ?? null}, ${`@${person.login}`})`;
     }
     for (const [index, team] of TEAMS.entries()) {
       await superuser`INSERT INTO slotlock.workspaces (tenant_ref, handle, name, created_by, created_at) VALUES (${team.ref}, ${team.handle}, ${team.name}, ${ADA}, ${new Date(clock - (index * 13 + 5) * 86_400_000)})`;
@@ -227,9 +230,11 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
       [TEAMS[0]?.ref ?? '', 'team', 'active', 'cus_Northwind04'], [TEAMS[1]?.ref ?? '', 'developer', 'active', 'cus_Riverside05'],
     ];
     for (const [ref, plan, status, customer] of plans) {
+      // Riverside Clinic's Developer plan is set to end at its period's end.
       await superuser`
         INSERT INTO slotlock.tenant_plans (tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints, stripe_customer, stripe_subscription, current_period_end)
         VALUES (${ref}, ${plan}, ${status}, ${plan === 'team' ? 500 : 100}, ${plan === 'team' ? 50 : 10}, ${plan === 'team' ? 25 : 10}, ${customer}, ${customer ? `sub_${customer.slice(4)}` : null}, ${new Date(clock + 20 * 86_400_000)})`;
+      if (ref === TEAMS[1]?.ref) await superuser`UPDATE slotlock.tenant_plans SET ends_at = ${new Date(clock + 20 * 86_400_000)} WHERE tenant_ref = ${ref}`;
     }
     const usage: { tenant: string; day: string; metric: string; origin: string; count: number }[] = [];
     const users = [[ADA, 1400], [GRACE, 2600], [`github:${BASE + 2}`, 300], [TEAMS[0]?.ref ?? '', 4200], [TEAMS[1]?.ref ?? '', 800]] as const;

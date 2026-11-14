@@ -211,7 +211,7 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     const [no] = await adminSql<{ opened: unknown }[]>`SELECT slotlock.admin_sign_in(${STRANGER}, ${CONSOLE_KEY}) AS opened`;
     expect(no?.opened).toBeNull();
     const log = await adminSql<{ staff_ref: string; action: string }[]>`
-      SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20)`;
+      SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20, NULL, NULL, NULL, NULL, NULL, true)`;
     expect(log).toEqual(
       expect.arrayContaining([
         { staff_ref: OWNER, action: 'staff.signed_in' },
@@ -289,7 +289,9 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     await expect(adminSql`SELECT slotlock.admin_home(${STRANGER})`).rejects.toMatchObject({ code: '42501' });
     // A viewer sees the home numbers.
     const [home] = await adminSql<{ home: Record<string, unknown> }[]>`SELECT slotlock.admin_home(${await as(VIEWER)}) AS home`;
-    expect(home?.home).toMatchObject({ accounts: 2, people: 2, paying: 1, suspended: 1, operations_month: 40, bookings_month: 3 });
+    // The person's Developer plan names no subscription (as the default plan, or an override, gives
+    // one), so it is not paying (staff_subscribed_plans).
+    expect(home?.home).toMatchObject({ accounts: 2, people: 2, paying: 0, suspended: 1, operations_month: 40, bookings_month: 3 });
   });
 
   it('finds accounts by key, Stripe customer, GitHub id and reference, recording only a key prefix', async () => {
@@ -662,5 +664,22 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     expect(Object.keys(billing?.billing.runs ?? {})).toEqual(['billing_daily']);
     // Only the deployment role records a run.
     await expect(adminSql`SELECT slotlock.record_maintenance_run('billing_daily', 'cli:x', now(), false, '{}')`).rejects.toMatchObject({ code: '42501' });
+
+    // With overage on, billing daily reports it, and records that as the overage report's run too,
+    // so the console's Billing jobs never says that one has never run.
+    const daily = await cli(['billing', 'daily'], false, { SLOTLOCK_OVERAGE: 'on', STRIPE_SECRET_KEY: 'sk_test_billing_daily' });
+    expect(daily.code).toBe(0);
+    const [overage] = await superuser<{ actor: string; attention: boolean; summary: { months: { month: string; sent: number; failed: number }[] } }[]>`
+      SELECT actor, attention, summary FROM slotlock.maintenance_runs WHERE job = 'overage_report' ORDER BY id DESC LIMIT 1`;
+    expect(overage?.actor).toMatch(/^cli:/);
+    expect(overage?.attention).toBe(false);
+    expect(overage?.summary.months.map((month) => month.month)).toEqual(daily.lines.filter((line) => line.job === 'overage').map((line) => line.month));
+    const [both] = await adminSql<{ billing: { runs: Record<string, unknown> } }[]>`SELECT slotlock.admin_billing(${await as(OWNER)}) AS billing`;
+    expect(Object.keys(both?.billing.runs ?? {}).sort()).toEqual(['billing_daily', 'overage_report']);
+    // Without overage, nothing is reported, and no overage run is recorded.
+    const runs = async () => (await superuser`SELECT 1 FROM slotlock.maintenance_runs WHERE job = 'overage_report'`).length;
+    const reported = await runs();
+    expect((await cli(['billing', 'daily'])).code).toBe(0);
+    expect(await runs()).toBe(reported);
   });
 });

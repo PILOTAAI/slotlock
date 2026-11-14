@@ -18,11 +18,14 @@ const ASK_AGAIN_MS = 60_000;
  * workers/dashboard/released-schema-functions.json) nor listed here.
  */
 export const SLOTLOCK_OPTIONAL_SCHEMA_FUNCTIONS = [
+  'slotlock.dashboard_name(text,text)',
   'slotlock.note_billing_event(text,text,text,jsonb)',
   'slotlock.set_tenant_plan_overage(text,text,boolean)',
+  'slotlock.set_tenant_plan_renewal(text,text,timestamptz,boolean)',
   'slotlock.sso_session_started(text, bytea, timestamptz, text, text, uuid, integer)',
   'slotlock.tenant_dashboard_notices(text)',
   'slotlock.tenant_plan_overage(text)',
+  'slotlock.tenant_plans_of_customer(text)',
   'slotlock.tenant_suspension_notice(text)',
 ] as const;
 

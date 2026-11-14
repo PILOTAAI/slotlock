@@ -75,6 +75,10 @@ import {
   createSlotlockDashboardWorkspaces,
 } from '../../src/workspaces.js';
 import { SLOTLOCK_DEFAULT_OVERAGE_STOP_PERCENT } from '../../src/overage.js';
+// Bundled at build time (a Worker reads no file): the version this code is.
+import manifest from '../../package.json' with { type: 'json' };
+
+const SLOTLOCK_VERSION: string = manifest.version;
 
 /**
  * A Workers rate limiting binding (developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit,
@@ -463,6 +467,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           }
         : {}),
       ...(config.privacyUrl ? { privacyUrl: config.privacyUrl } : {}),
+      // The version of the code deployed, from the package.json it was bundled with: the staff
+      // console's System page reads it from the sign-in page's header.
+      version: SLOTLOCK_VERSION,
       availability: readAvailability(vars),
       // With SLOTLOCK_ASSISTANT_SECRET, the chat assistant; its tool calls reach Postgres through
       // the request's client like every other page, and are bounded by the client rate limit.

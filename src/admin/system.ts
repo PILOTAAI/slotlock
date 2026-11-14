@@ -426,7 +426,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
       host.up ? pill('Up', 'good') : html`${pill('Down', 'bad')}<span class="sub">${host.answer}</span>`,
       html`${host.version ? html`<code>${host.version}</code>` : '–'}`,
       html`${count(host.ms)} ms`,
-    ]), 'No hosts to check.'), { id: 'hosts', info: info('Hosts', 'Asked as this page opened, with a five-second limit. The public status page probes them from GitHub every ten minutes.') })}
+    ]), 'No hosts to check.'), { id: 'hosts', info: info('Hosts', 'Asked as this page opened, with a five-second limit. The public status page probes them every five minutes, from a Cloudflare Worker.') })}
 
     <section class="section" id="maintenance"><header class="section-head"><h2>Maintenance</h2></header>
       ${stats([

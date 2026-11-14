@@ -6,9 +6,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
   type SlotlockPlan,
   type SlotlockPlanStatus,
+  readSlotlockPlansOfCustomer,
   readSlotlockTenantPlan,
   setSlotlockTenantPlan,
   setSlotlockTenantPlanOverage,
+  setSlotlockTenantPlanRenewal,
 } from './plans.js';
 import { createSlotlockSchemaFunctions } from './schema-functions.js';
 import type { SlotlockSql } from './store.js';
@@ -163,16 +165,22 @@ const OWED = new Set([...LIVE, 'unpaid']);
 const REVIVABLE = new Set(['unpaid', 'incomplete']);
 
 /** Whether the subscription gives its tenant a plan. */
-export function slotlockSubscriptionIsLive(subscription: SlotlockStripeSubscription): boolean {
+export function slotlockSubscriptionIsLive(subscription: Pick<SlotlockStripeSubscription, 'status'>): boolean {
   return LIVE.has(subscription.status);
 }
+
+/** What says whether and when a subscription ends: its status, its cancellation, its period. */
+export type SlotlockSubscriptionTerm = Pick<
+  SlotlockStripeSubscription,
+  'status' | 'cancel_at' | 'cancel_at_period_end' | 'current_period_end'
+> & { items?: { data?: ReadonlyArray<{ current_period_end?: number | null }> } };
 
 /**
  * When a subscription that still gives its plan is set to end: its cancellation date, or the end of
  * the period it was cancelled at the end of. Null when it renews, or has already ended (then the
  * webhook has set the plan to Free).
  */
-export function slotlockSubscriptionEnding(subscription: SlotlockStripeSubscription): Date | null {
+export function slotlockSubscriptionEnding(subscription: SlotlockSubscriptionTerm): Date | null {
   if (!slotlockSubscriptionIsLive(subscription)) return null;
   if (typeof subscription.cancel_at === 'number') return new Date(subscription.cancel_at * 1000);
   if (subscription.cancel_at_period_end !== true) return null;
@@ -405,12 +413,13 @@ export function slotlockPlanOfSubscription(
 
 /**
  * Record what needs a person for the admin console (RFC 0006, M4): a failed payment, a duplicate
- * subscription, or a payment that recovered (which resolves the account's open payment alerts).
- * A schema or grants from before this release record nothing, as before.
+ * subscription, a refund that left the plan running, or a payment that recovered (which resolves
+ * the account's open payment alerts). A schema or grants from before this release record nothing,
+ * as before.
  */
 async function noteBillingEvent(
   sql: SlotlockSql,
-  happened: 'payment_failed' | 'duplicate_subscription' | 'payment_recovered',
+  happened: 'payment_failed' | 'duplicate_subscription' | 'refunded_plan_active' | 'payment_recovered',
   tenantRef: string,
   stripeObject: string,
   detail: Record<string, string | number | null> = {},
@@ -445,6 +454,56 @@ function failedInvoiceOf(event: unknown): { id: string; detail: Record<string, s
   };
 }
 
+/**
+ * A refunded charge, from a `charge.refunded` event, whose data.object is a Charge (Stripe's API
+ * reference, read 2026-11-14: the event "occurs whenever a charge is refunded, including partial
+ * refunds"; a Charge has `id` (ch_…, or py_… for some payment methods), `customer` (an id, or the
+ * customer expanded), `amount` and `amount_refunded` in the currency's smallest unit, `currency`,
+ * and `refunded`, true only once all of it is refunded). Only those few fields are kept: never the
+ * billing details or the card.
+ */
+function refundedChargeOf(event: unknown): { id: string; customer: string; detail: Record<string, string | number | boolean | null> } | null {
+  const object = (event as { data?: { object?: Record<string, unknown> } })?.data?.object;
+  if (!object || object.object !== 'charge' || typeof object.id !== 'string' || !/^(ch|py)_[A-Za-z0-9]{1,250}$/.test(object.id)) {
+    return null;
+  }
+  const customer = typeof object.customer === 'string' ? object.customer : (object.customer as { id?: unknown } | null | undefined)?.id;
+  if (typeof customer !== 'string' || !/^cus_[A-Za-z0-9]{1,250}$/.test(customer)) return null;
+  const number = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  return {
+    id: object.id,
+    customer,
+    detail: {
+      amount: number(object.amount),
+      amount_refunded: number(object.amount_refunded),
+      currency: typeof object.currency === 'string' && /^[a-z]{3}$/.test(object.currency) ? object.currency : null,
+      refunded: object.refunded === true,
+    },
+  };
+}
+
+/**
+ * A refund is for the people who run the service when it left a plan running: the customer got
+ * their money back and still has the plan, so a person ends it or says why not (RFC 0006, M4).
+ * Stripe's word on the subscription decides, not the database's: a cancellation made with the
+ * refund may arrive after it. True when an alert was noted.
+ */
+async function noteRefund(
+  deps: { sql: SlotlockSql; stripe: SlotlockStripe },
+  charge: NonNullable<ReturnType<typeof refundedChargeOf>>,
+): Promise<boolean> {
+  const plans = await readSlotlockPlansOfCustomer(deps.sql, charge.customer);
+  let noted = false;
+  for (const plan of plans ?? []) {
+    if (plan.plan === 'free' || plan.status === 'canceled' || !plan.stripeSubscription || plan.endsAt) continue;
+    const subscription = await deps.stripe.subscription(plan.stripeSubscription);
+    if (!slotlockSubscriptionIsLive(subscription) || slotlockSubscriptionEnding(subscription)) continue;
+    await noteBillingEvent(deps.sql, 'refunded_plan_active', plan.tenantRef, charge.id, { ...charge.detail, subscription: subscription.id });
+    noted = true;
+  }
+  return noted;
+}
+
 /** The subscription a webhook event is about, if any. */
 function subscriptionOf(event: unknown): string | null {
   const object = (event as { data?: { object?: Record<string, unknown> } })?.data?.object;
@@ -464,7 +523,8 @@ function subscriptionOf(event: unknown): string | null {
 /**
  * Handles one Stripe webhook delivery: checks its signature, then, for any event about a
  * subscription, reads that subscription from Stripe (not the event, which may be stale or arrive out
- * of order) and sets its tenant's plan. A tenant that bought twice (two tabs, before either webhook
+ * of order) and sets its tenant's plan, with when it ends if it is set to. A refund
+ * (`charge.refunded`) that left a plan running is noted for the people who run the service. A tenant that bought twice (two tabs, before either webhook
  * arrived) keeps Developer until its last live subscription ends, and the second purchase is
  * reported through `onDuplicate`, by subscription ids only, for a refund. An erased account gets no
  * plan back; a subscription of its that could still bill is reported through `onErased`, by its id
@@ -501,6 +561,16 @@ export async function handleSlotlockStripeWebhook(
     event = JSON.parse(body);
   } catch {
     return text(400, 'Not JSON.');
+  }
+  if ((event as { type?: unknown } | null)?.type === 'charge.refunded') {
+    const charge = refundedChargeOf(event);
+    if (!charge) return text(200, 'Ignored.');
+    try {
+      return text(200, (await noteRefund(deps, charge)) ? 'Noted.' : 'Ignored.');
+    } catch (error) {
+      deps.onError?.(error);
+      return text(500, 'Try again.');
+    }
   }
   const id = subscriptionOf(event);
   if (!id) return text(200, 'Ignored.');
@@ -554,6 +624,13 @@ export async function handleSlotlockStripeWebhook(
         tenantRef,
         stripeSubscription: billable,
         metered: deps.stripe.carriesOverage?.(chosen) === true,
+      });
+      // When it ends, if it is set to: the staff console's figures and its accounts read it.
+      await setSlotlockTenantPlanRenewal(deps.sql, {
+        tenantRef,
+        stripeSubscription: billable,
+        endsAt: slotlockSubscriptionEnding(chosen),
+        trialing: chosen.status === 'trialing',
       });
     }
     // For the people who run the service (RFC 0006, M4): a payment that failed, or one that

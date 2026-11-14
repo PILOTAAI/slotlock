@@ -11,7 +11,8 @@
 //      (transfer_lookup_key). Each product's default price becomes its monthly one, and every other
 //      licensed price of the product is archived: subscriptions on it carry on, and no one new can
 //      buy it. Metered prices (overage) are left alone.
-//   3. The webhook endpoint at <dashboard>/stripe/webhook, with every event the dashboard acts on.
+//   3. The webhook endpoint at <dashboard>/stripe/webhook, with every event the dashboard acts on
+//      (an endpoint that exists gets the events it lacks, and keeps the rest).
 //      Its signing secret exists only when Stripe creates the endpoint: with --dashboard-worker
 //      <name>, it goes to that Worker as STRIPE_WEBHOOK_SECRET through `wrangler secret put`, on
 //      stdin; without, the script says where Stripe shows it. It is never printed.
@@ -88,7 +89,11 @@ const PLANS = [
 const CURRENCY = 'gbp';
 /** The reasons the cancellation survey offers (Stripe's own list). */
 const CANCEL_REASONS = ['customer_service', 'low_quality', 'missing_features', 'other', 'switched_service', 'too_complex', 'too_expensive', 'unused'];
-/** What the dashboard's webhook acts on (src/billing.ts). */
+/**
+ * What the dashboard's webhook acts on (src/billing.ts): a subscription's events, and a refund
+ * (charge.refunded), which it notes for the staff console when it left a plan running. An endpoint
+ * made before an event was added gets it on the next run, its other events kept.
+ */
 const EVENTS = [
   'checkout.session.completed',
   'customer.subscription.created',
@@ -96,6 +101,7 @@ const EVENTS = [
   'customer.subscription.deleted',
   'invoice.paid',
   'invoice.payment_failed',
+  'charge.refunded',
 ];
 
 class Failure extends Error {}

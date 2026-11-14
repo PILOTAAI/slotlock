@@ -18,9 +18,9 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 ## Start
 
 1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub or Google account. With
-   GitHub, Slotlock reads your public profile and keeps only your user id and login; it asks for
-   your verified email addresses only when you accept an invitation sent to one. With Google, it
-   reads your account's id and email address, and keeps only those. By signing in you agree to the
+   GitHub, Slotlock reads your public profile and keeps only your user id, login and profile name;
+   it asks for your verified email addresses only when you accept an invitation sent to one. With
+   Google, it reads your account's id, email address and name, and keeps only those. By signing in you agree to the
    [Terms of Service](/TERMS.md) and the [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 2. Add your resources and their weekly hours, then create an API key: **Read only** for an agent
    that only looks, **Read and write** for an agent that books, **Full** for an application that

@@ -1082,6 +1082,11 @@ export interface SlotlockDashboardOptions {
   /** The privacy notice the sign-in page links, an https URL. */
   privacyUrl?: string;
   /**
+   * The Slotlock version the dashboard runs, sent as X-Slotlock-Version on its pages so the staff
+   * console's System page can say what is deployed (the Worker passes package.json's).
+   */
+  version?: string;
+  /**
    * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
    * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
    * `publicUrl`.
@@ -2316,6 +2321,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
   const hsts: Record<string, string> =
     publicUrl.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+  const versionHeader: Record<string, string> =
+    options.version && /^[0-9A-Za-z.+-]{1,40}$/.test(options.version) ? { 'X-Slotlock-Version': options.version } : {};
   const service = new URL(options.serviceUrl ?? options.publicUrl);
   const serviceRoot = `${service.origin}${service.pathname.replace(/\/$/, '')}`;
   const mcpUrl = `${serviceRoot}/mcp`;
@@ -2703,6 +2710,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
         'Referrer-Policy': REFERRER_POLICY,
         'Cross-Origin-Opener-Policy': 'same-origin',
         ...hsts,
+        ...versionHeader,
         ...headers,
       },
     });
@@ -9056,7 +9064,7 @@ ${
     return null;
   }
 
-  async function readGitHubUser(token: string): Promise<{ uid: string; login: string } | null> {
+  async function readGitHubUser(token: string): Promise<{ uid: string; login: string; name: string | null } | null> {
     const response = await fetchImpl(userUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -9081,7 +9089,8 @@ ${
     ) {
       return null;
     }
-    return { uid: String(body.id), login: body.login };
+    // The profile's name, null when the person gave none (GET /user).
+    return { uid: String(body.id), login: body.login, name: typeof body.name === 'string' ? body.name : null };
   }
 
   /** The addresses GitHub verified for the token's person, lower-cased; none when it does not say. */
@@ -9172,7 +9181,9 @@ ${
       client_id: provider.clientId,
       redirect_uri: callbackUrl,
       response_type: 'code',
-      scope: 'openid email',
+      // `profile` for the name claim, which Google gives only with it (developers.google.com/identity/
+      // openid-connect/openid-connect, read 2026-11-14): kept beside the email for the staff console.
+      scope: 'openid email profile',
       state,
       nonce,
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
@@ -9202,7 +9213,7 @@ ${
     code: string,
     verifier: string,
     nonce: string,
-  ): Promise<{ uid: string; login: string; idp: 'google'; hd?: string } | null> {
+  ): Promise<{ uid: string; login: string; idp: 'google'; name: string | null; hd?: string } | null> {
     try {
       const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -9248,7 +9259,9 @@ ${
           : 'Google account';
       // A Google Workspace account names its domain (hd); a consumer account names none.
       const hd = typeof claims.hd === 'string' && /^[a-z0-9.-]{1,253}$/i.test(claims.hd) ? claims.hd.toLowerCase() : undefined;
-      return { uid: claims.sub, login: email, idp: 'google', ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
+      // The name claim (OpenID Connect Core 1.0, 5.1), with the email's scopes when Google gives it.
+      const name = typeof claims.name === 'string' ? claims.name : null;
+      return { uid: claims.sub, login: email, idp: 'google', name, ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
     } catch (error) {
       report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
       return null;
@@ -9259,7 +9272,7 @@ ${
     code: string,
     verifier: string,
     emails = false,
-  ): Promise<{ uid: string; login: string; orgs?: Organization[]; emails?: string[] } | null> {
+  ): Promise<{ uid: string; login: string; name: string | null; orgs?: Organization[]; emails?: string[] } | null> {
     try {
       const token = await exchangeCode(code, verifier);
       if (token === null) return null;
@@ -9310,7 +9323,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
+    let user: { uid: string; login: string; name: string | null; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -9363,9 +9376,11 @@ ${
             : user.orgs.map((org) => ({ id: org.id, role: org.role === 'admin' ? ('admin' as const) : ('member' as const) })),
         )
       : undefined;
-    // How the person is shown to the others in their teams: their GitHub login, or Google's verified email.
+    // How the person is shown to the others in their teams: their GitHub login, or Google's verified
+    // email; and the name their provider gives, for the staff console (cleaned, slotlockPersonName).
     if (teamStore) {
       await teamStore.setDisplay(person, user.idp === 'google' ? (user.login.includes('@') ? user.login : null) : `@${user.login}`);
+      await teamStore.setName?.(person, user.name);
     }
     // Of the addresses GitHub verified, only the invitation being opened's is kept, to accept it.
     let em: string[] | undefined;

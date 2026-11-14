@@ -83,7 +83,9 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const JWKS = { keys: [{ ...signing.publicKey.export({ format: 'jwk' }), kid: 'teams-key', alg: 'RS256', use: 'sig' }] };
-  let googleClaims: { nonce: string; email: string; verified: unknown } = { nonce: '', email: '', verified: true };
+  let googleClaims: { nonce: string; email: string; verified: unknown; name?: unknown } = { nonce: '', email: '', verified: true };
+  /** The profile name GitHub gives each person, by their sign-in code: none unless a test sets one. */
+  const githubNames = new Map<string, unknown>();
   const tenants: string[] = [];
   let admin: ReturnType<typeof postgres>;
   let application: ReturnType<typeof postgres>;
@@ -100,6 +102,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
         sub: googleSubject,
         email: googleClaims.email,
         email_verified: googleClaims.verified,
+        ...(googleClaims.name !== undefined ? { name: googleClaims.name } : {}),
         nonce: googleClaims.nonce,
         exp: Math.floor(Date.now() / 1000) + 3600,
       })}`;
@@ -109,10 +112,12 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     if (target.endsWith('/access_token')) {
       return Response.json({ access_token: `gho_${new URLSearchParams(String(init.body)).get('code')}` });
     }
-    const who = github.get(String(new Headers(init.headers).get('authorization')).replace('Bearer gho_', ''));
+    const code = String(new Headers(init.headers).get('authorization')).replace('Bearer gho_', '');
+    const who = github.get(code);
     if (!who) return new Response('no', { status: 401 });
     if (target.endsWith('/user/emails')) return Response.json(who.emails.map((entry) => ({ ...entry, primary: false })));
-    return Response.json({ id: who.id, login: who.login });
+    // GET /user: `name` is the profile's name, null when the person gave none.
+    return Response.json({ id: who.id, login: who.login, name: githubNames.has(code) ? githubNames.get(code) : null });
   };
 
   /** Signs the browser in with GitHub as `code`'s person, asking for `query` as the link would. */
@@ -123,10 +128,10 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(callback.status).toBe(303);
     return { location, callback };
   }
-  async function signInWithGoogle(browser: Browser, email: string, verified: unknown, query = '') {
+  async function signInWithGoogle(browser: Browser, email: string, verified: unknown, query = '', name?: unknown) {
     const start = await browser.get(`/dashboard/sign-in?with=google${query}`);
     const location = new URL(start.headers.get('location') ?? '');
-    googleClaims = { nonce: location.searchParams.get('nonce') ?? '', email, verified };
+    googleClaims = { nonce: location.searchParams.get('nonce') ?? '', email, verified, ...(name !== undefined ? { name } : {}) };
     return browser.get(`/dashboard/callback?code=g&state=${location.searchParams.get('state')}`);
   }
   /** The link the members page showed once, after an invitation. */
@@ -185,6 +190,65 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
     await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
     await admin.end();
+  });
+
+  it("keeps the name each provider gives beside the display, cleaned, and erasing the person takes both", async () => {
+    const shown = async (ref: string) =>
+      (await admin<{ display: string | null; name: string | null }[]>`
+        SELECT display, name FROM slotlock.dashboard_people WHERE person_ref = ${ref}`)[0];
+    const gus = `github:${github.get('gus')?.id}`;
+    // Control and bidirectional-text characters out (a right-to-left override would reorder what
+    // the console shows around the name), trimmed, at most 80 characters.
+    githubNames.set('gus', '  Gus \u202Egnihtemos\u202C Gibbs\u0007  ');
+    await signIn(new Browser(dashboard), 'gus');
+    expect(await shown(gus)).toEqual({ display: '@gus', name: 'Gus gnihtemos Gibbs' });
+    githubNames.set('gus', `Gus ${'x'.repeat(100)}`);
+    await signIn(new Browser(dashboard), 'gus');
+    expect((await shown(gus))?.name).toBe(`Gus ${'x'.repeat(76)}`);
+    // Removed from the profile: removed here at the next sign-in.
+    githubNames.delete('gus');
+    await signIn(new Browser(dashboard), 'gus');
+    expect(await shown(gus)).toEqual({ display: '@gus', name: null });
+    githubNames.set('gus', { not: 'a name' });
+    await signIn(new Browser(dashboard), 'gus');
+    expect((await shown(gus))?.name).toBeNull();
+    // The database keeps only a clean name, whoever calls it, and never refuses one: anything else
+    // is kept as no name, and nothing is cut (in any encoding, cutting could split a character).
+    await admin`SELECT slotlock.dashboard_name(${gus}, ${'  Ada Lovelace  '})`;
+    expect((await shown(gus))?.name).toBe('Ada Lovelace');
+    // Beyond ASCII where the database sees characters (UTF-8, as every deployment's should be); in
+    // one that sees bytes (SQL_ASCII), a name it cannot check is kept as none.
+    const [encoding] = await admin<{ utf8: boolean }[]>`SELECT getdatabaseencoding() = 'UTF8' AS utf8`;
+    await admin`SELECT slotlock.dashboard_name(${gus}, ${'Zoë Ōkubo'})`;
+    expect((await shown(gus))?.name).toBe(encoding?.utf8 ? 'Zoë Ōkubo' : null);
+    for (const unclean of ['Gus\u0007', 'Gus \u202Egnihtemos', 'y'.repeat(81)]) {
+      await admin`SELECT slotlock.dashboard_name(${gus}, ${unclean})`;
+      expect((await shown(gus))?.name, JSON.stringify(unclean)).toBeNull();
+    }
+
+    // Google's name claim, beside the address Google verified.
+    expect((await signInWithGoogle(new Browser(dashboard), 'grace@acme.example', true, '', 'Grace Hopper')).status).toBe(303);
+    expect(await shown(`google:${googleSubject}`)).toMatchObject({ display: 'grace@acme.example', name: 'Grace Hopper' });
+
+    // Erasing the person (as their own request, staff's or the operator's does) takes the name and
+    // the display with their row; a sign-in afterwards starts afresh.
+    githubNames.set('gus', 'Gus Gibbs');
+    await signIn(new Browser(dashboard), 'gus');
+    expect((await shown(gus))?.name).toBe('Gus Gibbs');
+    await admin`SELECT * FROM slotlock.erase_tenant(${gus}::text)`;
+    expect(await shown(gus)).toBeUndefined();
+    expect(await admin`SELECT 1 FROM slotlock.dashboard_people WHERE name = 'Gus Gibbs' OR display = '@gus'`).toHaveLength(0);
+
+    // A database from before this release cannot keep a name: sign-in works as before.
+    await admin.begin(async (tx) => {
+      await tx`DROP FUNCTION slotlock.dashboard_name(text, text)`;
+      const store = createSlotlockDashboardWorkspaces(tx as unknown as typeof admin).teams;
+      await expect(store?.setName?.(gus, 'Gus Gibbs')).resolves.toBeUndefined();
+      throw new Error('rolled back');
+    }).catch((error: unknown) => {
+      if ((error as Error).message !== 'rolled back') throw error;
+    });
+    githubNames.delete('gus');
   });
 
   it('lets a Google-only person invited by email join, by a link that consumes nothing until then', async () => {

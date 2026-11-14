@@ -76,6 +76,7 @@ const PAIRS: [string, string[], number, string][] = [
   ['c2', ['card'], 3, 'chart series 2'],
   ['c3', ['card'], 3, 'chart series 3'],
   ['c4', ['card'], 3, 'chart series 4'],
+  ...Array.from({ length: 8 }, (_, tone): [string, string[], number, string] => [`av${tone}-ink`, [`av${tone}`, 'card'], 4.5, `avatar initials, colour ${tone}`]),
 ];
 
 describe('design tokens', () => {
