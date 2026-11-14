@@ -254,6 +254,8 @@ const ACCEPT = 'image/png,image/jpeg,image/webp,image/avif,image/gif,video/mp4,v
 const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   saved: { kind: 'done', text: 'Saved as a draft on its pull request. The site’s checks are running on it.' },
   submitted: { kind: 'done', text: 'Submitted. An Owner can publish it once the checks on GitHub pass.' },
+  // An Owner reviews their own posts, so for them the step is "Ready to publish", not a review.
+  ready: { kind: 'done', text: 'Ready to publish. Publish it once the checks on GitHub pass.' },
   image_added: { kind: 'done', text: 'File added. Insert it into the post from Media.' },
   image_removed: { kind: 'done', text: 'File deleted from the post.' },
   renamed: { kind: 'done', text: 'Renamed on a new pull request, with redirects from the old address. Publish it to make the change live.' },
@@ -271,7 +273,7 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   rename_draft: { kind: 'warn', text: 'Only a published post with no open draft is renamed here. Discard or publish the draft first.' },
   changed: { kind: 'warn', text: 'The pull request changed since you opened the page. Look at it again, then publish.' },
   not_content: { kind: 'warn', text: 'That pull request changes more than this post: files outside the blog, another post, or redirects a rename did not write. The console does not merge it; review and merge it on GitHub.' },
-  not_submitted: { kind: 'warn', text: 'It is still a draft. Submit it for review first.' },
+  not_submitted: { kind: 'warn', text: 'It is still a draft. Choose Ready to publish first.' },
   checks_pending: { kind: 'warn', text: 'Its checks on GitHub have not all finished. Publish when they pass.' },
   checks_failing: { kind: 'warn', text: 'A check failed, on GitHub or in the console. Fix the post, then publish.' },
   merge_refused: { kind: 'warn', text: 'GitHub would not merge it: a branch rule or a conflict stops it. Open the pull request to see why.' },
@@ -599,12 +601,13 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
   }
 
   // ---------- Pages ----------
-  const statusPill = (state: { post: ParsedPost | null; pull: SlotlockCmsPullRequest | null; schedule: { sha: string } | null; onMain: ParsedPost | null }) => {
+  const statusPill = (state: { post: ParsedPost | null; pull: SlotlockCmsPullRequest | null; schedule: { sha: string } | null; onMain: ParsedPost | null }, canPublish: boolean) => {
     if (state.pull) {
       if (state.pull.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL)) {
         return state.schedule ? pill('Scheduled', 'info') : pill('Labelled, not scheduled here', 'warn');
       }
-      return state.post?.front.status === 'published' ? pill('In review', 'info') : pill('Draft', 'muted');
+      if (state.post?.front.status === 'published') return pill(canPublish ? 'Ready to publish' : 'In review', 'info');
+      return pill('Draft', 'muted');
     }
     if (state.onMain) return isLive(state.onMain, now()) ? pill('Published', 'good') : pill(state.onMain.front.status === 'draft' ? 'Draft on main' : 'Waiting for its date', 'warn');
     return pill('Draft', 'muted');
@@ -623,6 +626,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
 
   async function listPage(context: SlotlockCmsRequest, url: URL): Promise<Response> {
     const github = requireGithub();
+    const canPublish = slotlockStaffMay(context.role, 'content.publish');
     const pulls = (await github.pullRequests()).slice(0, 50);
     const slugOfPull = (pull: SlotlockCmsPullRequest) => pull.branch.slice('cms/'.length);
     const snap = await github.snapshot({
@@ -666,7 +670,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       ], 'views')}
       ${table('Posts', ['Post', 'Status', 'Checks', 'Author', 'Updated'], shown.map((row) => [
         html`<span class="ac-text"><a href="/content/${row.slug}">${row.post?.front.title ?? row.slug}</a><span class="sub mono">/blog/${row.slug}/</span></span>`,
-        html`${statusPill(row)}${row.schedule && row.pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">${row.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`,
+        html`${statusPill(row, canPublish)}${row.schedule && row.pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">${row.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`,
         row.pull ? html`${checksPill(row.checks)}<span class="sub"><a href="${row.pull.url}" rel="noreferrer">#${row.pull.number}</a></span>` : html`–`,
         html`${row.post?.front.author ?? '–'}`,
         html`${row.post ? day(row.post.front.updated ?? row.post.front.date) : '–'}`,
@@ -715,7 +719,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     const publishing = Boolean(slug && state && pull && canPublish);
     const actions = html`
       <button class="btn" type="submit" form="post-form" name="intent" value="save">Save draft</button>
-      <button class="btn${publishing ? '' : ' primary'}" type="submit" form="post-form" name="intent" value="submit">Submit for review</button>
+      <button class="btn${publishing ? '' : ' primary'}" type="submit" form="post-form" name="intent" value="submit">${canPublish ? 'Ready to publish' : 'Submit for review'}</button>
       ${publishing && state && pull ? html`<form class="inline publish" method="post" action="/content/${state.slug}/publish">
           <input type="hidden" name="csrf" value="${context.csrf}">
           <input type="hidden" name="sha" value="${pull.headSha}">
@@ -723,7 +727,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
         </form>` : ''}`;
     const statusFacts = slug && state ? html`<section>
         ${facts([
-          ['Status', html`${statusPill(state)}${state.schedule && pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">For ${state.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`],
+          ['Status', html`${statusPill(state, canPublish)}${state.schedule && pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">For ${state.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`],
           pull ? ['Pull request', html`<a href="${pull.url}" rel="noreferrer">#${pull.number}</a> ${checksPill(state.checks)}`] : null,
           pull && previewUrl(pull, slug) ? ['Preview deploy', html`<a href="${previewUrl(pull, slug) ?? ''}" rel="noreferrer">The whole site, with this post</a>`] : null,
           state.onMain && isLive(state.onMain, now()) ? ['Live', html`<a href="${site}/blog/${slug}/" rel="noreferrer">${site.replace('https://', '')}/blog/${slug}/</a>`] : null,
@@ -800,7 +804,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       ${dialogs()}`;
     return withMedia(context.page(state?.post?.front.title || (slug ?? 'New post'), '/content', body, input.notice, input.status ?? 200, {
       crumbs: [{ label: 'Content', href: '/content' }],
-      ...(state ? { pills: html`${statusPill(state)}${pull ? checksPill(state.checks) : ''}` } : {}),
+      ...(state ? { pills: html`${statusPill(state, canPublish)}${pull ? checksPill(state.checks) : ''}` } : {}),
       actions,
     }));
   }
@@ -913,7 +917,8 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     }
     const evaluation = await evaluate(made.post, state.context);
     if (intent === 'submit' && evaluation.checks.some((check) => !check.ok)) {
-      return editorPage(context, { state: shown, postContext: state.context, fields, evaluation, problem: 'Not submitted: fix the checks marked ✗, or save it as a draft.', status: 422 });
+      const problem = `${slotlockStaffMay(context.role, 'content.publish') ? 'Not ready' : 'Not submitted'}: fix the checks marked ✗, or save it as a draft.`;
+      return editorPage(context, { state: shown, postContext: state.context, fields, evaluation, problem, status: 422 });
     }
     await context.record(intent === 'submit' ? 'content.submitted' : 'content.saved', slug, state.pull ? { pr: state.pull.number } : {});
     try {
@@ -948,7 +953,8 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       return editorPage(context, { state: shown, postContext: state.context, fields, evaluation, ...(NOTICES.github ? { notice: NOTICES.github } : {}), status: 502 });
     }
     contexts.delete(slug);
-    return back(context, `/content/${slug}`, intent === 'submit' ? 'submitted' : 'saved', true);
+    const done = intent === 'save' ? 'saved' : slotlockStaffMay(context.role, 'content.publish') ? 'ready' : 'submitted';
+    return back(context, `/content/${slug}`, done, true);
   }
 
   async function preview(request: Request, context: SlotlockCmsRequest): Promise<Response> {

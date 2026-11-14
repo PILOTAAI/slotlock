@@ -26,7 +26,7 @@ const url = process.env.DATABASE_URL?.trim();
 const require_ = createRequire(import.meta.url);
 
 interface PwRoute {
-  request(): { url(): string; method(): string; headers(): Record<string, string>; postDataBuffer(): Buffer | null };
+  request(): { url(): string; method(): string; allHeaders(): Promise<Record<string, string>>; postDataBuffer(): Buffer | null };
   fulfill(response: { status: number; headers: Record<string, string>; body: Buffer }): Promise<void>;
 }
 interface PwLocator {
@@ -193,12 +193,14 @@ describe.skipIf(!url || !chromium)('the post editor in a browser: paste, toolbar
         });
         return;
       }
-      const sent = request.headers();
+      const sent = await request.allHeaders();
       const headers: Record<string, string> = {};
       for (const name of ['content-type', 'accept', 'x-slotlock-admin', 'range', 'if-range']) if (sent[name]) headers[name] = sent[name] as string;
       const body = request.postDataBuffer();
       if (body) headers['content-length'] = String(body.length);
-      let response = await editor.request(`${asked.pathname}${asked.search}`, { method: request.method(), headers, ...(body ? { body: new Uint8Array(body) } : {}) });
+      // The Origin Chromium itself sent, not one made up here: the console refuses a POST from anywhere
+      // else, and the page's Referrer-Policy decides what a form's POST carries (null under no-referrer).
+      let response = await editor.request(`${asked.pathname}${asked.search}`, { method: request.method(), headers, origin: sent.origin ?? null, ...(body ? { body: new Uint8Array(body) } : {}) });
       // A form's redirect is followed here: Chromium does not follow a redirect fulfilled for a POST navigation.
       if (response.status === 303 && response.headers.get('location')) response = await editor.request(response.headers.get('location') as string);
       const out: Record<string, string> = {};
