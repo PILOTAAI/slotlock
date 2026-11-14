@@ -148,6 +148,28 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
     expect(await adminSql`SELECT staff_ref, login FROM slotlock.admin_staff(${session})`).toEqual([{ staff_ref: 'github:7101', login: null }]);
   });
 
+  it('clears a name kept under the earlier, looser check that the stricter one refuses, then validates it', async () => {
+    // As the first form of this release's check left it: ASCII's controls only.
+    await sql.unsafe(`
+      ALTER TABLE slotlock.dashboard_people DROP CONSTRAINT slotlock_dashboard_people_name_valid;
+      ALTER TABLE slotlock.dashboard_people ADD CONSTRAINT slotlock_dashboard_people_name_valid
+        CHECK (name IS NULL OR (char_length(name) BETWEEN 1 AND 80 AND name = btrim(name)
+                                AND name !~ '[\\u0001-\\u001F\\u007F]'))`);
+    await sql`INSERT INTO slotlock.dashboard_people (person_ref, display, name) VALUES
+      ('github:7002', '@hidden', ${'Ada\u200BLovelace'}), ('github:7003', '@kept', 'Grace Hopper')`;
+    await createSlotlockStore(sql).applySchema();
+    expect(await sql`SELECT person_ref, name FROM slotlock.dashboard_people WHERE person_ref IN ('github:7002', 'github:7003') ORDER BY person_ref`).toEqual([
+      { person_ref: 'github:7002', name: null },
+      { person_ref: 'github:7003', name: 'Grace Hopper' },
+    ]);
+    const [check] = await sql<{ valid: boolean; definition: string }[]>`
+      SELECT convalidated AS valid, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+       WHERE conname = 'slotlock_dashboard_people_name_valid'`;
+    expect(check?.valid).toBe(true);
+    expect(check?.definition).toContain('getdatabaseencoding');
+    await expect(sql`UPDATE slotlock.dashboard_people SET name = ${'Ada\u00ADLovelace'} WHERE person_ref = 'github:7003'`).rejects.toMatchObject({ code: '23514' });
+  });
+
   it('changes nothing when it runs again: no function is dropped and made again', async () => {
     const signatures = [
       'slotlock.staff_directory()',

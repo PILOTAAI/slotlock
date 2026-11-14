@@ -42,8 +42,9 @@ versioning.
   `node scripts/configure-stripe.mjs` (it adds the event to an existing endpoint and keeps its
   others), and `slotlock migrate`; the launch check now expects the event.
 - **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
-  Google gives is kept beside the login or email (`dashboard_people.name`, without control or
-  text-direction characters, at most 80 characters) and erased with the person. Google sign-in asks
+  Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
+  (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at
+  most 80 characters) and erased with the person. Google sign-in asks
   for the `profile` scope, which its name claim needs. The console shows each account by its name,
   else its login or email, else its reference, with initials and a second line, and finds accounts
   by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched

@@ -281,6 +281,15 @@ export const SLOTLOCK_DASHBOARD_TABLES = Object.freeze([
   ...SLOTLOCK_SCIM_TABLES,
 ] as const);
 
+/**
+ * What a person's kept name may not hold beyond ASCII, as a PostgreSQL regular expression for a
+ * UTF-8 database: C1 controls, and Unicode's format characters (Cf: the bidirectional controls,
+ * zero-width characters, the soft hyphen, the byte order mark, tags) and line and paragraph
+ * separators (Zl, Zp), as Unicode 17 has them. The dashboard removes the same, and ASCII's controls
+ * (workspaces.ts slotlockPersonName); workspaces-names.unit.test.ts keeps the two the same.
+ */
+export const SLOTLOCK_NAME_UNSHOWN_PATTERN = String.raw`[\u0080-\u009F\u00AD\u0600-\u0605\u061C\u06DD\u070F\u0890-\u0891\u08E2\u180E\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB\U000110BD\U000110CD\U00013430-\U0001343F\U0001BCA0-\U0001BCA3\U0001D173-\U0001D17A\U000E0001\U000E0020-\U000E007F]`;
+
 /** The SECURITY DEFINER functions through which the serving role reaches the dashboard's records. */
 export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.use_dashboard_token(text, bytea, timestamptz, bytea)',
@@ -1482,9 +1491,10 @@ $slotlock_people_display$;
 -- The name the person's provider gives (GitHub's profile name, Google's name claim), as they last
 -- signed in, for the staff console to show an account by: never an identifier, and gone with the
 -- person's row when they are erased (erase_tenant). The dashboard cleans it (workspaces.ts
--- slotlockPersonName: no control or bidirectional-text characters, trimmed, 80 characters) and
--- dashboard_name keeps only a name that passes; this check holds what reads the same in any
--- encoding (no ASCII control character).
+-- slotlockPersonName: no control, format, bidirectional-text or separator characters, trimmed, 80
+-- characters) and dashboard_name keeps only a name that passes. This check holds the same: ASCII's
+-- controls in any encoding, and the rest (SLOTLOCK_NAME_UNSHOWN_PATTERN) in a UTF-8 database, where
+-- a pattern sees characters; in another, dashboard_name keeps only plain ASCII.
 ALTER TABLE slotlock.dashboard_people ADD COLUMN IF NOT EXISTS name text;
 DO $slotlock_people_name$
 BEGIN
@@ -1492,11 +1502,20 @@ BEGIN
     SELECT 1 FROM pg_constraint
      WHERE conname = 'slotlock_dashboard_people_name_valid'
        AND conrelid = 'slotlock.dashboard_people'::regclass
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%getdatabaseencoding%'
   ) THEN
-    -- NOT VALID: the column is new, and DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after.
+    -- A name kept under an earlier, looser check that this one refuses is cleared (the next sign-in
+    -- keeps it again, cleaned), so the check can be validated over every row.
+    UPDATE slotlock.dashboard_people person SET name = NULL
+     WHERE person.name ~ '[\\u0001-\\u001F\\u007F]'
+        OR (pg_catalog.getdatabaseencoding() = 'UTF8' AND person.name ~ '${SLOTLOCK_NAME_UNSHOWN_PATTERN}');
+    ALTER TABLE slotlock.dashboard_people DROP CONSTRAINT IF EXISTS slotlock_dashboard_people_name_valid;
+    -- NOT VALID: DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after the migration.
     ALTER TABLE slotlock.dashboard_people ADD CONSTRAINT slotlock_dashboard_people_name_valid
       CHECK (name IS NULL OR (char_length(name) BETWEEN 1 AND 80 AND name = btrim(name)
-                              AND name !~ '[\\u0001-\\u001F\\u007F]')) NOT VALID;
+                              AND name !~ '[\\u0001-\\u001F\\u007F]'
+                              AND (pg_catalog.getdatabaseencoding() <> 'UTF8'
+                                   OR name !~ '${SLOTLOCK_NAME_UNSHOWN_PATTERN}'))) NOT VALID;
   END IF;
 END
 $slotlock_people_name$;
@@ -1580,7 +1599,8 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[9]} FROM PUBLIC;
 
 -- A person's name as their provider gives it, cleaned by the dashboard (slotlockPersonName), at
 -- sign-in; none clears it. A name that is not clean is kept as none, never refused, so sign-in
--- cannot fail on it: over 80 characters, or holding a control or bidirectional-text character. In
+-- cannot fail on it: over 80 characters, or holding a control, format (bidirectional, zero-width,
+-- soft hyphen, byte order mark, tag) or line or paragraph separator character. In
 -- a UTF-8 database a pattern sees characters; in another (SQL_ASCII) it sees bytes, where only
 -- plain ASCII can be told apart, so only such a name is kept there. Nothing is cut here: in a
 -- database of another encoding, cutting could split a character.
@@ -1596,7 +1616,7 @@ DECLARE
 BEGIN
   IF kept IS NOT NULL AND (char_length(kept) > 80 OR kept ~ '[\\u0001-\\u001F\\u007F]'
       OR CASE WHEN pg_catalog.getdatabaseencoding() = 'UTF8'
-              THEN kept ~ '[\\u0080-\\u009F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]'
+              THEN kept ~ '${SLOTLOCK_NAME_UNSHOWN_PATTERN}'
               ELSE kept ~ '[^\\u0020-\\u007E]' END) THEN
     kept := NULL;
   END IF;

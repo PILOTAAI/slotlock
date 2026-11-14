@@ -459,12 +459,16 @@ const digest = (token: Buffer) => {
   return token;
 };
 
-/** Control characters, and Unicode's bidirectional-text controls, which reorder text around them. */
-const UNSHOWN = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+/**
+ * Control characters (Cc), format characters (Cf: the bidirectional controls that reorder text
+ * around them, zero-width characters, the soft hyphen, the byte order mark, tags), and line and
+ * paragraph separators (Zl, Zp). The database refuses the same (ddl.ts SLOTLOCK_NAME_UNSHOWN_PATTERN).
+ */
+const UNSHOWN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
 /**
- * A person's name as a provider gives it, made safe to keep and show: a string, without control or
- * bidirectional-text characters, trimmed, at most 80 characters; null for none.
+ * A person's name as a provider gives it, made safe to keep and show: a string, without control,
+ * format or separator characters, trimmed, at most 80 characters; null for none.
  */
 export function slotlockPersonName(value: unknown): string | null {
   if (typeof value !== 'string') return null;
