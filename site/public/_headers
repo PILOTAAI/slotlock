@@ -10,9 +10,13 @@
 # no 'unsafe-eval'. One third party: Cloudflare Web Analytics, which the zone injects and which
 # sets no cookie (PRIVACY.md; docs/rfc/0005-search.md, D3): its script from
 # static.cloudflareinsights.com, its beacon to cloudflareinsights.com.
+# A blog post's videos are its own files (media-src 'self'), and the only frames are the two video
+# players a post may embed (src/lib/post-format.ts, POST_EMBED_ORIGINS): YouTube's privacy-enhanced
+# youtube-nocookie.com and Vimeo's player, each sandboxed by the page. postbuild.mjs fails the build
+# on any other frame or a video from elsewhere.
 
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self' https://static.cloudflareinsights.com __SCRIPT_HASHES__; style-src 'self' __STYLE_HASHES__; style-src-attr __STYLE_ATTR_HASHES__; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cloudflareinsights.com; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'none'; script-src 'self' https://static.cloudflareinsights.com __SCRIPT_HASHES__; style-src 'self' __STYLE_HASHES__; style-src-attr __STYLE_ATTR_HASHES__; img-src 'self' data:; media-src 'self'; frame-src https://www.youtube-nocookie.com https://player.vimeo.com; font-src 'self'; connect-src 'self' https://cloudflareinsights.com; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin

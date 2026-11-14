@@ -1,7 +1,8 @@
 # CI: the full suite (vitest, build, packed-artifact verification) against PostgreSQL 16 on the
 # Node.js versions the README supports; the database suites again on PostgreSQL 17 (the major the
-# hosted service runs) and on the PostgreSQL 18 image docker-compose.yml pulls; a smoke test of the
-# server image; the language clients against it; and the Docker Compose quickstart, end to end.
+# hosted service runs) and on the PostgreSQL 18 image docker-compose.yml pulls; the admin console in
+# Chromium; a smoke test of the server image; the language clients against it; and the Docker
+# Compose quickstart, end to end.
 name: CI
 
 on:
@@ -97,6 +98,55 @@ jobs:
       - run: npm ci
       # Every *.integration.test.ts file; vitest runs them one file at a time (vitest.config.ts).
       - run: npx vitest run .integration.test.ts
+
+  # Every page of the admin console in Chromium, at three widths in both themes, under its CSP and
+  # axe-core (src/__tests__/admin-console-visual.integration.test.ts). The other jobs install no
+  # browser, so the file skips there; here SLOTLOCK_BROWSER_TESTS=required makes a browser that does
+  # not start a failure. Chromium is the build the playwright dev dependency's pinned version drives.
+  browser:
+    name: Admin console in a browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: slotlock_ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: slotlock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=slotlock_ci --dbname=slotlock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium for the pinned Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Every console page in Chromium
+        env:
+          SLOTLOCK_BROWSER_TESTS: required
+          SLOTLOCK_ADMIN_SHOTS: ${{ runner.temp }}/admin-shots
+        run: npx vitest run src/__tests__/admin-console-visual.integration.test.ts
+      - name: Keep the screenshots
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: admin-console-screenshots
+          path: ${{ runner.temp }}/admin-shots
+          if-no-files-found: ignore
+          retention-days: 14
 
   image:
     name: Docker image
@@ -345,14 +395,14 @@ jobs:
 
   # The one check the "Protect main" ruleset requires from this workflow (scripts/configure-github.sh,
   # with DCO's Signed-off-by): it passes only when every job above passed, so the client suites, the
-  # database suites on each PostgreSQL and the quickstart gate merges, and a job added here is
-  # required without touching the ruleset. Its needs list every other job (release-infrastructure
-  # test).
+  # database suites on each PostgreSQL, the console in a browser and the quickstart gate merges, and
+  # a job added here is required without touching the ruleset. Its needs list every other job
+  # (release-infrastructure test).
   passed:
     name: CI passed
     # A required check that is skipped counts as passing, so this runs whatever the jobs did.
     if: always()
-    needs: [test, postgres, image, clients, compose]
+    needs: [test, postgres, browser, image, clients, compose]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

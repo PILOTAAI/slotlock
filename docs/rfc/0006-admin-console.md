@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built; an AI security pre-review's findings are fixed (Part 7, after Phase 6). They wait for the independent security review, which must be a person's, and the owner's Phase 0 settings, which `scripts/configure-admin-console.mjs` makes. |
+| Status | Accepted (2026-11-11): the owner took the recommendations for E1 to E8. All six phases are built; an AI security pre-review's findings are fixed (Part 7, after Phase 6). They wait for the independent security review, which must be a person's, and the owner's Phase 0 settings, which `scripts/configure-admin-console.mjs` makes. 2026-11-14: no "Slotlock CMS" App. Content, the status page, both Deploys panels and the CMS schedule use the release app, the project's one GitHub App, which gains issues write and actions, checks and statuses read. The console has a private key of its own, and needs only the App's Client ID with it (Part 7, Owner settings). |
 | Target | Phase 0 (owner settings) first; then six phases, each shipped and reviewed on its own |
 | Decision | GOVERNANCE.md: this changes tenancy and security boundaries (staff can act across tenants), so it needs this RFC, the maintainer's approval and, while there is one maintainer, an independent security review of each phase. The owner's calls are in Part 7. |
 
@@ -361,8 +361,9 @@ lint, the SEO check and a strict CSP.
 3. **Open Graph images.** `og-images.mjs` reads titles from the posts' frontmatter, and the site's
    CI draws any missing image (Playwright, cached) before the build. Nobody commits an image by
    hand.
-4. **Publishing.** A GitHub App, "Slotlock CMS", installed on PILOTAAI/slotlock only, with
-   contents and pull requests write.
+4. **Publishing.** A GitHub App installed on PILOTAAI/slotlock only, with contents and pull
+   requests write: the release app (decided 2026-11-14, Part 7, Owner settings), not one of its
+   own.
    - **Submit** commits the post and its images to `cms/<slug>`, authored and signed off as the
      staff member, so the DCO check passes. It then opens a pull request, which runs the site's
      checks.
@@ -394,7 +395,7 @@ afford.
 - **Search Console and Bing**: a Google service account with read access to the property, and a
   Bing API key, both read-only.
 - **Cloudflare**: an API token that reads Web Analytics, Workers deploys and Access audit logs.
-- **GitHub**: the CMS App above, and read access to deploys and the status issues.
+- **GitHub**: the release app above, which also reads deploys and keeps the status issues.
 - Every external read is cached for an hour in Postgres (`admin_cache`), so the console stays fast
   and within the providers' quotas. Every secret is a Worker secret, never in the repository.
 
@@ -451,7 +452,7 @@ cards, eyebrow, title and lede):
 | XSS through a post | No raw HTML in Markdown; a strict CSP on the site and the console |
 | A leaked database credential | `slotlock_admin_app` can only call the admin functions; each takes a staff session's token, which the database opens only for the console's key (kept as a digest the role cannot read), so the credential alone acts as no one |
 | Bulk export of customer data | Lists capped at 100 rows a call; the account export only through a privacy request; CSV export of the directory for Owner and Billing only, and logged |
-| The CMS App's token | Scoped to one repository; it can open and merge pull requests, and the site's checks still run |
+| The release app's console key | A key of the console's own, revocable alone; tokens scoped to one repository; it can open and merge pull requests, and main's required checks still run (SECURITY.md, Admin console) |
 
 **Before the console goes live**
 
@@ -477,7 +478,7 @@ so the estimates below include them.
 
 | Phase | Scope | Done when | Estimate |
 | --- | --- | --- | --- |
-| **0. Owner settings** | Cloudflare Access application for `admin.slotlock.pylota.io` with GitHub; the "Slotlock CMS" GitHub App; a Hyperdrive configuration for `slotlock_admin_app`; DNS; the Worker's secrets, the console's key (`slotlock staff console-key`) among them; decisions E1 to E8 | Access blocks a non-staff GitHub account | An hour |
+| **0. Owner settings** | Cloudflare Access application for `admin.slotlock.pylota.io` with GitHub; the release app's permissions and a key of it for the console; a Hyperdrive configuration for `slotlock_admin_app`; DNS; the Worker's secrets, the console's key (`slotlock staff console-key`) among them; decisions E1 to E8 | Access blocks a non-staff GitHub account | An hour |
 | **1. Foundation and directory** | `workers/admin` and `src/admin/`; staff tables, sign-in (Access JWT, GitHub, passkey), roles, staff log; `account_directory` and its backfill; M0 shell with ⌘K; M1 Home (numbers, health); M2 Accounts; M3 Account detail, read-only; M12 staff list | Support can find any account by login, key prefix or Stripe id and see its plan, usage, keys and audit log; every view is in the staff log | 1 to 2 weeks |
 | **2. Support actions** | Suspend and unsuspend with a reason and a customer message; revoke keys; end sessions; notes; abuse cases (M6); staff actions in the customer's audit log; CLI operator commands audited | A suspension made in the console shows in the customer's dashboard and audit log, and in the staff log | 1 week |
 | **3. Billing and usage** | Stripe reads (M4); failed and duplicate payments; `billing daily` and `overage report` on a schedule, shown on Home; plan overrides and temporary allowances (M5); partner month close | An override changes the account's limits at once and ends on its date; a failed payment appears on Home within the hour | 1 week |
@@ -639,9 +640,11 @@ The month close stays in `billing daily`, which the deployment schedules. It sen
 through Stripe with a write key, and the console holds only a key that reads (4.6). The console
 shows each partner's month instead.
 
-The database keeps no GitHub login or email for a person, only the numeric id, and that does not
-change. The console reads logins from GitHub's public profile API when it shows or searches an
-account, and caches them for an hour. PRIVACY.md says so before the console goes live.
+The console shows a person by what the dashboard keeps from their last sign-in while team
+workspaces are offered (`dashboard_people`: their GitHub login or verified Google email, and from
+14 November 2026 their provider's name), and a staff member by the GitHub login kept at their last
+console sign-in; it asks GitHub's public profile API only for a searched login the database does
+not hold, and caches that for an hour. PRIVACY.md says so.
 
 **Where Phase 4 stands.** The CMS is built and tested. Its done-when holds, end to end against a
 fake GitHub and a real site build: an Editor writes a post with an image in the console, an Owner
@@ -691,14 +694,20 @@ sitemap entry, with the copy lint and the SEO check clean.
   (`site/wrangler.preview.jsonc`) with `noindex` on every page. It runs on `workflow_run`, so always
   as main has it: a pull request cannot change the workflow that holds the Cloudflare token. It
   checks out main for Wrangler and takes the build only as files.
-- **Owner settings (Phase 0).** The Slotlock CMS GitHub App (permissions in
-  `workers/admin/wrangler.jsonc`), its key on the console's Worker and on the `cms` environment,
-  and the preview Worker with its `site-preview` environment (limited to main, where
-  `workflow_run` runs). `CMS_APP_ID`, `CMS_APP_INSTALLATION` and `SITE_PREVIEW_HOST` are repository
-  variables, which a job's condition can read. `scripts/configure-github.sh` creates both
-  environments. `scripts/configure-admin-console.mjs go-live` creates the App, stores its key in the
-  Worker and the `cms` environment, and sets `CMS_APP_ID` and `CMS_APP_INSTALLATION`; `prepare` sets
-  `SITE_PREVIEW_HOST`. The preview Worker and its Cloudflare token are set by hand.
+- **Owner settings (Phase 0).** No GitHub App of the console's own (decided 2026-11-14). The release
+  app (`scripts/create-release-app.mjs`) is the one App: Release a version, `cms-schedule.yml` and
+  the console each mint tokens from it with only their own part of its permissions. It holds
+  contents, pull requests and issues write, and actions, checks and statuses read (permissions in
+  `scripts/github-app-manifest.mjs`). The owner adds the new ones in the App's settings and accepts
+  them on its installation. `cms-schedule.yml` runs in the `release-app` environment with
+  `RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY`; the `cms` environment and the `CMS_APP_*`
+  settings are gone. The console's Worker gets a second private key of the App, so either key can be
+  revoked alone. With it the Worker needs only the App's Client ID (`SLOTLOCK_ADMIN_CMS_APP_ID`) and
+  finds the installation itself. `scripts/configure-admin-console.mjs go-live`, given that key, checks
+  the App's permissions and its installation before it stores the key in the Worker, and says what to
+  change on GitHub when they are not right. `prepare` sets `SITE_PREVIEW_HOST`. The preview Worker
+  with its `site-preview` environment (limited to main, where `workflow_run` runs) and its Cloudflare
+  token are set by hand.
 
 Left for later phases:
 
@@ -785,7 +794,7 @@ runs.
     and keeps that promise. Email stays out until there is a reason to hold addresses.
   - **The status page**: its incidents are issues labelled `status` (docs/hosted/status.md). The
     console lists the open ones and the last ten resolved, opens one, and posts an update to one
-    or closes it, through the Slotlock CMS App, which now needs Issues (read and write). It refuses
+    or closes it, through the release app, which now needs Issues (read and write). It refuses
     any issue that is not open and labelled `status`. Each step is in the staff log before GitHub is
     asked.
 - **System (M11).**

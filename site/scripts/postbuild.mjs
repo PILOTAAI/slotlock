@@ -8,6 +8,8 @@
 //    JSON-LD (<script type="application/ld+json">) is data, never run, and CSP does not apply to it.
 // 3. Write the hashes into dist/_headers and check every line fits Cloudflare's 2,000 characters.
 // 4. Fail if a built stylesheet ships -webkit-backdrop-filter without backdrop-filter beside it.
+// 5. Fail if a frame comes from a host the CSP's frame-src does not name, or has no sandbox, or a
+//    blog post's picture or video is not a file the build put in dist (a post's media are its own).
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
@@ -38,6 +40,8 @@ const attrs = new Set();
 const problems = [];
 const ids = new Map();
 const links = [];
+const frames = [];
+const media = [];
 let pages = 0;
 
 for await (const file of htmlFiles(DIST)) {
@@ -61,6 +65,10 @@ for await (const file of htmlFiles(DIST)) {
     attrs.add(sha(decode(match[1])));
   }
   ids.set(page, new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => decode(m[1]))));
+  for (const match of html.matchAll(/<iframe\b([^>]*)>/g)) frames.push({ page, attributes: match[1] });
+  if (page.startsWith('/blog/')) {
+    for (const match of html.matchAll(/<(img|video|source)\b[^>]*?\ssrc="([^"]+)"/g)) media.push({ page, tag: match[1], src: decode(match[2]) });
+  }
   for (const match of html.matchAll(/\shref="([^"]+)"/g)) {
     const href = decode(match[1]);
     if (href.startsWith('/') || href.startsWith('#')) links.push({ page, href });
@@ -143,6 +151,30 @@ if (unpaired.length > 0) {
 
 const headersPath = join(DIST, '_headers');
 const template = await readFile(headersPath, 'utf8');
+
+// The frames a page may hold are the CSP's frame-src, and each is sandboxed; a post's pictures and
+// videos are files of the site.
+const frameSrc = /frame-src ([^;]+);/.exec(template)?.[1].trim().split(/\s+/) ?? [];
+const outside = [];
+for (const { page, attributes } of frames) {
+  const src = decode(/\ssrc="([^"]+)"/.exec(attributes)?.[1] ?? '');
+  let origin = '';
+  try {
+    origin = new URL(src).origin;
+  } catch {
+    origin = '';
+  }
+  if (!frameSrc.includes(origin)) outside.push(`${page}: a frame from ${src || 'nowhere'}, not in frame-src (${frameSrc.join(' ') || 'none'})`);
+  if (!/\ssandbox="[^"]*"/.test(attributes)) outside.push(`${page}: a frame from ${src} without a sandbox`);
+}
+for (const { page, tag, src } of media) {
+  if (!src.startsWith('/') || src.startsWith('//')) outside.push(`${page}: <${tag}> from ${src}, not a file of the site`);
+  else if (!(await exists(join(DIST, decodeURIComponent(src.split('?')[0]))))) outside.push(`${page}: <${tag}> ${src} is not in dist`);
+}
+if (outside.length > 0) {
+  console.error(`postbuild: ${outside.length} frame(s) or media the pages may not load:\n  ${outside.join('\n  ')}`);
+  process.exit(1);
+}
 for (const placeholder of ['__SCRIPT_HASHES__', '__STYLE_HASHES__', '__STYLE_ATTR_HASHES__']) {
   if (!template.includes(placeholder)) {
     console.error(`postbuild: public/_headers lost its ${placeholder} placeholder`);

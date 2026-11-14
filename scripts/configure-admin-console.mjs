@@ -13,15 +13,19 @@
 //       the addresses in SLOTLOCK_ADMIN_ACCESS_EMAILS. An application already there is kept as it is.
 //     - workers/admin/wrangler.deploy.jsonc: wrangler.jsonc with those values. It holds no secret.
 //
-//   node scripts/configure-admin-console.mjs go-live [--dry-run] [--no-open]
+//   node scripts/configure-admin-console.mjs go-live [--dry-run]
 //     From 14 November 2026, when PRIVACY.md's staff sections take effect; refused before then.
 //     - Deploys the Worker, which answers 503 until its secrets are set.
 //     - Sets the secrets it lacks with `wrangler secret bulk`, on stdin: a new session secret; the
 //       console's GitHub OAuth app's client ID and secret; the console's key, from
 //       `slotlock staff console-key`; and, if given, a restricted Stripe key.
-//     - Creates the "Slotlock CMS" GitHub App (two clicks in the browser), unless CMS_APP_ID is set.
-//       Its key goes to the Worker and to the cms environment, then CMS_APP_ID and
-//       CMS_APP_INSTALLATION are set, and the Worker is deployed again with them.
+//     - Adopts the release app (scripts/create-release-app.mjs), the one GitHub App, for Content, the
+//       status page and Deploys: no new App. Given SLOTLOCK_ADMIN_CMS_APP_KEY_FILE, a private key
+//       of the app generated for the console alone, it first checks, signed in as the app, that the
+//       app asks for exactly what the console needs and its installation has accepted that and
+//       reaches PILOTAAI/slotlock alone, and says what an owner changes on GitHub when not; then it
+//       stores the key in the Worker (nowhere else) and the app's Client ID in the config, and
+//       deploys again. The console finds the installation itself.
 //     - Adds each person in SLOTLOCK_ADMIN_OWNERS who is not staff yet as an Owner, and prints
 //       their one-time code for their first passkey.
 //
@@ -50,6 +54,9 @@
 //                              what the config already has
 //   SLOTLOCK_ADMIN_OWNERS      go-live: the first Owners' GitHub logins, comma-separated (two, so
 //                              erasure can be approved)
+//   SLOTLOCK_ADMIN_CMS_APP_KEY_FILE  go-live, optional: the downloaded .pem of a private key of the
+//                              release app made for the console (not the release workflow's). Once
+//                              the Worker holds it, delete the file
 //   SLOTLOCK_ADMIN_GITHUB_CLIENT_ID, SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET, SLOTLOCK_ADMIN_STRIPE_KEY,
 //   SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN
 //                              go-live: read from the environment when set, else asked for without
@@ -58,8 +65,8 @@
 // It also needs gh logged in as an owner of PILOTAAI, `npm ci` in workers/admin (Wrangler) and
 // `npm run build` here (the slotlock CLI). For tests: SLOTLOCK_CLI, SLOTLOCK_WRANGLER,
 // SLOTLOCK_CLOUDFLARE_API_URL, SLOTLOCK_ADMIN_CONFIG, SLOTLOCK_ADMIN_ROLE,
-// SLOTLOCK_ADMIN_SETUP_TODAY (a YYYY-MM-DD date in place of today), SLOTLOCK_CONFIGURE_GITHUB and
-// those of scripts/github-app-manifest.mjs.
+// SLOTLOCK_ADMIN_SETUP_TODAY (a YYYY-MM-DD date in place of today) and those of
+// scripts/github-app-manifest.mjs.
 //
 // Cloudflare endpoints and fields read from developers.cloudflare.com/api on 2026-11-12:
 //   resources/zero_trust/subresources/access/subresources/applications/methods/create and list
@@ -75,11 +82,11 @@ import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 import {
   Failure,
-  createAppFromManifest,
+  RELEASE_APP,
+  checkAdoptedApp,
   ghGet,
   ghSet,
   listPermissions,
-  onlyMainDeploys,
   web,
 } from './github-app-manifest.mjs';
 
@@ -92,17 +99,9 @@ const ACCESS_APP_NAME = 'Slotlock admin console';
 const ACCESS_POLICY_NAME = 'Slotlock staff (admin console)';
 /** An Access session lasts as long as the console's own, after its passkey. */
 const SESSION = '8h';
-const CMS_ENVIRONMENT = 'cms';
-const CMS_APP_NAME = 'PILOTAAI Slotlock CMS';
-// As workers/admin/wrangler.jsonc lists them. GitHub adds metadata: read to every app.
-const CMS_PERMISSIONS = {
-  actions: 'read',
-  checks: 'read',
-  contents: 'write',
-  issues: 'write',
-  pull_requests: 'write',
-  statuses: 'read',
-};
+// The console's GitHub App is the release app, with every permission its users need between them
+// (scripts/github-app-manifest.mjs). GitHub adds metadata: read to every app.
+const APP_PERMISSIONS = RELEASE_APP.permissions;
 const DEFAULT_ROLE = 'slotlock_admin_app';
 const MAX_EMAILS = 50;
 
@@ -119,20 +118,17 @@ const cliCommand = process.env.SLOTLOCK_CLI
 const wranglerCommand = process.env.SLOTLOCK_WRANGLER
   ? [process.env.SLOTLOCK_WRANGLER]
   : [join(root, 'workers', 'admin', 'node_modules', '.bin', 'wrangler')];
-const configureScript =
-  process.env.SLOTLOCK_CONFIGURE_GITHUB || join(root, 'scripts', 'configure-github.sh');
 
 function usage() {
-  return 'usage: node scripts/configure-admin-console.mjs prepare|go-live [--dry-run] [--no-open]';
+  return 'usage: node scripts/configure-admin-console.mjs prepare|go-live [--dry-run]';
 }
 
 function parseArguments(argv) {
   const [command, ...rest] = argv;
   if (command !== 'prepare' && command !== 'go-live') return null;
-  const options = { command, dryRun: false, open: true };
+  const options = { command, dryRun: false };
   for (const argument of rest) {
     if (argument === '--dry-run') options.dryRun = true;
-    else if (argument === '--no-open' && command === 'go-live') options.open = false;
     else return null;
   }
   return options;
@@ -154,6 +150,8 @@ function need(name, what) {
 const HYPERDRIVE_ID = /^[0-9a-f]{32}$/;
 const AUDIENCE = /^[0-9a-f]{16,128}$/;
 const GITHUB_ID = /^[1-9][0-9]{0,15}$/;
+/** A GitHub App's Client ID, or its numeric App ID in an older config. */
+const APP_ISSUER = /^(?:[1-9][0-9]{0,15}|Iv[0-9A-Za-z._-]{4,60})$/;
 /** A Cloudflare account id or a Web Analytics site tag. */
 const HEX32 = /^[0-9a-f]{32}$/;
 const HOST = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
@@ -523,8 +521,8 @@ function checkValues(values) {
     ["Hyperdrive's configuration id", values.hyperdrive, HYPERDRIVE_ID, false],
     ["Access's team domain", values.teamDomain, HOST, false],
     ["the Access application's Audience tag", values.aud, AUDIENCE, false],
-    ["the CMS App's id", values.cmsAppId, GITHUB_ID, true],
-    ["the CMS App's installation id", values.cmsInstallation, GITHUB_ID, true],
+    ["the release app's Client ID", values.cmsAppId, APP_ISSUER, true],
+    ["the release app's installation id", values.cmsInstallation, GITHUB_ID, true],
     ['the site preview host', values.previewHost, HOST, true],
     ['the Web Analytics site tag', values.analyticsSite, HEX32, true],
     ["the Web Analytics site's account", values.analyticsAccount, HEX32, true],
@@ -590,6 +588,14 @@ function webAnalytics(account) {
   const value = (name) => new RegExp(`"${name}": "([0-9a-f]{32})"`).exec(text)?.[1];
   const kept = { site: value('SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE'), account: value('SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT') };
   return kept.site && kept.account ? { ...kept, kept: true } : { site: undefined, account: undefined, kept: false };
+}
+
+/** The release app's Client ID and installation a config already holds, or nothing. */
+function keptCms() {
+  if (!existsSync(configPath)) return {};
+  const text = readFileSync(configPath, 'utf8');
+  const value = (name) => new RegExp(`"${name}": "([^"]*)"`).exec(text)?.[1] || undefined;
+  return { cmsAppId: value('SLOTLOCK_ADMIN_CMS_APP_ID'), cmsInstallation: value('SLOTLOCK_ADMIN_CMS_INSTALLATION') };
 }
 
 /** The values a written config holds, to deploy with or to rewrite. */
@@ -702,8 +708,8 @@ async function prepare(options) {
     teamDomain: access.teamDomain,
     aud: access.aud,
     previewHost: previewHost ?? repositoryVariable('SITE_PREVIEW_HOST'),
-    cmsAppId: repositoryVariable('CMS_APP_ID'),
-    cmsInstallation: repositoryVariable('CMS_APP_INSTALLATION'),
+    // go-live sets the release app's, once it has checked the app: kept as the config has them.
+    ...keptCms(),
     analyticsSite: analytics.site,
     analyticsAccount: analytics.account,
   };
@@ -733,40 +739,63 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-/** The cms environment exists and only main deploys to it. */
-function cmsEnvironment() {
-  let only = onlyMainDeploys(OWNER, REPO, CMS_ENVIRONMENT);
-  if (only === null) {
-    console.log(`The ${CMS_ENVIRONMENT} environment does not exist: running ${configureScript}.`);
-    const configured = spawnSync('bash', [configureScript], {
-      stdio: 'inherit',
-      env: { ...process.env, SKIP_SITE_SECRETS: '1' },
-    });
-    if (configured.status !== 0) throw new Failure(`${configureScript} failed.`);
-    only = onlyMainDeploys(OWNER, REPO, CMS_ENVIRONMENT);
+/** The release app's Client ID, as create-release-app.mjs stored it in the release-app environment. */
+function releaseAppClientId() {
+  const stored = ghGet(
+    `repos/${OWNER}/${REPO}/environments/${RELEASE_APP.environment}/variables/${RELEASE_APP.clientIdVariable}`,
+  )?.value;
+  if (stored === undefined || stored === null || stored === '') return undefined;
+  if (typeof stored !== 'string' || !APP_ISSUER.test(stored)) {
+    throw new Failure(`${RELEASE_APP.clientIdVariable} in the ${RELEASE_APP.environment} environment is not a GitHub App's Client ID.`);
   }
-  if (!only) {
-    throw new Failure(
-      `Only main may deploy to ${CMS_ENVIRONMENT}, and it ${only === null ? 'does not exist' : 'allows more'}: run ${configureScript}, which limits it.`,
-    );
-  }
+  return stored;
 }
 
-export function cmsAppManifest(base) {
-  return {
-    name: CMS_APP_NAME,
-    url: `https://github.com/${OWNER}/${REPO}`,
-    description:
-      "Saves, schedules and publishes the blog's posts for the Slotlock admin console, and keeps its status page (RFC 0006).",
-    hook_attributes: { url: 'https://slotlock.pylota.io/', active: false },
-    redirect_url: `${base}/created`,
-    setup_url: `${base}/installed`,
-    public: false,
-    default_permissions: CMS_PERMISSIONS,
-    default_events: [],
-    request_oauth_on_install: false,
-    setup_on_update: false,
-  };
+/**
+ * The release app for the console: its Client ID and, given SLOTLOCK_ADMIN_CMS_APP_KEY_FILE, the
+ * console's own key of it, once that key has shown the app is fit for the console. Fails, before
+ * anything is deployed, with what an owner changes on GitHub when it is not. Null when no release
+ * app is stored and no key was given.
+ */
+async function releaseAppForConsole() {
+  const keyFile = optional('SLOTLOCK_ADMIN_CMS_APP_KEY_FILE');
+  const clientId = releaseAppClientId();
+  if (!clientId) {
+    if (keyFile) {
+      throw new Failure(
+        `No release app is stored (${RELEASE_APP.clientIdVariable} in the ${RELEASE_APP.environment} environment): an owner of ${OWNER} runs node scripts/create-release-app.mjs first.`,
+      );
+    }
+    return null;
+  }
+  if (!keyFile) return { clientId, pem: '', keyFile: '' };
+  let pem = '';
+  try {
+    pem = readFileSync(keyFile, 'utf8');
+  } catch (error) {
+    throw new Failure(`Could not read ${keyFile}: ${error.code ?? error.message}.`);
+  }
+  if (!/-----BEGIN (RSA )?PRIVATE KEY-----/.test(pem)) {
+    throw new Failure(`${keyFile} is not a private key (.pem) of a GitHub App.`);
+  }
+  const checked = await checkAdoptedApp({
+    owner: OWNER,
+    repo: REPO,
+    clientId,
+    pem,
+    permissions: APP_PERMISSIONS,
+    agent: 'slotlock-configure-admin-console',
+  });
+  if (checked.steps.length > 0) {
+    throw new Failure(
+      [
+        `The release app (${checked.app.slug}) cannot serve the console yet: nothing was deployed or stored. As an owner of ${OWNER}:`,
+        ...checked.steps.map((step, index) => `  ${index + 1}. ${step}`),
+        'Then run go-live again.',
+      ].join('\n'),
+    );
+  }
+  return { clientId, pem, keyFile, slug: checked.app.slug };
 }
 
 async function goLive(options) {
@@ -796,9 +825,11 @@ async function goLive(options) {
         ...(config.analyticsSite
           ? ['       SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN      a token with Account Analytics Read, for Web Analytics, if you give one']
           : []),
-        `  3. unless the repository variable CMS_APP_ID is set: create the "${CMS_APP_NAME}" GitHub App`,
-        `     (you click Create, then Install, on ${OWNER}/${REPO} only), store its key in the Worker and the`,
-        `     ${CMS_ENVIRONMENT} environment, set CMS_APP_ID and CMS_APP_INSTALLATION, and deploy again`,
+        `  3. adopt the release app (${RELEASE_APP.clientIdVariable} in the ${RELEASE_APP.environment} environment) for Content, the status page and Deploys:`,
+        '     with SLOTLOCK_ADMIN_CMS_APP_KEY_FILE, a private key of the app for the console alone, check (before step 1)',
+        `     that the app has ${listPermissions(APP_PERMISSIONS)}, and that its installation`,
+        `     accepted them and reaches ${OWNER}/${REPO} alone, saying what to change on GitHub if not; then store the key`,
+        "     in the Worker, put the app's Client ID in the config, and deploy again. No new GitHub App is made",
         `  4. add as Owners those of ${owners.join(', ')} who are not staff yet (each must be a GitHub user),`,
         '     and print each one\'s one-time code for their first passkey',
         ...(owners.length < 2 ? ['     Erasing an account needs a second Owner to approve: name two when you can.'] : []),
@@ -827,14 +858,7 @@ async function goLive(options) {
   if (people.length < 2) {
     console.log('Note: erasing an account needs a second Owner to approve. Add one when you can.');
   }
-  const cmsAppId = repositoryVariable('CMS_APP_ID');
-  if (!cmsAppId) {
-    const membership = ghGet(`user/memberships/orgs/${OWNER}`);
-    if (membership?.role !== 'admin' || membership?.state !== 'active') {
-      throw new Failure(`${user.login} is not an owner of ${OWNER}. Creating the CMS App for the organization needs one.`);
-    }
-    cmsEnvironment();
-  }
+  const releaseApp = await releaseAppForConsole();
 
   console.log(`1. Deploying the console to https://${config.hostname}`);
   wrangler(['deploy', '--config', configPath]);
@@ -895,46 +919,40 @@ async function goLive(options) {
   for (const name of Object.keys(secrets)) secrets[name] = '';
   console.log(names.length > 0 ? `   Set ${names.join(', ')}.` : '   Every secret was already set.');
 
-  console.log('3. The Slotlock CMS GitHub App');
-  if (cmsAppId) {
-    const installation = repositoryVariable('CMS_APP_INSTALLATION') ?? '';
-    console.log(`   Kept the CMS App ${cmsAppId} (CMS_APP_ID is set).`);
-    if (!present.has('SLOTLOCK_ADMIN_CMS_APP_KEY')) {
+  console.log('3. The release app: Content, the status page and Deploys');
+  const KEY = 'SLOTLOCK_ADMIN_CMS_APP_KEY';
+  if (!releaseApp) {
+    console.log(
+      `   No release app is stored (${RELEASE_APP.clientIdVariable} in the ${RELEASE_APP.environment} environment): the console runs without them. An owner of ${OWNER} runs node scripts/create-release-app.mjs, then go-live again.`,
+    );
+  } else {
+    if (releaseApp.pem) {
+      try {
+        wrangler(['secret', 'bulk', '--config', configPath], { input: JSON.stringify({ [KEY]: releaseApp.pem }), capture: true });
+      } finally {
+        releaseApp.pem = '';
+      }
       console.log(
-        `   The console has no key for it: make a private key in the App's settings and give it with "npx wrangler secret put SLOTLOCK_ADMIN_CMS_APP_KEY --config ${configPath}" (from workers/admin).`,
+        `   Checked ${releaseApp.slug}: installed on ${OWNER}/${REPO} only, with ${listPermissions(APP_PERMISSIONS)}.`,
+      );
+      console.log(`   Stored the console's key of it in the Worker, and nowhere else: delete ${releaseApp.keyFile}.`);
+    } else if (present.has(KEY)) {
+      console.log('   The Worker has its key of the release app. To check the app again, or to replace the key, run go-live with SLOTLOCK_ADMIN_CMS_APP_KEY_FILE.');
+    } else {
+      console.log(
+        `   The console has no key of the release app (client ID ${releaseApp.clientId}). As an owner of ${OWNER}, generate a second private key in the app's settings (${web}/organizations/${OWNER}/settings/apps > the app > Private keys > Generate a private key), then run go-live again with SLOTLOCK_ADMIN_CMS_APP_KEY_FILE set to the downloaded file.`,
       );
     }
-    if (config.cmsAppId !== cmsAppId || config.cmsInstallation !== installation) {
-      writeConfig({ ...config, cmsAppId, cmsInstallation: installation });
+    // The Client ID only once the Worker has a key to go with it; the console finds the installation.
+    if ((releaseApp.keyFile || present.has(KEY)) && (config.cmsAppId !== releaseApp.clientId || config.cmsInstallation !== '')) {
+      writeConfig({ ...config, cmsAppId: releaseApp.clientId, cmsInstallation: '' });
       wrangler(['deploy', '--config', configPath]);
     }
-  } else {
-    const { app, installationId } = await createAppFromManifest({
-      owner: OWNER,
-      repo: REPO,
-      permissions: CMS_PERMISSIONS,
-      manifest: cmsAppManifest,
-      title: 'Create the Slotlock CMS app',
-      agent: 'slotlock-configure-admin-console',
-      retry: 'Install it as above and run go-live again (CMS_APP_ID is still unset)',
-      open: options.open,
-    });
-    try {
-      console.log(`   Installed on ${OWNER}/${REPO} only, with ${listPermissions(CMS_PERMISSIONS)}.`);
-      // The key first, in both places; the variables last, since they turn the scheduled job on.
-      wrangler(['secret', 'bulk', '--config', configPath], {
-        input: JSON.stringify({ SLOTLOCK_ADMIN_CMS_APP_KEY: app.pem }),
-        capture: true,
-      });
-      ghSet(['secret', 'set', 'CMS_APP_KEY', '--env', CMS_ENVIRONMENT, '--repo', `${OWNER}/${REPO}`], app.pem);
-      ghSet(['variable', 'set', 'CMS_APP_ID', '--repo', `${OWNER}/${REPO}`, '--body', String(app.id)]);
-      ghSet(['variable', 'set', 'CMS_APP_INSTALLATION', '--repo', `${OWNER}/${REPO}`, '--body', String(installationId)]);
-    } finally {
-      app.pem = '';
-    }
-    console.log(`   Stored its key in the Worker and the ${CMS_ENVIRONMENT} environment, and set CMS_APP_ID and CMS_APP_INSTALLATION.`);
-    writeConfig({ ...config, cmsAppId: String(app.id), cmsInstallation: String(installationId) });
-    wrangler(['deploy', '--config', configPath]);
+  }
+  if (repositoryVariable('CMS_APP_ID')) {
+    console.log(
+      '   The repository variables CMS_APP_ID and CMS_APP_INSTALLATION, and the cms environment, are no longer used: delete them, and the App they name.',
+    );
   }
 
   console.log('4. The first Owners');

@@ -18,6 +18,7 @@ const EVENTS = [
   'customer.subscription.deleted',
   'invoice.paid',
   'invoice.payment_failed',
+  'charge.refunded',
 ];
 
 interface World {
@@ -197,7 +198,8 @@ describe('check-launch.mjs', () => {
       topics: ['mcp'],
       mcpOpen: true,
       probeSkipped: true,
-      events: EVENTS.filter((event) => event !== 'invoice.paid'),
+      // An endpoint made before refunds were noted, and short of another event.
+      events: EVENTS.filter((event) => event !== 'invoice.paid' && event !== 'charge.refunded'),
       undelivered: [
         { type: 'checkout.session.completed', minutes: 120 },
         { type: 'invoice.paid', minutes: 30 },
@@ -210,7 +212,7 @@ describe('check-launch.mjs', () => {
       'FAIL GitHub: topics missing: mcp-server, model-context-protocol, ai-agents, booking-api, scheduling-api (run scripts/configure-github.sh)',
       'FAIL api: /mcp answers 200 to a call without a key, not 401',
       'FAIL status: the status probe is off: set SLOTLOCK_STATUS_PROBE to on',
-      `FAIL Stripe: the webhook at ${base}/dash/stripe/webhook does not get: invoice.paid`,
+      `FAIL Stripe: the webhook at ${base}/dash/stripe/webhook does not get: invoice.paid, charge.refunded`,
       'FAIL Stripe: 2 payment event(s) of the last three days did not reach the webhook, the oldest a checkout.session.completed 2 hour(s) ago',
     ]) {
       expect(result.output).toContain(line);

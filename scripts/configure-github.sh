@@ -487,9 +487,12 @@ configure_environments() {
   configure_environment release-tag '[]' branch main
   configure_tag_key
 
-  # release-app: release-version.yml's job, a manual run on main. It holds the release app's
-  # private key (scripts/create-release-app.mjs stores it), so only runs on main can read it. No
-  # reviewer: a person starts every run, and the release still goes through its pull request.
+  # release-app: release-version.yml's job, a manual run on main, and cms-schedule.yml's hourly job
+  # on main, which publishes the blog posts an Owner scheduled in the admin console (RFC 0006, 4.5).
+  # It holds the release app's private key (scripts/create-release-app.mjs stores it), so only runs
+  # on main can read it; each job mints a token with only what it needs. No reviewer: a person starts
+  # every release, which still goes through its pull request, a reviewer would hold every hourly
+  # run, and an Owner already published the post.
   configure_environment release-app '[]' branch main
 
   # site: site.yml's deploy job, on a push to main or a manual run on main. No reviewer: the
@@ -502,13 +505,6 @@ configure_environments() {
   # session secret), so only runs on main can read it. No reviewer: the change already went through
   # a pull request into main and CI passed on that very commit. --dashboard-deploy stores its values.
   configure_environment dashboard '[]' branch main
-
-  # cms: cms-schedule.yml's hourly job, on main, which publishes the blog posts an Owner scheduled
-  # in the admin console (RFC 0006, 4.5). It holds the Slotlock CMS App's private key (CMS_APP_KEY,
-  # set by hand; the repository variables CMS_APP_ID and CMS_APP_INSTALLATION, also by hand, turn
-  # the job on, since a job's `if` reads no environment's variables). No reviewer: one would hold
-  # every hourly run, and an Owner already published the post.
-  configure_environment cms '[]' branch main
 
   # site-preview: site-preview.yml, a workflow_run workflow that uploads a CMS pull request's build to
   # the preview Worker. A workflow_run job runs on main, as main has the workflow, so it is limited to
@@ -716,7 +712,7 @@ configure_tag_ruleset() {
   # whatever commit it names, so creating one publishes the Go client. Only the admin role and
   # deploy keys may create either: tag-release.yml and release.yml's go-module job push them with
   # the release deploy key (step 2), the only deploy key this script adds. Any other identity that
-  # can write to the repository (a workflow's GITHUB_TOKEN, the Slotlock CMS App) cannot. A
+  # can write to the repository (a workflow's GITHUB_TOKEN, the release app) cannot. A
   # DeployKey bypass cannot name that key (the REST docs: its actor_id "should be null"), so it
   # covers any write deploy key; that is accepted, and kept to creation by a second ruleset in
   # which only the admin role may move or delete a release tag. Tag rulesets allow no "pull

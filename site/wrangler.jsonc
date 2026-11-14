@@ -1,12 +1,20 @@
-// slotlock.pylota.io: the landing page and docs, deployed as an assets-only Worker (no Worker script,
-// no bindings). Build first (`npm run build` writes ./dist), then `npm run deploy`.
-// Config reference: https://developers.cloudflare.com/workers/static-assets/ (read 2026-10-09).
+// slotlock.pylota.io: the landing page and docs, deployed as a static-assets Worker whose only script
+// answers byte ranges of a blog post's videos (worker/range.mjs; run_worker_first below); its only
+// binding is its assets. Build first (`npm run build` writes ./dist), then `npm run deploy`.
+// Config reference: https://developers.cloudflare.com/workers/static-assets/ (read 2026-10-09), and
+// https://developers.cloudflare.com/workers/static-assets/binding/ for run_worker_first's patterns
+// (read 2026-11-14).
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "slotlock-site",
   "compatibility_date": "2026-10-01",
+  // The one script: a post's videos in the byte ranges a player asks for (worker/range.mjs), which
+  // static assets do not give. It runs for those paths only; every other request is an asset.
+  "main": "worker/range.mjs",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/blog/*/*.mp4", "/blog/*/*.webm"],
     // Unknown paths get Starlight's 404 page with a 404 status.
     "not_found_handling": "404-page",
     "html_handling": "auto-trailing-slash"

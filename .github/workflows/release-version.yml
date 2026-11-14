@@ -79,7 +79,9 @@ jobs:
       BRANCH: release/v${{ inputs.version }}
     steps:
       # A token of the release app for this repository only, with contents: write and
-      # pull_requests: write, revoked when the job ends. Skipped until the app is stored.
+      # pull_requests: write, revoked when the job ends: only what opening and merging the pull
+      # request needs, of the permissions the app holds for all its users. Skipped until the app is
+      # stored.
       - name: Mint the release app's token
         id: app
         if: vars.RELEASE_APP_CLIENT_ID != ''
@@ -121,7 +123,7 @@ jobs:
       - name: Wait for CI and DCO on the pull request (approve its workflows to run if GitHub holds them)
         if: inputs.dry_run != true
         env:
-          # Reading workflow runs needs actions: read, which only GITHUB_TOKEN has here.
+          # Reading workflow runs needs actions: read, which the app's token here is not given.
           GH_TOKEN: ${{ github.token }}
         run: scripts/wait-for-pr-checks.sh "$SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$PR" ci.yml dco.yml
       - name: Merge it

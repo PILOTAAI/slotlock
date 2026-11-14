@@ -53,6 +53,7 @@ const STRIPE_EVENTS = [
   'customer.subscription.deleted',
   'invoice.paid',
   'invoice.payment_failed',
+  'charge.refunded',
 ];
 /** The paid plans' prices, in pence, as docs/hosted/README.md and the site state them. */
 const PRICES = [

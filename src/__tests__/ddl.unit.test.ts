@@ -333,10 +333,12 @@ describe('application role grants', () => {
     for (const table of SLOTLOCK_TENANT_TABLES) {
       expect(`${table}: ${Number(exported.includes(table)) + Number(leftOut.includes(table))}`).toBe(`${table}: 1`);
     }
-    // API keys come from slotlock.list_api_keys, which holds no digest; every other is a tenant table.
+    // API keys come from slotlock.list_api_keys, which holds no digest, and the person's sign-in
+    // record from slotlock.tenant_export_person; every other is a tenant table.
     for (const table of exported) {
-      if (table !== 'api_keys') expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
+      if (table !== 'api_keys' && table !== 'dashboard_people') expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
     }
+    expect(exported).toContain('dashboard_people');
     for (const table of leftOut) expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
   });
 

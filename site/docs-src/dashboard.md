@@ -171,7 +171,10 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - The server takes a team's keys only with the setting on, and only while the team exists and is
   not being deleted (checked in the database, kept 30 seconds).
 - Each person's GitHub login, or the email Google verified, is kept (`slotlock.dashboard_people`)
-  to show them to the others in their teams. Invitations keep the address they were sent to until
+  to show them to the others in their teams, and with it the name their GitHub profile or Google
+  account gives (without invisible, control or text-direction characters, at most 80 characters), which only
+  the staff console shows. Both are replaced at each sign-in and go when the person is erased.
+  Invitations keep the address they were sent to until
   30 days after they are accepted, revoked or expire. Erasing a person refuses while they are a
   team's only Owner; erasing a team takes its members and invitations with it.
 

@@ -32,7 +32,13 @@ import {
   slotlockRoleCan,
   slotlockRoleMayGrant,
 } from './workspace-roles.js';
-import type { SlotlockAnnouncementKind } from './staff-ddl.js';
+import {
+  SLOTLOCK_ANNOUNCEMENT_BANNER_CSS,
+  SLOTLOCK_BANNER_CSS,
+  SLOTLOCK_DASHBOARD_TOKENS,
+  slotlockAnnouncementBannerParts,
+  slotlockCssVars,
+} from './design-tokens.js';
 import type {
   SlotlockDashboardNotices,
   SlotlockDashboardWorkspaces,
@@ -515,13 +521,6 @@ const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
 });
 /** What the Teams page says where staff turned off creating teams for the person's account (M11). */
 const TEAM_CREATION_OFF = 'Creating team workspaces is turned off for your account, or it is suspended. Teams you are in work as before.';
-/** How a dashboard's banner names an announcement's kind (RFC 0006, M10). */
-const ANNOUNCEMENT_LABELS: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
-  maintenance: 'Planned maintenance',
-  change: 'A change to Slotlock',
-  incident: 'Incident',
-  notice: 'Notice',
-});
 const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
   ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
   ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
@@ -1082,6 +1081,11 @@ export interface SlotlockDashboardOptions {
   termsUrl?: string;
   /** The privacy notice the sign-in page links, an https URL. */
   privacyUrl?: string;
+  /**
+   * The Slotlock version the dashboard runs, sent as X-Slotlock-Version on its pages so the staff
+   * console's System page can say what is deployed (the Worker passes package.json's).
+   */
+  version?: string;
   /**
    * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
    * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
@@ -2317,6 +2321,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
   const hsts: Record<string, string> =
     publicUrl.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+  const versionHeader: Record<string, string> =
+    options.version && /^[0-9A-Za-z.+-]{1,40}$/.test(options.version) ? { 'X-Slotlock-Version': options.version } : {};
   const service = new URL(options.serviceUrl ?? options.publicUrl);
   const serviceRoot = `${service.origin}${service.pathname.replace(/\/$/, '')}`;
   const mcpUrl = `${serviceRoot}/mcp`;
@@ -2704,6 +2710,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
         'Referrer-Policy': REFERRER_POLICY,
         'Cross-Origin-Opener-Policy': 'same-origin',
         ...hsts,
+        ...versionHeader,
         ...headers,
       },
     });
@@ -2846,8 +2853,8 @@ ${live}
     const shown = noticesOf.get(session)?.announcements ?? [];
     return html`${shown.map(
       (announcement) =>
-        html`<p class="test-banner announcement-banner announcement-${announcement.kind}" role="status"><strong>${ANNOUNCEMENT_LABELS[announcement.kind]}.</strong> ${announcement.message}${
-          announcement.link ? html` <a href="${announcement.link}" rel="noopener noreferrer">More about this</a>` : html``
+        html`<p class="${slotlockAnnouncementBannerParts(announcement.kind).className}" role="status"><strong>${slotlockAnnouncementBannerParts(announcement.kind).label}</strong> ${announcement.message}${
+          announcement.link ? html` <a href="${announcement.link}" rel="noopener noreferrer">${slotlockAnnouncementBannerParts(announcement.kind).more}</a>` : html``
         }</p>`,
     )}`;
   };
@@ -9057,7 +9064,7 @@ ${
     return null;
   }
 
-  async function readGitHubUser(token: string): Promise<{ uid: string; login: string } | null> {
+  async function readGitHubUser(token: string): Promise<{ uid: string; login: string; name: string | null } | null> {
     const response = await fetchImpl(userUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -9082,7 +9089,8 @@ ${
     ) {
       return null;
     }
-    return { uid: String(body.id), login: body.login };
+    // The profile's name, null when the person gave none (GET /user).
+    return { uid: String(body.id), login: body.login, name: typeof body.name === 'string' ? body.name : null };
   }
 
   /** The addresses GitHub verified for the token's person, lower-cased; none when it does not say. */
@@ -9173,7 +9181,9 @@ ${
       client_id: provider.clientId,
       redirect_uri: callbackUrl,
       response_type: 'code',
-      scope: 'openid email',
+      // `profile` for the name claim, which Google gives only with it (developers.google.com/identity/
+      // openid-connect/openid-connect, read 2026-11-14): kept beside the email for the staff console.
+      scope: 'openid email profile',
       state,
       nonce,
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
@@ -9203,7 +9213,7 @@ ${
     code: string,
     verifier: string,
     nonce: string,
-  ): Promise<{ uid: string; login: string; idp: 'google'; hd?: string } | null> {
+  ): Promise<{ uid: string; login: string; idp: 'google'; name: string | null; hd?: string } | null> {
     try {
       const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -9249,7 +9259,9 @@ ${
           : 'Google account';
       // A Google Workspace account names its domain (hd); a consumer account names none.
       const hd = typeof claims.hd === 'string' && /^[a-z0-9.-]{1,253}$/i.test(claims.hd) ? claims.hd.toLowerCase() : undefined;
-      return { uid: claims.sub, login: email, idp: 'google', ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
+      // The name claim (OpenID Connect Core 1.0, 5.1), with the email's scopes when Google gives it.
+      const name = typeof claims.name === 'string' ? claims.name : null;
+      return { uid: claims.sub, login: email, idp: 'google', name, ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
     } catch (error) {
       report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
       return null;
@@ -9260,7 +9272,7 @@ ${
     code: string,
     verifier: string,
     emails = false,
-  ): Promise<{ uid: string; login: string; orgs?: Organization[]; emails?: string[] } | null> {
+  ): Promise<{ uid: string; login: string; name: string | null; orgs?: Organization[]; emails?: string[] } | null> {
     try {
       const token = await exchangeCode(code, verifier);
       if (token === null) return null;
@@ -9311,7 +9323,7 @@ ${
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
+    let user: { uid: string; login: string; name: string | null; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
@@ -9364,9 +9376,11 @@ ${
             : user.orgs.map((org) => ({ id: org.id, role: org.role === 'admin' ? ('admin' as const) : ('member' as const) })),
         )
       : undefined;
-    // How the person is shown to the others in their teams: their GitHub login, or Google's verified email.
+    // How the person is shown to the others in their teams: their GitHub login, or Google's verified
+    // email; and the name their provider gives, for the staff console (cleaned, slotlockPersonName).
     if (teamStore) {
       await teamStore.setDisplay(person, user.idp === 'google' ? (user.login.includes('@') ? user.login : null) : `@${user.login}`);
+      await teamStore.setName?.(person, user.name);
     }
     // Of the addresses GitHub verified, only the invitation being opened's is kept, to accept it.
     let em: string[] | undefined;
@@ -10218,33 +10232,12 @@ const DASHBOARD_CSS = `:root {
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
   --radius-sm: 6px; --radius: 8px; --radius-lg: 12px; --radius-full: 999px;
   --ease: cubic-bezier(0.2, 0, 0, 1); --fast: 120ms; --slow: 180ms;
-  --canvas: #f7f7f8; --surface: #ffffff; --surface-2: #fafafa; --sunken: #f2f2f4; --hover: #f0f0f2;
-  --line: #e6e6e9; --line-strong: #d4d4d8; --line-soft: #efeff1;
-  --ink: #18181b; --ink-2: #52525b; --ink-3: #6b6b74;
-  --accent: #2456e6; --accent-wash: #eef2fe; --ring: rgba(36, 86, 230, 0.28);
-  --button: #18181b; --button-ink: #ffffff; --button-hover: #2e2e33;
-  --good: #11764c; --good-wash: #e9f6ef; --bad: #c42b1c; --bad-ink: #ffffff; --bad-wash: #fdeeec; --bad-line: #f5c9c3;
-  --warn: #8a5300; --warn-wash: #fff5e1; --warn-line: #f3dcae;
-  /* The logo's inks (the Slotlock design system): ink lock and lime slot here, lime lock in the dark. */
-  --logo-lock: #0a0b0d; --logo-slot: #d9ff43;
-  --pop-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 12px 32px -8px rgba(24, 24, 27, 0.18);
-  --field: #ffffff; --field-line: #d4d4d8; --field-line-hover: #a1a1aa; --field-shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
-  --card-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
+  ${slotlockCssVars(SLOTLOCK_DASHBOARD_TOKENS.light, '\n  ')}
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --logo-lock: #d9ff43;
-    --canvas: #0b0b0d; --surface: #111114; --surface-2: #141418; --sunken: #18181c; --hover: #1c1c21;
-    --line: #26262c; --line-strong: #34343b; --line-soft: #1d1d22;
-    --ink: #ededf0; --ink-2: #b4b4bc; --ink-3: #8e8e98;
-    --accent: #7ea2ff; --accent-wash: #18203a; --ring: rgba(126, 162, 255, 0.35);
-    --button: #ededf0; --button-ink: #0b0b0d; --button-hover: #ffffff;
-    --good: #4fca8f; --good-wash: #0f2419; --bad: #ff7a6b; --bad-ink: #1a0806; --bad-wash: #2c1512; --bad-line: #5a2a24;
-    --warn: #f4c25a; --warn-wash: #2a2210; --warn-line: #4d3d17;
-    --pop-shadow: 0 0 0 1px #26262c, 0 16px 40px -8px rgba(0, 0, 0, 0.7);
-    --field: #18181d; --field-line: #2f2f36; --field-line-hover: #4a4a53; --field-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
-    --card-shadow: none;
+    ${slotlockCssVars(SLOTLOCK_DASHBOARD_TOKENS.dark, '\n    ')}
     color-scheme: dark;
   }
 }
@@ -10287,8 +10280,7 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 .environment button { flex: 1; height: 26px; padding: 0 var(--space-2); border: 0; border-radius: calc(var(--radius) - 2px); background: none; box-shadow: none; color: var(--muted); font-size: var(--text-sm); font-weight: 600; }
 .environment button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
 .environment button[aria-pressed="true"][value="test"] { background: var(--warn-wash); color: var(--warn); box-shadow: 0 0 0 1px var(--warn-line); }
-.test-banner { margin: 0 0 var(--space-4); padding: var(--space-2) var(--space-3); border: 1px dashed var(--warn-line); border-radius: var(--radius); background: var(--warn-wash); color: var(--warn); font-size: var(--text-md); }
-.test-banner code { background: none; padding: 0; }
+${SLOTLOCK_BANNER_CSS}
 .avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none; border-radius: var(--radius-sm); background: var(--ink); color: var(--surface); font-size: 11px; font-weight: 700; }
 .nav { display: grid; gap: 1px; }
 .nav a { position: relative; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: var(--radius); color: var(--ink-2); font-weight: 500; font-size: var(--text-md); transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease); }
@@ -10494,10 +10486,7 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 /* A team being deleted */
 .deleting-banner { background: var(--bad-soft, var(--surface-2)); }
 .suspended-banner { background: var(--bad-soft, var(--surface-2)); }
-.announcement-banner { border-style: solid; border-color: var(--line-strong); background: var(--accent-wash); color: var(--ink); }
-.announcement-banner strong { color: var(--ink); }
-.announcement-banner a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
-.announcement-incident { border-color: var(--warn-line); background: var(--warn-wash); }
+${SLOTLOCK_ANNOUNCEMENT_BANNER_CSS}
 /* Sessions (Settings, Account) */
 h2.sessions-head { margin-top: var(--space-6); }
 /* Audit log */

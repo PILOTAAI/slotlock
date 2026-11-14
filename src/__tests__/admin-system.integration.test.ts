@@ -107,6 +107,9 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
   const BING_KEY = 'bingkey0123456789abcdef';
   /** Every request the console made to a provider, "host path". */
   const providerCalls: string[] = [];
+  /** Every request the System page made to the dashboard and the site. */
+  const hostCalls: string[] = [];
+  let dashboardDown = false;
 
   /** Search Console, Bing, Cloudflare and the hosts, as the console reaches them. */
   async function providers(input: string | URL | Request, init?: RequestInit): Promise<Response | null> {
@@ -158,8 +161,15 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
       }] } }, errors: null });
     }
     if (target.hostname === 'api.slotlock.test') return reply({ status: 'ready', version: '0.10.0', checks: ['database'] });
-    if (target.hostname === 'dashboard.slotlock.test') return new Response('down', { status: 503 });
-    if (target.hostname === 'site.slotlock.test') return new Response('<!doctype html>', { status: 200 });
+    // The dashboard says its version in a header on its sign-in page; the site in its facts.json.
+    if (target.hostname === 'dashboard.slotlock.test') {
+      hostCalls.push(`${target.hostname}${target.pathname}`);
+      return dashboardDown ? new Response('down', { status: 503 }) : new Response('<!doctype html>', { status: 200, headers: { 'x-slotlock-version': '0.10.1' } });
+    }
+    if (target.hostname === 'site.slotlock.test') {
+      hostCalls.push(`${target.hostname}${target.pathname}`);
+      return target.pathname === '/facts.json' ? reply({ version: '0.10.2', toolCount: 19 }) : new Response('<!doctype html>', { status: 200 });
+    }
     return null;
   }
 
@@ -228,7 +238,10 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
       head_sha: 'a'.repeat(40), html_url: `https://github.com/${FAKE_REPOSITORY}/actions/runs/${id}`, created_at: new Date(clock - id * 60_000).toISOString(),
     });
     repo.runs.set('site.yml', [run('Site', 11, 'success'), run('Site', 12, 'failure')]);
-    repo.runs.set('dashboard.yml', [run('Dashboard', 21, null)]);
+    repo.runs.set('dashboard-deploy.yml', [run('Dashboard deploy', 21, null)]);
+    repo.runs.set('status-worker.yml', [run('Status Worker', 41, 'success')]);
+    // Bundles and checks the Workers, deploys nothing: never listed as a deploy.
+    repo.runs.set('dashboard.yml', [run('Dashboard', 51, 'success')]);
     repo.runs.set('image.yml', [run('Image', 31, 'success')]);
     repo.runs.set('release.yml', []);
 
@@ -394,7 +407,13 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
   });
 
   it('puts a maintenance failure on Home and the System page, without the account’s data, and clears it when a pass runs', async () => {
+    /** The System page's headline: its tone, its words, and the top bar's pill. */
+    const headline = (page: string) => ({
+      tone: /<div class="headline"><span class="pill (\w+) dot-only"/.exec(page)?.[1],
+      text: /<span class="headline-text">([^<]*)<\/span>/.exec(page)?.[1],
+    });
     expect(await text(staff.owner, '/')).not.toContain('Maintenance is failing');
+    expect(headline(await text(staff.owner, '/system'))).toEqual({ tone: 'good', text: 'All systems operational' });
     // A pass for Ada fails, as a server's scheduler runs it, with a value in its message.
     const failing = Object.assign(Object.create(store) as SlotlockStore, {
       withTenant: async () => {
@@ -423,10 +442,15 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     expect(billingHome).toContain('Maintenance is failing for 1 account');
     expect(billingHome).not.toContain('href="/system#maintenance"');
     const system = await text(staff.support, '/system');
-    expect(system).toContain(`href="/accounts/${encodeURIComponent(ADA)}" class="mono">${ADA}</a>`);
+    // The shared account cell: Ada by her login, linked to her page, her reference beneath.
+    expect(system).toContain(`<a href="/accounts/${encodeURIComponent(ADA)}">@ada</a><span class="sub">${ADA}</span>`);
     expect(system).toContain('<code>Error XX000</code>');
     expect(system).toContain('Could not extend …');
     expect(system).not.toContain('Weekly standup');
+    // Every host is up, but one account's maintenance is failing: the headline says so, as a warning.
+    expect(headline(system)).toEqual({ tone: 'warn', text: 'Maintenance failing for 1 account' });
+    expect(system).toContain('<span class="pill warn">Maintenance failing</span>');
+    expect(system).not.toContain('All systems operational');
 
     // The next pass runs: the failure clears, and Home has nothing to say about it.
     const fixed = startSlotlockMaintenance({ store, sql: application, tenants: [ADA], intervalMs: 3_600_000, record });
@@ -436,7 +460,9 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     await fixed.close();
     expect(await superuser`SELECT 1 FROM slotlock.maintenance_failures`).toHaveLength(0);
     expect(await text(staff.owner, '/')).not.toContain('Maintenance is failing');
-    expect(await text(staff.owner, '/system')).toContain('Every account’s last pass ran.');
+    const cleared = await text(staff.owner, '/system');
+    expect(cleared).toContain('Every account’s last pass ran.');
+    expect(headline(cleared)).toEqual({ tone: 'good', text: 'All systems operational' });
     expect(await superuser`SELECT 1 FROM slotlock.maintenance_runs WHERE job = 'maintenance'`).toHaveLength(2);
   });
 
@@ -491,6 +517,17 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     const page = await text(staff.owner, '/communications');
     expect(page).toContain(`#${probe?.number} Hosted Slotlock API is down`);
     expect(page).not.toContain('The docs search misses a page');
+    // The Status page tab is laid out as Announcements is: the form on the left, and on the right
+    // the open incidents as the status page lists them, each with its update form.
+    const status = page.slice(page.indexOf('id="status"'));
+    const composer = status.slice(status.indexOf('<div class="composer">'));
+    expect(status).toContain('<div class="composer">');
+    expect(composer.indexOf('action="/communications/status"')).toBeGreaterThan(-1);
+    expect(composer.indexOf('action="/communications/status"')).toBeLessThan(composer.indexOf('<div class="composer-preview">'));
+    const preview = composer.slice(composer.indexOf('<div class="composer-preview">'));
+    expect(preview).toContain(`#${probe?.number} Hosted Slotlock API is down`);
+    expect(preview).toContain('action="/communications/status/update"');
+    expect(status.slice(0, status.indexOf('<div class="composer">'))).not.toContain('<details class="popover"');
 
     expect((await form(staff.owner, '/communications/status', { title: 'Slow bookings in Europe', body: 'Booking calls take up to five seconds. We are looking into it.' }, '/communications')).headers.get('location'))
       .toBe('/communications?done=incident_opened');
@@ -565,11 +602,33 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     await app.createWebhook({ principal: { tenantRef: BEA, scopes: ['admin'] }, signal: new AbortController().signal } as never, { url: 'https://hooks.example.com/slotlock' });
     await superuser`UPDATE slotlock.webhook_endpoints SET failing_since = now() - interval '2 hours', attempts = 4 WHERE tenant_ref = ${BEA}`;
     const system = await text(staff.owner, '/system');
-    expect(system).toContain('0.10.0');
-    const dashboardRow = system.slice(system.indexOf('https://dashboard.slotlock.test/dashboard'));
-    expect(dashboardRow.slice(0, 300)).toContain('<span class="pill bad">Down</span><span class="sub">HTTP 503</span>');
-    expect(system).toContain('Dashboard and console Workers');
+    const hostRow = (url: string) => {
+      const row = system.slice(system.indexOf(url));
+      return row.slice(0, row.indexOf('</tr>'));
+    };
+    // Each host's own version: the API's from /healthz, the dashboard's from its header, the site's
+    // from its facts.json.
+    expect(hostRow('https://api.slotlock.test/healthz')).toContain('0.10.0');
+    expect(hostRow('https://dashboard.slotlock.test/dashboard')).toContain('<span class="pill good">Up</span>');
+    expect(hostRow('https://dashboard.slotlock.test/dashboard')).toContain('0.10.1');
+    expect(hostRow('https://site.slotlock.test/facts.json')).toContain('0.10.2');
+    expect(hostCalls).toEqual(expect.arrayContaining(['dashboard.slotlock.test/dashboard', 'site.slotlock.test/facts.json']));
+    // The status page's probe, as it runs: a Cloudflare Worker, every five minutes.
+    expect(system).toContain('The public status page probes them every five minutes, from a Cloudflare Worker.');
+    expect(system).not.toContain('from GitHub every ten minutes');
+    // The workflows that deploy: the dashboard Worker, the site and the status Worker.
+    expect(system).toContain('Dashboard Worker');
+    expect(system).toContain('Status Worker');
+    expect(system).not.toContain('Dashboard and console Workers');
+    expect(system).not.toContain('actions/runs/51');
     expect(system).toContain('Running');
+    // A host that does not answer 200 is down, and says no version.
+    dashboardDown = true;
+    const down = await text(staff.owner, '/system');
+    const downRow = down.slice(down.indexOf('https://dashboard.slotlock.test/dashboard'));
+    expect(downRow.slice(0, downRow.indexOf('</tr>'))).toContain('<span class="pill bad">Down</span><span class="sub">HTTP 503</span>');
+    expect(down).toMatch(/<div class="headline"><span class="pill bad dot-only" aria-hidden="true"><\/span><span class="headline-text">1 host is down<\/span>/);
+    dashboardDown = false;
     expect(system).toMatch(/<span class="stat-label">Failing<\/span>\s*<strong class="stat-value">1<\/strong>/);
     expect(system).toContain('connected to sc-domain:slotlock.pylota.io');
     expect(system).toContain(`connected to ${FAKE_REPOSITORY}`);

@@ -2,13 +2,18 @@
 // (src/admin/github-app.ts, scripts/cms-scheduled-merge.mjs): one repository held in memory, with
 // blobs, flat trees, commits, branches, pull requests, labels, comments, check runs, squash merges
 // that keep main's ruleset (up to date with main, checks passed), and the one GraphQL query the
-// console sends. An App installation token is given only for a JWT the App's key signed.
+// console sends. An App installation token, and the App's installation on the repository, are given
+// only for a JWT the App's key signed, issued by its Client ID or its numeric App ID.
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 
 export const FAKE_APP_ID = '424';
+export const FAKE_CLIENT_ID = 'Iv23liFakeReleaseApp';
+export const FAKE_APP_SLUG = 'pilotaai-slotlock-release';
 export const FAKE_INSTALLATION = '77';
 export const FAKE_REPOSITORY = 'PILOTAAI/slotlock';
-const TOKEN = 'ghs_fake_installation_token';
+/** The installation token the fake gives, as the hourly workflow's token step would hand it on. */
+export const FAKE_TOKEN = 'ghs_fake_installation_token';
+const TOKEN = FAKE_TOKEN;
 
 interface Commit {
   tree: Map<string, string>;
@@ -25,7 +30,8 @@ export interface FakePull {
   state: 'open' | 'closed';
   merged: boolean;
   labels: string[];
-  comments: { body: string; app: boolean }[];
+  /** Each comment, and whether the App made it (true), another App did ({ id, slug }) or a person (false). */
+  comments: { body: string; app: boolean | { id: number; slug: string } }[];
   /** The main commit the branch last started from or caught up with: what the pull request's diff is against. */
   base: string;
   /** The fork it comes from, when it is not this repository's own branch. */
@@ -56,12 +62,18 @@ export interface FakeGithubRepo {
   merges: { title: string; message: string; number: number }[];
   /** The commits a compare/main...<sha> was asked for, in order. */
   compared: string[];
+  /** Each blob the console created, by its size in bytes, in order. */
+  blobUploads: number[];
+  /** Each file read raw through the contents API, in order. */
+  rawReads: string[];
   /** Issues, numbered after the pull requests: the status page's incidents (labelled status) and others. */
   issues: Map<number, FakeIssue>;
   /** Open an issue as a person (or the status probe) would, outside the console. */
   openIssue(title: string, labels: string[]): FakeIssue;
   /** Each workflow file's runs on main, newest first. */
   runs: Map<string, { id: number; name: string; status: string; conclusion: string | null; event: string; head_sha: string; html_url: string; created_at: string }[]>;
+  /** The body of each installation token request, in order. */
+  tokenRequests: Record<string, unknown>[];
 }
 
 export interface FakeIssue {
@@ -174,6 +186,8 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       return pull;
     },
     compared: [],
+    blobUploads: [],
+    rawReads: [],
     issues: new Map(),
     openIssue(title, labels) {
       // Issues and pull requests share their numbers, as on GitHub.
@@ -182,6 +196,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       return issue;
     },
     runs: new Map(),
+    tokenRequests: [],
   };
 
   const diff = (pull: FakePull) => {
@@ -215,18 +230,36 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
     const reply = (body: unknown, status = 200) =>
       new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     const auth = new Headers(init?.headers).get('authorization') ?? '';
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    // The console sends a blob's JSON as bytes (github-app.ts, blobBody), everything else as text.
+    const body = init?.body ? (JSON.parse(init.body instanceof Uint8Array ? new TextDecoder().decode(init.body) : String(init.body)) as Record<string, unknown>) : {};
 
-    if (method === 'POST' && path === `/app/installations/${FAKE_INSTALLATION}/access_tokens`) {
+    // GitHub takes the App's Client ID or its App ID as the JWT's issuer.
+    const appJwt = () => {
       const [header, payload, signature] = auth.replace(/^Bearer /, '').split('.');
       if (!header || !payload || !signature) return reply({ message: 'A JSON web token could not be decoded' }, 401);
       const ok = verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), publicKey, Buffer.from(signature, 'base64url'));
       const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { iss?: string; exp?: number; iat?: number };
       const seconds = Math.floor(now() / 1000);
-      if (!ok || claims.iss !== FAKE_APP_ID || !claims.exp || claims.exp < seconds || claims.exp - (claims.iat ?? 0) > 600) {
+      if (!ok || ![FAKE_APP_ID, FAKE_CLIENT_ID].includes(claims.iss ?? '') || !claims.exp || claims.exp < seconds || claims.exp - (claims.iat ?? 0) > 600) {
         return reply({ message: 'Bad credentials' }, 401);
       }
+      return null;
+    };
+    if (method === 'POST' && path === `/app/installations/${FAKE_INSTALLATION}/access_tokens`) {
+      const refused = appJwt();
+      if (refused) return refused;
+      fake.tokenRequests.push(body);
       return reply({ token: TOKEN, expires_at: new Date(now() + 3_600_000).toISOString() }, 201);
+    }
+    if (method === 'GET' && /^\/repos\/[^/]+\/[^/]+\/installation$/.test(path)) {
+      const refused = appJwt();
+      if (refused) return refused;
+      if (path.toLowerCase() !== `/repos/${FAKE_REPOSITORY}/installation`.toLowerCase()) return reply({ message: 'Not Found' }, 404);
+      return reply({
+        id: Number(FAKE_INSTALLATION), app_id: Number(FAKE_APP_ID), app_slug: FAKE_APP_SLUG, client_id: FAKE_CLIENT_ID,
+        repository_selection: 'selected',
+        permissions: { actions: 'read', checks: 'read', contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write', statuses: 'read' },
+      });
     }
     if (auth !== `Bearer ${TOKEN}`) return reply({ message: 'Bad credentials' }, 401);
 
@@ -278,7 +311,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       const files = [...new Set([...before.keys(), ...after.keys()])].sort().flatMap((file) => {
         if (before.get(file) === after.get(file)) return [];
         const status = !before.has(file) ? 'added' : !after.has(file) ? 'removed' : 'modified';
-        const binary = /\.(?:png|jpe?g|webp)$/.test(file);
+        const binary = /\.(?:png|jpe?g|webp|avif|gif|mp4|webm|pdf)$/.test(file);
         const was = text(before.get(file)).split('\n').filter(Boolean);
         const now = text(after.get(file)).split('\n').filter(Boolean);
         const patch = binary
@@ -299,7 +332,9 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       return commit ? reply({ sha: match[1], tree: { sha: putTree(commit.tree) } }) : reply({ message: 'Not Found' }, 404);
     }
     if (rest === '/git/blobs' && method === 'POST') {
-      return reply({ sha: putBlob(new Uint8Array(Buffer.from(String(body.content), 'base64'))) }, 201);
+      const bytes = new Uint8Array(Buffer.from(String(body.content), 'base64'));
+      fake.blobUploads.push(bytes.length);
+      return reply({ sha: putBlob(bytes) }, 201);
     }
     if (rest === '/git/trees' && method === 'POST') {
       const tree = new Map(trees.get(String(body.base_tree)) ?? []);
@@ -337,9 +372,21 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       const tree = treeOf(target.searchParams.get('ref') ?? 'main');
       if (!tree) return reply({ message: 'No commit found for the ref' }, 404);
       const sha = tree.get(file);
-      if (sha) return reply({ type: 'file', sha, encoding: 'base64', content: Buffer.from(blobs.get(sha) as Uint8Array).toString('base64') });
-      const entries = [...tree.keys()].filter((name) => name.startsWith(`${file}/`) && !name.slice(file.length + 1).includes('/'));
-      return entries.length ? reply(entries.map((name) => ({ name: name.slice(file.length + 1), type: 'file' }))) : reply({ message: 'Not Found' }, 404);
+      if (sha) {
+        const bytes = blobs.get(sha) as Uint8Array;
+        // As GitHub's contents API: the raw media type gives the bytes of a file up to 100 MB; JSON
+        // gives the content of one up to 1 MB, and of a larger one an empty content, "none" encoded.
+        if (new Headers(init?.headers).get('accept') === 'application/vnd.github.raw+json') {
+          fake.rawReads.push(file);
+          return bytes.length > 100 * 1024 * 1024 ? reply({ message: 'Too large' }, 403) : new Response(new Uint8Array(bytes), { headers: { 'content-type': 'application/octet-stream' } });
+        }
+        if (bytes.length > 1024 * 1024) return reply({ type: 'file', sha, size: bytes.length, encoding: 'none', content: '' });
+        return reply({ type: 'file', sha, size: bytes.length, encoding: 'base64', content: Buffer.from(bytes).toString('base64') });
+      }
+      const entries = [...tree.entries()].filter(([name]) => name.startsWith(`${file}/`) && !name.slice(file.length + 1).includes('/'));
+      return entries.length
+        ? reply(entries.map(([name, blob]) => ({ name: name.slice(file.length + 1), type: 'file', sha: blob, size: blobs.get(blob)?.length ?? 0 })))
+        : reply({ message: 'Not Found' }, 404);
     }
     if (rest === '/pulls' && method === 'GET') {
       const head = target.searchParams.get('head');
@@ -477,7 +524,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
         const page = Number(target.searchParams.get('page') ?? '1');
         return reply(pull.comments.slice((page - 1) * size, page * size).map((comment) => ({
           body: comment.body,
-          performed_via_github_app: comment.app ? { id: Number(FAKE_APP_ID) } : null,
+          performed_via_github_app: comment.app === true ? { id: Number(FAKE_APP_ID), slug: FAKE_APP_SLUG, client_id: FAKE_CLIENT_ID } : comment.app || null,
         })));
       }
     }

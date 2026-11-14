@@ -2263,6 +2263,8 @@ async function runBillingDaily(
       line({ job: 'overage', skipped: 'no STRIPE_SECRET_KEY' });
       attention = true;
     } else {
+      const started = Date.now();
+      const months: { month: string; tenants: number; sent: number; failed: number }[] = [];
       for (const reported of [month, slotlockMonthOf(options.now)]) {
         const report = await reportSlotlockOverage(owner, {
           month: reported,
@@ -2270,8 +2272,13 @@ async function runBillingDaily(
           stripe: { secretKey: options.stripeSecretKey, eventName: 'slotlock_operations' },
         });
         line({ job: 'overage', month: reported, sent: report.sent, failed: report.failed });
-        if (report.failed > 0) attention = true;
+        months.push({ month: reported, tenants: report.tenants.length, sent: report.sent, failed: report.failed });
       }
+      const failed = months.some((reported) => reported.failed > 0);
+      if (failed) attention = true;
+      // Overage reported here is the overage report's run too: the console's Billing jobs shows
+      // when it last ran, whichever command ran it.
+      await recordMaintenanceRun(owner, 'overage_report', started, failed, { by: 'billing daily', months });
     }
   }
   const mismatches = await owner<{ partner_id: string; day: string; mismatched: number; worst: number }[]>`

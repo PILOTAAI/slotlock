@@ -211,7 +211,10 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     const [no] = await adminSql<{ opened: unknown }[]>`SELECT slotlock.admin_sign_in(${STRANGER}, ${CONSOLE_KEY}) AS opened`;
     expect(no?.opened).toBeNull();
     const log = await adminSql<{ staff_ref: string; action: string }[]>`
-      SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20)`;
+      SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20, NULL, NULL, NULL, NULL, NULL, true)`;
+    // The whole staff list, for the log's filter, only to those who may read the log.
+    expect((await adminSql`SELECT * FROM slotlock.admin_staff_logins(${await as(OWNER)}, NULL)`).length).toBeGreaterThanOrEqual(3);
+    await expect(adminSql`SELECT * FROM slotlock.admin_staff_logins(${await as(SUPPORT)}, NULL)`).rejects.toMatchObject({ code: '42501' });
     expect(log).toEqual(
       expect.arrayContaining([
         { staff_ref: OWNER, action: 'staff.signed_in' },
@@ -289,7 +292,9 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     await expect(adminSql`SELECT slotlock.admin_home(${STRANGER})`).rejects.toMatchObject({ code: '42501' });
     // A viewer sees the home numbers.
     const [home] = await adminSql<{ home: Record<string, unknown> }[]>`SELECT slotlock.admin_home(${await as(VIEWER)}) AS home`;
-    expect(home?.home).toMatchObject({ accounts: 2, people: 2, paying: 1, suspended: 1, operations_month: 40, bookings_month: 3 });
+    // The person's Developer plan names no subscription (as the default plan, or an override, gives
+    // one), so it is not paying (staff_subscribed_plans).
+    expect(home?.home).toMatchObject({ accounts: 2, people: 2, paying: 0, suspended: 1, operations_month: 40, bookings_month: 3 });
   });
 
   it('finds accounts by key, Stripe customer, GitHub id and reference, recording only a key prefix', async () => {
@@ -313,6 +318,34 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
       SELECT metadata FROM slotlock.staff_audit_events
        WHERE action = 'accounts.searched' AND metadata->>'query' LIKE 'slk_%' ORDER BY id DESC LIMIT 1`;
     expect(logged?.metadata.query).toBe('slk_AbCd1234');
+
+    // The staff log is kept six years, past any erasure: a search is kept as typed only when it is
+    // a reference, an id, a key prefix or a customer; a name, a login or an email only as a digest
+    // keyed with the deployment's secret, which shows two searches were the same and nothing more.
+    const logOf = async (query: string) => {
+      await search(query);
+      const [row] = await superuser<{ metadata: Record<string, string> }[]>`
+        SELECT metadata FROM slotlock.staff_audit_events WHERE action = 'accounts.searched' ORDER BY id DESC LIMIT 1`;
+      return row?.metadata;
+    };
+    for (const query of ['cus_TEST123', '424242', 'github:51', 'google:1234567', 'team:0b9e', 'github-org:77~test']) {
+      expect(await logOf(query), query).toEqual({ query });
+    }
+    const [digest] = await superuser<{ ada: string }[]>`SELECT slotlock.privacy_digest('ada lovelace') AS ada`;
+    for (const query of ['Ada Lovelace', 'ada LOVELACE']) {
+      expect(await logOf(query), query).toEqual({ query_digest: digest?.ada, query_kind: 'text' });
+    }
+    for (const query of ['ada@example.com', '@ada', 'octocat', 'Acme Rentals']) {
+      // The digest and its kind, nothing else: a digest's hex can hold letters of the query ('ada').
+      expect(await logOf(query), query).toEqual({ query_kind: 'text', query_digest: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    }
+    // The console's own record of a search: the same rule.
+    const support2 = await as(SUPPORT);
+    await adminSql`SELECT slotlock.admin_record(${support2}, 'search.github_lookup', NULL, 'octocat', NULL, '{}'::jsonb)`;
+    const [lookup] = await superuser<{ target: string | null; metadata: Record<string, string> }[]>`
+      SELECT target, metadata FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY id DESC LIMIT 1`;
+    const [octocat] = await superuser<{ digest: string }[]>`SELECT slotlock.privacy_digest('octocat') AS digest`;
+    expect(lookup).toEqual({ target: null, metadata: { query_digest: octocat?.digest, query_kind: 'text' } });
   });
 
   it('shows one account with its counts read under its own row security, then puts the setting back', async () => {
@@ -662,5 +695,22 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     expect(Object.keys(billing?.billing.runs ?? {})).toEqual(['billing_daily']);
     // Only the deployment role records a run.
     await expect(adminSql`SELECT slotlock.record_maintenance_run('billing_daily', 'cli:x', now(), false, '{}')`).rejects.toMatchObject({ code: '42501' });
+
+    // With overage on, billing daily reports it, and records that as the overage report's run too,
+    // so the console's Billing jobs never says that one has never run.
+    const daily = await cli(['billing', 'daily'], false, { SLOTLOCK_OVERAGE: 'on', STRIPE_SECRET_KEY: 'sk_test_billing_daily' });
+    expect(daily.code).toBe(0);
+    const [overage] = await superuser<{ actor: string; attention: boolean; summary: { months: { month: string; sent: number; failed: number }[] } }[]>`
+      SELECT actor, attention, summary FROM slotlock.maintenance_runs WHERE job = 'overage_report' ORDER BY id DESC LIMIT 1`;
+    expect(overage?.actor).toMatch(/^cli:/);
+    expect(overage?.attention).toBe(false);
+    expect(overage?.summary.months.map((month) => month.month)).toEqual(daily.lines.filter((line) => line.job === 'overage').map((line) => line.month));
+    const [both] = await adminSql<{ billing: { runs: Record<string, unknown> } }[]>`SELECT slotlock.admin_billing(${await as(OWNER)}) AS billing`;
+    expect(Object.keys(both?.billing.runs ?? {}).sort()).toEqual(['billing_daily', 'overage_report']);
+    // Without overage, nothing is reported, and no overage run is recorded.
+    const runs = async () => (await superuser`SELECT 1 FROM slotlock.maintenance_runs WHERE job = 'overage_report'`).length;
+    const reported = await runs();
+    expect((await cli(['billing', 'daily'])).code).toBe(0);
+    expect(await runs()).toBe(reported);
   });
 });

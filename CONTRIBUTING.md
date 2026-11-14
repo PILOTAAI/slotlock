@@ -30,6 +30,11 @@ role named `slotlock` is the package's schema, which `"$user"` puts first on the
 command-line tool redacts the database password from everything it prints, so a short or
 product-like password rewrites the output the tests read.
 
+The browser suites (the admin console's pages, and the dashboard assistant end to end) also need
+Chromium for the Playwright version `package.json` pins, `npx playwright install chromium`, and skip
+without it; CI's "Admin console in a browser" job runs the console's, and keeps its screenshots when
+it fails.
+
 Property suites (`*.property.test.ts`) check the engine, time zones, iCalendar parsing and API
 keys on input [fast-check](https://fast-check.dev/) generates, with a new seed each run. A failure
 prints the seed and the shrunk counterexample; add `{ seed, path }` from it to that `fc.assert` to
@@ -102,8 +107,13 @@ dated, is released the same way. After a failed run, run it again with the same 
 the release branch the failed run left when that already holds this release, so checks already run
 there still count, replaces it otherwise, and reuses its pull request (`scripts/open-release-pr.sh`).
 
-The pull request is opened and merged by the release app, a GitHub App that can only write this
-repository's contents and pull requests. An owner of the organization creates it once with
+The pull request is opened and merged by the release app, the project's one GitHub App, installed
+on this repository only. It holds what its three users need between them: contents, pull requests
+and issues write, and Actions, checks and commit statuses read. Each token asks only for its own
+part. Release a version asks for contents and pull requests. The hourly CMS schedule
+(`cms-schedule.yml`) uses the same key and asks for checks too. The admin console has a private key
+of its own, so either key can be revoked alone (SECURITY.md, Admin console). An owner of the
+organization creates it once with
 `node scripts/create-release-app.mjs` (click **Create GitHub App**, then install it on `slotlock`
 only); the script checks the installation and stores the app's key in the `release-app` environment,
 which only `main` can use. Without the app, the workflow opens the pull request as

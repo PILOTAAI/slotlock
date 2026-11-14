@@ -1,19 +1,15 @@
 # Publishes the blog posts an Owner scheduled in the admin console (RFC 0006, 4.5): each hour, as the
-# "Slotlock CMS" GitHub App, it merges every CMS pull request labelled cms:scheduled whose time has
-# come, if the App's own schedule comment names its head commit, it changes only blog files, the
-# post is submitted and every check passed (scripts/cms-scheduled-merge.mjs). A merge by the App,
-# unlike one by this workflow's GITHUB_TOKEN, starts the site's deploy on main.
+# release app (scripts/create-release-app.mjs), it merges every CMS pull request labelled
+# cms:scheduled whose time has come, if the App's own schedule comment names its head commit, it
+# changes only blog files, the post is submitted and every check passed (scripts/cms-scheduled-merge.mjs).
+# A merge by the App, unlike one by this workflow's GITHUB_TOKEN, starts the site's deploy on main.
 #
-# Every action is pinned to a full commit SHA, the same as site.yml's.
+# Every action is pinned to a full commit SHA, the same as release-version.yml's.
 #
-# Set up:
-#   repository variables  CMS_APP_ID            the Slotlock CMS App's App ID
-#                         CMS_APP_INSTALLATION  its installation id on this repository
-#     (not secrets; a job's `if` reads only repository variables, not an environment's)
-#   `cms` environment, with no required reviewers (a reviewer would hold every hourly run) and
-#   limited to main:
-#     secret              CMS_APP_KEY           the App's private key (.pem)
-# Until CMS_APP_ID is set the job is skipped.
+# It uses what Release a version uses, and nothing of its own: the release-app environment, which only
+# main can use and which has no reviewer (one would hold every hourly run), with the variable
+# RELEASE_APP_CLIENT_ID and the secret RELEASE_APP_PRIVATE_KEY. Its token asks only for what merging a
+# post needs. Until the client ID is stored the job does nothing.
 name: CMS schedule
 
 on:
@@ -30,22 +26,44 @@ concurrency:
 jobs:
   merge:
     name: Publish scheduled posts
-    if: vars.CMS_APP_ID != '' && github.ref == 'refs/heads/main'
+    # A job's `if` reads no environment's variables: the token step checks the client ID.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    environment: cms
+    # The environment's key and client ID, without a deployment recorded for each hourly run. Its
+    # branch policy still holds ("Using environments without deployments", GitHub docs, read
+    # 2026-11-14).
+    environment:
+      name: release-app
+      deployment: false
     steps:
+      # A token of the release app for this repository only, revoked when the job ends: contents and
+      # pull requests write to update and merge a post's pull request, delete its branch, and label
+      # and comment on it; checks read for its check runs.
+      - name: Mint the release app's token
+        id: app
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-checks: read
+          permission-contents: write
+          permission-pull-requests: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.app.outputs.token != ''
         with:
           persist-credentials: false
           sparse-checkout: scripts
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.app.outputs.token != ''
         with:
-          node-version: "22"
+          node-version: "22.23.3"
+          package-manager-cache: false
       - name: Merge the scheduled posts whose time has come
+        if: steps.app.outputs.token != ''
         run: node scripts/cms-scheduled-merge.mjs
         env:
-          CMS_APP_ID: ${{ vars.CMS_APP_ID }}
-          CMS_APP_INSTALLATION: ${{ vars.CMS_APP_INSTALLATION }}
-          CMS_APP_KEY: ${{ secrets.CMS_APP_KEY }}
+          CMS_TOKEN: ${{ steps.app.outputs.token }}
+          CMS_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           CMS_REPOSITORY: ${{ github.repository }}

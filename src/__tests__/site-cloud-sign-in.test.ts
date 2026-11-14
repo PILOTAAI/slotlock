@@ -58,10 +58,10 @@ describe('the site signs people in to Slotlock Cloud', () => {
     const hosted = read('docs/hosted/README.md');
     expect(hosted).toContain('an owner has turned Slotlock on for (the dashboard\'s Teams\npage)');
     // What signing in reads, as the dashboard says it on Cloud, which serves no organization list
-    // (no SLOTLOCK_DASHBOARD_ORGS): GitHub's public profile, or Google's id and email address.
+    // (no SLOTLOCK_DASHBOARD_ORGS): GitHub's public profile, or Google's id, email address and name.
     const flatHosted = hosted.replace(/\s+/g, ' ');
-    expect(flatHosted).toContain('With GitHub, Slotlock reads your public profile and keeps only your user id and login');
-    expect(flatHosted).toContain("With Google, it reads your account's id and email address, and keeps only those.");
+    expect(flatHosted).toContain('With GitHub, Slotlock reads your public profile and keeps only your user id, login and profile name');
+    expect(flatHosted).toContain("With Google, it reads your account's id, email address and name, and keeps only those.");
   });
 
   it('lists the endpoints the hosted service page publishes', () => {

@@ -2,8 +2,10 @@
 // period, a Search Console key that does not read failing only its part, Cloudflare's referrers
 // apart from the rest, the pages worth a new title, and the Worker's settings for each provider.
 import { generateKeyPairSync } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createSlotlockAdminInsights, slotlockLowClickPages } from '../admin/insights.js';
+import { slotlockSitePage } from '../admin/system.js';
 import { insightsOf } from '../../workers/admin/worker.js';
 
 const NOW = Date.UTC(2026, 10, 12, 12);
@@ -76,6 +78,40 @@ describe('the Site page’s providers', () => {
     const row = (key: string, clicks: number, impressions: number) => ({ key, clicks, impressions, ctr: clicks / impressions, position: 5 });
     expect(slotlockLowClickPages([row('/a', 1, 99), row('/b', 1, 100), row('/c', 30, 1000), row('/d', 5, 900)]).map((page) => page.key))
       .toEqual(['/d', '/b']);
+  });
+});
+
+describe('connecting a provider', () => {
+  it('leads each Connect on the Site page to the hosted docs’ section on it, which names every setting', () => {
+    const page = String(slotlockSitePage({
+      siteUrl: 'https://slotlock.pylota.io',
+      google: { state: 'off' },
+      bing: { state: 'off' },
+      visits: { state: 'off' },
+      deploys: { state: 'off' },
+      now: NOW,
+    }).body);
+    const connects = [...page.matchAll(/<a class="btn sm" href="([^"]+)"[^>]*>Connect<\/a>/g)].map((match) => match[1]);
+    expect(connects).toHaveLength(4);
+    const [target] = new Set(connects);
+    expect(new Set(connects).size).toBe(1);
+    const url = new URL(target ?? '');
+    // The hosted page is docs/hosted/README.md, included in the site (site/docs-src/hosted.md).
+    expect(`${url.origin}${url.pathname}`).toBe('https://slotlock.pylota.io/docs/hosted/');
+    // The heading's anchor as GitHub and the site's Markdown make it.
+    const slug = (heading: string) => heading.trim().toLowerCase().replace(/[^a-z0-9 -]/g, '').replace(/ /g, '-');
+    const docs = readFileSync('docs/hosted/README.md', 'utf8');
+    const headings = [...docs.matchAll(/^## (.+)$/gm)];
+    const at = headings.findIndex((heading) => slug(heading[1] ?? '') === url.hash.slice(1));
+    expect(at, url.hash).toBeGreaterThan(-1);
+    const start = headings[at]?.index ?? 0;
+    const section = docs.slice(start, headings[at + 1]?.index ?? docs.length);
+    for (const setting of [
+      'SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY', 'SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY', 'SLOTLOCK_ADMIN_BING_KEY', 'SLOTLOCK_ADMIN_BING_SITE',
+      'SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN', 'SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT', 'SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE',
+    ]) {
+      expect(section).toContain(`\`${setting}\``);
+    }
   });
 });
 

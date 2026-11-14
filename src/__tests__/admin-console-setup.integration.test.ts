@@ -2,7 +2,7 @@
 // Wrangler and the slotlock CLI, with a real PostgreSQL for the console's role. Skipped without
 // DATABASE_URL.
 import { spawn } from 'node:child_process';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createVerify, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type Server, createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -23,7 +23,10 @@ const AUD = 'ab'.repeat(32);
 const HOSTNAME = 'admin.slotlock.test';
 const CONSOLE_KEY = `ck_${randomBytes(24).toString('base64url')}`;
 const CLIENT_SECRET = `gh-oauth-secret-${randomBytes(12).toString('hex')}`;
-const CMS_PERMISSIONS = {
+// The release app, the one GitHub App: what it asks for once its permissions are updated.
+const RELEASE_CLIENT_ID = 'Iv23liReleaseTest';
+const RELEASE_SLUG = 'pilotaai-slotlock-release';
+const PERMISSIONS = {
   actions: 'read',
   checks: 'read',
   contents: 'write',
@@ -31,6 +34,7 @@ const CMS_PERMISSIONS = {
   pull_requests: 'write',
   statuses: 'read',
 };
+const RELEASE_ONLY = { contents: 'write', metadata: 'read', pull_requests: 'write' };
 
 const scratch: string[] = [];
 const servers: Server[] = [];
@@ -123,15 +127,40 @@ async function cloudflareApi(answers: { hyperdriveId?: string } = {}) {
   return { url: await listen(server), requests, state };
 }
 
-const { privateKey } = generateKeyPairSync('rsa', {
+const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+});
+const other = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
   publicKeyEncoding: { type: 'spki', format: 'pem' },
 });
 
-/** The stand-in GitHub API, for the CMS App's manifest flow. */
-async function githubApi() {
-  const seen = { conversions: 0, minted: [] as string[], revoked: [] as string[] };
+interface ReleaseApp {
+  /** What the app asks for, in its settings. */
+  app?: Record<string, string>;
+  /** What its installation on slotlock has accepted. */
+  installation?: Record<string, string>;
+  reach?: 'slotlock' | 'all';
+  installed?: boolean;
+}
+
+/** The stand-in GitHub API, for the release app as it is: a JWT its key signed, issued by its Client ID. */
+async function githubApi(scenario: ReleaseApp = {}) {
+  const seen = { minted: [] as string[], revoked: [] as string[], badJwts: 0, jwts: 0 };
+  const granted = { ...PERMISSIONS, metadata: 'read' };
+  const jwtOk = (authorization: string | undefined) => {
+    const [header = '', payload = '', signature = ''] = (/^Bearer (.+)$/.exec(authorization ?? '')?.[1] ?? '').split('.');
+    const verified = createVerify('RSA-SHA256').update(`${header}.${payload}`).verify(publicKey, Buffer.from(signature, 'base64url'));
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString() || '{}');
+    const now = Math.floor(Date.now() / 1000);
+    const ok = verified && claims.iss === RELEASE_CLIENT_ID && claims.iat <= now && claims.exp > now && claims.exp - now <= 600;
+    seen.jwts += 1;
+    if (!ok) seen.badJwts += 1;
+    return ok;
+  };
   const server = createServer((request, response) => {
     const json = (status: number, body?: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json' });
@@ -139,25 +168,31 @@ async function githubApi() {
     };
     const target = new URL(request.url ?? '/', 'http://api.test');
     const route = `${request.method} ${target.pathname}`;
-    if (route === 'POST /app-manifests/the-code/conversions') {
-      seen.conversions += 1;
-      return json(201, {
-        id: 4242,
-        slug: 'pilotaai-slotlock-cms',
-        client_id: 'Iv23liCmsTest',
-        pem: privateKey,
-        owner: { login: 'PILOTAAI' },
-        permissions: { ...CMS_PERMISSIONS, metadata: 'read' },
+    if (route === 'GET /app') {
+      if (!jwtOk(request.headers.authorization)) return json(401, { message: 'A JSON web token could not be decoded' });
+      return json(200, { id: 42, slug: RELEASE_SLUG, client_id: RELEASE_CLIENT_ID, owner: { login: 'PILOTAAI' }, permissions: scenario.app ?? granted });
+    }
+    if (route === 'GET /repos/PILOTAAI/slotlock/installation') {
+      if (!jwtOk(request.headers.authorization)) return json(401, { message: 'Bad credentials' });
+      if (scenario.installed === false) return json(404, { message: 'Not Found' });
+      return json(200, {
+        id: 7777, app_id: 42, app_slug: RELEASE_SLUG, client_id: RELEASE_CLIENT_ID,
+        repository_selection: scenario.reach === 'all' ? 'all' : 'selected',
+        permissions: scenario.installation ?? scenario.app ?? granted,
       });
     }
-    if (route === 'GET /repos/PILOTAAI/slotlock/installation') return json(200, { id: 7777 });
     if (route === 'POST /app/installations/7777/access_tokens') {
+      if (!jwtOk(request.headers.authorization)) return json(401, { message: 'Bad credentials' });
       const token = `ghs_${seen.minted.length}`;
       seen.minted.push(token);
-      return json(201, { token, permissions: { ...CMS_PERMISSIONS, metadata: 'read' }, repository_selection: 'selected' });
+      return json(201, { token, permissions: scenario.installation ?? scenario.app ?? granted, repository_selection: scenario.reach === 'all' ? 'all' : 'selected' });
     }
     if (route === 'GET /installation/repositories') {
-      return json(200, { total_count: 1, repositories: [{ full_name: 'PILOTAAI/slotlock' }] });
+      const all = scenario.reach === 'all';
+      return json(200, {
+        total_count: all ? 12 : 1,
+        repositories: all ? [{ full_name: 'PILOTAAI/slotlock' }, { full_name: 'PILOTAAI/pylota' }] : [{ full_name: 'PILOTAAI/slotlock' }],
+      });
     }
     if (route === 'DELETE /installation/token') {
       seen.revoked.push((request.headers.authorization ?? '').replace('Bearer ', ''));
@@ -168,7 +203,8 @@ async function githubApi() {
   return { url: await listen(server), seen };
 }
 
-// gh: the account, the first Owners, the cms environment and repository variables (kept as files).
+// gh: the account, the first Owners, repository variables and the release-app environment's (kept as
+// files).
 const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB/gh.log"
 case "$1 $2" in
@@ -189,8 +225,10 @@ case "$last" in
     name="\${last##*/}"
     if [ -f "$STUB/var-$name" ]; then printf '{"name":"%s","value":"%s"}\\n' "$name" "$(cat "$STUB/var-$name")"
     else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;
-  repos/PILOTAAI/slotlock/environments/cms) echo '{"name":"cms","deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' ;;
-  repos/PILOTAAI/slotlock/environments/cms/deployment-branch-policies) echo '{"branch_policies":[{"name":"main","type":"branch"}]}' ;;
+  repos/PILOTAAI/slotlock/environments/release-app/variables/*)
+    name="\${last##*/}"
+    if [ -f "$STUB/env-var-$name" ]; then printf '{"name":"%s","value":"%s"}\\n' "$name" "$(cat "$STUB/env-var-$name")"
+    else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;
   *) echo "unexpected: gh $*" >&2; exit 99 ;;
 esac
 `;
@@ -489,7 +527,10 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     for (const name of ['SESSION_SECRET', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'CONSOLE_KEY', 'STRIPE_KEY']) {
       expect(dry.output).toContain(`SLOTLOCK_ADMIN_${name} `);
     }
-    expect(dry.output).toContain('3. unless the repository variable CMS_APP_ID is set: create the "PILOTAAI Slotlock CMS" GitHub App');
+    // No new GitHub App: the release app, with a key of the console's own.
+    expect(dry.output).toContain('3. adopt the release app (RELEASE_APP_CLIENT_ID in the release-app environment) for Content, the status page and Deploys:');
+    expect(dry.output).toContain('with SLOTLOCK_ADMIN_CMS_APP_KEY_FILE, a private key of the app for the console alone');
+    expect(dry.output).not.toContain('Slotlock CMS');
     expect(dry.output).toContain('4. add as Owners those of ada who are not staff yet (each must be a GitHub user)');
     expect(dry.output).toContain('Erasing an account needs a second Owner to approve');
     expect(dry.output).not.toContain('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN');
@@ -510,8 +551,7 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
       STUB_STAFF: JSON.stringify([{ staff_ref: 'github:101', role: 'owner', status: 'active' }]),
     });
     writePrepared(run.config, {}, true);
-    writeFileSync(join(run.stub, 'var-CMS_APP_ID'), '4242');
-    writeFileSync(join(run.stub, 'var-CMS_APP_INSTALLATION'), '7777');
+    writeFileSync(join(run.stub, `env-var-RELEASE_APP_CLIENT_ID`), RELEASE_CLIENT_ID);
     const live = await runScript(['go-live'], run.env);
     expect(live.code, live.output).toBe(0);
 
@@ -532,20 +572,21 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
       expect(live.output).not.toContain(value);
       expect(`${run.read('wrangler.log')}${run.read('cli.log')}${run.read('gh.log')}`).not.toContain(value);
     }
-    // Deployed, with the CMS App's ids put in the config and deployed again.
+    // Deployed once: without a key of the release app, the CMS stays off and the config as it was.
     expect(run.read('wrangler.log')).toBe(
       [
         `deploy --config ${run.config}`,
         `secret list --config ${run.config} --format json`,
         `secret bulk --config ${run.config}`,
-        `deploy --config ${run.config}`,
         '',
       ].join('\n'),
     );
-    expect(readFileSync(run.config, 'utf8')).toContain('"SLOTLOCK_ADMIN_CMS_APP_ID": "4242"');
-    // Rewriting the config for the CMS App kept Web Analytics.
-    expect(readFileSync(run.config, 'utf8')).toContain(`"SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": "${SITE_TAG}"`);
-    expect(live.output).toContain('The console has no key for it');
+    expect(readFileSync(run.config, 'utf8')).toContain('"SLOTLOCK_ADMIN_CMS_APP_ID": ""');
+    // What the owner does for the console's own key, and nothing about a new App.
+    expect(live.output).toContain(
+      `The console has no key of the release app (client ID ${RELEASE_CLIENT_ID}). As an owner of PILOTAAI, generate a second private key in the app's settings (${WEB}/organizations/PILOTAAI/settings/apps > the app > Private keys > Generate a private key), then run go-live again with SLOTLOCK_ADMIN_CMS_APP_KEY_FILE set to the downloaded file.`,
+    );
+    expect(live.output).not.toMatch(/Open http|Slotlock CMS/);
     expect(live.output).not.toContain('Web Analytics on that page');
     // ada is staff already; grace is added, and her code is shown for her.
     expect(run.read('cli.log')).toBe('staff console-key\nstaff list\nstaff add github:102 owner\n');
@@ -560,50 +601,132 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(JSON.parse(run.read('worker-secrets.json') ?? '{}')).toEqual(secrets);
   });
 
-  it('creates the CMS App, and stores its key in the Worker and the cms environment only', async () => {
+  it('adopts the release app with a key of the console\'s own, once it has checked the app, and stores the key in the Worker only', async () => {
     const github = await githubApi();
+    const keyFile = join(mkdtempSync(join(tmpdir(), 'slotlock-admin-key-')), 'pilotaai-slotlock-release.private-key.pem');
+    scratch.push(dirname(keyFile));
+    writeFileSync(keyFile, privateKey, { mode: 0o600 });
     const run = await setup({
       SLOTLOCK_ADMIN_SETUP_TODAY: '2026-11-14',
       SLOTLOCK_ADMIN_OWNERS: 'grace',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_ID: 'Ov23liConsoleTest',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET: CLIENT_SECRET,
       SLOTLOCK_GITHUB_API_URL: github.url,
+      SLOTLOCK_ADMIN_CMS_APP_KEY_FILE: keyFile,
     });
-    writePrepared(run.config);
-    const live = start(['go-live', '--no-open'], run.env);
-    let base = '';
-    for (let tries = 0; tries < 200 && !base; tries += 1) {
-      base = /Open (http:\/\/127\.0\.0\.1:\d+)\//.exec(live.output())?.[1] ?? '';
-      if (!base) await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(base, live.output()).not.toBe('');
-    const page = await (await fetch(`${base}/`)).text();
-    const decode = (text: string) =>
-      text.replaceAll('&quot;', '"').replaceAll('&#39;', "'").replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
-    const manifest = JSON.parse(decode(/name="manifest" value="([^"]+)"/.exec(page)?.[1] ?? '{}'));
-    expect(manifest).toMatchObject({ name: 'PILOTAAI Slotlock CMS', public: false, default_permissions: CMS_PERMISSIONS, default_events: [] });
-    const state = new URL(decode(/<form method="post" action="([^"]+)"/.exec(page)?.[1] ?? '')).searchParams.get('state');
-    const back = await fetch(`${base}/created?code=the-code&state=${state}`, { redirect: 'manual' });
-    expect(back.status).toBe(302);
-    expect(await live.exit, live.output()).toBe(0);
+    writePrepared(run.config, {}, true);
+    writeFileSync(join(run.stub, 'env-var-RELEASE_APP_CLIENT_ID'), RELEASE_CLIENT_ID);
+    const live = await runScript(['go-live'], run.env);
+    expect(live.code, live.output).toBe(0);
 
+    // Signed in as the app by its Client ID, checked, and every check's token revoked.
+    expect(github.seen.jwts).toBeGreaterThanOrEqual(3);
+    expect(github.seen.badJwts).toBe(0);
+    expect(github.seen.minted.length).toBe(1);
+    expect(github.seen.revoked).toEqual(github.seen.minted);
+    expect(live.output).toContain(
+      `Checked ${RELEASE_SLUG}: installed on PILOTAAI/slotlock only, with actions: read, checks: read, contents: write, issues: write, pull_requests: write and statuses: read.`,
+    );
+    // The key is in the Worker, and nowhere on GitHub: no new App, no new secret, no cms environment.
     const secrets = JSON.parse(run.read('worker-secrets.json') ?? '{}') as Record<string, string>;
     expect(secrets.SLOTLOCK_ADMIN_CMS_APP_KEY).toBe(privateKey);
-    // No site tag, so no Web Analytics token was asked for, and the closing note says how to add it.
-    expect(secrets).not.toHaveProperty('SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN');
-    expect(live.output()).toContain('Web Analytics on that page: run prepare again with SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE');
-    expect(run.read('gh-secret-CMS_APP_KEY')).toBe(privateKey);
-    expect([run.read('var-CMS_APP_ID'), run.read('var-CMS_APP_INSTALLATION')]).toEqual(['4242', '7777']);
     const calls = run.read('gh.log') ?? '';
-    expect(calls.indexOf('secret set CMS_APP_KEY --env cms')).toBeLessThan(calls.indexOf('variable set CMS_APP_ID'));
-    // Deployed again with the App's ids; its key is never printed nor an argument.
+    expect(calls).not.toMatch(/secret set|variable set CMS|environments\/cms/);
+    // The config names the app by its Client ID; the console finds the installation itself. Web
+    // Analytics is kept.
     const deploys = (run.read('deploys.log') ?? '').split('=====').filter((text) => text.trim());
     expect(deploys).toHaveLength(2);
-    expect(deploys[1]).toContain('"SLOTLOCK_ADMIN_CMS_APP_ID": "4242"');
-    expect(deploys[1]).toContain('"SLOTLOCK_ADMIN_CMS_INSTALLATION": "7777"');
+    expect(deploys[1]).toContain(`"SLOTLOCK_ADMIN_CMS_APP_ID": "${RELEASE_CLIENT_ID}"`);
+    expect(deploys[1]).toContain('"SLOTLOCK_ADMIN_CMS_INSTALLATION": ""');
+    expect(deploys[1]).toContain(`"SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE": "${SITE_TAG}"`);
+    // The key is never printed nor an argument.
     const keyBody = privateKey.split('\n')[5] ?? '';
-    expect(live.output()).not.toContain(keyBody);
+    expect(live.output).not.toContain(keyBody);
     expect(`${run.read('wrangler.log')}${calls}`).not.toContain(keyBody);
+    expect(live.output).toContain(`delete ${keyFile}`);
+
+    // Again without the file: the Worker's key is kept, and nothing is deployed twice.
+    const again = await runScript(['go-live'], { ...run.env, SLOTLOCK_ADMIN_CMS_APP_KEY_FILE: '' });
+    expect(again.code, again.output).toBe(0);
+    expect(again.output).toContain('The Worker has its key of the release app.');
+    expect((run.read('deploys.log') ?? '').split('=====').filter((text) => text.trim())).toHaveLength(3);
+    expect(JSON.parse(run.read('worker-secrets.json') ?? '{}').SLOTLOCK_ADMIN_CMS_APP_KEY).toBe(privateKey);
+  });
+
+  it.each([
+    [
+      'the release app before its permissions were added',
+      { app: RELEASE_ONLY },
+      [
+        `1. Set its permissions: ${WEB}/organizations/PILOTAAI/settings/apps/${RELEASE_SLUG}/permissions > Repository permissions > Actions: Read-only; Checks: Read-only; Issues: Read and write; Commit statuses: Read-only > Save changes.`,
+        `2. Then accept them for the installation: ${WEB}/organizations/PILOTAAI/settings/installations/7777 > Review request > Accept new permissions.`,
+      ],
+    ],
+    [
+      'permissions the installation has not accepted yet',
+      { installation: RELEASE_ONLY },
+      [`1. Accept its new permissions for the installation: ${WEB}/organizations/PILOTAAI/settings/installations/7777 > Review request > Accept new permissions.`],
+    ],
+    [
+      'a permission it should not have',
+      { app: { ...PERMISSIONS, metadata: 'read', administration: 'write' }, installation: { ...PERMISSIONS, metadata: 'read', administration: 'write' } },
+      [`1. Set its permissions: ${WEB}/organizations/PILOTAAI/settings/apps/${RELEASE_SLUG}/permissions > Repository permissions > Administration: No access > Save changes.`],
+    ],
+    [
+      'an installation that reaches every repository',
+      { reach: 'all' as const },
+      [`1. The installation reaches every repository in PILOTAAI. Limit it to slotlock: ${WEB}/organizations/PILOTAAI/settings/installations/7777 > Only select repositories > slotlock > Save.`],
+    ],
+    [
+      'no installation',
+      { installed: false },
+      [`1. Install it on slotlock only: ${WEB}/apps/${RELEASE_SLUG}/installations/new (Only select repositories > slotlock > Install).`],
+    ],
+  ])('refuses %s, deploying and storing nothing, and says what to change on GitHub', async (_, scenario, steps) => {
+    const github = await githubApi(scenario);
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-admin-key-'));
+    scratch.push(dir);
+    writeFileSync(join(dir, 'key.pem'), privateKey, { mode: 0o600 });
+    const run = await setup({
+      SLOTLOCK_ADMIN_SETUP_TODAY: '2026-11-14',
+      SLOTLOCK_ADMIN_OWNERS: 'grace',
+      SLOTLOCK_GITHUB_API_URL: github.url,
+      SLOTLOCK_ADMIN_CMS_APP_KEY_FILE: join(dir, 'key.pem'),
+    });
+    writePrepared(run.config);
+    writeFileSync(join(run.stub, 'env-var-RELEASE_APP_CLIENT_ID'), RELEASE_CLIENT_ID);
+    const refused = await runScript(['go-live'], run.env);
+    expect(refused.code, refused.output).toBe(1);
+    expect(refused.output).toContain(`The release app (${RELEASE_SLUG}) cannot serve the console yet: nothing was deployed or stored. As an owner of PILOTAAI:`);
+    for (const line of steps) expect(refused.output).toContain(`\n  ${line}\n`);
+    expect(refused.output).toContain('Then run go-live again.');
+    expect(refused.output.match(/^ {2}\d\. /gm)).toHaveLength(steps.length);
+    expect([run.read('wrangler.log'), run.read('cli.log'), run.read('worker-secrets.json')]).toEqual([null, null, null]);
+    expect(github.seen.badJwts).toBe(0);
     expect(github.seen.revoked).toEqual(github.seen.minted);
+    expect(refused.output).not.toContain(privateKey.split('\n')[5] ?? '');
+  });
+
+  it('refuses a key that is not the release app\'s, and a file that holds no key', async () => {
+    const github = await githubApi();
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-admin-key-'));
+    scratch.push(dir);
+    writeFileSync(join(dir, 'other.pem'), other.privateKey, { mode: 0o600 });
+    writeFileSync(join(dir, 'notes.txt'), 'not a key', { mode: 0o600 });
+    const run = await setup({ SLOTLOCK_ADMIN_SETUP_TODAY: '2026-11-14', SLOTLOCK_ADMIN_OWNERS: 'grace', SLOTLOCK_GITHUB_API_URL: github.url });
+    writePrepared(run.config);
+    writeFileSync(join(run.stub, 'env-var-RELEASE_APP_CLIENT_ID'), RELEASE_CLIENT_ID);
+    const wrongKey = await runScript(['go-live'], { ...run.env, SLOTLOCK_ADMIN_CMS_APP_KEY_FILE: join(dir, 'other.pem') });
+    expect(wrongKey.code).toBe(1);
+    expect(wrongKey.output).toContain(`GitHub refused the key for the app with client ID ${RELEASE_CLIENT_ID} (HTTP 401)`);
+    const notAKey = await runScript(['go-live'], { ...run.env, SLOTLOCK_ADMIN_CMS_APP_KEY_FILE: join(dir, 'notes.txt') });
+    expect(notAKey.code).toBe(1);
+    expect(notAKey.output).toContain(`${join(dir, 'notes.txt')} is not a private key (.pem) of a GitHub App.`);
+    // A key and no release app stored to use it with.
+    rmSync(join(run.stub, 'env-var-RELEASE_APP_CLIENT_ID'));
+    const noApp = await runScript(['go-live'], { ...run.env, SLOTLOCK_ADMIN_CMS_APP_KEY_FILE: join(dir, 'other.pem') });
+    expect(noApp.code).toBe(1);
+    expect(noApp.output).toContain('No release app is stored (RELEASE_APP_CLIENT_ID in the release-app environment): an owner of PILOTAAI runs node scripts/create-release-app.mjs first.');
+    expect([run.read('wrangler.log'), run.read('worker-secrets.json')]).toEqual([null, null]);
   });
 });

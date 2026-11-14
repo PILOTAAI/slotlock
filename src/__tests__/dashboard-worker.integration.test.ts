@@ -1,6 +1,7 @@
 // The dashboard Worker's fetch handler against real Postgres, as the LOGIN role Hyperdrive connects
 // as. Skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
@@ -95,6 +96,13 @@ describe.skipIf(!url)('the dashboard Worker (real Postgres)', () => {
     expect(root.headers.get('location')).toBe(`${APP}/dashboard`);
     const elsewhere = await worker.fetch(new Request(`${APP}/mcp`), env, ctx);
     expect(elsewhere.status).toBe(404);
+  });
+
+  it('says which version it runs on its sign-in page, for the staff console', async () => {
+    const worker = createSlotlockDashboardWorker({ fetch: github });
+    const page = await worker.fetch(new Request(`${APP}/dashboard`), env, ctx);
+    expect(page.status).toBe(200);
+    expect(page.headers.get('x-slotlock-version')).toBe(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version);
   });
 
   it('signs a person in, issues a key for their tenant, and points agents at the server', async () => {
