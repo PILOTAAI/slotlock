@@ -492,6 +492,54 @@ describe.skipIf(!url)('single sign-on through a team provider (real Postgres)', 
     expect(await sso.bypass(tenantRef, ada, scoped)).toBe('not_allowed');
   });
 
+  it("keeps a linked member's own sessions through provider sign-ins whose proof is refused, and keeps none of those", async () => {
+    const { tenantRef, domain, id } = await connectedTeam();
+    const fay = people[4] as string;
+    await addByGithub(tenantRef, fay, 'member');
+    const own = await session(fay);
+    expect(await signIn(id, 'fay-at-idp', { email: `fay@${domain}`, sessionPerson: fay })).toMatchObject({ outcome: 'linked' });
+    const later = () => new Date(Date.now() + 3_600_000);
+    const sessionsOf = async () =>
+      (await admin<{ count: number }[]>`SELECT count(*)::int AS count FROM slotlock.dashboard_sessions WHERE person_ref = ${fay}`)[0]?.count;
+    // Fifty callbacks read the connection, then wait on the provider while the Owner changes it,
+    // tests it and turns it on again: each proof is refused, and nothing of theirs is kept.
+    const read = (await sso.connectionById(id))?.configVersion as number;
+    await admin`UPDATE slotlock.sso_connections SET config_version = config_version + 1, tested_version = config_version + 1 WHERE id = ${id}::uuid`;
+    for (let index = 0; index < 50; index++) {
+      expect((await signIn(id, 'fay-at-idp', { email: `fay@${domain}` })).person).toBe(fay);
+      await workspaces.signedIn(fay, []);
+      expect(await sso.startScoped(randomBytes(24).toString('base64url'), fay, id, read, later(), {})).toBe(false);
+    }
+    expect(await sessionsOf()).toBe(1);
+    // One more, proved: scoped to the team from the moment it is recorded, the member's own kept.
+    const scoped = randomBytes(24).toString('base64url');
+    expect(await sso.startScoped(scoped, fay, id, read + 1, later(), { userAgent: 'Firefox', ipAddress: '203.0.113.9' })).toBe(true);
+    expect(await workspaces.sessions?.seen(fay, own)).toBe(true);
+    expect(await workspaces.standing(tenantRef, fay, scoped)).toMatchObject({ role: 'member', refusal: null });
+    const scopedDigest = createHash('sha256').update(scoped).digest();
+    const [kept] = await admin<{ sso_connection_id: string; user_agent: string; proofs: number }[]>`
+      SELECT kept.sso_connection_id, kept.user_agent,
+             (SELECT count(*)::int FROM slotlock.dashboard_session_sso proof WHERE proof.sid_sha256 = kept.sid_sha256) AS proofs
+        FROM slotlock.dashboard_sessions kept WHERE kept.sid_sha256 = ${scopedDigest}`;
+    expect(kept).toEqual({ sso_connection_id: id, user_agent: 'Firefox', proofs: 1 });
+    // A session id already recorded is not taken over.
+    expect(await sso.startScoped(own, fay, id, read + 1, later(), {})).toBe(false);
+    expect(await workspaces.standing(tenantRef, fay, own)).toMatchObject({ role: 'member' });
+
+    // Recorded in two steps, as a release before this one does and the dashboard still does on a
+    // schema without the one: each refused, then ended. Ended sessions go first of the 50 kept.
+    for (let index = 0; index < 50; index++) {
+      const sid = randomBytes(24).toString('base64url');
+      await workspaces.sessions?.started(fay, sid, later(), {});
+      expect(await sso.recordProof(sid, fay, id, true, read)).toBe(false);
+      expect(await workspaces.sessions?.end(fay, workspaces.sessions.idOf(sid))).toBe(true);
+    }
+    await session(fay);
+    expect(await workspaces.sessions?.seen(fay, own)).toBe(true);
+    expect(await workspaces.sessions?.seen(fay, scoped)).toBe(true);
+    expect(await sessionsOf()).toBe(50);
+  });
+
   it("keeps the tables out of the serving role's reach but for the functions", async () => {
     for (const table of ['sso_connections', 'sso_identities', 'sso_role_mappings', 'dashboard_session_sso', 'sso_bypasses']) {
       await expect(application.unsafe(`SELECT * FROM slotlock.${table}`)).rejects.toThrow(/permission denied/);

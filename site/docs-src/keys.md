@@ -105,7 +105,11 @@ slotlock key revoke <id>     # stops working on its next request
   without waiting; bookings and events keep their times. `slotlock sandbox reset` empties it,
   keeping its keys, webhooks and plan. The same are `POST /v1/sandbox/seed`, `/race`,
   `/fast-forward` and `/reset` for an admin test key. Each refuses a live tenant
-  (`sandbox_test_only`), and so does the database's reset.
+  (`sandbox_test_only`), and so does the database's reset. On `slotlock serve`, a race takes a write
+  token for each agent and runs one at a time with the environment's fast-forwards and maintenance
+  runs ([Limits](/docs/limits/)), and it ends with its request: when the client leaves or the
+  request times out, the agents still waiting never run and the race answers 503
+  `request_aborted`.
 
 ## Partner accounts
 

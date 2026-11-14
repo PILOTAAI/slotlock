@@ -1,7 +1,7 @@
 // Monthly quotas (RFC 0003 part 3): each hosted plan allows so many operations and bookings a UTC
 // calendar month (plans.ts SLOTLOCK_PLAN_QUOTAS). The server checks each operation against them as
 // it is authorized: past the operations quota every operation is refused, past the bookings quota
-// only those that can make a booking, so a tenant can still read and cancel. A refusal is
+// only those that can make a booking, so a tenant can still read, cancel and decline. A refusal is
 // `quota_exceeded` (429) with Retry-After at the month's end (rate-limit.ts renders it), and at 80%
 // and 100% of each quota the tenant's feed records `usage.threshold_reached` once.
 //
@@ -21,21 +21,166 @@ import type { SlotlockRecordedUsageMetric } from './usage.js';
 export { SLOTLOCK_QUOTA_METRICS, SLOTLOCK_QUOTA_NOTICE_PERCENTS };
 export type SlotlockQuotaMetric = (typeof SLOTLOCK_QUOTA_METRICS)[number];
 
+/** Every operation a quota is checked for: an agent's, and the application API's. */
+export type SlotlockQuotaOperation = SlotlockAgentOperation | SlotlockApplicationOperation;
+
 /**
- * The operations that can make a booking (a reservation, an event, a confirmed hold) or hold a slot
- * for one: refused once the bookings quota is used up. Everything else, reads and cancellations
- * included, runs until the operations quota is.
+ * Whether each operation can make a booking (a reservation, an event, a confirmed hold) or hold a
+ * slot for one: those are refused once the bookings quota is used up. Everything else, reads,
+ * cancellations and declines included, runs until the operations quota is. `grant` is a decision
+ * that books when it grants and not when it declines. A record over every operation, so one a later
+ * release adds does not compile until it is classified here.
  */
-export const SLOTLOCK_BOOKING_OPERATIONS: readonly (SlotlockAgentOperation | SlotlockApplicationOperation)[] =
-  Object.freeze([
-    'slotlock_hold_slots',
-    'slotlock_book_together',
-    'slotlock_book_pool',
-    'slotlock_create_event',
-    'slotlock_acquire_hold',
-    'slotlock_confirm_hold',
-    'slotlock_put_reservation',
-  ]);
+export const SLOTLOCK_BOOKING_OPERATIONS: Readonly<Record<SlotlockQuotaOperation, boolean | 'grant'>> =
+  Object.freeze({
+    // Agents' operations.
+    slotlock_list_resources: false,
+    slotlock_get_free_busy: false,
+    slotlock_find_next_available: false,
+    slotlock_find_available_slots: false,
+    slotlock_find_available_ranges: false,
+    slotlock_hold_slots: true,
+    slotlock_hold_together: true,
+    slotlock_release_slots: false,
+    slotlock_confirm_slot: true,
+    // A move or a change keeps the booking it was: nothing new is booked.
+    slotlock_reschedule: false,
+    slotlock_cancel: false,
+    slotlock_book_together: true,
+    slotlock_book_pool: true,
+    slotlock_get_pool_availability: false,
+    slotlock_create_event: true,
+    slotlock_get_event: false,
+    slotlock_list_events: false,
+    slotlock_update_event: false,
+    slotlock_delete_event: false,
+    // The application API's.
+    slotlock_create_resource: false,
+    slotlock_update_resource: false,
+    slotlock_list_locations: false,
+    slotlock_create_location: false,
+    slotlock_update_location: false,
+    slotlock_delete_location: false,
+    slotlock_list_groups: false,
+    slotlock_create_group: false,
+    slotlock_delete_group: false,
+    slotlock_add_group_member: false,
+    slotlock_remove_group_member: false,
+    slotlock_get_resource: false,
+    slotlock_archive_resource: false,
+    slotlock_restore_resource: false,
+    slotlock_delete_resource: false,
+    slotlock_list_busy: false,
+    slotlock_set_resource_availability: false,
+    slotlock_set_tenant_availability: false,
+    slotlock_get_availability_defaults: false,
+    slotlock_set_location_availability: false,
+    slotlock_list_availability_exceptions: false,
+    slotlock_create_availability_exception: false,
+    slotlock_delete_availability_exception: false,
+    slotlock_import_holidays: false,
+    slotlock_list_holiday_calendars: false,
+    slotlock_delete_holiday_calendar: false,
+    slotlock_export_resource_availability: false,
+    slotlock_import_resource_availability: false,
+    slotlock_set_resource_booking_rules: false,
+    slotlock_set_resource_pool: false,
+    slotlock_set_resource_parent: false,
+    slotlock_list_pools: false,
+    slotlock_set_pool_order: false,
+    slotlock_get_booking_rule_defaults: false,
+    slotlock_set_tenant_booking_rules: false,
+    slotlock_set_pool_booking_rules: false,
+    slotlock_get_resource_history: false,
+    slotlock_get_coverage: false,
+    slotlock_record_coverage_failure: false,
+    slotlock_delete_coverage: false,
+    // A calendar's busy time is not a booking Slotlock makes.
+    slotlock_put_source_busy: false,
+    slotlock_report_coverage_conflict: false,
+    slotlock_get_reservation_history: false,
+    slotlock_get_tenant_event_history: false,
+    slotlock_acquire_hold: true,
+    slotlock_get_hold: false,
+    slotlock_list_holds: false,
+    slotlock_confirm_hold: true,
+    // Payment lets a hold be confirmed; confirming it is what books.
+    slotlock_mark_hold_paid: false,
+    slotlock_release_hold: false,
+    slotlock_get_reservation: false,
+    slotlock_list_reservations: false,
+    slotlock_put_reservation: true,
+    slotlock_cancel_reservation: false,
+    slotlock_check_in_reservation: false,
+    slotlock_put_contact: false,
+    slotlock_get_contact: false,
+    slotlock_list_contacts: false,
+    slotlock_delete_contact: false,
+    // An entry holds nothing; the hold it may be offered later is booked by slotlock_confirm_hold.
+    slotlock_join_waitlist: false,
+    slotlock_list_waitlist: false,
+    slotlock_leave_waitlist: false,
+    slotlock_decline_waitlist_offer: false,
+    slotlock_tenant_book_together: true,
+    slotlock_tenant_book_pool: true,
+    slotlock_record_coverage: false,
+    slotlock_list_tenant_events: false,
+    slotlock_get_tenant_event: false,
+    slotlock_export_tenant_event: false,
+    slotlock_cancel_tenant_event: false,
+    slotlock_get_tenant: false,
+    slotlock_erase_tenant: false,
+    slotlock_run_maintenance: false,
+    slotlock_list_changes: false,
+    slotlock_create_webhook: false,
+    slotlock_list_webhooks: false,
+    slotlock_delete_webhook: false,
+    slotlock_enable_webhook: false,
+    slotlock_get_usage: false,
+    slotlock_list_audit_events: false,
+    slotlock_verify_audit_log: false,
+    slotlock_export_subject: false,
+    slotlock_erase_subject: false,
+    slotlock_create_tenant_export: false,
+    slotlock_list_tenant_exports: false,
+    slotlock_get_tenant_export: false,
+    slotlock_get_tenant_export_part: false,
+    slotlock_delete_tenant_export: false,
+    slotlock_list_approval_policies: false,
+    slotlock_put_approval_policy: false,
+    slotlock_delete_approval_policy: false,
+    slotlock_list_approvals: false,
+    slotlock_get_approval: false,
+    slotlock_decide_approval: 'grant',
+    // A scenario's bookings are made as maintenance, which a quota never counts.
+    slotlock_sandbox_seed: false,
+    slotlock_sandbox_reset: false,
+    slotlock_sandbox_fast_forward: false,
+    // Its winner books through slotlock_create_event, whose own check a race does not run.
+    slotlock_sandbox_race: true,
+    slotlock_partner_put_account: false,
+    slotlock_partner_list_accounts: false,
+    slotlock_partner_get_account: false,
+    slotlock_partner_list_keys: false,
+    slotlock_partner_create_key: false,
+    slotlock_partner_rotate_key: false,
+    slotlock_partner_revoke_key: false,
+    slotlock_partner_suspend_account: false,
+    slotlock_partner_unsuspend_account: false,
+    slotlock_partner_erase_account: false,
+    slotlock_partner_get_usage: false,
+    slotlock_partner_reconcile_usage: false,
+  });
+
+/**
+ * Whether `operation`, given `input` (its arguments, as checked), can make a booking or hold a slot
+ * for one. A decision books unless it declines: one whose input is not given is held as a grant.
+ */
+export function slotlockOperationBooks(operation: SlotlockQuotaOperation, input?: unknown): boolean {
+  const books = SLOTLOCK_BOOKING_OPERATIONS[operation];
+  if (books !== 'grant') return books;
+  return !(typeof input === 'object' && input !== null && (input as { decision?: unknown }).decision === 'decline');
+}
 
 /**
  * Operations a quota never refuses, though each still counts: reading the month's usage, so a
@@ -122,7 +267,9 @@ export interface SlotlockQuotas {
    */
   check(args: {
     tenantRef: string;
-    operation: SlotlockAgentOperation | SlotlockApplicationOperation;
+    operation: SlotlockQuotaOperation;
+    /** The operation's arguments, as checked: whether a decision grants or declines. */
+    input?: unknown;
   }): Promise<SlotlockQuotaCheck>;
 }
 
@@ -245,7 +392,7 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
   }
 
   return {
-    async check({ tenantRef, operation }) {
+    async check({ tenantRef, operation, input }) {
       const at = now();
       const { periodStart, resetsAt } = slotlockQuotaPeriod(at);
       let entry = entries.get(tenantRef);
@@ -274,7 +421,7 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
       let standings = standingsOf(tenantRef, entry, resetsAt);
       // Booking operations let run since the read are attempts, and some were refused or failed:
       // before refusing one on that estimate, read the database's count again.
-      const booking = SLOTLOCK_BOOKING_OPERATIONS.includes(operation);
+      const booking = slotlockOperationBooks(operation, input);
       const bookingStanding = standings[1];
       if (booking && entry.bookingsSinceRead > 0 && bookingStanding && bookingStanding.used >= bookingStanding.stop) {
         let pending = reading.get(tenantRef);
@@ -310,6 +457,20 @@ export function createSlotlockQuotas(options: SlotlockQuotasOptions): SlotlockQu
       return { ok: true, standings };
     },
   };
+}
+
+/**
+ * A booking made other than by an operation (the dashboard's Approvals page granting one), held to
+ * the bookings stop as slotlock_decide_approval's grant is. Not to the operations stop: a person's
+ * action on the dashboard is not an operation, and is not counted as one.
+ */
+export async function checkSlotlockBookingQuota(quotas: SlotlockQuotas, tenantRef: string): Promise<SlotlockQuotaCheck> {
+  const verdict = await quotas.check({ tenantRef, operation: 'slotlock_decide_approval', input: { decision: 'grant' } });
+  if (verdict.ok || verdict.exceeded.metric === 'bookings') return verdict;
+  const bookings = verdict.standings.find((standing) => standing.metric === 'bookings');
+  return bookings && bookings.used >= bookings.stop
+    ? { ok: false, exceeded: bookings, standings: verdict.standings }
+    : { ok: true, standings: verdict.standings };
 }
 
 /** `slotlock.tenant_quota_usage`: the tenant's operations and bookings from `fromDay` until now. */

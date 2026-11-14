@@ -58,7 +58,9 @@ event does not already take), and the agent is answered `409 approval_pending` w
 `approval_id` and `expires_at`; under `refuse` it is `403 approval_policy_refused`. A person decides
 in the dashboard's Approvals page or with `slotlock_decide_approval`: granting makes the booking as
 the agent asked for it, as that agent, in the transaction that lets the hold go; declining frees the
-time. The agent learns the outcome by retrying with the same `idempotency_key`: the booking with
+time. Past the tenant's monthly bookings (`SLOTLOCK_QUOTAS=on`) granting is refused
+`429 quota_exceeded`, there and on the Approvals page, and the approval waits; declining still runs.
+The agent learns the outcome by retrying with the same `idempotency_key`: the booking with
 `replayed: true` once granted, `403 approval_declined` (with the person's `reason`) or
 `409 approval_expired`. The wait is each policy's own (`approval_ttl_minutes`, a day by default, up
 to 30 days, and the backend's `maxApprovalMinutes`), ending `lead_minutes` before the booking

@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { invokeSlotlockAgentOperation } from '../agent-server.js';
-import { createSlotlockStoreAgentBackend } from '../agent-store-backend.js';
+import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
 import {
   SLOTLOCK_SANDBOX_SCENARIOS,
@@ -103,6 +103,53 @@ describe.skipIf(!url)('the sandbox (real Postgres, application role)', () => {
     await expect(
       raceSlotlockSandbox({ backend: backend(), tenantRef: live, resourceId: car?.id as string, start, end: start }),
     ).rejects.toMatchObject({ code: 'sandbox_test_only' });
+    await resetSlotlockSandbox(store, test);
+  });
+
+  it("ends a race with its request: racers still waiting for the tenant's transactions never run", async () => {
+    // A 60-agent race whose client left after 43 ms still made all 60 booking attempts.
+    const slotted = createSlotlockStore(application, { maxTenantTransactions: 2 });
+    await seedSlotlockSandbox(slotted, test, 'car-rental');
+    const [car] = await slotted.withTenant(test, (tenant) => tenant.listResources({ tenantRef: test, limit: 100 }));
+    const controller = new AbortController();
+    // Each transaction counted as it begins; the first to begin ends the request.
+    let begun = 0;
+    const withTenant: SlotlockStore['withTenant'] = (tenantRef, callback, options) =>
+      slotted.withTenant(
+        tenantRef,
+        (tenant) => {
+          begun += 1;
+          controller.abort();
+          return callback(tenant);
+        },
+        options,
+      );
+    const counted = Object.create(slotted, { withTenant: { value: withTenant } }) as SlotlockStore;
+    const backend = createSlotlockStoreApplicationBackend(counted, {
+      agentBackend: createSlotlockStoreAgentBackend(counted, {
+        availabilityRules: async () => [{ rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU', startMinutes: 0, durationMinutes: 1440 }],
+      }),
+    });
+    const start = new Date(Date.UTC(new Date().getUTCFullYear() + 1, 2, 4, 10));
+    await expect(
+      backend.sandboxRace(
+        {
+          principal: { subject: 'sandbox-admin', tenantRef: test, scopes: ['read', 'write', 'admin'] },
+          operation: 'slotlock_sandbox_race',
+          signal: controller.signal,
+        },
+        {
+          resource_id: car?.id,
+          starts_at: start.toISOString(),
+          ends_at: new Date(start.getTime() + 3_600_000).toISOString(),
+          agents: 30,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'request_aborted', status: 503 });
+    // Only the racers already in one of the tenant's two transactions ran, and nothing runs after.
+    expect(begun).toBeLessThanOrEqual(2);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(begun).toBeLessThanOrEqual(2);
     await resetSlotlockSandbox(store, test);
   });
 

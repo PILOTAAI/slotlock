@@ -52,15 +52,27 @@ describe('functions a schema from an earlier release lacks', () => {
     expect(calls(statements, 'tenant_dashboard_notices')).toBe(1);
   });
 
+  it('include the one step a sign-in through a team provider alone is recorded in: without it, nothing is called', async () => {
+    const connection = '00000000-0000-4000-8000-000000000001';
+    const without = fakeSql([]);
+    const earlier = createSlotlockDashboardWorkspaces(without.sql).sso;
+    await expect(earlier?.startScoped('sid', 'github:1', connection, 1, new Date(), {})).resolves.toBeNull();
+    expect(calls(without.statements, 'sso_session_started')).toBe(0);
+    const present = fakeSql(['slotlock.sso_session_started(text, bytea, timestamptz, text, text, uuid, integer)']);
+    await createSlotlockDashboardWorkspaces(present.sql).sso?.startScoped('sid', 'github:1', connection, 1, new Date(), {});
+    expect(calls(present.statements, 'sso_session_started')).toBe(1);
+  });
+
   it('are taken as missing when the question itself fails, and asked again after a minute', async () => {
     let clock = 0;
     const failing = fakeSql([], true);
-    const has = createSlotlockSchemaFunctions(failing.sql, ['slotlock.x(text)'], () => clock);
-    await expect(has('slotlock.x(text)')).resolves.toBe(false);
-    await expect(has('slotlock.x(text)')).resolves.toBe(false);
+    const overage = 'slotlock.tenant_plan_overage(text)';
+    const has = createSlotlockSchemaFunctions(failing.sql, [overage], () => clock);
+    await expect(has(overage)).resolves.toBe(false);
+    await expect(has(overage)).resolves.toBe(false);
     expect(failing.statements).toHaveLength(1);
     clock = 61_000;
-    await has('slotlock.x(text)');
+    await has(overage);
     expect(failing.statements).toHaveLength(2);
   });
 });

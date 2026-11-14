@@ -36,6 +36,10 @@ git add package.json package-lock.json server.json slotlock.manifest.json CHANGE
 # Each language client's version, as scripts/prepare-release.sh moved it.
 . "$(dirname "$0")/client-versions.sh"
 client_version_paths | while IFS= read -r path; do git add -- "$path"; done
+# The release's schema functions, as scripts/prepare-release.sh wrote them.
+if [ -f workers/dashboard/released-schema-functions.json ]; then
+  git add workers/dashboard/released-schema-functions.json
+fi
 git -c user.name="$bot" -c user.email="$bot_email" commit -q -m "Release $version" \
   -m "Signed-off-by: $bot <$bot_email>" >&2
 commit=$(git rev-parse HEAD)

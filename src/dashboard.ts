@@ -152,7 +152,7 @@ import {
   SLOTLOCK_MAX_KEY_SCOPE_REFS,
   isSlotlockResourceScope,
 } from './resource-profile.js';
-import { slotlockQuotaPeriod } from './quotas.js';
+import { type SlotlockQuotas, checkSlotlockBookingQuota, slotlockQuotaPeriod } from './quotas.js';
 import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
 import {
   type CreateWebhookEndpointResult,
@@ -1225,6 +1225,12 @@ export function createSlotlockDashboardResources(
      * and subscribes to a calendar's address.
      */
     holidayFetch?: typeof fetch;
+    /**
+     * The tenants' monthly quotas (SLOTLOCK_QUOTAS=on, quotas.ts): with them, granting an approval,
+     * which books, is refused `quota_exceeded` once the tenant's bookings this month reach its stop,
+     * as the API's grant is. Declining is not.
+     */
+    quotas?: SlotlockQuotas;
   } = {},
 ): SlotlockDashboardResources {
   // Every transaction keeps to the resources the request's member is limited to, if any.
@@ -1294,6 +1300,9 @@ export function createSlotlockDashboardResources(
               const approval = await store.withTenant(tenantRef, (tenant) => tenant.getApproval({ tenantRef, id }));
               if (!approval) return { ok: false as const, code: 'approval_not_found' };
               if (approval.status !== 'pending') return { ok: false as const, code: 'approval_not_pending' };
+              if (options.quotas && !(await checkSlotlockBookingQuota(options.quotas, tenantRef)).ok) {
+                return { ok: false as const, code: 'quota_exceeded' };
+              }
               try {
                 await runSlotlockApprovalGrant(agentBackend, approval, {
                   tenantRef,
@@ -4228,6 +4237,14 @@ ${
     if (decision !== 'grant' && decision !== 'decline') return approvalsPage(session, 400, 'Choose approve or decline.');
     const reason = (form.get('reason') ?? '').trim().slice(0, 500);
     const decided = await approvals.decide(tenantOf(session), form.get('id') ?? '', decision, personOf(session), reason || undefined);
+    if (!decided.ok && decided.code === 'quota_exceeded') {
+      const resets = formatDate(slotlockQuotaPeriod(now()).resetsAt);
+      return approvalsPage(
+        session,
+        429,
+        `This month's bookings are used up: Slotlock refuses new bookings, approvals included, with quota_exceeded until ${resets}. Decline it to free its time.`,
+      );
+    }
     if (!decided.ok) {
       const messages: Record<string, string> = {
         approval_not_found: 'That approval is not one of yours.',
@@ -8447,10 +8464,18 @@ ${
     if (teamStore && idp === 'sso') await teamStore.setDisplay(person, login === 'SSO account' ? null : login);
     const sid = randomBytes(24).toString('base64url');
     const expires = now() + SESSION_TTL_MS;
-    await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
     // Scoped to this team for the session's life: the provider reaches nothing else of the person's.
-    if (!(await ssoStore.recordProof(sid, person, connection.id, true, connection.configVersion))) {
-      await workspaces?.sessions?.end(person, workspaces.sessions.idOf(sid));
+    // Recorded scoped, with its proof, in one step, so it never counts among the sessions the person
+    // began (50 of which are kept), not even while its proof is recorded; a refused one is not kept.
+    const recorded = await ssoStore.startScoped(sid, person, connection.id, connection.configVersion, new Date(expires), requestOrigin(request));
+    if (recorded === null) {
+      // A schema from before that step (0.10.2's): recorded, then scoped by its proof, as it was.
+      await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
+      if (!(await ssoStore.recordProof(sid, person, connection.id, true, connection.configVersion))) {
+        await workspaces?.sessions?.end(person, workspaces.sessions.idOf(sid));
+        return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+      }
+    } else if (!recorded) {
       return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
     }
     const sealedSession = seal('slotlock-dashboard-session-v1', {

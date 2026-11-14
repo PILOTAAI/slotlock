@@ -20,6 +20,8 @@ export type SlotlockSandboxScenario = (typeof SLOTLOCK_SANDBOX_SCENARIOS)[number
 
 /** Agents one race runs at most, so a race stays a test of the server and not a load on it. */
 export const SLOTLOCK_SANDBOX_MAX_RACERS = 200;
+/** Agents a race runs when it names no number. */
+export const SLOTLOCK_SANDBOX_DEFAULT_RACERS = 100;
 
 /** Refused outside a test environment. */
 export class SlotlockSandboxError extends Error {
@@ -323,7 +325,10 @@ export interface SlotlockSandboxRaceResult {
 /**
  * Race `agents` agents (2-200), each its own principal, for one time on one resource of a test
  * environment, through the same operation boundary MCP, A2A and REST use: who booked, who was
- * refused and why, and how long each answer took.
+ * refused and why, and how long each answer took. With `signal`, the race ends with the request
+ * that asked for it: each racer's call carries the signal, so a racer still waiting its turn for
+ * the tenant's transactions leaves the line when it aborts, and the race then rejects with its
+ * reason once the racers already running have finished.
  */
 export async function raceSlotlockSandbox(params: {
   backend: SlotlockAgentCalendarBackend;
@@ -332,12 +337,15 @@ export async function raceSlotlockSandbox(params: {
   start: Date;
   end: Date;
   agents?: number;
+  /** The asking request's signal. */
+  signal?: AbortSignal;
 }): Promise<SlotlockSandboxRaceResult> {
   assertTestTenant(params.tenantRef);
-  const agents = params.agents ?? 100;
+  const agents = params.agents ?? SLOTLOCK_SANDBOX_DEFAULT_RACERS;
   if (!Number.isSafeInteger(agents) || agents < 2 || agents > SLOTLOCK_SANDBOX_MAX_RACERS) {
     throw new RangeError(`A sandbox race runs 2 to ${SLOTLOCK_SANDBOX_MAX_RACERS} agents`);
   }
+  params.signal?.throwIfAborted();
   const race = randomUUID().slice(0, 8);
   const answers = await Promise.all(
     Array.from({ length: agents }, async (_, index) => {
@@ -352,7 +360,7 @@ export async function raceSlotlockSandbox(params: {
           title: `Sandbox racer ${index + 1}`,
           idempotency_key: `sandbox-race-${race}-${index}`,
         },
-        request: new Request('https://sandbox.slotlock.invalid/race'),
+        request: new Request('https://sandbox.slotlock.invalid/race', params.signal ? { signal: params.signal } : {}),
         options: {
           backend: params.backend,
           authenticate: async () => ({
@@ -366,6 +374,8 @@ export async function raceSlotlockSandbox(params: {
       return { answer, ms: performance.now() - started };
     }),
   );
+  // The racers that left the line answered request_aborted: the race was not run, not refused.
+  params.signal?.throwIfAborted();
   const refused: Record<string, number> = {};
   let withAlternatives = 0;
   let serverErrors = 0;

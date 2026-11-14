@@ -207,6 +207,7 @@ describe('scripts/deploy-dashboard.mjs', () => {
     ['another entry point', null, '"main" must be worker.ts'],
     ['no strictly public fetch', null, '"compatibility_flags" must include "global_fetch_strictly_public"'],
     ['the private-origin fetch', null, '"compatibility_flags" must include "global_fetch_strictly_public"'],
+    ['a flag listed twice', null, '"compatibility_flags" lists global_fetch_strictly_public more than once'],
     ['not JSON', '{ "name": ', 'It is not JSON or JSONC'],
   ])('refuses %s before it asks Cloudflare anything', async (name, given, message) => {
     const text =
@@ -220,6 +221,11 @@ describe('scripts/deploy-dashboard.mjs', () => {
         'the private-origin fetch': config().replace(
           '["global_fetch_strictly_public"]',
           '["global_fetch_strictly_public", "global_fetch_private_origin"]',
+        ),
+        // As stored on 14 November: Cloudflare refused the upload with code 10021.
+        'a flag listed twice': config().replace(
+          '["global_fetch_strictly_public"]',
+          '["nodejs_compat", "global_fetch_strictly_public", "global_fetch_strictly_public"]',
         ),
       }[name] ??
       '';

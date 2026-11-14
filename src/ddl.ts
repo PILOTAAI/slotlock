@@ -39,7 +39,7 @@ import {
   SLOTLOCK_IDENTITY_TABLES,
   SLOTLOCK_INVITE_DOMAIN_REFUSED,
 } from './ddl-identity.js';
-import { SLOTLOCK_SSO_DDL, SLOTLOCK_SSO_FUNCTIONS, SLOTLOCK_SSO_TABLES } from './ddl-sso.js';
+import { SLOTLOCK_SSO_ASKED_FUNCTIONS, SLOTLOCK_SSO_DDL, SLOTLOCK_SSO_FUNCTIONS, SLOTLOCK_SSO_TABLES } from './ddl-sso.js';
 import { SLOTLOCK_SCIM_DDL, SLOTLOCK_SCIM_FUNCTIONS, SLOTLOCK_SCIM_TABLES } from './ddl-scim.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
@@ -426,6 +426,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
   // 0006, M10 and M11; staff-ddl.ts).
   ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
+  // A session begun through a team's provider alone, with its proof (ddl-sso.ts): asked for first.
+  ...SLOTLOCK_SSO_ASKED_FUNCTIONS,
 ] as const);
 
 /** The functions usage metering runs (SLOTLOCK_USAGE=on): serve checks it may, before it starts. */
@@ -2405,11 +2407,14 @@ BEGIN
   DELETE FROM slotlock.dashboard_sessions old
    WHERE old.person_ref = requested_person
      AND (old.expires_at <= statement_timestamp()
-          -- The 50 newest are kept, sessions through a team's provider alone going first: a
-          -- provider signing in as a linked member cannot push out the sessions they began.
+          -- The 50 newest are kept, ended ones going first (they let nobody in), then those through
+          -- a team's provider alone: a provider signing in as a linked member cannot push out the
+          -- sessions they began, not even by sign-ins refused and ended (sso_session_started keeps
+          -- no refused one; a dashboard from before it ends them).
           OR old.sid_sha256 IN (SELECT kept.sid_sha256 FROM slotlock.dashboard_sessions kept
                                  WHERE kept.person_ref = requested_person
-                                 ORDER BY (kept.sso_connection_id IS NULL) DESC, kept.started_at DESC OFFSET 50));
+                                 ORDER BY (kept.ended_at IS NULL) DESC, (kept.sso_connection_id IS NULL) DESC,
+                                          kept.started_at DESC OFFSET 50));
 END
 $slotlock_dashboard_session_started$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[25]} FROM PUBLIC;

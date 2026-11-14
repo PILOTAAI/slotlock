@@ -167,7 +167,10 @@ function readWorkerUsage(vars: SlotlockEnv): boolean {
   return value === 'on';
 }
 
-/** SLOTLOCK_QUOTAS: on to hold the assistant's operations to each tenant's quotas, as serve does. */
+/**
+ * SLOTLOCK_QUOTAS: on to hold the assistant's operations, and approvals granted on the Approvals
+ * page, to each tenant's quotas, as serve does.
+ */
 function readWorkerQuotas(vars: SlotlockEnv, usage: boolean): boolean {
   const value = vars.SLOTLOCK_QUOTAS?.trim() || 'off';
   if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_QUOTAS must be on or off');
@@ -354,7 +357,7 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         stripeWebhook: { path: string; secret: string; stripe: SlotlockStripe } | null;
         /** SLOTLOCK_USAGE=on: the assistant's operations are recorded (usage.ts). */
         usage: boolean;
-        /** SLOTLOCK_QUOTAS=on: the assistant's operations are held to the tenant's quotas. */
+        /** SLOTLOCK_QUOTAS=on: the assistant's operations and approvals granted are held to the tenant's quotas. */
         quotas: boolean;
         overageStopPercent: number | undefined;
         limits: {
@@ -492,10 +495,12 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                     admit: async (args: {
                       principal: SlotlockAgentPrincipal;
                       operation: SlotlockAgentOperation;
+                      input: Record<string, unknown>;
                     }) => {
                       const verdict = await current().quotas?.check({
                         tenantRef: args.principal.tenantRef,
                         operation: args.operation,
+                        input: args.input,
                       });
                       if (verdict && !verdict.ok) throw slotlockQuotaRefusal(verdict.exceeded);
                     },
@@ -692,36 +697,42 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
         const agentBackend = createSlotlockStoreAgentBackend(store, {
           availabilityRules: async () => availability.map((rule) => ({ ...rule })),
         });
+        // Read once a request, with this request's own counts on top.
+        const monthly =
+          quotas && meter
+            ? createSlotlockQuotas({
+                plan: (tenantRef) =>
+                  readSlotlockTenantQuotas(sql, tenantRef, overageStopPercent !== undefined ? { overageStopPercent } : {}),
+                used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
+                local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
+                notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
+                onError: (error) =>
+                  console.error(
+                    JSON.stringify({
+                      message: 'slotlock quota check failed',
+                      error: error instanceof Error ? error.message : 'unknown',
+                    }),
+                  ),
+              })
+            : null;
         requestScope = {
           sql,
           keys: createSlotlockApiKeyStore(sql),
           agentCalls: { count: 0 },
           usage: meter,
-          // Read once a request, with this request's own counts on top.
-          quotas:
-            quotas && meter
-              ? createSlotlockQuotas({
-                  plan: (tenantRef) =>
-                    readSlotlockTenantQuotas(sql, tenantRef, overageStopPercent !== undefined ? { overageStopPercent } : {}),
-                  used: (tenantRef, fromDay) => readSlotlockQuotaUse(sql, tenantRef, fromDay),
-                  local: (tenantRef, metric, fromDay) => meter.local(tenantRef, metric, fromDay),
-                  notice: (notice) => noteSlotlockQuotaThreshold(sql, notice),
-                  onError: (error) =>
-                    console.error(
-                      JSON.stringify({
-                        message: 'slotlock quota check failed',
-                        error: error instanceof Error ? error.message : 'unknown',
-                      }),
-                    ),
-                })
-              : null,
+          quotas: monthly,
           agent: agentBackend,
-          // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with.
+          // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with,
+          // and held to the tenant's bookings quota as the API's grant is.
           // Holiday calendars by address (RFC 0004 B1): the Worker's fetch, which reaches only the
           // public internet, its own zone included through the zone's front door
           // (global_fetch_strictly_public, wrangler.jsonc); fetchHolidayCalendar refuses localhost
           // and private IP literals itself, and takes https only, no redirects, 1 MB, 10 seconds.
-          resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: (input, init) => fetch(input, init) }),
+          resources: createSlotlockDashboardResources(store, {
+            agentBackend,
+            holidayFetch: (input, init) => fetch(input, init),
+            ...(monthly ? { quotas: monthly } : {}),
+          }),
           state: createSlotlockDashboardState(sql),
           workspaces: createSlotlockDashboardWorkspaces(sql),
         };

@@ -19,6 +19,11 @@ fields. The application API counts an admin key's calls in its tenant's own `app
 `app_write` budgets, apart from the agents'; another key's are its own. The health check is not
 counted.
 
+A sandbox race (`POST /v1/sandbox/race`) books once for each of its agents, so it takes a write
+token for each. When its tenant's budget holds fewer, the race still runs, and the tenant's next
+write waits until the race is paid for, as it would have after that many writes. The server's budget
+gives what it holds and is never owed, so one tenant's race never holds up every tenant's writes.
+
 ## Recurring writes
 
 A recurring create and every event update (a new title re-expands a recurring event's series too)
@@ -39,7 +44,8 @@ the place of that tenant's last write, which gets 503 `server_busy`; otherwise i
 An expansion runs on the server's main thread, so any request may also wait for the one running. A
 write that has waited two seconds gets 429 while its tenant's own write is still running, otherwise
 503 `server_busy`. An application API maintenance run waits the same way for slots of its own: one
-per tenant, `maintenance_runs` per server.
+per tenant, `maintenance_runs` per server. A sandbox race and a sandbox fast-forward share those
+slots.
 
 ## Database connections
 
@@ -91,13 +97,17 @@ setting for the assistant's operations.
 With `SLOTLOCK_QUOTAS=on` too (off by default), a tenant on a hosted plan is held to that plan's
 monthly quotas (`SLOTLOCK_PLAN_QUOTAS` in plans.ts; a tenant on no plan, as on a self-hosted
 server, has none): past its operations this UTC month every operation is refused but reading its
-usage and erasing it, past its bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
+usage and erasing it, past its bookings every one that can book or hold a slot for a booking, an
+approval granted among them (by `slotlock_decide_approval` or on the dashboard's Approvals page),
+with `429 quota_exceeded` and `Retry-After` at the month's end; reads, cancellations and declines
+still run.
 Each operation's answer lists the quotas in `RateLimit` and `RateLimit-Policy`
 (`"operations_month"`, `"bookings_month"`), and the feed records `usage.threshold_reached` once at
 80% and at 100% of each. A server reads the month so far at most every 30 seconds (every 2 near
 the stop) and adds its own unrecorded operations, so a tenant can pass its stop by what other
 servers counted in the last few seconds; a count it cannot read lets the operation run. The
-dashboard Worker takes the same setting for the assistant's operations.
+dashboard Worker takes the same setting for the assistant's operations and for approvals granted on
+its Approvals page.
 
 ## What a tenant may store
 

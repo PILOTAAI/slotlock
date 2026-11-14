@@ -97,8 +97,9 @@
     // Meter the assistant's operations in each tenant's usage, as slotlock serve does (off by
     // default). Uncomment and set:
     // "SLOTLOCK_USAGE": "on",
-    // Hold the assistant's operations to each tenant's monthly quotas, as slotlock serve does
-    // (off by default; needs SLOTLOCK_USAGE). Uncomment and set:
+    // Hold the assistant's operations, and approvals granted on the Approvals page, to each
+    // tenant's monthly quotas, as slotlock serve does (off by default; needs SLOTLOCK_USAGE).
+    // Uncomment and set:
     // "SLOTLOCK_QUOTAS": "on",
     // For organizations instead of people: GitHub organization ids, each one tenant its members
     // share (gh api orgs/<login> --jq .id). Uncomment and set:

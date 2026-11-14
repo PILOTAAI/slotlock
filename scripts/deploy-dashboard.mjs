@@ -23,7 +23,8 @@
 // The configuration is checked for: a name; `main` worker.ts; vars.SLOTLOCK_PUBLIC_URL an https
 // origin (http on loopback only); nothing left from the example (example.com, "set-this-to"); no var named like a secret
 // (…_SECRET, …_SECRETS, …_TOKEN, …_KEY, …_PASSWORD), since vars are plain text in Cloudflare's
-// dashboard and in the deploy log; no SLOTLOCK_FREE_PLAN_FROM, which makes billing answer 503; and
+// dashboard and in the deploy log; no SLOTLOCK_FREE_PLAN_FROM, which makes billing answer 503; no
+// compatibility flag listed twice, which Cloudflare refuses at upload; and
 // the global_fetch_strictly_public compatibility flag, without which the Worker's fetch of a URL a
 // member gives reaches a hostname in its own zone past that zone's security settings
 // (https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public,
@@ -134,6 +135,13 @@ export function configProblems(text) {
     problems.push(
       '"compatibility_flags" must include "global_fetch_strictly_public", as wrangler.jsonc does: without it, the ' +
         'Worker\'s fetch of a URL a member gives reaches a hostname in its own zone past the zone\'s security settings.',
+    );
+  }
+  const twice = [...new Set(flags.filter((flag, at) => flags.indexOf(flag) !== at))];
+  if (twice.length) {
+    problems.push(
+      `"compatibility_flags" lists ${twice.join(', ')} more than once, which Cloudflare refuses ` +
+        '("Compatibility flag specified multiple times", code 10021): list each flag once.',
     );
   }
   return problems;

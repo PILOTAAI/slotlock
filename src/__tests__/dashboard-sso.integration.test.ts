@@ -12,6 +12,7 @@ import { createSlotlockDashboard, createSlotlockDashboardResources, createSlotlo
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import { createSlotlockSecretBox } from '../oidc.js';
 import { createSlotlockStore } from '../store.js';
+import type { SlotlockWorkspaceSso } from '../workspace-sso.js';
 import { type SlotlockWorkspaceTeams, createSlotlockDashboardWorkspaces } from '../workspaces.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -75,10 +76,13 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
   let lastNonce = '';
   /** Pad the token endpoint's next answers past what the dashboard reads (64 KB). */
   let padTokenAnswer = false;
+  /** Run while the token endpoint answers, as the provider's operator holds the callback. */
+  let whileTokenAnswered: (() => Promise<unknown>) | null = null;
   const tokenRequests: { authorization: string | null; body: string }[] = [];
   const tenants: string[] = [];
   let admin: ReturnType<typeof postgres>;
   let application: ReturnType<typeof postgres>;
+  let options: Parameters<typeof createSlotlockDashboard>[0];
   let current: ReturnType<typeof createSlotlockDashboard>;
 
   const fakeFetch = async (input: string | URL | Request, init: RequestInit = {}) => {
@@ -95,6 +99,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     if (target === `${ISSUER}/v1/keys`) return Response.json(JWKS);
     if (target === `${ISSUER}/v1/token`) {
       tokenRequests.push({ authorization: new Headers(init.headers).get('authorization'), body: String(init.body) });
+      await whileTokenAnswered?.();
       const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
       const signed = `${part({ alg: 'RS256', kid: 'idp-key', typ: 'JWT' })}.${part({
         iss: ISSUER,
@@ -142,7 +147,7 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     await owner.grantApplicationRole(role);
     application = postgres(Object.assign(new URL(url as string), { username: role, password }).href, { max: 6, onnotice: () => {} });
     const store = createSlotlockStore(application);
-    current = createSlotlockDashboard({
+    options = {
       publicUrl: ORIGIN,
       github: { clientId: 'Ov23liSso', clientSecret: 's'.repeat(40) },
       sessionSecret: randomBytes(32).toString('hex'),
@@ -155,7 +160,8 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
       domains: { resolvers: [] },
       sso: { secretBox: createSlotlockSecretBox('x'.repeat(40)), fetch: fakeFetch as typeof fetch },
       fetch: fakeFetch as typeof fetch,
-    });
+    };
+    current = createSlotlockDashboard(options);
   });
 
   afterAll(async () => {
@@ -383,6 +389,128 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     const workspace = await throughProvider(deskAgain, await deskAgain.post(`/dashboard/sso?email=desk@${domain}`, '/sso/start', {}), { ...google, hd: domain });
     expect(workspace.response.status).toBe(303);
     expect(await teamOf(deskAgain)).toBe(team);
+  });
+
+  // A team's provider signing in as a member who linked their own account cannot sign them out: a
+  // session it begins never counts among the 50 the member's own are kept in, whether its proof was
+  // refused (the connection changed while the provider held the callback) or is still being
+  // recorded when the member signs in again.
+  it("keeps a linked member's own session through 50 provider sign-ins refused, and 50 in flight", async () => {
+    github.set('cleo', { id: base + 2, login: 'cleo' });
+    github.set('dan', { id: base + 3, login: 'dan' });
+    const orbit = `orbit-${base.toString(36)}.com`;
+    const cleo = new Browser(() => current);
+    await signIn(cleo, 'cleo');
+    expect((await cleo.post('/dashboard/teams', '/teams/create', { name: 'Orbit Rentals' })).status).toBe(303);
+    const team = (await teamOf(cleo)) as string;
+    tenants.push(team);
+    await admin`
+      INSERT INTO slotlock.workspace_domains (tenant_ref, domain_ascii, domain_unicode, status, token, verified_at)
+      VALUES (${team}, ${orbit}, ${orbit}, 'verified', ${'c'.repeat(26)}, now())`;
+    expect((await cleo.post('/dashboard/settings/identity', '/identity/sso', { kind: 'okta', issuer: ISSUER, client_id: '0oa-acme-client', client_secret: 'orbit-secret-value-1234' })).status).toBe(303);
+    const tested = await throughProvider(cleo, await cleo.post('/dashboard/settings/identity', '/identity/sso/test', {}), { sub: 'cleo-at-idp', email: `cleo@${orbit}` });
+    expect(tested.response.status).toBe(303);
+    expect((await cleo.post('/dashboard/settings/identity', '/identity/sso/status', { status: 'active' })).status).toBe(303);
+    const [connection] = await admin<{ id: string }[]>`SELECT id FROM slotlock.sso_connections WHERE tenant_ref = ${team}`;
+
+    // Dan, a member who signs in with GitHub, has linked his account at the team's provider.
+    const real = createSlotlockDashboardWorkspaces(application);
+    const realSso = real.sso as SlotlockWorkspaceSso;
+    const teams = real.teams as SlotlockWorkspaceTeams;
+    const raw = randomBytes(32);
+    await teams.invite({ tenantRef: team, inviter: `github:${base + 2}`, to: { github: `github:${base + 3}`, login: 'dan' }, role: 'member', tokenSha256: createHash('sha256').update(raw).digest(), days: 7, dailyLimit: null, memberCap: null });
+    await teams.accept({ tokenSha256: createHash('sha256').update(raw).digest(), person: `github:${base + 3}`, emails: [], memberCap: null });
+    const dan = new Browser(() => current);
+    await signIn(dan, 'dan');
+    const linked = await realSso.signIn({
+      connectionId: connection?.id as string, issuer: ISSUER, subject: 'dan-at-idp', entraTid: null, entraOid: null, email: `dan@${orbit}`,
+      emailOk: true, groups: [], overage: false, guest: false, sessionPerson: `github:${base + 3}`, memberCap: null,
+    });
+    expect(linked.outcome).toBe('linked');
+    const stillSignedIn = async () => (await dan.get('/dashboard/settings/account')).status === 200;
+    expect(await stillSignedIn()).toBe(true);
+    const asDan = { sub: 'dan-at-idp', email: `dan@${orbit}` };
+    const start = (browser: Browser) => browser.post(`/dashboard/sso?email=dan@${orbit}`, '/sso/start', {});
+
+    // Refused: each callback read the connection before the Owner changed, tested and turned it on
+    // again, which happens while the provider holds the callback at its token endpoint.
+    whileTokenAnswered = () => admin`
+      UPDATE slotlock.sso_connections SET config_version = config_version + 1, tested_version = config_version + 1
+       WHERE id = ${connection?.id as string}::uuid`;
+    try {
+      for (let index = 0; index < 50; index++) {
+        const browser = new Browser(() => current);
+        expect((await throughProvider(browser, await start(browser), asDan)).response.status).toBe(409);
+      }
+    } finally {
+      whileTokenAnswered = null;
+    }
+    const proved = new Browser(() => current);
+    expect((await throughProvider(proved, await start(proved), asDan)).response.status).toBe(303);
+    expect(await stillSignedIn()).toBe(true);
+    const [refused] = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.dashboard_sessions WHERE person_ref = ${`github:${base + 3}`} AND ended_at IS NOT NULL`;
+    expect(refused?.count).toBe(0);
+
+    // In flight: 50 callbacks held where the session is recorded but its proof not yet (as a release
+    // that recorded them in two steps did), while Dan signs in again elsewhere.
+    let held = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holding = createSlotlockDashboard({
+      ...options,
+      workspaces: {
+        ...real,
+        sso: {
+          ...realSso,
+          async recordProof(...args) {
+            held += 1;
+            await gate;
+            return realSso.recordProof(...args);
+          },
+        },
+      },
+    });
+    const callbacks: Promise<Response>[] = [];
+    try {
+      for (let index = 0; index < 50; index++) {
+        const browser = new Browser(() => holding);
+        const location = new URL((await start(browser)).headers.get('location') ?? '');
+        lastNonce = location.searchParams.get('nonce') ?? '';
+        next = { claims: asDan, key: signing.privateKey };
+        const back = new URL(location.searchParams.get('redirect_uri') ?? '');
+        const query = new URLSearchParams({ code: randomBytes(8).toString('hex'), state: location.searchParams.get('state') ?? '' });
+        const before = held;
+        let settled = false;
+        const callback = browser.get(`${back.pathname}?${query}`);
+        callback.then(
+          () => (settled = true),
+          () => (settled = true),
+        );
+        callbacks.push(callback);
+        // On to the next once this one is held or done, so each is answered with its own nonce.
+        while (!settled && held === before) await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      await signIn(new Browser(() => current), 'dan');
+      expect(await stillSignedIn()).toBe(true);
+    } finally {
+      release();
+    }
+    for (const response of await Promise.all(callbacks)) expect(response.status).toBe(303);
+    expect(await stillSignedIn()).toBe(true);
+
+    // On a schema without the one step (0.10.2's), the two as before: signed in, to this team alone.
+    const earlier = createSlotlockDashboard({ ...options, workspaces: { ...real, sso: { ...realSso, startScoped: async () => null } } });
+    const before = new Browser(() => earlier);
+    expect((await throughProvider(before, await start(before), asDan)).response.status).toBe(303);
+    expect(await teamOf(before)).toBe(team);
+    // Dan's own: the two he signed in with GitHub, and no other.
+    const [own] = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.dashboard_sessions
+       WHERE person_ref = ${`github:${base + 3}`} AND sso_connection_id IS NULL AND ended_at IS NULL`;
+    expect(own?.count).toBe(2);
   });
 
   // An address or link no team signs in with is a way forward, not a dead end: it says what it read

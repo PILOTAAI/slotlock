@@ -226,7 +226,9 @@ it up on Settings, Identity. A provider that speaks only SAML cannot be connecte
 - **Who someone is**: the provider's subject (and Entra's tenant and object id), never an email.
   A first sign-in through the provider alone makes a new person, with no workspace of their own,
   who acts in this team only: a session through the provider alone sees no other team the person
-  is in, nor their other sessions, and its forms count apart from theirs. An email counts only at
+  is in, nor their other sessions, and its forms count apart from theirs. However many such
+  sessions it begins, refused or not, none counts among the 50 sessions each person keeps, so the
+  provider never signs the person out of the ones they began. An email counts only at
   a domain the team verified (with Entra, only when Entra says the domain's owner verified it;
   never when the provider marks it unverified).
   With Google Workspace, only an account of the team's verified domain signs in at all.

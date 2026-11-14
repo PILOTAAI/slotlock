@@ -77,9 +77,10 @@ From 16 November 2026, each plan allows so many operations and bookings a calend
   your webhooks receive, and the dashboard's Overview and Usage pages say so.
 - **On Free**, past an allowance, calls are refused with `429 quota_exceeded` and a `Retry-After`
   header until the month ends: every call once the operations are used up, except reading your
-  usage (`GET /v1/usage`) and erasing your account, and only new bookings and holds once the
-  bookings are, so you can still read and cancel. **On Developer and Team** the same
-  happens at 110% of an allowance. Nothing is charged for use past one.
+  usage (`GET /v1/usage`) and erasing your account, and only new bookings and holds (an approval
+  granted among them) once the bookings are, so you can still read, cancel and decline.
+  **On Developer and Team** the same happens at 110% of an allowance. Nothing is charged for use
+  past one.
 - Every answer to an operation lists what is left this month in its `RateLimit` and
   `RateLimit-Policy` headers (`"operations_month"` and `"bookings_month"`), and `GET /v1/usage`
   and the dashboard's Usage page show the month so far.
