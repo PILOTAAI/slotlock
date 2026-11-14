@@ -83,7 +83,7 @@ async function request(url, options = {}) {
   } catch {
     json = undefined;
   }
-  return { status: response.status, text, json };
+  return { status: response.status, headers: response.headers, text, json };
 }
 
 /** Runs one check; a network error or a thrown message fails it with that reason. */
@@ -103,8 +103,25 @@ const expectStatus = async (area, url, wanted = 200, options = {}) => {
 
 // ---------- The service ----------
 
-for (const path of ['/', '/pricing/', '/docs/quickstart/', '/blog/', '/sitemap-index.xml']) {
-  await check('site', () => expectStatus('site', `${URLS.site}${path}`));
+// A page that says noindex (an X-Robots-Tag header, or its robots meta tag) is never in search
+// results, however good its sitemap: a stray zone rule once sent it from every page of the site.
+const SITE_PAGES = ['/', '/pricing/', '/docs/quickstart/', '/blog/'];
+for (const path of [...SITE_PAGES, '/sitemap-index.xml']) {
+  await check('site', async () => {
+    const url = `${URLS.site}${path}`;
+    const { status, headers, text } = await request(url);
+    if (status !== 200) return fail('site', `${url} answers ${status}, not 200`);
+    ok('site', `${url} answers 200`);
+    if (!SITE_PAGES.includes(path)) return;
+    const robots = headers.get('x-robots-tag') ?? '';
+    const meta = /<meta\s[^>]*name=["']robots["'][^>]*content=["'][^"']*noindex/i.test(text);
+    if (/noindex/i.test(robots) || meta) {
+      fail(
+        'site',
+        `${url} tells search engines not to index it (${meta ? 'its robots meta tag' : `X-Robots-Tag: ${robots}`}): remove the rule that adds it (a Cloudflare Transform Rule on the zone, when this repository's _headers has none)`,
+      );
+    } else ok('site', `${url} may be indexed`);
+  });
 }
 await check('api', async () => {
   const { status, json } = await request(`${URLS.api}/healthz`);
