@@ -85,6 +85,10 @@ describe.skipIf(!url)('accounts by name on every console surface (real Postgres)
     await superuser`
       INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, origin, count)
       VALUES (${TEAM}, (now() AT TIME ZONE 'UTC')::date, 'operations', 'rest', 900)`;
+    // Ada has used 4% of Developer's operations: the most of anyone's, and nowhere near her quota.
+    await superuser`
+      INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, origin, count)
+      VALUES (${ADA}, (now() AT TIME ZONE 'UTC')::date, 'operations', 'rest', 20000)`;
     await superuser`SELECT slotlock.note_billing_event('payment_failed', ${ADA}, 'in_Names1', ${superuser.json({ amount_due: 1900, currency: 'gbp' })})`;
     // What staff did: a case and a privacy request about Ada, and an override for the team.
     const session = await staffSession(superuser, 'github:1001');
@@ -143,6 +147,17 @@ describe.skipIf(!url)('accounts by name on every console surface (real Postgres)
   it('names the accounts near their quotas, on Usage and on Accounts', async () => {
     expect(between(between(await text('/usage'), '>Near quota<', '</table>'), '<tbody>', '</tbody>')).toContain(teamCell);
     expect(between(await text('/accounts?view=near_quota'), '<tbody>', '</tbody>')).toContain(teamCell);
+  });
+
+  it('counts as near quota only an account at 80% of a quota or more, on Usage and on Accounts alike', async () => {
+    const usage = between(between(await text('/usage'), '>Near quota<', '</table>'), '<tbody>', '</tbody>');
+    const accounts = await text('/accounts?view=near_quota');
+    // The team at 90% of the operations its override gives; never Ada at 4%, however busy.
+    for (const listed of [usage, between(accounts, '<tbody>', '</tbody>')]) {
+      expect(listed).toContain(teamCell);
+      expect(listed).not.toContain(`href="/accounts/${encodeURIComponent(ADA)}"`);
+    }
+    expect(accounts).toContain('>Near quota<span class="count">1</span>');
   });
 
   it('names the account in the case and privacy queues and on their records', async () => {

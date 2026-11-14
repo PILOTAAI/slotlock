@@ -110,6 +110,9 @@ versioning.
 - The System page's headline no longer says "All systems operational" while maintenance is failing:
   it names hosts that are down, then "Maintenance failing for 1 account" (or that no server has
   recorded maintenance for some hours) as a warning, and the top bar's pill says the same.
+- **Near quota** means at 80% of a monthly quota or more, the first share the account's owner is
+  told of, on Usage as on Accounts' view of that name and its count. Usage listed the twenty
+  busiest accounts whatever their share, so accounts at 1 to 4% of their quota were "near" it.
 
 ### Security
 

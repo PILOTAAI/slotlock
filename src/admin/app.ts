@@ -11,7 +11,7 @@
 // console's role can read no table (staff-ddl.ts).
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
-import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan } from '../plans.js';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, SLOTLOCK_QUOTA_NOTICE_PERCENTS, type SlotlockPlan } from '../plans.js';
 import {
   SLOTLOCK_CASE_ACTIONS,
   SLOTLOCK_OVERRIDE_SOLO_DAYS,
@@ -938,15 +938,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return page(session, 'Accounts', '/accounts', body, q);
   }
 
-  /** Accounts at 80% or more of a monthly quota this month: the usage table's leaders. */
+  /** Accounts near a monthly quota this month (Usage's Near quota, all of them). */
   async function nearQuota(session: Session, url: URL, q: string): Promise<Response> {
-    const leaders = await quotaLeaders(session);
-    const near = leaders.filter((item) => item.worst >= 80);
+    const near = await nearQuotaLeaders(session);
     const body = html`
       ${tabs('Views', (Object.keys(ACCOUNT_VIEWS) as AccountView[]).map((value) => ({
         label: ACCOUNT_VIEWS[value], href: withParams(url, { view: value === 'all' ? null : value, status: null }), current: value === 'near_quota', count: value === 'near_quota' ? near.length : null,
       })), 'views')}
-      ${quotaTable(session, near, 'No account is at 80% of a quota this month.')}`;
+      ${quotaTable(session, near, NOT_NEAR_QUOTA)}`;
     return page(session, 'Accounts', '/accounts', body, q);
   }
 
@@ -2025,6 +2024,15 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return { row, worst: Math.max(operations ?? 0, bookings ?? 0), operations, bookings, opsQuota, bookingsQuota };
     }).sort((a, b) => b.worst - a.worst);
   }
+  /**
+   * Near a quota: at or past the first share of it the account's owner is told of (80%), on either
+   * metric. Usage's Near quota and Accounts' view of that name count by this alone.
+   */
+  const NEAR_QUOTA_PERCENT = SLOTLOCK_QUOTA_NOTICE_PERCENTS[0];
+  const NOT_NEAR_QUOTA = `No account is at ${NEAR_QUOTA_PERCENT}% of a quota this month.`;
+  async function nearQuotaLeaders(session: Session) {
+    return (await quotaLeaders(session)).filter((item) => item.worst >= NEAR_QUOTA_PERCENT);
+  }
   function quotaTable(session: Session, rows: Awaited<ReturnType<typeof quotaLeaders>>, empty: string): Html {
     const used = (value: string, quota: number | null, percent: number | null) =>
       quota
@@ -2045,7 +2053,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const range: Range = rangeOf(url.searchParams.get('range'), '30d');
     const asked = url.searchParams.get('metric') ?? '';
     const metric: UsageMetric = Object.hasOwn(USAGE_METRICS, asked) ? (asked as UsageMetric) : 'operations';
-    const [usage, leaders] = await Promise.all([platformUsage(session, Math.max(RANGE_DAYS[range], 62)), quotaLeaders(session)]);
+    const [usage, near] = await Promise.all([platformUsage(session, Math.max(RANGE_DAYS[range], 62)), nearQuotaLeaders(session)]);
     const monthStart = new Date(now()).toISOString().slice(0, 7);
     const sums = (key: string, month: string) => usage.filter((row) => row.metric === key && day(row.day).slice(0, 7) === month).reduce((sum, row) => sum + Number(row.count), 0);
     const bySurface = new Map<string, { operations: number; bookings: number }>();
@@ -2087,7 +2095,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           html`<code>${origin}</code>`, html`${count(totals.operations)}`, html`${count(totals.bookings)}`,
           sparkline(lastDays(30, now()).map((key) => usage.filter((row) => row.metric === 'operations' && row.origin === origin && day(row.day) === key).reduce((sum, row) => sum + Number(row.count), 0))),
         ]), 'No use this month yet.'), { id: 'surfaces' })}</div>
-        <div class="c6">${section('Near quota', quotaTable(session, leaders.slice(0, 20), 'No use this month yet.'), { aside: html`<a href="/accounts?view=near_quota">All</a>` })}</div>
+        <div class="c6">${section('Near quota', quotaTable(session, near.slice(0, 20), NOT_NEAR_QUOTA), { aside: html`<a href="/accounts?view=near_quota">All</a>` })}</div>
       </div>`;
     return page(session, 'Usage', '/usage', body);
   }

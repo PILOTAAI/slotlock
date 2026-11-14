@@ -665,7 +665,9 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
 
     const usage = await (await browser.request('/usage')).text();
     expect(usage).toContain('<code>mcp</code>');
-    expect(usage).toContain(`href="${accountPath}"`);
+    // 40 of Developer's 500,000 operations is not near its quota.
+    expect(usage).not.toContain(`href="${accountPath}"`);
+    expect(usage).toContain('No account is at 80% of a quota this month.');
   });
 
   it('opens Billing to a Viewer to read, and nothing else of it', async () => {
