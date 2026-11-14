@@ -482,6 +482,19 @@ describe.skipIf(!url || (!chromium && !REQUIRED))('the admin console in a browse
     expect(problems).toEqual([]);
   }, 900_000);
 
+  it('keeps Publish from putting live a post whose changes are not saved', async (context) => {
+    if (!browser) context.skip();
+    const { context: browserContext, tab } = await open(1440, 'dark', 1);
+    await tab.goto(`${ORIGIN}/content/booking-rules-for-agents`, { waitUntil: 'load' });
+    const button = `(() => { const button = document.querySelector('form.publish button[type="submit"]'); return { disabled: button.disabled, text: button.textContent.trim() }; })()`;
+    expect(await tab.evaluate(button)).toEqual({ disabled: false, text: 'Publish' });
+    // An edit, as the toolbar, a paste or a key makes one: Publish merges what is saved on GitHub, so
+    // it waits for the save rather than putting live the post without this change.
+    await tab.evaluate(`(() => { const body = document.getElementById('f-body'); body.value += '\\n\\nOne more line.'; body.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    expect(await tab.evaluate(button)).toEqual({ disabled: true, text: 'Save to publish' });
+    await browserContext.close();
+  });
+
   it('saves the owner’s review set: ten pages at 1440 and 1920 wide, dark, at twice the pixels', async (context) => {
     if (!browser) context.skip();
     for (const width of [1440, 1920]) {

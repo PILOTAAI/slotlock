@@ -4,8 +4,9 @@ Where to see whether hosted Slotlock is up, and how that is kept honest.
 
 ## For users
 
-- **Status page:** <https://stats.uptimerobot.com/F7RQohQzXM>. Uptime by day for the API, the dashboard and the site, checked every
-  five minutes by UptimeRobot from outside the servers, with incidents and announcements. It is
+- **Status page:** <https://stats.uptimerobot.com/F7RQohQzXM>. Uptime by day for the API, the service
+  your agents and code call, checked every five minutes by UptimeRobot from outside the servers,
+  with incidents and announcements. It is
   UptimeRobot's free plan, so it has no email subscriptions and no `status.slotlock.pylota.io`
   address yet.
 - **Current incidents:** open issues labelled `status`,
@@ -29,8 +30,8 @@ Three probes watch from outside the servers they check:
   backup that keeps working if Cloudflare does not. It is set to every ten minutes, but GitHub runs
   scheduled workflows late: in November 2026 it ran every 3.5 to 10.5 hours.
 - **UptimeRobot**, every five minutes from outside GitHub and Cloudflare
-  (`scripts/configure-uptime.mjs`). It alerts the maintainers directly, and publishes the status
-  page from the same checks. Its heartbeat monitor, which would notice the status Worker stopping,
+  (`scripts/configure-uptime.mjs`). It checks the API, the dashboard and the site, alerts the
+  maintainers directly about each, and publishes the API's checks on the status page. Its heartbeat monitor, which would notice the status Worker stopping,
   needs a paid plan, and the free plan refused it. Until then, nothing watches the Worker itself;
   UptimeRobot still checks the service, and the launch check (`scripts/check-launch.mjs`, every
   three hours) warns when the GitHub probe below has not run for 12 hours.

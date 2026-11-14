@@ -25,6 +25,8 @@ let refuseHeartbeat = false;
 /** A free plan: no custom domain, no email subscriptions. */
 let freePlan = false;
 let pages: { id: number; friendlyName: string; customDomain: string | null; urlKey: string; monitorIds: number[] }[] = [];
+/** An UptimeRobot that answers a status page's edit but keeps its monitors as they were. */
+let ignorePageEdits = false;
 let server: Server;
 let base = '';
 const scratch: string[] = [];
@@ -46,6 +48,17 @@ beforeAll(async () => {
       return send(200, [{ id: 501, friendlyName: 'owner', type: 'Email' }]);
     }
     if (request.method === 'GET' && url.pathname === '/v3/psps') return send(200, { data: pages, nextLink: null });
+    const onPage = /^\/v3\/psps\/(\d+)$/.exec(url.pathname);
+    if (onPage) {
+      const page = pages.find((item) => item.id === Number(onPage[1]));
+      if (!page) return send(404, { message: 'Not found' });
+      if (request.method === 'GET') return send(200, page);
+      if (request.method === 'PATCH') {
+        const spec = (await body(request)) as { monitorIds?: number[] };
+        if (!ignorePageEdits && Array.isArray(spec.monitorIds)) page.monitorIds = spec.monitorIds;
+        return send(200, page);
+      }
+    }
     if (request.method === 'POST' && url.pathname === '/v3/psps') {
       const spec = (await body(request)) as { friendlyName: string; customDomain?: string; monitorIds: number[]; sort?: unknown; subscription?: boolean };
       // As UptimeRobot: the order is a number from 1 to 4, checked before the domain.
@@ -94,6 +107,7 @@ beforeEach(() => {
   refuseHeartbeat = false;
   freePlan = false;
   pages = [];
+  ignorePageEdits = false;
 });
 
 /** A gh that records each call's arguments and stdin. */
@@ -151,7 +165,7 @@ describe('configure-uptime.mjs', () => {
     // The public status page shows the three service monitors, at the custom domain, with email
     // subscriptions where the plan has them.
     expect(pages).toEqual([
-      { id: 70, friendlyName: 'Slotlock status', customDomain: 'status.slotlock.pylota.io', subscription: true, urlKey: 'AbC123', monitorIds: [901, 902, 903] },
+      { id: 70, friendlyName: 'Slotlock status', customDomain: 'status.slotlock.pylota.io', subscription: true, urlKey: 'AbC123', monitorIds: [901] },
     ]);
     expect(result.output).toContain('created: Slotlock status (status page 70): https://status.slotlock.pylota.io');
     expect(result.output).toContain('status.slotlock.pylota.io CNAME stats.uptimerobot.com, DNS only');
@@ -190,7 +204,32 @@ describe('configure-uptime.mjs', () => {
     expect(result.output).toContain('created: Slotlock status (status page 70): https://stats.uptimerobot.com/AbC123');
     expect(result.output).not.toContain('CNAME');
     expect(pages).toHaveLength(1);
-    expect(pages[0]).toMatchObject({ customDomain: null, subscription: false, monitorIds: [901, 902, 903] });
+    expect(pages[0]).toMatchObject({ customDomain: null, subscription: false, monitorIds: [901] });
+  });
+
+  it('takes the dashboard and the site off a status page that shows them, and keeps watching them', async () => {
+    const { gh } = fakeGh();
+    monitors = [
+      { id: 901, friendlyName: 'Slotlock API' },
+      { id: 902, friendlyName: 'Slotlock dashboard' },
+      { id: 903, friendlyName: 'Slotlock site' },
+      { id: 904, friendlyName: 'Slotlock status Worker', heartbeatUrl: HEARTBEAT },
+    ];
+    pages = [{ id: 70, friendlyName: 'Slotlock status', customDomain: null, urlKey: 'AbC123', monitorIds: [901, 902, 903] }];
+    const result = await run([], { UPTIMEROBOT_API_KEY: KEY, SLOTLOCK_GH: gh });
+    expect(result.code, result.output).toBe(0);
+    // The public page is the service people build on; the rest still alerts the owner.
+    expect(pages[0]?.monitorIds).toEqual([901]);
+    expect(result.output).toContain('updated: Slotlock status now shows Slotlock API only');
+    expect(created).toEqual([]);
+    expect(monitors.map((monitor) => monitor.friendlyName)).toEqual(['Slotlock API', 'Slotlock dashboard', 'Slotlock site', 'Slotlock status Worker']);
+
+    // UptimeRobot answers the edit but keeps the page as it was: said, not taken for done.
+    pages = [{ id: 70, friendlyName: 'Slotlock status', customDomain: null, urlKey: 'AbC123', monitorIds: [901, 902, 903] }];
+    ignorePageEdits = true;
+    const kept = await run([], { UPTIMEROBOT_API_KEY: KEY, SLOTLOCK_GH: gh });
+    expect(kept.code).toBe(1);
+    expect(kept.output).toContain('Slotlock status still shows Slotlock dashboard, Slotlock site');
   });
 
   it('changes nothing on --dry-run, and refuses to start without a key or with a wrong one', async () => {
@@ -198,7 +237,7 @@ describe('configure-uptime.mjs', () => {
     const dry = await run(['--dry-run'], { UPTIMEROBOT_API_KEY: KEY, SLOTLOCK_GH: gh });
     expect(dry.code, dry.output).toBe(0);
     expect(dry.output).toContain('would create: Slotlock API (KEYWORD https://slotlock-api.pylota.io/healthz), every 5 minutes');
-    expect(dry.output).toContain('would create: Slotlock status, a public status page of the API, the dashboard and the site, at https://status.slotlock.pylota.io');
+    expect(dry.output).toContain('would create: Slotlock status, a public status page of Slotlock API, at https://status.slotlock.pylota.io');
     expect(dry.output).toContain('Nothing was changed.');
     expect(created).toEqual([]);
     expect(pages).toEqual([]);

@@ -608,6 +608,17 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect(parsePost(repo.text('main', `site/content/blog/${later}.md`) ?? '', later).front.publishAt).toBe('2026-11-14T09:00Z');
   });
 
+  it("takes GitHub's installation tokens as they are now: ghs_<app id>_<JWT>, about 520 characters", async () => {
+    // The stateless format GitHub rolled out by 2 October 2026: three base64url parts of a JWT after
+    // ghs_ and the App's id. The old cap of 255 characters refused every one, so no run merged anything.
+    const part = (length: number) => 'aB3-_x9Z'.repeat(Math.ceil(length / 8)).slice(0, length);
+    const token = `ghs_1234567_${part(36)}.${part(330)}.${part(140)}`;
+    expect(token.length).toBeGreaterThan(500);
+    // Taken, and sent to GitHub: the fake knows only its own token, so its 401 is the proof.
+    await expect(mergeDuePosts({ token, appSlug: FAKE_APP_SLUG, repository: FAKE_REPOSITORY, fetch: repo.fetch, now: () => Date.parse('2026-11-01T00:00:00Z') })).rejects.toThrow('GitHub answered 401 to GET /repos/PILOTAAI/slotlock/pulls');
+    await expect(mergeDuePosts({ token: 'ghs_ not a token', appSlug: FAKE_APP_SLUG, repository: FAKE_REPOSITORY, fetch: repo.fetch })).rejects.toThrow('CMS_TOKEN is an installation token');
+  });
+
   it('unschedules a post that changed after it was scheduled, or that the console did not schedule', async () => {
     const changed = 'changed-post';
     expect((await form(editor, '/content/new', { ...postFields(changed, { publishAt: '2026-11-15T09:00' }), intent: 'submit' })).status).toBe(303);

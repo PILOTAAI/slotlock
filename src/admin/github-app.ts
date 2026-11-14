@@ -106,8 +106,11 @@ export interface SlotlockCmsGitHub {
   /**
    * Whether a pull request can merge as it is: clean, behind main (main's ruleset wants it up to
    * date), dirty (a conflict), blocked (a required check), or unknown while GitHub works it out.
+   * Only a hint: GitHub answers unknown on the first read after main moves (behindMain decides).
    */
   pullState(number: number): Promise<{ headSha: string; mergeable: string; open: boolean }>;
+  /** How many of main's commits this commit lacks (compare main...sha, behind_by): 0 when up to date. */
+  behindMain(sha: string): Promise<number>;
   /** Merge main into the pull request's branch, if its head is still this commit. */
   updateBranch(number: number, expectedHead: string): Promise<boolean>;
   /**
@@ -614,6 +617,14 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
         mergeable: String(body?.mergeable_state ?? 'unknown'),
         open: body?.state === 'open',
       };
+    },
+
+    async behindMain(sha) {
+      if (!SHA.test(sha)) throw new SlotlockCmsError('A commit is 40 hex characters', 400);
+      const { body } = await call<{ behind_by?: unknown }>('GET', `${repo}/compare/main...${sha}`);
+      const behind = Number(body?.behind_by);
+      if (!Number.isInteger(behind) || behind < 0) throw new SlotlockCmsError('GitHub did not say how far the branch is behind main', 502);
+      return behind;
     },
 
     async updateBranch(number, expectedHead) {
