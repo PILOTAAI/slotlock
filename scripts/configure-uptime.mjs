@@ -10,9 +10,10 @@
 //                            minutes; it alerts when the pings stop. Its URL is stored, on stdin, as
 //                            the SLOTLOCK_STATUS_HEARTBEAT_URL secret of the `site` environment, and
 //                            the Status Worker workflow is started so the Worker gets it.
-// It also publishes the public status page, "Slotlock status", from the three service monitors:
-// uptime by day for each, incidents as they happen, and announcements, with email subscriptions
-// where the plan has them. It asks for the custom domain status.slotlock.pylota.io (a CNAME to
+// It also publishes the public status page, "Slotlock status", of the service people build on: the
+// API (the monitors marked public), with uptime by day, incidents as they happen, and announcements,
+// with email subscriptions where the plan has them. The dashboard and the site are watched and alert
+// the owner, but stay off the public page; a page that shows them is brought back to the API. It asks for the custom domain status.slotlock.pylota.io (a CNAME to
 // stats.uptimerobot.com in Cloudflare, DNS only), and takes UptimeRobot's own address where the
 // plan refuses one.
 // A monitor or status page of the same name is kept as it is, so the script is safe to run again.
@@ -43,6 +44,7 @@ const MONITORS = [
     keywordCaseType: 'CaseSensitive',
     keywordValue: '"status":"ready"',
     timeout: 30,
+    public: true,
   },
   { friendlyName: 'Slotlock dashboard', type: 'HTTP', url: 'https://app.slotlock.pylota.io/dashboard', httpMethodType: 'GET', timeout: 30 },
   { friendlyName: 'Slotlock site', type: 'HTTP', url: 'https://slotlock.pylota.io/', httpMethodType: 'GET', timeout: 30 },
@@ -93,23 +95,50 @@ async function list(start, what) {
   return found;
 }
 
-/** The public status page, from the service monitors: kept when it exists, else created. */
+/** The monitors the public status page shows, by name. */
+const PUBLIC = MONITORS.filter((spec) => spec.public).map((spec) => spec.friendlyName);
+
+/**
+ * The public status page, of the public monitors only: created when it is missing, and brought back to
+ * them when it shows others (read back afterwards, so an edit UptimeRobot did not make is not taken
+ * for done).
+ */
 async function statusPage(before) {
   const pages = await list('/psps?limit=50', 'status pages');
   const kept = pages.find((page) => page.friendlyName === STATUS_PAGE);
+  // The monitors as they are now, including any this run created.
+  const now = dryRun ? before : await list('/monitors?limit=50', 'monitors');
+  const idOf = (name) => now.find((monitor) => monitor.friendlyName === name)?.id ?? before.find((m) => m.friendlyName === name)?.id;
+  const ids = PUBLIC.map(idOf).filter((id) => typeof id === 'number');
   if (kept) {
-    console.log(`kept:    ${STATUS_PAGE}: ${pageUrl(kept)}`);
+    const shown = Array.isArray(kept.monitorIds) ? kept.monitorIds : [];
+    const same = shown.length === ids.length && ids.every((id) => shown.includes(id));
+    if (same || ids.length === 0) {
+      console.log(`kept:    ${STATUS_PAGE}: ${pageUrl(kept)}`);
+      return;
+    }
+    if (dryRun) {
+      console.log(`would update: ${STATUS_PAGE}, to show ${PUBLIC.join(', ')} only`);
+      return;
+    }
+    const edit = await api('PATCH', `/psps/${kept.id}`, { monitorIds: ids });
+    if (edit.status !== 200) throw new Failure(`UptimeRobot answered ${edit.status} updating the status page: ${edit.text.slice(0, 300)}`);
+    const read = await api('GET', `/psps/${kept.id}`);
+    const after = Array.isArray(read.json?.monitorIds) ? read.json.monitorIds : [];
+    const extra = after.filter((id) => !ids.includes(id));
+    if (read.status !== 200 || extra.length || !ids.every((id) => after.includes(id))) {
+      const names = extra.map((id) => now.find((monitor) => monitor.id === id)?.friendlyName ?? `monitor ${id}`);
+      throw new Failure(
+        `${STATUS_PAGE} still shows ${names.join(', ') || 'other monitors'} after the update: in UptimeRobot, open Status pages > ${STATUS_PAGE} > Monitors and keep ${PUBLIC.join(', ')} only.`,
+      );
+    }
+    console.log(`updated: ${STATUS_PAGE} now shows ${PUBLIC.join(', ')} only: ${pageUrl(kept)}`);
     return;
   }
   if (dryRun) {
-    console.log(`would create: ${STATUS_PAGE}, a public status page of the API, the dashboard and the site, at https://${STATUS_DOMAIN}`);
+    console.log(`would create: ${STATUS_PAGE}, a public status page of ${PUBLIC.join(', ')}, at https://${STATUS_DOMAIN}`);
     return;
   }
-  // The monitors as they are now, including any this run created.
-  const now = await list('/monitors?limit=50', 'monitors');
-  const ids = MONITORS.filter((spec) => spec.type !== 'HEARTBEAT')
-    .map((spec) => now.find((monitor) => monitor.friendlyName === spec.friendlyName)?.id ?? before.find((m) => m.friendlyName === spec.friendlyName)?.id)
-    .filter((id) => typeof id === 'number');
   const page = {
     friendlyName: STATUS_PAGE,
     monitorIds: ids,

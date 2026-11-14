@@ -5,6 +5,13 @@ versioning.
 
 ## Unreleased
 
+### Changed
+
+- The public status page shows the API only, the service agents and code call. UptimeRobot still
+  checks the dashboard and the site and alerts the maintainers, but they are off the public page.
+  `scripts/configure-uptime.mjs` takes them off a page that shows them and reads the page back; run
+  it with the account's API key to change the live page.
+
 ### Fixed
 
 - Publishing a post from the admin console after main had moved on was refused ("GitHub would not
