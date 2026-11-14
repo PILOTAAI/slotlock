@@ -182,6 +182,13 @@ never offered to agents over MCP or A2A. Every application operation checks the 
 only through row-level security: another tenant's resource or hold is not found even on a connection
 that bypasses RLS.
 
+A suspended account's keys authenticate as nothing from the next request until the suspension is
+lifted: the database's key lookup reads the suspension (the account's own, its live tenant's for a
+test key, or its partner's), so no server path can skip it. Its dashboard still shows its data. A
+partner lifts only a suspension it made: one the operator or staff made, before the partner's or
+after, takes the partner's over and stays, and a suspended account cannot be erased through the
+partner API.
+
 ## Admin console
 
 The people who run Slotlock Cloud use an admin console ([RFC 0006](docs/rfc/0006-admin-console.md),

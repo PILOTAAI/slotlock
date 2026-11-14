@@ -129,7 +129,7 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
   }
 
   describe('suspension', () => {
-    it('refuses every write and keeps every read, for that tenant only', async () => {
+    it('refuses every write and its keys, and keeps every read, for that tenant only', async () => {
       const { tenantRef, resourceId } = await freshTenant();
       const other = await freshTenant();
       await expect(
@@ -166,17 +166,22 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         ),
       ).resolves.toMatchObject({ ok: true });
 
-      // No new key; one it has still authenticates (reads go on).
+      // No new key, and the keys it has are refused, its test environment's too, until the
+      // suspension is lifted.
       const keys = createSlotlockApiKeyStore(application);
       await expect(keys.create({ tenantRef, name: 'New key', scopes: ['read'] })).rejects.toThrow(/suspended/);
       const kept = await keys.create({ tenantRef: other.tenantRef, name: 'Kept key', scopes: ['read'] });
+      const trial = await keys.create({ tenantRef: `${other.tenantRef}~test`, name: 'Trial key', scopes: ['read'] });
+      await expect(keys.authenticate(kept.key)).resolves.toMatchObject({ tenantRef: other.tenantRef });
       await asOwner((store) => store.suspendTenant({ tenantRef: other.tenantRef }));
-      await expect(keys.authenticate(kept.key)).resolves.toMatchObject({
-        tenantRef: other.tenantRef,
-      });
+      await expect(keys.authenticate(kept.key)).resolves.toBeNull();
+      await expect(keys.authenticate(trial.key)).resolves.toBeNull();
       await expect(keys.rotate({ tenantRef: other.tenantRef, id: kept.apiKey.id })).rejects.toThrow(
         /suspended/,
       );
+      await asOwner((store) => store.unsuspendTenant({ tenantRef: other.tenantRef }));
+      await expect(keys.authenticate(kept.key)).resolves.toMatchObject({ tenantRef: other.tenantRef });
+      await expect(keys.authenticate(trial.key)).resolves.toMatchObject({ tenantRef: `${other.tenantRef}~test` });
 
       await expect(asOwner((store) => store.unsuspendTenant({ tenantRef }))).resolves.toEqual({
         unsuspended: true,

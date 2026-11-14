@@ -4389,16 +4389,21 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<BookingRetentionResult>;
   /**
    * Suspend a tenant: from when this returns, its withTenant transactions may read but writes are
-   * refused (`tenant_suspended`); one in flight is waited for. Its keys still authenticate but it
-   * gets no new key. Maintenance and erasure go on. True when it was not suspended already.
-   * Deployment role only (`tenant_suspension_not_permitted`).
+   * refused (`tenant_suspended`); one in flight is waited for. Its API keys, its test environment's
+   * too, authenticate as nothing until the suspension is lifted, and it gets no new key; its
+   * dashboard, by session, still reads. Maintenance and erasure go on. True when it was not
+   * suspended already, or suspended only by its partner, whose suspension this takes over so the
+   * partner cannot lift it. Deployment role only (`tenant_suspension_not_permitted`).
    */
   suspendTenant(params: {
     tenantRef: string;
     /** Why, for the operator: 1-500 characters without control characters. */
     reason?: string;
   }): Promise<{ suspended: boolean }>;
-  /** Lift a suspension; true when the tenant was suspended. The deployment role only. */
+  /**
+   * Lift a suspension, whoever made it; true when the tenant was suspended. Its keys work again
+   * from the next request. The deployment role only.
+   */
   unsuspendTenant(params: { tenantRef: string }): Promise<{ unsuspended: boolean }>;
   /** Whether the tenant is suspended. */
   isTenantSuspended(params: { tenantRef: string }): Promise<boolean>;

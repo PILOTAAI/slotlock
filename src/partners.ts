@@ -222,7 +222,11 @@ export interface SlotlockPartnerStore {
   recordReconciliation(partnerId: string, day: string, accounts: number, mismatched: number, worstPercent: number): Promise<void>;
   /** The account's keys, made and changed as any tenant's (api-keys.ts). */
   keys: SlotlockApiKeyStore;
-  /** Erase the account's tenant, with its partner's record of it. */
+  /**
+   * Erase the account's tenant, with its partner's record of it, suspended or not. The partner API
+   * does not call it: it erases as `/v1/tenant/erase` does, refusing a suspended account in the
+   * erasure's own transaction.
+   */
   eraseAccount(partnerId: string, account: string): Promise<{ erased: boolean; total: number }>;
 }
 

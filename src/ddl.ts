@@ -365,7 +365,10 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
   'slotlock.installed_schema_version()',
 ] as const);
 
-/** The table of suspended tenants: they may read, and write nothing (store.ts withTenant). */
+/**
+ * The table of suspended tenants: they write nothing (store.ts withTenant), and their API keys are
+ * refused (authenticate_scoped_api_key).
+ */
 export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'tenant_plans',
@@ -891,7 +894,10 @@ $slotlock_set_api_key_resource_scope$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[6]} FROM PUBLIC;
 
 -- As authenticate_api_key, with the key's scope: null locations and groups for a key with none.
--- A key of a partner's account whose partner is not active (RFC 0003 P2) authenticates as nothing.
+-- A key of a suspended tenant authenticates as nothing, from the request after the suspension: its
+-- own suspension, its live tenant's for a test environment's key, or its partner's when the partner
+-- is not active (RFC 0003 P2), as tenant_suspended reads them. Its dashboard, by session, still
+-- reads.
 CREATE OR REPLACE FUNCTION slotlock.authenticate_scoped_api_key(presented_secret_hash bytea)
 RETURNS TABLE (key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[])
 LANGUAGE plpgsql
@@ -904,7 +910,7 @@ BEGIN
   SELECT found.key_id, found.key_tenant_ref, found.key_scopes, scope.locations, scope.groups
     FROM slotlock.authenticate_api_key(presented_secret_hash) found
     LEFT JOIN slotlock.api_key_resource_scopes scope ON scope.key_id = found.key_id
-   WHERE NOT slotlock.partner_tenant_blocked(found.key_tenant_ref);
+   WHERE NOT slotlock.tenant_suspended(found.key_tenant_ref);
 END
 $slotlock_authenticate_scoped_api_key$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[7]} FROM PUBLIC;
@@ -2666,10 +2672,10 @@ $slotlock_installed_schema_version$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
 `;
 
-// Tenant suspension and erasure. A suspended tenant may read and write nothing; its keys still
-// authenticate but it gets no new key. The table names tenants and reasons, so RLS with no policy
-// and no grants: servers read it only through tenant_suspended(), and only the deployment role
-// (owner) suspends. Erasure keeps the suspension.
+// Tenant suspension and erasure. A suspended tenant writes nothing, its API keys authenticate as
+// nothing and it gets no new key; its dashboard still reads it. The table names tenants and
+// reasons, so RLS with no policy and no grants: servers read it only through tenant_suspended(),
+// and only the deployment role (owner) suspends. Erasure keeps the suspension.
 //
 // Every server transaction for a tenant holds its lock shared before reading the suspension;
 // suspension and erasure take it exclusively, so a suspension waits for transactions in flight and
@@ -2721,6 +2727,28 @@ BEGIN
   END IF;
 END
 $slotlock_tenant_suspensions_message$;
+
+-- Who made a suspension: the deployment's operator (slotlock tenant suspend), staff (the admin
+-- console) or the tenant's partner (the partner API, RFC 0003 P3). A partner lifts only its own,
+-- and the operator or staff take a partner's over, so theirs stays whatever the partner does. Rows
+-- from before the column are read once, when it is added: a partner's had its 'partner: ' reason
+-- and no one recorded, staff's a staff reference; any other is the operator's, which no partner
+-- lifts.
+DO $slotlock_tenant_suspensions_source$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute
+     WHERE attrelid = 'slotlock.tenant_suspensions'::regclass AND attname = 'source' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE slotlock.tenant_suspensions ADD COLUMN source text NOT NULL DEFAULT 'operator'
+      CONSTRAINT slotlock_tenant_suspensions_source_valid CHECK (source IN ('operator', 'staff', 'partner'));
+    UPDATE slotlock.tenant_suspensions held
+       SET source = CASE WHEN held.suspended_by LIKE 'github:%' THEN 'staff' ELSE 'partner' END
+     WHERE held.suspended_by LIKE 'github:%'
+        OR (held.suspended_by IS NULL AND held.reason LIKE 'partner: %');
+  END IF;
+END
+$slotlock_tenant_suspensions_source$;
 
 -- A suspended tenant's notice for its dashboard: since when, and the message staff left (null for
 -- none). One row while it is suspended (its own suspension, its live tenant's, or its partner's),
@@ -3550,7 +3578,9 @@ END
 $slotlock_note_usage_threshold$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[18]} FROM PUBLIC;
 
--- True when the tenant was not suspended already; a second suspension keeps the first's reason.
+-- True when it suspended the tenant: one not suspended, or suspended by its partner, whose suspension
+-- this takes over, so the partner cannot lift it (set_partner_account_suspended). Otherwise a second
+-- suspension keeps the first's reason. Who did it is recorded after (staff_operator_record).
 CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -3562,9 +3592,12 @@ BEGIN
   -- The tenant's key lock too: a key or secret being issued commits first, and one issued after
   -- this commits sees the suspension and is refused.
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
-  INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
-  VALUES (requested_tenant_ref, requested_reason)
-  ON CONFLICT (tenant_ref) DO NOTHING;
+  INSERT INTO slotlock.tenant_suspensions AS held (tenant_ref, reason, source)
+  VALUES (requested_tenant_ref, requested_reason, 'operator')
+  ON CONFLICT (tenant_ref) DO UPDATE
+     SET reason = EXCLUDED.reason, source = EXCLUDED.source, suspended_at = EXCLUDED.suspended_at,
+         customer_message = NULL, suspended_by = NULL
+   WHERE held.source = 'partner';
   RETURN FOUND;
 END
 $slotlock_suspend_tenant$;
@@ -6191,7 +6224,8 @@ $slotlock_get_partner_account$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[5]} FROM PUBLIC;
 
 -- Suspend an account of the partner's, or lift a suspension the partner made: one Pylota made (for
--- abuse, say) the partner cannot lift. True when it changed something; null for no such account.
+-- abuse, say), before the partner's or taking it over after, the partner cannot lift. True when it
+-- changed something; null for no such account.
 CREATE OR REPLACE FUNCTION slotlock.set_partner_account_suspended(
   requested_partner_id text, requested_account text, requested_suspended boolean, requested_reason text
 )
@@ -6212,13 +6246,13 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || tenant, 0));
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || tenant, 0));
   IF requested_suspended THEN
-    INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
-    VALUES (tenant, 'partner: ' || COALESCE(left(requested_reason, 200), 'suspended by its partner'))
+    INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason, source)
+    VALUES (tenant, 'partner: ' || COALESCE(left(requested_reason, 200), 'suspended by its partner'), 'partner')
     ON CONFLICT (tenant_ref) DO NOTHING;
     RETURN FOUND;
   END IF;
   DELETE FROM slotlock.tenant_suspensions held
-   WHERE held.tenant_ref = tenant AND held.reason LIKE 'partner: %';
+   WHERE held.tenant_ref = tenant AND held.source = 'partner';
   RETURN FOUND;
 END
 $slotlock_set_partner_account_suspended$;

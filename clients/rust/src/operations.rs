@@ -3578,9 +3578,10 @@ impl Client {
 
     /// Get the tenant.
     ///
-    /// The key's tenant: its reference, and whether it is suspended. A suspended tenant may read
-    /// and writes nothing (403 tenant_suspended); only the server's operator suspends a tenant or
-    /// lifts a suspension (slotlock tenant suspend).
+    /// The key's tenant: its reference, and whether it is suspended. A suspended tenant writes
+    /// nothing (403 tenant_suspended), and its API keys are refused (401) until the suspension is
+    /// lifted; only the server's operator suspends a tenant or lifts a suspension (slotlock
+    /// tenant suspend).
     pub fn get_tenant(&self, input: &GetTenantInput) -> Result<Value, Error> {
         self.call("slotlock_get_tenant", serde_json::to_value(input)?)
     }
@@ -3970,16 +3971,18 @@ impl Client {
 
     /// Suspend an account.
     ///
-    /// Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys
-    /// get no new secret. suspended says whether it was not suspended already.
+    /// Suspend the account, as slotlock tenant suspend: it writes nothing, and its keys are
+    /// refused (401) and get no new secret until the suspension is lifted. suspended says whether
+    /// it was not suspended already.
     pub fn partner_suspend_account(&self, input: &PartnerSuspendAccountInput) -> Result<Value, Error> {
         self.call("slotlock_partner_suspend_account", serde_json::to_value(input)?)
     }
 
     /// Lift a suspension.
     ///
-    /// Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as
-    /// when the account was not suspended.
+    /// Lift a suspension the partner made. One Pylota made stays, whether before the partner's or
+    /// after (it takes the partner's over): unsuspended is false then, as when the account was
+    /// not suspended.
     pub fn partner_unsuspend_account(&self, input: &PartnerUnsuspendAccountInput) -> Result<Value, Error> {
         self.call("slotlock_partner_unsuspend_account", serde_json::to_value(input)?)
     }
@@ -3987,7 +3990,9 @@ impl Client {
     /// Erase an account.
     ///
     /// Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's
-    /// record of it. confirm repeats the account. Cannot be undone.
+    /// record of it. confirm repeats the account. Cannot be undone. A suspended account is not
+    /// erased (403 tenant_suspended), whoever suspended it: the partner lifts its own suspension
+    /// first, and one Pylota made keeps the data for Pylota.
     pub fn partner_erase_account(&self, input: &PartnerEraseAccountInput) -> Result<Value, Error> {
         self.call("slotlock_partner_erase_account", serde_json::to_value(input)?)
     }

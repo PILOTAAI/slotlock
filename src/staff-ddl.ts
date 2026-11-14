@@ -407,13 +407,16 @@ $slotlock_staff_customer_audit$;
 -- Suspend an account (safety.act): from the next request it changes nothing, and its keys are
 -- refused, as slotlock tenant suspend does. The reason goes to the staff log and the account's audit
 -- log; the message, if any, is shown on every page of its dashboard. Linked to a case, the case
--- records the suspension. False when it was suspended already.
+-- records the suspension. A suspension its partner made is taken over, as suspend_tenant takes it,
+-- so the partner cannot lift staff's. False when it was suspended already otherwise.
 CREATE OR REPLACE FUNCTION slotlock.admin_suspend(actor text, account text, why text, message text, case_id bigint)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_admin_suspend$
+DECLARE
+  previous text;
 BEGIN
   actor := slotlock.staff_session(actor, 'safety.act', false);
   PERFORM slotlock.staff_account_known(account);
@@ -432,15 +435,22 @@ BEGIN
   -- As suspend_tenant: the tenant's lock and its key lock, so writes in flight finish first.
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || account, 0));
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || account, 0));
-  INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason, customer_message, suspended_by)
-  VALUES (account, why, message, actor)
-  ON CONFLICT (tenant_ref) DO NOTHING;
+  -- A partner's suspension is taken over, and the staff log says so; any other stays as it is.
+  SELECT held.source INTO previous FROM slotlock.tenant_suspensions held
+   WHERE held.tenant_ref = account FOR UPDATE;
+  INSERT INTO slotlock.tenant_suspensions AS held (tenant_ref, reason, customer_message, suspended_by, source)
+  VALUES (account, why, message, actor, 'staff')
+  ON CONFLICT (tenant_ref) DO UPDATE
+     SET reason = EXCLUDED.reason, customer_message = EXCLUDED.customer_message,
+         suspended_by = EXCLUDED.suspended_by, source = EXCLUDED.source, suspended_at = EXCLUDED.suspended_at
+   WHERE held.source = 'partner';
   IF NOT FOUND THEN
     RETURN false;
   END IF;
   PERFORM slotlock.staff_log(actor, 'account.suspended', account,
     CASE WHEN case_id IS NULL THEN NULL ELSE 'case:' || case_id END, why,
-    jsonb_build_object('message', message IS NOT NULL));
+    jsonb_build_object('message', message IS NOT NULL)
+      || CASE WHEN previous = 'partner' THEN jsonb_build_object('took_over', 'partner') ELSE '{}'::jsonb END);
   PERFORM slotlock.staff_customer_audit(actor, account, 'staff.account_suspended', NULL, NULL, why);
   IF case_id IS NOT NULL THEN
     UPDATE slotlock.abuse_cases opened

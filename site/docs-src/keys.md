@@ -131,11 +131,13 @@ slotlock partner suspend stackapi        # every account with it; its keys stop
   /v1/partner/accounts/{account}`: the account's limits and quotas are that plan's), lists and
   reads them, makes, rotates and revokes their keys (`/v1/partner/accounts/{account}/keys`, shown
   once, scopes capped by the contract), suspends one and lifts its own suspension (never one the
-  deployment made), erases one, and reads their usage (`GET /v1/partner/usage`, the counts the
-  partner is invoiced from). Another partner's accounts are not there for it.
+  deployment made, before the partner's or after: the deployment's takes the partner's over),
+  erases one that is not suspended (`403 tenant_suspended`; a suspension the deployment made keeps
+  the data for it), and reads their usage (`GET /v1/partner/usage`, the counts the partner is
+  invoiced from). Another partner's accounts are not there for it.
 - An account is an ordinary tenant: forced row-level security keeps each from every other, and its
-  keys work over MCP, A2A and REST as any key. A suspended partner suspends its accounts and their
-  keys stop authenticating.
+  keys work over MCP, A2A and REST as any key. A suspended account's keys stop authenticating until
+  the suspension is lifted, whoever made it, and a suspended partner suspends all its accounts.
 - A partner that cannot keep a key per account may act for one with its own key and a
   `Slotlock-Account: <account>` field, where its contract says `"act_on_behalf": true`: the
   request then runs as that account, with the contract's key scopes, and never reaches the partner
