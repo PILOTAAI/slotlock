@@ -4739,6 +4739,9 @@ export function createSlotlockStoreApplicationBackend(
           start: new Date(input.starts_at as string),
           end: new Date(input.ends_at as string),
           ...(input.agents !== undefined ? { agents: input.agents as number } : {}),
+          // A race ends with its request: its racers leave the tenant's line when the client goes
+          // or the handler times out, rather than running on with no one to answer.
+          signal: context.signal,
         });
         return {
           agents: raced.agents,
@@ -4751,6 +4754,7 @@ export function createSlotlockStoreApplicationBackend(
           max_ms: raced.maxMs,
         };
       } catch (error) {
+        if (context.signal.aborted) throw new SlotlockAgentOperationError('request_aborted', 503);
         throw sandboxRefusal(error);
       }
     },

@@ -3108,7 +3108,8 @@ Environment:
                                  application API, sign_in (20/m:20); counts for
                                  tenant_series_writes and series_writes
                                  (1: writes that may expand a recurring series at once),
-                                 maintenance_runs (1: application API maintenance runs at once),
+                                 maintenance_runs (1: application API maintenance runs,
+                                 sandbox races and fast-forwards at once),
                                  subscriptions (256), tenant_subscriptions (16),
                                  key_subscriptions (4, and fewer than tenant_subscriptions),
                                  key_lookups (2), key_lookup_queue (256),

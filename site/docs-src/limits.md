@@ -19,6 +19,11 @@ fields. The application API counts an admin key's calls in its tenant's own `app
 `app_write` budgets, apart from the agents'; another key's are its own. The health check is not
 counted.
 
+A sandbox race (`POST /v1/sandbox/race`) books once for each of its agents, so it takes a write
+token for each. When its tenant's budget holds fewer, the race still runs, and the tenant's next
+write waits until the race is paid for, as it would have after that many writes. The server's budget
+gives what it holds and is never owed, so one tenant's race never holds up every tenant's writes.
+
 ## Recurring writes
 
 A recurring create and every event update (a new title re-expands a recurring event's series too)
@@ -39,7 +44,8 @@ the place of that tenant's last write, which gets 503 `server_busy`; otherwise i
 An expansion runs on the server's main thread, so any request may also wait for the one running. A
 write that has waited two seconds gets 429 while its tenant's own write is still running, otherwise
 503 `server_busy`. An application API maintenance run waits the same way for slots of its own: one
-per tenant, `maintenance_runs` per server.
+per tenant, `maintenance_runs` per server. A sandbox race and a sandbox fast-forward share those
+slots.
 
 ## Database connections
 

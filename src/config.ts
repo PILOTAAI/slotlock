@@ -570,7 +570,7 @@ export interface SlotlockLimits {
  *   loop was busy while its write held it, up to a second, then goes to the tenant with the fewest
  *   writes in flight and, among those, the least use lately. That keeps a tenant sending one write
  *   at a time from waiting behind tenants with more, not behind many tenants with one each
- *   (rate-limit.ts).
+ *   (rate-limit.ts). Sandbox races and fast-forwards wait for the maintenance runs' slots.
  * - `subscriptions`: MCP live-update streams the server holds open. When it is full, a tenant
  *   holding fewer than the tenant holding most, less one, ends that tenant's oldest stream.
  * - `tenant_subscriptions`: of those, how many one tenant may hold.
