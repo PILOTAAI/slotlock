@@ -236,12 +236,20 @@ const SERVE_MAX_TENANT_RESOURCES = 10_000;
 const SERVE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 /** Passes `slotlock maintain` runs at most, each as big as `serve`'s, until nothing is left. */
 const MAINTAIN_MAX_PASSES = 100;
+/**
+ * The writes SLOTLOCK_CONFIRM_WRITES may name, and all of them for `all`: every tool that books,
+ * moves or cancels, the named booking tools included. The agent server also guards the tool that
+ * performs the same write as a listed one.
+ */
 const WRITE_OPERATIONS: readonly SlotlockAgentWriteOperation[] = [
   'slotlock_create_event',
   'slotlock_book_together',
   'slotlock_book_pool',
   'slotlock_update_event',
   'slotlock_delete_event',
+  'slotlock_confirm_slot',
+  'slotlock_reschedule',
+  'slotlock_cancel',
 ];
 /**
  * What `serve` lets the token holder call. An allow-list, so an operation a later release adds stays

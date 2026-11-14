@@ -282,15 +282,26 @@ describe('slotlock serve configuration', () => {
     expect(config.confirmWrites).toEqual([]);
     expect('confirmationSecret' in config).toBe(false);
     const optedIn = readSlotlockServeConfig(serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'all' }));
+    // Every write, the named booking tools included: each books, moves or cancels as the others do.
     expect(optedIn.confirmWrites).toEqual([
       'slotlock_create_event',
       'slotlock_book_together',
       'slotlock_book_pool',
       'slotlock_update_event',
       'slotlock_delete_event',
+      'slotlock_confirm_slot',
+      'slotlock_reschedule',
+      'slotlock_cancel',
     ]);
     expect(optedIn.confirmationSecret).toBeDefined();
     expect(SLOTLOCK_CLI_HELP).toMatch(/SLOTLOCK_CONFIRM_WRITES +none \(default\), all,/);
+  });
+
+  it('accepts the named booking tools in SLOTLOCK_CONFIRM_WRITES', () => {
+    const config = readSlotlockServeConfig(
+      serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'slotlock_cancel, slotlock_reschedule,slotlock_confirm_slot' }),
+    );
+    expect(config.confirmWrites).toEqual(['slotlock_cancel', 'slotlock_reschedule', 'slotlock_confirm_slot']);
   });
 
   it('reads every optional setting', () => {

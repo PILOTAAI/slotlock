@@ -373,7 +373,9 @@ its own model.
   its zone, and for a change or cancellation the event's title, resource and time as it stands)
   and then shows every argument in full; a change too large to show (16 KB of arguments) is not
   proposed, and a conversation has at most 4 waiting. A proposal is only checked: the series-write
-  slot and the write's rate token are taken when the approved change runs.
+  slot and the write's rate token are taken when the approved change runs. It never runs before,
+  not even as a dry run: the model is offered no `dry_run`, and a proposal that sends one is
+  refused (`invalid_arguments`).
 - **Bounds.** A message's reads share a budget of 16 calls and 400 resource-days. API keys,
   webhooks, booking rules, pools, erasure and coverage are never offered; a tool the model names
   outside the list is refused. Tool results and booking data are data to the model, never

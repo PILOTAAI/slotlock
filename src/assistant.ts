@@ -519,7 +519,8 @@ export interface SlotlockAssistantTool {
 
 /**
  * The tools the model is offered: every agent tool the assistant reads or proposes, with its input
- * schema less `idempotency_key`, which the dashboard sets itself so an approval runs once.
+ * schema less `idempotency_key`, which the dashboard sets itself so an approval runs once, and less
+ * `dry_run`: a proposal never runs, dry or not, and the dashboard refuses one that asks for it.
  */
 export function slotlockAssistantTools(): SlotlockAssistantTool[] {
   return slotlockAgentTools().flatMap((tool) => {
@@ -528,6 +529,7 @@ export function slotlockAssistantTools(): SlotlockAssistantTool[] {
     const schema = { ...(tool.inputSchema as Record<string, unknown>) };
     const properties = { ...((schema.properties as Record<string, unknown> | undefined) ?? {}) };
     delete properties.idempotency_key;
+    delete properties.dry_run;
     schema.properties = properties;
     if (Array.isArray(schema.required)) {
       schema.required = (schema.required as string[]).filter((name) => name !== 'idempotency_key');
