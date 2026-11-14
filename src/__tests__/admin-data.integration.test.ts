@@ -176,7 +176,7 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     // Each plan set to end, and when.
     const ending = billing.slice(billing.indexOf('id="ending"'));
     expect(ending).toContain(`href="/accounts/${encodeURIComponent(ENDING)}"`);
-    expect(ending).toContain('14 Dec');
+    expect(ending).toContain(`${thisYear}-12-14`);
     expect(ending).toContain('£5.00');
     expect(stripeCalls).toEqual(['/v1/subscriptions']);
   });
@@ -208,12 +208,22 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     const before = stripeCalls.length;
     const accounts = await text(staff.owner, '/accounts');
     const row = accounts.slice(accounts.indexOf(`href="/accounts/${encodeURIComponent(ENDING)}"`));
-    expect(row.slice(0, row.indexOf('</tr>'))).toContain('Developer · ends 14 Dec');
+    expect(row.slice(0, row.indexOf('</tr>'))).toContain(`Developer · ends ${thisYear}-12-14`);
     // The list asks Stripe nothing.
     expect(stripeCalls.length).toBe(before);
     const page = await text(staff.owner, `/accounts/${encodeURIComponent(ENDING)}`);
-    expect(page).toContain('Developer · ends 14 Dec');
-    expect(page).toMatch(/<dt>Ends<\/dt><dd>\d{4}-12-14<\/dd>/);
+    expect(page).toContain(`Developer · ends ${thisYear}-12-14`);
+    expect(page).toContain(`<dt>Ends</dt><dd>${thisYear}-12-14</dd>`);
+  });
+
+  it('shows every date to staff one way, 2026-11-14 (and 09:21 after it for a time), on every page', async () => {
+    /** What a person reads: no script, style or tags (an SVG point's title included). */
+    const visible = (page: string) => page.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ');
+    const MONTH = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)';
+    const other = new RegExp(`\\b\\d{1,2} ${MONTH}\\b|\\b${MONTH} \\d{1,2}\\b|\\b${MONTH} \\d{4}\\b|\\b\\d{1,2}/\\d{1,2}/\\d{2,4}\\b`);
+    for (const path of ['/', '/accounts', `/accounts/${encodeURIComponent(ENDING)}`, '/billing', '/usage', '/cases', '/privacy', '/site', '/communications', '/system', '/staff', '/staff/log']) {
+      expect(other.exec(visible(await text(staff.owner, path)))?.[0] ?? null, path).toBeNull();
+    }
   });
 
   it('puts a refund that left a plan running under Needs a person', async () => {
@@ -239,7 +249,7 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     const ending = await text(staff.billing, '/billing');
     const endingTable = ending.slice(ending.indexOf('<table', ending.indexOf('id="alerts"')));
     const endingRow = endingTable.slice(endingTable.lastIndexOf('<tr', endingTable.indexOf('ch_Refund3')), endingTable.indexOf('</tr>', endingTable.indexOf('ch_Refund3')));
-    expect(endingRow).toContain('Refunded in full, plan ends 14 Dec<span class="sub">£5.00 of £5.00 refunded: end it now, or say why not</span>');
+    expect(endingRow).toContain(`Refunded in full, plan ends ${thisYear}-12-14<span class="sub">£5.00 of £5.00 refunded: end it now, or say why not</span>`);
   });
 
   it("shows people by their provider's name, else display, else reference, with initials and no style attribute", async () => {

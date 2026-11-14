@@ -121,6 +121,10 @@ versioning.
   which names every setting (`SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY` and `_PROPERTY`,
   `SLOTLOCK_ADMIN_BING_KEY` and `_SITE`, `SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN` and `_ACCOUNT`, and
   `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE`), not to the top of RFC 0006.
+- The console shows every date one way, as most of it already did: `2026-11-14`, with `09:21` after
+  it for a time. A plan set to end ("Developer · ends 2026-12-14"), Billing's Ending, the refund
+  alert, the charts' dates and an announcement's time in the viewer's zone read "14 Dec" or
+  "Sun, Nov 15" before. On a phone a chart shows three dates under it instead of five.
 
 ### Security
 

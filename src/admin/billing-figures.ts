@@ -3,6 +3,7 @@
 // each brings in a month, and the links into Stripe. The figures themselves come from the database
 // (staff-ddl.ts staff_subscribed_plans) and Stripe (stripe.ts slotlockRevenueOf), by one rule.
 import { type SlotlockStripeRevenue, slotlockMoney } from './stripe.js';
+import { day } from './ui.js';
 
 const PLAN_NAMES: Readonly<Record<string, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
 
@@ -11,17 +12,9 @@ export function slotlockPlanName(plan: string | null | undefined): string {
   return PLAN_NAMES[plan ?? 'free'] ?? plan ?? 'Free';
 }
 
-/** A day as people read it: 14 Dec this year, 14 Dec 2027 another. */
-export function slotlockShortDate(value: Date | string | number, nowMs: number): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '–';
-  const sameYear = date.getUTCFullYear() === new Date(nowMs).getUTCFullYear();
-  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }), timeZone: 'UTC' });
-}
-
-/** A plan, with the day it ends when its subscription is set to end: "Developer · ends 14 Dec". */
-export function slotlockPlanLabel(plan: string | null | undefined, endsAt: Date | string | null | undefined, nowMs: number): string {
-  return endsAt ? `${slotlockPlanName(plan)} · ends ${slotlockShortDate(endsAt, nowMs)}` : slotlockPlanName(plan);
+/** A plan, with the day it ends when its subscription is set to end: "Developer · ends 2026-12-14". */
+export function slotlockPlanLabel(plan: string | null | undefined, endsAt: Date | string | null | undefined): string {
+  return endsAt ? `${slotlockPlanName(plan)} · ends ${day(endsAt)}` : slotlockPlanName(plan);
 }
 
 /** Amounts by currency, each as people read it, joined: £20.00 + €5.00. */
@@ -38,7 +31,7 @@ export function slotlockStripeLink(ref: string): string {
 }
 
 /** A billing alert in words: what happened, and its detail. */
-export function slotlockBillingAlertWords(kind: string, detail: Record<string, unknown>, nowMs: number = Date.now()): { title: string; detail: string | null } {
+export function slotlockBillingAlertWords(kind: string, detail: Record<string, unknown>): { title: string; detail: string | null } {
   const currency = typeof detail.currency === 'string' ? detail.currency : null;
   if (kind === 'payment_failed') {
     return {
@@ -56,7 +49,7 @@ export function slotlockBillingAlertWords(kind: string, detail: Record<string, u
     // All of it refunded on a plan set to end: the customer keeps it until then, for nothing.
     if (typeof detail.ends_at === 'string') {
       return {
-        title: `Refunded in full, plan ends ${slotlockShortDate(detail.ends_at, nowMs)}`,
+        title: `Refunded in full, plan ends ${day(detail.ends_at)}`,
         detail: amounts ? `${amounts}: end it now, or say why not` : 'End it now, or say why not',
       };
     }

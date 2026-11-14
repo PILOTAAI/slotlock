@@ -66,7 +66,6 @@ import {
   slotlockMoneyByCurrency,
   slotlockPlanLabel,
   slotlockPlanName,
-  slotlockShortDate,
   slotlockStripeLink,
 } from './billing-figures.js';
 import { slotlockShownPerson } from './people.js';
@@ -615,7 +614,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     chip({ person: 'Person', team: 'Team', organization: 'Organization', partner: 'Partner', test: 'Test' }[kind] ?? kind, kind === 'test' ? 'warn' : 'plain');
   /** A plan, with the day it ends when its subscription is set to end (the webhook keeps it). */
   const planPill = (plan: string | null, endsAt?: Date | string | null) =>
-    chip(slotlockPlanLabel(plan, endsAt, now()), endsAt ? 'warn' : plan === 'team' || plan === 'developer' ? 'info' : 'plain');
+    chip(slotlockPlanLabel(plan, endsAt), endsAt ? 'warn' : plan === 'team' || plan === 'developer' ? 'info' : 'plain');
   const statusPill = (suspended: boolean, planStatus: string | null) =>
     suspended ? pill('Suspended', 'bad') : planStatus === 'past_due' ? pill('Past due', 'warn') : pill('Active', 'good');
   const accountHref = (ref: string) => `/accounts/${encodeURIComponent(ref)}`;
@@ -1881,7 +1880,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const openAlerts = alerts.filter((alert) => !alert.resolved_at);
     const pending = overrides.filter((item) => item.state === 'pending');
     const approvable = pending.filter((item) => item.created_by !== session.s);
-    const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail, now());
+    const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail);
     const mrr = revenue ? slotlockMoneyByCurrency(revenue.mrr) : null;
     const payingTotal = Object.values(paying).reduce((sum, value) => sum + Number(value), 0);
     const account = (row: { account_ref: string } & Named) => accountOf(session, row.account_ref, namedOf(row));
@@ -1933,7 +1932,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       accountOf(session, row.account, endingNames.get(row.account) ?? {}),
       html`${row.plan ? slotlockPlanName(row.plan) : '–'}`,
       html`${row.monthly === null ? '–' : slotlockMoney(row.monthly, row.currency)}`,
-      html`${slotlockShortDate(row.endsAt, now())}`,
+      html`${day(new Date(row.endsAt))}`,
     ]), 'No paying plan is set to end.', { hrefs: may('accounts.read') ? ending.map((row) => accountHref(row.account)) : [] }), { id: 'ending' })}`;
     const alertsPanel = html`
       <div class="toolbar">${tabs('Alerts', [
