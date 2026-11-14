@@ -125,6 +125,9 @@ const expectedFiles = new Set([
   'dashboard-settings-ui.d.ts',
   'dashboard.js',
   'dashboard.d.ts',
+  // The colours the dashboard shares with the staff console, and its announcement banner.
+  'design-tokens.js',
+  'design-tokens.d.ts',
   'ddl.js',
   'ddl.d.ts',
   // Teams phase 5: verified domains (the DNS side, their tables and functions, the adapter).
