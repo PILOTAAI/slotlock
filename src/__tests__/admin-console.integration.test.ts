@@ -201,7 +201,7 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(home.status).toBe(200);
     const text = await home.text();
     expect(text).toContain('octo-owner');
-    expect(text).toContain('Needs attention');
+    expect(text).toContain('Needs a person');
     expect(text).toContain('href="/staff/log"');
     expect(await log('github:1001')).toEqual(
       expect.arrayContaining(['staff.signed_in', 'staff.passkey_added', 'home.viewed']),
@@ -737,6 +737,46 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect((await first.request('/accounts')).status).toBe(200);
     await asOwner((tx) => tx`SELECT slotlock.staff_reset('github:1020', 'cli:ops', ${sha('lost')}, ${new Date(Date.now() + 86_400_000)})`);
     expect((await first.request('/accounts')).headers.get('location')).toBe('/sign-in');
+  });
+
+  it('serves its typefaces for good, finds accounts by view, by name for a form, and as CSV, and opens a staff log entry', async () => {
+    const browser = browsers.owner();
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    // The fonts: same-origin files at a path that names their hash, which the CSP allows and nothing else.
+    const page = await browser.request('/');
+    expect(page.headers.get('content-security-policy')).toContain("font-src 'self'");
+    const font = /href="(\/fonts\/inter-[0-9a-f]{12}\.woff2)"/.exec(await page.text())?.[1] ?? '';
+    const served = await new Browser(() => admin, '').request(font);
+    expect(served.status).toBe(200);
+    expect(served.headers.get('content-type')).toBe('font/woff2');
+    expect(served.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect((await new Browser(() => admin, '').request('/fonts/inter-000000000000.woff2')).status).toBe(403);
+    // Views the database filters, and views the console filters.
+    expect(await (await browser.request('/accounts?view=paying')).text()).toContain(`href="/accounts/${encodeURIComponent(PERSON)}"`);
+    expect(await (await browser.request('/accounts?view=suspended')).text()).not.toContain(`href="/accounts/${encodeURIComponent(PERSON)}"`);
+    expect(await (await browser.request('/accounts?kind=team')).text()).not.toContain(`href="/accounts/${encodeURIComponent(PERSON)}"`);
+    // A form's typeahead: the reference, and the name to show for it.
+    const found = await browser.request('/accounts?format=json&q=424242');
+    expect(found.headers.get('content-type')).toContain('application/json');
+    expect(await found.json()).toEqual([{ ref: PERSON, label: 'someone', initials: 'SO', kind: 'person' }]);
+    // Export: the rows on the screen, as CSV, a cell that would start a formula quoted as text.
+    const exported = await browser.request('/accounts?view=paying&format=csv');
+    expect(exported.headers.get('content-type')).toBe('text/csv; charset=utf-8');
+    expect(exported.headers.get('content-disposition')).toBe('attachment; filename="accounts.csv"');
+    const lines = (await exported.text()).split('\r\n');
+    expect(lines[0]).toBe('account,name,kind,plan,plan_status,suspended,operations_month,bookings_month,last_active,created');
+    expect(lines.some((line) => line.startsWith(`${PERSON},`))).toBe(true);
+    // The staff log: filtered, exported, and an entry opened in a drawer with the chain beside it.
+    const mine = await (await browser.request(`/staff/log?${new URLSearchParams({ who: 'github:1001', action: 'Accounts' }).toString()}`)).text();
+    expect(mine).toContain('accounts.searched');
+    expect(mine).not.toContain('staff.signed_out');
+    const csv = await (await browser.request('/staff/log?format=csv')).text();
+    expect(csv.split('\r\n')[0]).toBe('chain_index,occurred_at,staff,action,account,target,reason');
+    expect(csv).toContain('accounts.searched');
+    const entry = await (await browser.request('/staff/log?entry=1')).text();
+    expect(entry).toContain('role="dialog"');
+    expect(entry).toContain('Hash chain');
   });
 
   it('shows no notice or label that a link from elsewhere names, only what its own action did', async () => {

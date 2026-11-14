@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { renderAdminFonts } from '../../scripts/admin-fonts.mjs';
+import { SLOTLOCK_ADMIN_CSS } from '../admin/ui.js';
 import { SLOTLOCK_ADMIN_FONTS } from '../admin/fonts.js';
 import { SLOTLOCK_CONSOLE_TOKENS, SLOTLOCK_DASHBOARD_TOKENS, type SlotlockTokenSet } from '../design-tokens.js';
 
@@ -131,6 +132,7 @@ describe('design tokens', () => {
     expect(SLOTLOCK_ADMIN_FONTS.map((font) => font.family)).toEqual(['Inter', 'Geist Mono']);
     for (const font of SLOTLOCK_ADMIN_FONTS) {
       expect(font.path).toMatch(/^\/fonts\/[a-z-]+-[0-9a-f]{12}\.woff2$/);
+      expect(SLOTLOCK_ADMIN_CSS).toContain(`src:url(${font.path}) format('woff2')`);
       // woff2's signature, wOF2.
       expect(Buffer.from(font.base64, 'base64').subarray(0, 4).toString('latin1')).toBe('wOF2');
     }
