@@ -10,13 +10,14 @@ tags:
   - MCP
 image: blog-introducing-slotlock
 imageAlt: Introducing Slotlock, the calendar AI agents can't double-book.
-status: published
-publishAt: 2026-11-16T13:00Z
+status: draft
 related:
   - Booking MCP server | /mcp-server/
   - Quickstart | /docs/quickstart/
   - Pricing | /pricing/
 ---
+![Slotlock - calendar for AI agents](/blog/introducing-slotlock/g5.png)
+
 Today Slotlock is open to everyone. It is a calendar for AI agents: it books vehicles, rooms, machines, people or anything else reservable, answers "when is this free?", and lets PostgreSQL refuse a double booking however many agents race for the same time. You can use it on Slotlock Cloud in a minute, or run the whole server yourself under {{facts.license}}.
 
 ## Why another calendar
