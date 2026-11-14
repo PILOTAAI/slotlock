@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SLOTLOCK_MCP_LEGACY_PROTOCOL_VERSION } from '../agent-server.js';
 import { SLOTLOCK_DASHBOARD_FUNCTIONS } from '../ddl.js';
 import { setSlotlockTenantPlan } from '../plans.js';
+import { readSlotlockQuotaUse, slotlockQuotaPeriod } from '../quotas.js';
 import { type SlotlockEnv, runSlotlockCli } from '../self-host.js';
 import { createSlotlockStore } from '../store.js';
 import { recordSlotlockUsage } from '../usage.js';
@@ -504,6 +505,172 @@ describe.skipIf(!url)('slotlock command (real Postgres)', () => {
     } finally {
       await admin`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${quoted}`;
       await admin`SELECT * FROM slotlock.erase_tenant(${quoted}::text)`;
+    }
+  });
+
+  it('refuses every way to book past the month’s bookings with SLOTLOCK_QUOTAS=on, and still cancels and declines', async () => {
+    const booked = `cli-bookings-${randomUUID()}`;
+    const bookedEnv: SlotlockEnv = {
+      ...env,
+      SLOTLOCK_TENANT: booked,
+      SLOTLOCK_USAGE: 'on',
+      SLOTLOCK_QUOTAS: 'on',
+      SLOTLOCK_CONFIRM_WRITES: 'none',
+    };
+    const cli = async (argv: string[]) => {
+      const stdout = output();
+      const stderr = output();
+      const code = await runSlotlockCli(argv, { env: bookedEnv, stdout, stderr, signal: new AbortController().signal });
+      expect(code, stderr.text()).toBe(0);
+      return JSON.parse(stdout.text()) as Record<string, string>;
+    };
+    expect((await run(['migrate'])).code).toBe(0);
+    const { key } = await cli(['key', 'create', 'booking agent', '--scope', 'read,write,admin']);
+    const van1 = (await cli(['resource', 'add', 'van-1', '--timezone', 'UTC'])).id as string;
+    const van2 = (await cli(['resource', 'add', 'van-2', '--timezone', 'UTC'])).id as string;
+    await setSlotlockTenantPlan(admin, { tenantRef: booked, plan: 'free', status: 'active' });
+    // A weekday a week or more ahead, inside the server's hours (09:00-17:00 UTC).
+    const day = new Date();
+    day.setUTCHours(0, 0, 0, 0);
+    day.setUTCDate(day.getUTCDate() + 7);
+    while (day.getUTCDay() !== 2) day.setUTCDate(day.getUTCDate() + 1);
+    const at = (hour: number) => new Date(day.getTime() + hour * 3_600_000).toISOString();
+    /** Serve, call it with the key, and stop. */
+    async function serving(during: (call: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: Record<string, unknown> }>) => Promise<void>) {
+      const stdout = output();
+      const shutdown = new AbortController();
+      const served = runSlotlockCli(['serve'], { env: bookedEnv, stdout, stderr: output(), signal: shutdown.signal });
+      try {
+        const listening = await eventually(() => stdout.events().find(({ event }) => event === 'listening'));
+        expect(listening).toMatchObject({ usage: true, quotas: true });
+        await during(async (method, path, body) => {
+          const response = await fetch(`${listening.address as string}${path}`, {
+            method,
+            headers: { Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          });
+          return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+        });
+      } finally {
+        shutdown.abort();
+        expect(await served).toBe(0);
+      }
+    }
+    const month = slotlockQuotaPeriod(Date.now()).periodStart;
+    try {
+      // Under the stop: a pool, two bookings that wait for a person, an event, and a hold.
+      let granted = '';
+      let declined = '';
+      let event = { id: '', revision: 0 };
+      let hold = '';
+      await serving(async (call) => {
+        for (const id of [van1, van2]) {
+          expect((await call('PUT', `/v1/resources/${id}/pool`, { pool: 'vans' })).status).toBe(200);
+        }
+        expect(
+          (await call('PUT', '/v1/approval-policies/van-1', {
+            name: 'Van 1',
+            applies_to: { resource_ids: [van1] },
+            conditions: { kinds: ['single'] },
+            outcome: 'require_approval',
+          })).status,
+        ).toBe(200);
+        const ask = (hour: number) =>
+          call('POST', '/v1/events', {
+            resource_id: van1,
+            starts_at: at(hour),
+            ends_at: at(hour + 1),
+            timezone: 'UTC',
+            title: 'Waits for a person',
+            idempotency_key: `ask-${hour}`,
+          });
+        const first = await ask(9);
+        const second = await ask(10);
+        expect([first.body.code, second.body.code]).toEqual(['approval_pending', 'approval_pending']);
+        granted = first.body.approval_id as string;
+        declined = second.body.approval_id as string;
+        const made = await call('POST', '/v1/events', {
+          resource_id: van2,
+          starts_at: at(9),
+          ends_at: at(10),
+          timezone: 'UTC',
+          title: 'To cancel',
+          idempotency_key: 'to-cancel',
+        });
+        expect(made.status).toBe(200);
+        event = made.body.event as { id: string; revision: number };
+        const held = await call('POST', '/v1/slot-holds', {
+          slots: [{ resource_id: van2, start: at(11), end: at(12) }],
+          ttl_seconds: 600,
+          idempotency_key: 'to-confirm',
+        });
+        expect(held.status).toBe(200);
+        hold = (held.body.holds as { hold_id: string }[])[0]?.hold_id as string;
+      });
+      // This month's bookings brought to Free's stop (1,000), as the roll-up would leave them.
+      const before = await readSlotlockQuotaUse(admin, booked, month);
+      await admin`INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)
+                  VALUES (${booked}, ${new Date().toISOString().slice(0, 10)}::date, 'bookings', '', 'rest', ${1_000 - before.bookings})`;
+      expect((await readSlotlockQuotaUse(admin, booked, month)).bookings).toBe(1_000);
+
+      await serving(async (call) => {
+        const refusals = {
+          create_event: await call('POST', '/v1/events', {
+            resource_id: van2,
+            starts_at: at(13),
+            ends_at: at(14),
+            timezone: 'UTC',
+            title: 'Past the stop',
+            idempotency_key: 'past-1',
+          }),
+          tenant_book_together: await call('POST', '/v1/tenant/bundles', {
+            resource_ids: [van1, van2],
+            starts_at: at(14),
+            ends_at: at(15),
+            timezone: 'UTC',
+            title: 'Past the stop',
+            idempotency_key: 'past-2',
+          }),
+          tenant_book_pool: await call('POST', '/v1/tenant/pool-bookings', {
+            pool: 'vans',
+            starts_at: at(15),
+            ends_at: at(16),
+            timezone: 'UTC',
+            idempotency_key: 'past-3',
+          }),
+          hold_together: await call('POST', '/v1/slot-holds/together', {
+            resource_ids: [van1, van2],
+            start: at(16),
+            end: at(17),
+            ttl_seconds: 300,
+            idempotency_key: 'past-4',
+          }),
+          confirm_slot: await call('POST', `/v1/slot-holds/${hold}/confirm`, { title: 'Past the stop' }),
+          decide_approval: await call('POST', `/v1/approvals/${granted}/decision`, { decision: 'grant' }),
+        };
+        const refusal = { status: 429, code: 'quota_exceeded', metric: 'bookings' };
+        expect(
+          Object.fromEntries(
+            Object.entries(refusals).map(([operation, { status, body }]) => [
+              operation,
+              { status, code: body.code, metric: body.metric },
+            ]),
+          ),
+        ).toEqual(Object.fromEntries(Object.keys(refusals).map((operation) => [operation, refusal])));
+        // Declining, cancelling and letting go still run.
+        expect((await call('POST', `/v1/approvals/${declined}/decision`, { decision: 'decline' })).status).toBe(200);
+        expect(
+          (await call('POST', `/v1/events/${event.id}/cancel`, { expected_revision: event.revision })).status,
+        ).toBe(200);
+        expect((await call('DELETE', `/v1/slot-holds/${hold}`)).status).toBe(200);
+      });
+      expect((await readSlotlockQuotaUse(admin, booked, month)).bookings).toBe(1_000);
+      const [approval] = await admin<{ status: string }[]>`
+        SELECT status FROM slotlock.approvals WHERE tenant_ref = ${booked} AND id = ${granted}::uuid`;
+      expect(approval?.status).toBe('pending');
+    } finally {
+      await admin`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${booked}`;
+      await admin`SELECT * FROM slotlock.erase_tenant(${booked}::text)`;
     }
   });
 

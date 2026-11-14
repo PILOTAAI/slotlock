@@ -12,6 +12,8 @@ import {
   createSlotlockDashboardResources,
   createSlotlockDashboardState,
 } from '../dashboard.js';
+import { SLOTLOCK_PLAN_QUOTAS } from '../plans.js';
+import { createSlotlockQuotas, readSlotlockQuotaUse, slotlockQuotaPeriod } from '../quotas.js';
 import { createSlotlockStore } from '../store.js';
 import { runSlotlockDashboardRequest, setSlotlockDashboardRequestScope } from '../dashboard-scope.js';
 
@@ -223,6 +225,104 @@ describe.skipIf(!url)('dashboard approvals (real Postgres)', () => {
       expect(southLeft?.status).toBe('pending');
     } finally {
       await admin`SELECT * FROM slotlock.erase_tenant(${scopedRef}::text)`;
+    }
+  });
+
+  it('refuses to approve past the month’s bookings, says why, and still declines', async () => {
+    const memberId = githubId + 100_000;
+    const quotedRef = `github:${memberId}`;
+    const store = createSlotlockStore(application);
+    const agentBackend = createSlotlockStoreAgentBackend(store, {
+      availabilityRules: async () => [
+        { rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU', startMinutes: 0, durationMinutes: 24 * 60 },
+      ],
+    });
+    // Free's quotas, over the database's count of the month.
+    const quotas = createSlotlockQuotas({
+      plan: async () => SLOTLOCK_PLAN_QUOTAS.free,
+      used: (tenant, fromDay) => readSlotlockQuotaUse(application, tenant, fromDay),
+    });
+    const dashboard = createSlotlockDashboard({
+      publicUrl: ORIGIN,
+      github: { clientId: 'Ov23liQuotas', clientSecret: randomBytes(20).toString('hex') },
+      sessionSecret: randomBytes(32).toString('hex'),
+      allowedUsers: [String(memberId)],
+      keys: createSlotlockApiKeyStore(application),
+      resources: createSlotlockDashboardResources(store, { agentBackend, quotas }),
+      state: createSlotlockDashboardState(application),
+      fetch: async (input) =>
+        String(input).endsWith('/access_token')
+          ? Response.json({ access_token: 'gho_fake' })
+          : Response.json({ id: memberId, login: 'quota-manager' }),
+    });
+    const get = (path: string, cookie?: string) =>
+      dashboard.fetch(new Request(`${ORIGIN}${path}`, cookie ? { headers: { cookie } } : {}));
+    const post = async (path: string, fields: Record<string, string>, cookie: string) => {
+      const sent = new URLSearchParams(fields);
+      const page = await (await get('/dashboard/keys', cookie)).text();
+      sent.set('csrf', /name="csrf" value="([^"]+)"/.exec(page)?.[1] as string);
+      sent.set('once', /name="once" value="([^"]+)"/.exec(page)?.[1] as string);
+      return dashboard.fetch(
+        new Request(`${ORIGIN}${path}`, {
+          method: 'POST',
+          headers: { cookie, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: sent.toString(),
+        }),
+      );
+    };
+    try {
+      const start = await get('/dashboard/sign-in');
+      const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+      const pending = start.headers.getSetCookie()[0]?.split('; ')[0] as string;
+      const callback = await get(`/dashboard/callback?code=c&state=${state}`, pending);
+      const session = callback.headers
+        .getSetCookie()
+        .find((value) => value.startsWith('__Host-slotlock-session='))
+        ?.split('; ')[0] as string;
+      const van = await store.withTenant(quotedRef, async (tenant) => {
+        await tenant.putApprovalPolicy({ tenantRef: quotedRef, ref: 'vans', name: 'Vans', outcome: 'require_approval' });
+        return tenant.createResource({ tenantRef: quotedRef, externalRef: 'van-9', timezone: 'UTC' });
+      });
+      const base = Date.UTC(new Date().getUTCFullYear() + 1, 4, 5);
+      const ask = (hour: number) =>
+        invokeSlotlockAgentOperation({
+          operation: 'slotlock_create_event',
+          input: {
+            resource_id: van.id,
+            starts_at: new Date(base + hour * HOUR).toISOString(),
+            ends_at: new Date(base + (hour + 1) * HOUR).toISOString(),
+            timezone: 'UTC',
+            idempotency_key: `quota-ask-${hour}`,
+          },
+          request: new Request(ORIGIN),
+          options: {
+            backend: agentBackend,
+            authenticate: async () => ({ subject: 'courier-agent', tenantRef: quotedRef, scopes: ['read', 'write'] }),
+            authorize: async () => true,
+          },
+        }) as Promise<{ ok: false; code: string; details?: Record<string, string> }>;
+      const first = await ask(9);
+      const second = await ask(12);
+      expect([first.code, second.code]).toEqual(['approval_pending', 'approval_pending']);
+      // This month's bookings at Free's stop (1,000), as the roll-up would leave them.
+      const month = slotlockQuotaPeriod(Date.now()).periodStart;
+      await admin`INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)
+                  VALUES (${quotedRef}, ${new Date().toISOString().slice(0, 10)}::date, 'bookings', '', 'rest', 1000)`;
+
+      const refused = await post('/dashboard/approvals/decide', { id: first.details?.approval_id as string, decision: 'grant' }, session);
+      expect(refused.status).toBe(429);
+      expect(await refused.text()).toContain(
+        `This month&#39;s bookings are used up: Slotlock refuses new bookings, approvals included, with quota_exceeded until ${slotlockQuotaPeriod(Date.now()).resetsAt.toISOString().slice(0, 16).replace('T', ' ')} UTC. Decline it to free its time.`,
+      );
+      const still = await store.withTenant(quotedRef, (tenant) =>
+        tenant.getApproval({ tenantRef: quotedRef, id: first.details?.approval_id as string }),
+      );
+      expect(still?.status).toBe('pending');
+      expect((await readSlotlockQuotaUse(admin, quotedRef, month)).bookings).toBe(1_000);
+      const declined = await post('/dashboard/approvals/decide', { id: second.details?.approval_id as string, decision: 'decline' }, session);
+      expect(declined.status).toBe(303);
+    } finally {
+      await admin`SELECT * FROM slotlock.erase_tenant(${quotedRef}::text)`;
     }
   });
 

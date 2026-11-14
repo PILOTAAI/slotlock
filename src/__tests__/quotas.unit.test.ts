@@ -1,11 +1,14 @@
 // Monthly quotas (quotas.ts) with a fake database and clock: what a check counts, when it reads
 // again, what it refuses, the notices it sends once, and the fields an answer carries.
 import { describe, expect, it } from 'vitest';
-import { SlotlockAgentOperationError } from '../agent-server.js';
+import { SlotlockAgentOperationError, slotlockAgentOperationScope, slotlockAgentTools } from '../agent-server.js';
+import { SLOTLOCK_APPLICATION_OPERATIONS } from '../application-api.js';
 import { SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan } from '../plans.js';
 import {
+  SLOTLOCK_BOOKING_OPERATIONS,
   type SlotlockQuotaNotice,
   type SlotlockQuotaUse,
+  checkSlotlockBookingQuota,
   createSlotlockQuotas,
   slotlockQuotaFields,
   slotlockQuotaPeriod,
@@ -149,6 +152,89 @@ describe('monthly quotas', () => {
         exceeded: { metric: 'bookings', stop: 1_000 },
       });
     }
+  });
+
+  it('refuses every operation that can book or hold a slot at the bookings stop, a grant among them', async () => {
+    const { quotas } = fixture({ used: { operations: 10, bookings: 1_000 } });
+    for (const operation of [
+      'slotlock_hold_slots',
+      'slotlock_hold_together',
+      'slotlock_confirm_slot',
+      'slotlock_book_together',
+      'slotlock_book_pool',
+      'slotlock_create_event',
+      'slotlock_acquire_hold',
+      'slotlock_confirm_hold',
+      'slotlock_put_reservation',
+      'slotlock_tenant_book_together',
+      'slotlock_tenant_book_pool',
+      'slotlock_sandbox_race',
+    ] as const) {
+      expect(await quotas.check({ tenantRef: 'acme', operation }), operation).toMatchObject({
+        ok: false,
+        exceeded: { metric: 'bookings', stop: 1_000 },
+      });
+    }
+    const decide = (input?: Record<string, unknown>) =>
+      quotas.check({ tenantRef: 'acme', operation: 'slotlock_decide_approval', ...(input ? { input } : {}) });
+    const approval_id = '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d';
+    expect(await decide({ approval_id, decision: 'grant' })).toMatchObject({ ok: false, exceeded: { metric: 'bookings' } });
+    // A decision the check is not shown is held as a grant would be: never a booking let through.
+    expect((await decide()).ok).toBe(false);
+    // Declining, cancelling, letting go and reading still run.
+    expect((await decide({ approval_id, decision: 'decline' })).ok).toBe(true);
+    for (const operation of [
+      'slotlock_cancel',
+      'slotlock_delete_event',
+      'slotlock_release_slots',
+      'slotlock_reschedule',
+      'slotlock_list_events',
+      'slotlock_cancel_tenant_event',
+      'slotlock_cancel_reservation',
+      'slotlock_release_hold',
+      'slotlock_decline_waitlist_offer',
+      'slotlock_list_approvals',
+    ] as const) {
+      expect((await quotas.check({ tenantRef: 'acme', operation })).ok, operation).toBe(true);
+    }
+  });
+
+  it('classifies every operation, so one a later release adds cannot run until it is', () => {
+    const agent = slotlockAgentTools().map((tool) => tool.name);
+    const application = SLOTLOCK_APPLICATION_OPERATIONS.map((operation) => operation.name);
+    expect(Object.keys(SLOTLOCK_BOOKING_OPERATIONS).sort()).toEqual([...agent, ...application].sort());
+    // Only a write can book.
+    for (const operation of agent) {
+      if (SLOTLOCK_BOOKING_OPERATIONS[operation] !== false) expect(slotlockAgentOperationScope(operation), operation).toBe('write');
+    }
+    for (const operation of SLOTLOCK_APPLICATION_OPERATIONS) {
+      if (SLOTLOCK_BOOKING_OPERATIONS[operation.name] !== false) expect(operation.risk.readOnly, operation.name).toBe(false);
+    }
+    // A record over every operation: one left out does not compile (npm run typecheck).
+    const { slotlock_tenant_book_pool: _, ...unclassified } = SLOTLOCK_BOOKING_OPERATIONS;
+    // @ts-expect-error slotlock_tenant_book_pool is not classified
+    const partial: typeof SLOTLOCK_BOOKING_OPERATIONS = unclassified;
+    expect(partial).not.toHaveProperty('slotlock_tenant_book_pool');
+  });
+
+  it("holds the dashboard's own grant to the bookings stop, not the operations stop", async () => {
+    const atBookings = fixture({ used: { operations: 10, bookings: 1_000 } });
+    expect(await checkSlotlockBookingQuota(atBookings.quotas, 'acme')).toMatchObject({
+      ok: false,
+      exceeded: { metric: 'bookings', stop: 1_000 },
+    });
+    // A person's grant on the dashboard is not an operation.
+    const atOperations = fixture({ used: { operations: 25_000, bookings: 999 } });
+    expect(await checkSlotlockBookingQuota(atOperations.quotas, 'acme')).toMatchObject({
+      ok: true,
+      standings: [{ metric: 'operations', used: 25_000 }, { metric: 'bookings', used: 999 }],
+    });
+    const atBoth = fixture({ used: { operations: 25_000, bookings: 1_000 } });
+    expect(await checkSlotlockBookingQuota(atBoth.quotas, 'acme')).toMatchObject({
+      ok: false,
+      exceeded: { metric: 'bookings' },
+    });
+    expect(await checkSlotlockBookingQuota(fixture({ plan: null }).quotas, 'acme')).toEqual({ ok: true, standings: [] });
   });
 
   it('reads the database again before refusing a booking on attempts counted since the read', async () => {

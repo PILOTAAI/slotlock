@@ -91,13 +91,17 @@ setting for the assistant's operations.
 With `SLOTLOCK_QUOTAS=on` too (off by default), a tenant on a hosted plan is held to that plan's
 monthly quotas (`SLOTLOCK_PLAN_QUOTAS` in plans.ts; a tenant on no plan, as on a self-hosted
 server, has none): past its operations this UTC month every operation is refused but reading its
-usage and erasing it, past its bookings only those that can book, with `429 quota_exceeded` and `Retry-After` at the month's end.
+usage and erasing it, past its bookings every one that can book or hold a slot for a booking, an
+approval granted among them (by `slotlock_decide_approval` or on the dashboard's Approvals page),
+with `429 quota_exceeded` and `Retry-After` at the month's end; reads, cancellations and declines
+still run.
 Each operation's answer lists the quotas in `RateLimit` and `RateLimit-Policy`
 (`"operations_month"`, `"bookings_month"`), and the feed records `usage.threshold_reached` once at
 80% and at 100% of each. A server reads the month so far at most every 30 seconds (every 2 near
 the stop) and adds its own unrecorded operations, so a tenant can pass its stop by what other
 servers counted in the last few seconds; a count it cannot read lets the operation run. The
-dashboard Worker takes the same setting for the assistant's operations.
+dashboard Worker takes the same setting for the assistant's operations and for approvals granted on
+its Approvals page.
 
 ## What a tenant may store
 

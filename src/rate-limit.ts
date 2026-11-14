@@ -147,11 +147,13 @@ export interface SlotlockRequestLimits {
   /**
    * For `authorize`: with `quotas`, refuse an operation over its tenant's monthly quota, throwing a
    * `SlotlockAgentOperationError` (`quota_exceeded`, 429) that names the metric, the quota, the stop
-   * and when the month resets. Without `quotas`, or for a tenant on no plan, nothing.
+   * and when the month resets. Without `quotas`, or for a tenant on no plan, nothing. `input`, the
+   * operation's checked arguments, tells a decision that grants, and books, from one that declines.
    */
   quota(args: {
     principal: SlotlockAgentPrincipal;
     operation: SlotlockAgentOperation | SlotlockApplicationOperation;
+    input?: Record<string, unknown>;
   }): Promise<void>;
   /** Put the limits in front of `target`: the listener's fetch target. */
   serve(target: SlotlockNodeServerFetchTarget): SlotlockNodeServerFetchTarget;
@@ -877,10 +879,10 @@ export function createSlotlockRequestLimits(
       throw new SlotlockAgentOperationError('server_busy', 503);
     },
 
-    async quota({ principal, operation }) {
+    async quota({ principal, operation, input }) {
       if (!options.quotas) return;
       const state = states.getStore();
-      const verdict = await options.quotas.check({ tenantRef: principal.tenantRef, operation });
+      const verdict = await options.quotas.check({ tenantRef: principal.tenantRef, operation, input });
       const at = clock();
       if (verdict.ok) {
         if (state && verdict.standings.length > 0) {

@@ -1308,7 +1308,7 @@ export async function startSlotlockServer(
       // tenant's expansions cannot hold the event loop from every other tenant's requests.
       authorize: async ({ principal, operation, input }) => {
         if (!authorizeSlotlockServeOperation({ principal, operation })) return false;
-        await limits.quota({ principal, operation });
+        await limits.quota({ principal, operation, input });
         await limits.admit({ principal, operation, input });
         return true;
       },
@@ -1360,7 +1360,8 @@ export async function startSlotlockServer(
                 // admin, or a partner key's partner scope for the partner API: never either for the other.
                 const needed = slotlockApplicationScope(slotlockApplicationOperation(operation));
                 if (principal.scopes?.includes(needed) !== true) return false;
-                await limits.quota({ principal, operation });
+                // A decision's input says whether it grants, which books, or declines.
+                await limits.quota({ principal, operation, input });
                 await limits.admit({ principal, operation, input });
                 return true;
               },
@@ -1413,8 +1414,13 @@ export async function startSlotlockServer(
                 }
               : {}),
             keys: createSlotlockApiKeyStore(sql),
-            // Holiday calendars by address (RFC 0004 B1), never from a private address.
-            resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: createSlotlockGuardedFetch() }),
+            // Holiday calendars by address (RFC 0004 B1), never from a private address. An approval
+            // granted there books, so it is held to the tenant's bookings quota as the API's grant is.
+            resources: createSlotlockDashboardResources(store, {
+              agentBackend,
+              holidayFetch: createSlotlockGuardedFetch(),
+              ...(quotas ? { quotas } : {}),
+            }),
             state: createSlotlockDashboardState(sql),
             // Roles from the database on every request, and "Sign out everywhere" (workspaces.ts).
             workspaces: createSlotlockDashboardWorkspaces(sql),
