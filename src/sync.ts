@@ -1570,7 +1570,11 @@ function budgetTimezoneCoverage(root: ICAL.Component, budget: RecurrenceBudget):
   }
 }
 
-/** An untrusted calendar parsed with a feed's bounds, for a reader outside this module. */
+/**
+ * An untrusted calendar parsed with a feed's bounds, for a reader outside this module.
+ * @internal Holds ical.js types, which do not compile in a strict consumer, so it stays out of the
+ * published declarations (tsconfig.build.json stripInternal).
+ */
 export interface BoundedICalendar {
   root: ICAL.Component;
   /**
@@ -1588,6 +1592,7 @@ export interface BoundedICalendar {
  * dates bounded before any time is read, and each expansion built by `expand`. It leaves the VEVENT
  * count, and whether the root is a VCALENDAR, to the caller. Throws CalendarContractError
  * (CalendarExpansionLimitError past a limit), or what ical.js throws for text it cannot parse.
+ * @internal Out of the published declarations, as BoundedICalendar is.
  */
 export function parseBoundedICalendar(input: string): BoundedICalendar {
   if (Buffer.byteLength(input, 'utf8') > MAX_ICAL_INPUT_BYTES) {
