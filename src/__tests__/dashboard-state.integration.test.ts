@@ -354,11 +354,17 @@ describe.skipIf(!url)('dashboard state shared through Postgres (real Postgres)',
       const refused = await post(second, '/dashboard/keys', { csrf, once, name: 'Over', access: 'read', expires: 'never' }, session);
       expect(refused.status).toBe(429);
       expect(await refused.text()).toContain('Too many forms');
+      // Signing out passes the limit, its single-use value still used once: without the membership
+      // store there is no everywhere to sign out of, so the session stays to send it again.
+      expect((await post(first, '/dashboard/sign-out-everywhere', { csrf, once }, session)).status).toBe(404);
+      expect((await post(second, '/dashboard/sign-out-everywhere', { csrf, once }, session)).status).toBe(409);
       const out = await post(first, '/dashboard/sign-out', { csrf }, session);
       expect(out.status).toBe(303);
       expect(await (await get(second, '/dashboard/keys', session)).text()).not.toContain('@two-servers');
     } finally {
       await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${ownerHash}`;
+      const signingOut = createHash('sha256').update(`slotlock-dashboard-owner.sign-out:${githubId}`).digest();
+      await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${signingOut}`;
     }
   });
 

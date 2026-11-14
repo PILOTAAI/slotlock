@@ -62,7 +62,9 @@ In a process of your own:
   your own erasure workflow; nothing is deleted table by table. Only the API keys' SHA-256 digests
   stay, with nothing about the tenant, so an erased key is never accepted again. The dashboard's
   other records hold no tenant and expire within 12 hours; a form record carries a SHA-256 digest
-  of the GitHub user id that sent it, and an accepted write confirmation a digest of its nonce.
+  of the person who sent it, and an accepted write confirmation a digest of its nonce. The form
+  records of a session a team's single sign-on began alone, and of signing out past the form limit,
+  count apart from the person's and stay until they expire.
 
 ## Production checklist
 

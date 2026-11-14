@@ -20,6 +20,7 @@ import {
   SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,
   SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
   SLOTLOCK_FRESH_CAPABILITIES,
+  SLOTLOCK_ROLE_CAPABILITIES,
   SLOTLOCK_SCOPED_DASHBOARD_PAGES,
   SLOTLOCK_SCOPED_DASHBOARD_POSTS,
   SLOTLOCK_WORKSPACE_ROLE_NAMES,
@@ -898,8 +899,9 @@ export interface SlotlockDashboardState {
    * Record a sign-in or form `value` until `expiresAt` (ms since the epoch). True only the first
    * time, and never for a value whose expiry has passed or that claims to outlive a day, by the
    * state's own clock (the database's, for createSlotlockDashboardState). A form names its `owner`,
-   * the GitHub user id: past SLOTLOCK_DASHBOARD_FORM_LIMIT live forms of one owner, `use` throws an
-   * error with `code: 'dashboard_form_limit'`.
+   * whose budget it draws on (the person, or a team's provider signing in as them): past
+   * SLOTLOCK_DASHBOARD_FORM_LIMIT live forms of one owner, `use` throws an error with
+   * `code: 'dashboard_form_limit'`.
    */
   use(kind: 'sign_in' | 'form', value: string, expiresAt: number, owner?: string): Promise<boolean>;
   /** Record that the session `sid` signed out, until `expiresAt`. */
@@ -6117,18 +6119,42 @@ ${byKey}`;
    * Every capability a form needs: its route's, and more where the form decides. A Full-access key
    * asks `keys.full`; a key someone else created asks `keys.manage_any`; rotating or limiting a
    * Full-access key asks `keys.full` as well, so a person who lost that power cannot keep it by
-   * rotating, and anyone rotating one signed in recently. An empty list is a route with none.
+   * rotating, and anyone rotating one signed in recently. A member's form asks the fresh powers of
+   * the role it gives and of the role it changes. An empty list is a route with none.
    */
   async function capabilitiesOf(session: Session, route: string, form: URLSearchParams): Promise<SlotlockWorkspaceCapability[]> {
     const base = SLOTLOCK_DASHBOARD_POST_CAPABILITIES[route];
     if (base === undefined) return [];
     const needed: SlotlockWorkspaceCapability[] = [base];
     if (route === '/keys' && form.get('access') === 'full') needed.push('keys.full');
-    // Giving a role needs its powers: making an Owner `workspace.own`, a Billing manager `billing.manage`.
+    // Giving a role needs its powers, and changing, limiting or removing a member needs those of the
+    // role they hold: an Owner's `workspace.own`, and every fresh one the role carries, so a session
+    // past its 15 minutes neither demotes an Owner nor makes or unmakes an Admin, who holds
+    // Full-access keys and webhooks. Sending an invitation again gives its role to a new link.
+    const roles: SlotlockWorkspaceRole[] = [];
     if (route === '/members/invite' || route === '/members/role') {
-      const role = form.get('role');
-      if (role === 'owner') needed.push('workspace.own');
-      if (role === 'billing') needed.push('billing.manage');
+      const given = form.get('role');
+      if (isSlotlockWorkspaceRole(given)) roles.push(given);
+    }
+    const tenantRef = teamTenantOf(session);
+    if (teamStore && tenantRef !== undefined) {
+      if (route === '/members/role' || route === '/members/scope' || route === '/members/remove') {
+        const person = form.get('person') ?? '';
+        const held = (await teamStore.members(tenantRef)).find((member) => member.person === person);
+        if (held) roles.push(held.role);
+      }
+      if (route === '/members/resend') {
+        const id = (form.get('id') ?? '').toLowerCase();
+        const invitation = (await teamStore.invitations(tenantRef)).find((candidate) => candidate.id === id);
+        if (invitation) roles.push(invitation.role);
+      }
+    }
+    // Who owns the workspace first: a refusal names the power that matters most.
+    if (roles.includes('owner')) needed.push('workspace.own');
+    for (const role of roles) {
+      for (const capability of SLOTLOCK_ROLE_CAPABILITIES[role]) {
+        if (SLOTLOCK_FRESH_CAPABILITIES.has(capability) && !needed.includes(capability)) needed.push(capability);
+      }
     }
     if (route === '/keys/rotate' || route === '/keys/revoke' || route === '/keys/limits') {
       // As PostgreSQL reads a uuid, whatever its case: the key the handler would act on.
@@ -6179,7 +6205,12 @@ ${byKey}`;
       return deniedPage(session, missing, backOf(route));
     }
     const fresh = needed.find((capability) => SLOTLOCK_FRESH_CAPABILITIES.has(capability));
-    if (fresh !== undefined && !freshlySignedIn(session)) return confirmPage(session, fresh, backOf(route));
+    if (fresh !== undefined && !freshlySignedIn(session)) {
+      // A member's form asks for the powers of the roles it touches, but what it does is manage
+      // members, or change who owns the workspace.
+      const doing = needed[0] === 'members.manage' && fresh !== 'workspace.own' ? 'members.manage' : fresh;
+      return confirmPage(session, doing, backOf(route));
+    }
     return null;
   }
 
@@ -6260,14 +6291,14 @@ ${byKey}`;
 
   /**
    * The page a form's route belongs to, for an answer about the form itself (already sent, too many
-   * forms, another organization's page), only to a person whose role reads the page rendered:
-   * anyone else gets the notice alone. These answers come before the role is checked.
+   * forms, another organization's page), only to a person who reaches the page rendered, as
+   * authorizePage decides: anyone else, a member limited to locations and groups included, gets the
+   * notice alone. These answers come before the role is checked.
    */
   function pageOrNotice(route: string): FormAnswerPage {
     const { path, page } = pageEntryFor(route);
     return (session, status, notice) => {
-      const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[path];
-      if (capability !== undefined && can(session, capability)) return page(session, status, notice);
+      if (reaches(session, path)) return page(session, status, notice);
       return respond(status, layout('Refused', html`<p class="notice" role="alert">${notice}</p>`, session));
     };
   }
@@ -9611,13 +9642,28 @@ ${
           'That page was for another workspace. Nothing was changed: check the workspace and try again.',
         );
       }
+      // Whose forms these are, for the per-person limit. A session a team's provider began alone
+      // keeps a budget of its own: the provider, which the team's Owner runs, cannot spend the
+      // forms the person sends everywhere else.
+      const owner =
+        session.sc !== undefined
+          ? `sso:${session.sc}:${personOf(session)}`
+          : session.idp === 'google'
+            ? personOf(session)
+            : session.uid;
+      const overLimit = (error: unknown) => (error as { code?: unknown }).code === 'dashboard_form_limit';
       let first: boolean;
       try {
         first =
           checked === 'ok' &&
-          (await options.state.use('form', once, session.exp, session.idp === 'google' ? personOf(session) : session.uid));
+          (await options.state.use('form', once, session.exp, owner).catch((error: unknown) => {
+            // Past the limit a person can still end their sessions: signing out draws on a budget
+            // of its own, and its single-use value is still used once.
+            if (!overLimit(error) || (route !== '/sign-out' && route !== '/sign-out-everywhere')) throw error;
+            return options.state.use('form', once, session.exp, `sign-out:${owner}`);
+          }));
       } catch (error) {
-        if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
+        if (!overLimit(error)) throw error;
         return pageOrNotice(route)(
           session,
           429,

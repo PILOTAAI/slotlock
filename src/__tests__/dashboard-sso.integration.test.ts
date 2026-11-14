@@ -9,6 +9,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboard, createSlotlockDashboardResources, createSlotlockDashboardState } from '../dashboard.js';
+import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import { createSlotlockSecretBox } from '../oidc.js';
 import { createSlotlockStore } from '../store.js';
 import { type SlotlockWorkspaceTeams, createSlotlockDashboardWorkspaces } from '../workspaces.js';
@@ -307,6 +308,24 @@ describe.skipIf(!url)('single sign-on in the dashboard (real Postgres)', () => {
     const everywhere = new URLSearchParams({ csrf: forged.get('csrf') as string, once: /name="once" value="([^"]+)"/.exec(account)?.[1] as string });
     expect((await scoped.send('/sign-out-everywhere', everywhere)).status).toBe(403);
     expect(await teamOf(adaElsewhere)).toBe(team);
+
+    // Nor does it spend the forms Ada's own sessions may send, in every workspace: it has its own.
+    const adaForms = createHash('sha256').update(`slotlock-dashboard-owner.${base}`).digest();
+    const [live] = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM slotlock.dashboard_tokens
+       WHERE owner_hash = ${adaForms} AND kind = 'form' AND expires_at > now()`;
+    await admin`
+      INSERT INTO slotlock.dashboard_tokens (kind, token_hash, owner_hash, expires_at)
+      SELECT 'form', sha256(convert_to(${randomUUID()} || n::text, 'UTF8')), ${adaForms}, now() + interval '1 hour'
+        FROM generate_series(1, ${SLOTLOCK_DASHBOARD_FORM_LIMIT - 2 - (live?.n ?? 0)}) AS n`;
+    try {
+      for (let sent = 0; sent < 2; sent++) {
+        expect((await scoped.post('/dashboard', '/environment', { environment: 'live' })).status).toBe(303);
+      }
+      expect((await adaElsewhere.post('/dashboard', '/environment', { environment: 'live' })).status).toBe(303);
+    } finally {
+      await admin`DELETE FROM slotlock.dashboard_tokens WHERE owner_hash = ${adaForms}`;
+    }
 
     // A link to a team's single sign-on names the team; only its own page's button goes on to the
     // provider, so another site neither signs someone in to a team they did not choose nor sends
