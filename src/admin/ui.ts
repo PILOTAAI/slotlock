@@ -156,6 +156,8 @@ export function layout(shell: Shell, body: Html): Html {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>${shell.title} · Slotlock admin</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preload" href="${FONT_PRELOAD}" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/admin.css">
 <script src="/admin.js" defer></script>
@@ -216,6 +218,8 @@ export function plainPage(title: string, body: Html, script?: string): Html {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>${title} · Slotlock admin</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preload" href="${FONT_PRELOAD}" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/admin.css">
 ${script ? html`<script src="${script}" defer></script>` : ''}

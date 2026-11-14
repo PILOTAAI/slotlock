@@ -78,6 +78,7 @@ import {
   slotlockStaffLogRange,
 } from './staff-log.js';
 import { SLOTLOCK_ADMIN_FONTS } from './fonts.js';
+import { SLOTLOCK_ADMIN_FAVICON_SVG, SLOTLOCK_ADMIN_TOUCH_ICON_PNG_BASE64 } from './icons.js';
 import {
   type AccountLike,
   type Crumb,
@@ -462,6 +463,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
 
   // ---------- Responses ----------
   const fontBytes = new Map<string, Uint8Array>();
+  let touchIcon: Uint8Array | undefined;
   function fontResponse(font: (typeof SLOTLOCK_ADMIN_FONTS)[number]): Response {
     let bytes = fontBytes.get(font.path);
     if (!bytes) {
@@ -2884,6 +2886,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       // The typefaces, at a path that names their hash: the same bytes for good.
       const font = path.startsWith('/fonts/') ? SLOTLOCK_ADMIN_FONTS.find((entry) => entry.path === path) : undefined;
       if (font) return fontResponse(font);
+      if (path === '/favicon.svg') return respond(SLOTLOCK_ADMIN_FAVICON_SVG, 200, { 'Cache-Control': 'public, max-age=86400' }, 'image/svg+xml');
+      if (path === '/apple-touch-icon.png') {
+        touchIcon ??= new Uint8Array(Buffer.from(SLOTLOCK_ADMIN_TOUCH_ICON_PNG_BASE64, 'base64'));
+        return new Response(touchIcon, { status: 200, headers: { ...SECURITY_HEADERS, 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' } });
+      }
       if (path === '/healthz') return respond('ok', 200, {}, 'text/plain; charset=utf-8');
     }
 

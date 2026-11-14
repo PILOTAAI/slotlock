@@ -7,6 +7,8 @@ versioning.
 
 ### Fixed
 
+- The admin console's tabs show Slotlock's mark: it serves the site's own `favicon.svg` and
+  `apple-touch-icon.png`, byte for byte, and every page links them.
 - `scripts/check-launch.mjs` fails when a page of the site (home, pricing, the quickstart, the blog)
   tells search engines not to index it, by an `X-Robots-Tag` header or its robots meta tag. A zone rule
   outside this repository was sending `X-Robots-Tag: noindex` from every page, and nothing noticed.

@@ -3,6 +3,7 @@
 // pages each role may open, the forms' origin and token checks, and the staff log each step writes.
 // Needs a role that creates databases and roles; skipped without DATABASE_URL.
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type SlotlockAdmin, createSlotlockAdmin } from '../admin/app.js';
@@ -133,6 +134,15 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const css = await browser.request('/admin.css');
     expect(css.status).toBe(200);
     expect(css.headers.get('content-type')).toContain('text/css');
+    // The site's own icons, byte for byte: the browser's tab, and a phone's home screen.
+    const favicon = await browser.request('/favicon.svg');
+    expect(favicon.status).toBe(200);
+    expect(favicon.headers.get('content-type')).toBe('image/svg+xml');
+    expect(await favicon.text()).toBe(readFileSync(new URL('../../site/public/favicon.svg', import.meta.url), 'utf8'));
+    const touchIcon = await browser.request('/apple-touch-icon.png');
+    expect(touchIcon.status).toBe(200);
+    expect(touchIcon.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await touchIcon.arrayBuffer()).equals(readFileSync(new URL('../../site/public/apple-touch-icon.png', import.meta.url)))).toBe(true);
     expect(() =>
       createSlotlockAdmin({ sql: () => adminSql, publicUrl: ORIGIN, sessionSecret: 'x'.repeat(40), consoleKey: CONSOLE_KEY, github: { clientId: 'a', clientSecret: 'b' }, access: null }),
     ).toThrow(/Cloudflare Access/);
@@ -154,6 +164,8 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     // style attribute.
     const markup = (await page.text()).toLowerCase();
     expect(markup.split('<script').length).toBe(markup.split('<script src="/').length);
+    expect(markup).toContain('<link rel="icon" href="/favicon.svg" type="image/svg+xml">');
+    expect(markup).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png">');
     expect(markup).not.toContain(' style=');
   });
 
@@ -753,7 +765,10 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     // The fonts: same-origin files at a path that names their hash, which the CSP allows and nothing else.
     const page = await browser.request('/');
     expect(page.headers.get('content-security-policy')).toContain("font-src 'self'");
-    const font = /href="(\/fonts\/inter-[0-9a-f]{12}\.woff2)"/.exec(await page.text())?.[1] ?? '';
+    const shell = await page.text();
+    expect(shell).toContain('<link rel="icon" href="/favicon.svg" type="image/svg+xml">');
+    expect(shell).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png">');
+    const font = /href="(\/fonts\/inter-[0-9a-f]{12}\.woff2)"/.exec(shell)?.[1] ?? '';
     const served = await new Browser(() => admin, '').request(font);
     expect(served.status).toBe(200);
     expect(served.headers.get('content-type')).toBe('font/woff2');
