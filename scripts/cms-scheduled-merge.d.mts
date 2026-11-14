@@ -9,9 +9,10 @@ export declare function signOffsOf(
 ): string[];
 export declare function scheduleOf(bodies: readonly string[]): { sha: string; at: string; by: string } | null;
 export declare function mergeDuePosts(options: {
-  appId: string;
-  installationId: string;
-  privateKey: string;
+  /** An installation token of the App, as cms-schedule.yml's token step gives it. */
+  token: string;
+  /** The App's slug, by which its own comments are known. */
+  appSlug: string;
   repository: string;
   fetch?: typeof fetch;
   now?: () => number;

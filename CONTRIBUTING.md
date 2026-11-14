@@ -102,8 +102,13 @@ dated, is released the same way. After a failed run, run it again with the same 
 the release branch the failed run left when that already holds this release, so checks already run
 there still count, replaces it otherwise, and reuses its pull request (`scripts/open-release-pr.sh`).
 
-The pull request is opened and merged by the release app, a GitHub App that can only write this
-repository's contents and pull requests. An owner of the organization creates it once with
+The pull request is opened and merged by the release app, the project's one GitHub App, installed
+on this repository only. It holds what its three users need between them: contents, pull requests
+and issues write, and Actions, checks and commit statuses read. Each token asks only for its own
+part. Release a version asks for contents and pull requests. The hourly CMS schedule
+(`cms-schedule.yml`) uses the same key and asks for checks too. The admin console has a private key
+of its own, so either key can be revoked alone (SECURITY.md, Admin console). An owner of the
+organization creates it once with
 `node scripts/create-release-app.mjs` (click **Create GitHub App**, then install it on `slotlock`
 only); the script checks the installation and stores the app's key in the `release-app` environment,
 which only `main` can use. Without the app, the workflow opens the pull request as

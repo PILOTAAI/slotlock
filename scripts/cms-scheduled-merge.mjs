@@ -1,7 +1,8 @@
 // The CMS's scheduled posts (RFC 0006, 4.5): an Owner schedules a post in the admin console, which
-// labels its pull request cms:scheduled and comments, as the "Slotlock CMS" App, the commit it may
-// merge and when. Each hour, .github/workflows/cms-schedule.yml runs this as the App and merges each
-// scheduled pull request whose time has come, if:
+// labels its pull request cms:scheduled and comments, as the release app, the commit it may merge
+// and when. Each hour, .github/workflows/cms-schedule.yml runs this with a token of the release app
+// (contents and pull requests write, checks read) and merges each scheduled pull request whose time
+// has come, if:
 //   - the App's own latest schedule comment names a commit, and every file the pull request
 //     changes is the same at its head as at that commit (bringing in main is fine; a change to the
 //     post, or a label someone else added, merges nothing);
@@ -14,9 +15,11 @@
 // A pull request whose post changed since it was scheduled loses its label, with a comment saying so.
 // Merging as the App, not as the workflow's GITHUB_TOKEN, starts the site's deploy on main.
 //
-//   CMS_APP_ID=… CMS_APP_INSTALLATION=… CMS_APP_KEY="$(cat key.pem)" CMS_REPOSITORY=owner/name \
+// It never holds the App's key: the workflow's token step does, and hands it the token and the App's
+// slug, by which it knows the App's own comments.
+//
+//   CMS_TOKEN=<installation token> CMS_APP_SLUG=<app slug> CMS_REPOSITORY=owner/name \
 //     node scripts/cms-scheduled-merge.mjs
-import { createSign } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const API = 'https://api.github.com';
@@ -112,31 +115,16 @@ export function scheduleOf(bodies) {
   return null;
 }
 
-const base64url = (value) => Buffer.from(value).toString('base64url');
-
-/** A JWT for the App, good for nine minutes, dated a minute back for clock skew. */
-function appJwt(appId, privateKey, seconds) {
-  const unsigned = `${base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64url(JSON.stringify({ iat: seconds - 60, exp: seconds + 540, iss: appId }))}`;
-  const signature = createSign('RSA-SHA256').update(unsigned).sign(privateKey.replace(/\\n/g, '\n'));
-  return `${unsigned}.${signature.toString('base64url')}`;
-}
-
 /**
- * Merge the scheduled posts whose time has come. Returns what happened to each scheduled pull
- * request: merged, waiting, or why it was left alone.
+ * Merge the scheduled posts whose time has come, with an installation token of the App whose slug is
+ * given. Returns what happened to each scheduled pull request: merged, waiting, or why it was left
+ * alone.
  */
-export async function mergeDuePosts({ appId, installationId, privateKey, repository, fetch = globalThis.fetch, now = Date.now }) {
-  if (!/^[1-9][0-9]{0,15}$/.test(String(appId)) || !/^[1-9][0-9]{0,15}$/.test(String(installationId))) {
-    throw new Error('CMS_APP_ID and CMS_APP_INSTALLATION are numbers');
-  }
+export async function mergeDuePosts({ token, appSlug, repository, fetch = globalThis.fetch, now = Date.now }) {
+  if (typeof token !== 'string' || !/^[\w.-]{20,255}$/.test(token)) throw new Error('CMS_TOKEN is an installation token');
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(String(appSlug))) throw new Error("CMS_APP_SLUG is the App's slug");
   if (!/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(String(repository))) throw new Error('CMS_REPOSITORY is owner/name');
   const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'slotlock-cms-schedule' };
-  const tokenResponse = await fetch(`${API}/app/installations/${installationId}/access_tokens`, {
-    method: 'POST',
-    headers: { ...headers, Authorization: `Bearer ${appJwt(String(appId), privateKey, Math.floor(now() / 1000))}` },
-  });
-  if (!tokenResponse.ok) throw new Error(`GitHub refused the App's token (${tokenResponse.status})`);
-  const { token } = await tokenResponse.json();
   const repo = `/repos/${repository}`;
   async function call(method, path, body, allow = []) {
     const response = await fetch(`${API}${path}`, {
@@ -163,8 +151,10 @@ export async function mergeDuePosts({ appId, installationId, privateKey, reposit
     let complete = false;
     for (let page = 1; page <= COMMENT_PAGES; page += 1) {
       const { body: comments } = await call('GET', `${repo}/issues/${number}/comments?per_page=100&page=${page}`);
+      // The App's own: GitHub sets performed_via_github_app, which no one else can, and a slug is
+      // one App's alone.
       for (const c of comments ?? []) {
-        if (String(c.performed_via_github_app?.id ?? '') === String(appId)) bodies.push(String(c.body ?? ''));
+        if (c.performed_via_github_app?.slug === appSlug) bodies.push(String(c.body ?? ''));
       }
       if ((comments ?? []).length < 100) {
         complete = true;
@@ -285,9 +275,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     return value;
   };
   const results = await mergeDuePosts({
-    appId: env('CMS_APP_ID'),
-    installationId: env('CMS_APP_INSTALLATION'),
-    privateKey: env('CMS_APP_KEY'),
+    token: env('CMS_TOKEN'),
+    appSlug: env('CMS_APP_SLUG'),
     repository: env('CMS_REPOSITORY'),
   });
   // Pull request numbers and outcomes only: a title is untrusted text in a workflow log.

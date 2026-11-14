@@ -807,17 +807,17 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     for (const name of ['npm', 'ghcr', 'mcp-registry']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
     }
-    for (const name of ['release-tag', 'release-app', 'site', 'dashboard', 'cms', 'site-preview']) {
+    for (const name of ['release-tag', 'release-app', 'site', 'dashboard', 'site-preview']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([]);
     }
-    // The CMS's environments (RFC 0006, 4.5): the App's key on main only, and the preview token on
-    // main only too, where site-preview.yml's workflow_run job runs as main has it.
+    // The CMS's schedule uses the release app's environment: there is no cms environment, and the
+    // preview token is on main only too, where site-preview.yml's workflow_run job runs as main has it.
+    expect(environment(requests, 'cms')).toBeUndefined();
     const policy = (name: string) =>
       requests.find(
         (request) =>
           request.method === 'POST' && request.path === `repos/PILOTAAI/slotlock/environments/${name}/deployment-branch-policies`,
       )?.body;
-    expect(policy('cms')).toEqual({ name: 'main', type: 'branch' });
     expect(policy('site-preview')).toEqual({ name: 'main', type: 'branch' });
     // The dashboard's deploy token can replace the Worker and read its session secret: main only.
     expect(policy('dashboard')).toEqual({ name: 'main', type: 'branch' });
@@ -2256,6 +2256,57 @@ printf '%s' "$answer" | jq -r "$filter"
     const result = wait({ 'ci.yml': [run(1, 'completed', 'success')], 'dco.yml': [none] }, '0');
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`::error::Still waiting for dco.yml on ${url}.`);
+  });
+});
+
+// cms-schedule.yml publishes the admin console's scheduled posts as the release app, the one GitHub
+// App: its key in the release-app environment (main only), a token with only what merging a post
+// needs, and no key of its own.
+describe('the CMS schedule', () => {
+  const workflow = (file: string) => read(join('.github', 'workflows', file));
+  const step = (text: string, name: string) => {
+    const start = text.indexOf(`- name: ${name}`);
+    expect(start, name).toBeGreaterThan(0);
+    const next = text.indexOf('\n      - ', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  };
+
+  it('mints the release app\'s token in its environment, for what merging a post needs and no more', () => {
+    const text = workflow('cms-schedule.yml');
+    expect(text).toMatch(/^permissions: \{\}$/m);
+    // The environment's key, without a deployment for each hourly run.
+    expect(text).toContain('\n    environment:\n      name: release-app\n      deployment: false\n');
+    // A job's `if` reads no environment's variables: the step checks the client ID.
+    expect(text).toMatch(/^ {4}if: github\.ref == 'refs\/heads\/main'$/m);
+    const mint = step(text, "Mint the release app's token");
+    expect(mint).toContain("if: vars.RELEASE_APP_CLIENT_ID != ''");
+    expect(mint).toContain('client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}');
+    expect(mint).toContain('private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}');
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual([
+      'permission-checks: read',
+      'permission-contents: write',
+      'permission-pull-requests: write',
+    ]);
+    // The same action, at the same commit, as Release a version mints its token with.
+    const action = (source: string) => /uses: (actions\/create-github-app-token@[0-9a-f]{40}) # v[\d.]+/.exec(source)?.[1];
+    expect(action(mint)).toBeDefined();
+    expect(action(mint)).toBe(action(workflow('release-version.yml')));
+    // The key reaches only that step; the script gets the token and the App's slug.
+    expect(text.match(/secrets\.\w+/g)).toEqual(['secrets.RELEASE_APP_PRIVATE_KEY']);
+    const merge = step(text, 'Merge the scheduled posts whose time has come');
+    expect(merge).toContain("if: steps.app.outputs.token != ''");
+    expect(merge).toContain('CMS_TOKEN: ${{ steps.app.outputs.token }}');
+    expect(merge).toContain('CMS_APP_SLUG: ${{ steps.app.outputs.app-slug }}');
+    expect(merge).toContain('node scripts/cms-scheduled-merge.mjs');
+    // No second App, no second key, no environment of its own.
+    for (const gone of ['CMS_APP_ID', 'CMS_APP_INSTALLATION', 'CMS_APP_KEY', 'environment: cms']) {
+      expect(text).not.toContain(gone);
+    }
+  });
+
+  it('keeps Release a version\'s token to opening and merging its pull request', () => {
+    const mint = step(workflow('release-version.yml'), "Mint the release app's token");
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual(['permission-contents: write', 'permission-pull-requests: write']);
   });
 });
 

@@ -2,13 +2,18 @@
 // (src/admin/github-app.ts, scripts/cms-scheduled-merge.mjs): one repository held in memory, with
 // blobs, flat trees, commits, branches, pull requests, labels, comments, check runs, squash merges
 // that keep main's ruleset (up to date with main, checks passed), and the one GraphQL query the
-// console sends. An App installation token is given only for a JWT the App's key signed.
+// console sends. An App installation token, and the App's installation on the repository, are given
+// only for a JWT the App's key signed, issued by its Client ID or its numeric App ID.
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 
 export const FAKE_APP_ID = '424';
+export const FAKE_CLIENT_ID = 'Iv23liFakeReleaseApp';
+export const FAKE_APP_SLUG = 'pilotaai-slotlock-release';
 export const FAKE_INSTALLATION = '77';
 export const FAKE_REPOSITORY = 'PILOTAAI/slotlock';
-const TOKEN = 'ghs_fake_installation_token';
+/** The installation token the fake gives, as the hourly workflow's token step would hand it on. */
+export const FAKE_TOKEN = 'ghs_fake_installation_token';
+const TOKEN = FAKE_TOKEN;
 
 interface Commit {
   tree: Map<string, string>;
@@ -25,7 +30,8 @@ export interface FakePull {
   state: 'open' | 'closed';
   merged: boolean;
   labels: string[];
-  comments: { body: string; app: boolean }[];
+  /** Each comment, and whether the App made it (true), another App did ({ id, slug }) or a person (false). */
+  comments: { body: string; app: boolean | { id: number; slug: string } }[];
   /** The main commit the branch last started from or caught up with: what the pull request's diff is against. */
   base: string;
   /** The fork it comes from, when it is not this repository's own branch. */
@@ -62,6 +68,8 @@ export interface FakeGithubRepo {
   openIssue(title: string, labels: string[]): FakeIssue;
   /** Each workflow file's runs on main, newest first. */
   runs: Map<string, { id: number; name: string; status: string; conclusion: string | null; event: string; head_sha: string; html_url: string; created_at: string }[]>;
+  /** The body of each installation token request, in order. */
+  tokenRequests: Record<string, unknown>[];
 }
 
 export interface FakeIssue {
@@ -182,6 +190,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       return issue;
     },
     runs: new Map(),
+    tokenRequests: [],
   };
 
   const diff = (pull: FakePull) => {
@@ -217,16 +226,33 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
     const auth = new Headers(init?.headers).get('authorization') ?? '';
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
 
-    if (method === 'POST' && path === `/app/installations/${FAKE_INSTALLATION}/access_tokens`) {
+    // GitHub takes the App's Client ID or its App ID as the JWT's issuer.
+    const appJwt = () => {
       const [header, payload, signature] = auth.replace(/^Bearer /, '').split('.');
       if (!header || !payload || !signature) return reply({ message: 'A JSON web token could not be decoded' }, 401);
       const ok = verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), publicKey, Buffer.from(signature, 'base64url'));
       const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { iss?: string; exp?: number; iat?: number };
       const seconds = Math.floor(now() / 1000);
-      if (!ok || claims.iss !== FAKE_APP_ID || !claims.exp || claims.exp < seconds || claims.exp - (claims.iat ?? 0) > 600) {
+      if (!ok || ![FAKE_APP_ID, FAKE_CLIENT_ID].includes(claims.iss ?? '') || !claims.exp || claims.exp < seconds || claims.exp - (claims.iat ?? 0) > 600) {
         return reply({ message: 'Bad credentials' }, 401);
       }
+      return null;
+    };
+    if (method === 'POST' && path === `/app/installations/${FAKE_INSTALLATION}/access_tokens`) {
+      const refused = appJwt();
+      if (refused) return refused;
+      fake.tokenRequests.push(body);
       return reply({ token: TOKEN, expires_at: new Date(now() + 3_600_000).toISOString() }, 201);
+    }
+    if (method === 'GET' && /^\/repos\/[^/]+\/[^/]+\/installation$/.test(path)) {
+      const refused = appJwt();
+      if (refused) return refused;
+      if (path.toLowerCase() !== `/repos/${FAKE_REPOSITORY}/installation`.toLowerCase()) return reply({ message: 'Not Found' }, 404);
+      return reply({
+        id: Number(FAKE_INSTALLATION), app_id: Number(FAKE_APP_ID), app_slug: FAKE_APP_SLUG, client_id: FAKE_CLIENT_ID,
+        repository_selection: 'selected',
+        permissions: { actions: 'read', checks: 'read', contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write', statuses: 'read' },
+      });
     }
     if (auth !== `Bearer ${TOKEN}`) return reply({ message: 'Bad credentials' }, 401);
 
@@ -477,7 +503,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
         const page = Number(target.searchParams.get('page') ?? '1');
         return reply(pull.comments.slice((page - 1) * size, page * size).map((comment) => ({
           body: comment.body,
-          performed_via_github_app: comment.app ? { id: Number(FAKE_APP_ID) } : null,
+          performed_via_github_app: comment.app === true ? { id: Number(FAKE_APP_ID), slug: FAKE_APP_SLUG, client_id: FAKE_CLIENT_ID } : comment.app || null,
         })));
       }
     }

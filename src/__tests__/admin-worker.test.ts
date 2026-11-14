@@ -1,10 +1,12 @@
 // workers/admin: the console's Worker wrapper refuses to serve half-configured, counts every request
 // against its rate limit before any database client opens, closes each request's client, and its
-// example configuration keeps the console off workers.dev and query strings out of the logs.
+// example configuration keeps the console off workers.dev and query strings out of the logs; and the
+// CMS needs only the App's Client ID and a key, its installation found on the repository.
+import { generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Sql } from 'postgres';
 import { describe, expect, it } from 'vitest';
-import { type SlotlockAdminWorkerEnv, createSlotlockAdminWorker } from '../../workers/admin/worker.js';
+import { type SlotlockAdminWorkerEnv, cmsOf, createSlotlockAdminWorker } from '../../workers/admin/worker.js';
 
 const AUD = 'a'.repeat(64);
 const env = (overrides: Partial<SlotlockAdminWorkerEnv> = {}, allow = true): SlotlockAdminWorkerEnv => ({
@@ -87,5 +89,31 @@ describe('the admin console Worker', () => {
     const dashboard = readFileSync(new URL('../../workers/dashboard/wrangler.jsonc', import.meta.url), 'utf8');
     const ids = (source: string) => [...source.matchAll(/"namespace_id": "(\d+)"/g)].map((m) => m[1]);
     for (const id of ids(text)) expect(ids(dashboard)).not.toContain(id);
+  });
+
+  it('turns the CMS on with the App\'s Client ID and its key alone, and still with an App ID and installation', () => {
+    const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      expect(cmsOf(env({ SLOTLOCK_ADMIN_CMS_APP_ID: ' Iv23liReleaseApp ', SLOTLOCK_ADMIN_CMS_INSTALLATION: '', SLOTLOCK_ADMIN_CMS_APP_KEY: key }))).toEqual({
+        cms: { appId: 'Iv23liReleaseApp', privateKey: key.trim(), repository: 'PILOTAAI/slotlock', siteUrl: 'https://slotlock.pylota.io' },
+      });
+      expect(cmsOf(env({ SLOTLOCK_ADMIN_CMS_APP_ID: '4242', SLOTLOCK_ADMIN_CMS_INSTALLATION: '7777', SLOTLOCK_ADMIN_CMS_APP_KEY: key }))).toMatchObject({
+        cms: { appId: '4242', installationId: '7777' },
+      });
+      // Off, never half on: nothing set, no key, an id of neither shape, an installation that is not a number.
+      for (const broken of [
+        {},
+        { SLOTLOCK_ADMIN_CMS_APP_ID: 'Iv23liReleaseApp' },
+        { SLOTLOCK_ADMIN_CMS_APP_KEY: key },
+        { SLOTLOCK_ADMIN_CMS_APP_ID: 'Ov23liAnOAuthApp', SLOTLOCK_ADMIN_CMS_APP_KEY: key },
+        { SLOTLOCK_ADMIN_CMS_APP_ID: 'Iv23liReleaseApp', SLOTLOCK_ADMIN_CMS_INSTALLATION: 'abc', SLOTLOCK_ADMIN_CMS_APP_KEY: key },
+      ]) {
+        expect(cmsOf(env(broken)), JSON.stringify(Object.keys(broken))).toEqual({});
+      }
+    } finally {
+      console.error = quiet;
+    }
   });
 });

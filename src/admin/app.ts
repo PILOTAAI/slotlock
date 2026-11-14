@@ -102,14 +102,16 @@ export interface SlotlockAdminOptions {
    */
   stripeKey?: string;
   /**
-   * The CMS (RFC 0006, 4.5): the "Slotlock CMS" GitHub App, installed on the site's repository
-   * only. Without it the Content pages say what to set.
+   * The CMS (RFC 0006, 4.5): the release app, installed on the site's repository only, with a key
+   * of the console's own. Without it the Content pages say what to set.
    */
   cms?: {
+    /** The App's Client ID, or its numeric App ID. */
     appId: string;
     /** The App's private key, PEM (PKCS#1 as GitHub gives it, or PKCS#8). */
     privateKey: string;
-    installationId: string;
+    /** Its installation on the repository; found through GitHub when not given. */
+    installationId?: string;
     /** owner/name, e.g. PILOTAAI/slotlock. */
     repository: string;
     /** The live site, for the editor's link check and facts. Default https://slotlock.pylota.io. */
@@ -325,12 +327,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   const now = options.now ?? (() => Date.now());
   const fetcher = options.fetch ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
   const githubCache = new Map<string, { value: { id: string; login: string; type: string } | null; until: number }>();
-  /** The Slotlock CMS GitHub App: the CMS, the status page's incidents and the deploy history. */
+  /** The release app: the CMS, the status page's incidents and the deploy history. */
   const github: SlotlockCmsGitHub | null = options.cms
     ? createSlotlockCmsGitHub({
         appId: options.cms.appId,
         privateKey: options.cms.privateKey,
-        installationId: options.cms.installationId,
+        ...(options.cms.installationId ? { installationId: options.cms.installationId } : {}),
         repository: options.cms.repository,
         fetch: fetcher,
         now,

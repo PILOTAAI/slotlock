@@ -1,17 +1,31 @@
-// The admin console's CMS on GitHub (RFC 0006, 4.5): the "Slotlock CMS" GitHub App, installed on the
-// site's repository only, with contents and pull requests write. The console commits a post and its
-// images to cms/<slug>, authored and signed off as the staff member (so the DCO check passes), opens
-// a pull request the site's checks run on, and merges it when an Owner publishes it.
+// The admin console's CMS on GitHub (RFC 0006, 4.5), through the release app (scripts/create-release-
+// app.mjs), installed on the site's repository only, with a private key of the console's own. The
+// console commits a post and its images to cms/<slug>, authored and signed off as the staff member
+// (so the DCO check passes), opens a pull request the site's checks run on, and merges it when an
+// Owner publishes it. The status page's incidents and the deploy history go through it too.
 //
 // Only WebCrypto and fetch, so it runs in a Worker. The App's private key may be GitHub's PKCS#1
 // download ("BEGIN RSA PRIVATE KEY") or PKCS#8; the installation token is kept until a minute before
 // it expires.
+//
+// The JWT's issuer is the App's Client ID or its numeric App ID: GitHub takes either and recommends
+// the Client ID ("Generating a JSON Web Token (JWT) for a GitHub App", read 2026-11-14:
+// https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app).
+// Without an installation id, the App's installation on the repository, and the App ID its comments
+// carry, come from GET /repos/{owner}/{repo}/installation with that JWT ("Get a repository
+// installation for the authenticated app", REST docs read 2026-11-14), asked once and kept.
+
+/** A GitHub App's Client ID (Iv1.…, Iv23…), or its numeric App ID as older setups give it. */
+export const SLOTLOCK_GITHUB_APP_ISSUER = /^(?:[1-9][0-9]{0,15}|Iv[0-9A-Za-z._-]{4,60})$/;
+const NUMERIC_ID = /^[1-9][0-9]{0,15}$/;
 
 export interface SlotlockCmsGitHubOptions {
+  /** The App's Client ID, or its numeric App ID. */
   appId: string;
   /** The App's private key, PEM. */
   privateKey: string;
-  installationId: string;
+  /** The App's installation on the repository; found through GitHub when not given. */
+  installationId?: string;
   /** owner/name: the repository the App is installed on. */
   repository: string;
   fetch?: typeof fetch;
@@ -243,8 +257,11 @@ const CHECK_STATES: Readonly<Record<string, SlotlockCmsChecks>> = {
 
 export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): SlotlockCmsGitHub {
   if (!REPOSITORY.test(options.repository)) throw new SlotlockCmsError('The CMS repository is owner/name', 500);
-  if (!/^[1-9][0-9]{0,15}$/.test(options.appId) || !/^[1-9][0-9]{0,15}$/.test(options.installationId)) {
-    throw new SlotlockCmsError('The CMS App id and installation id are numbers', 500);
+  if (!SLOTLOCK_GITHUB_APP_ISSUER.test(options.appId)) {
+    throw new SlotlockCmsError('The CMS App is named by its Client ID or its App ID', 500);
+  }
+  if (options.installationId !== undefined && !NUMERIC_ID.test(options.installationId)) {
+    throw new SlotlockCmsError("The CMS App's installation id is a number", 500);
   }
   const fetcher = options.fetch ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
   const now = options.now ?? (() => Date.now());
@@ -277,15 +294,63 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     return `${unsigned}.${base64url(signature)}`;
   }
 
+  /**
+   * The installation to mint tokens for, and the App ID the App's comments carry: as configured for
+   * a numeric App ID with its installation, else from GitHub, asked once and kept. A lookup that
+   * failed is asked again next time.
+   */
+  let identity: Promise<{ installationId: string; appId: string }> | null =
+    NUMERIC_ID.test(options.appId) && options.installationId !== undefined
+      ? Promise.resolve({ installationId: options.installationId, appId: options.appId })
+      : null;
+  function app(): Promise<{ installationId: string; appId: string }> {
+    if (!identity) {
+      const found = (async () => {
+        const response = await fetcher(`${API}/repos/${options.repository}/installation`, {
+          headers: { ...HEADERS, Authorization: `Bearer ${await appJwt()}` },
+          redirect: 'manual',
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+          throw new SlotlockCmsError(`The CMS App is not installed on ${options.repository} (${response.status})`, 502);
+        }
+        const body = (await response.json()) as { id?: unknown; app_id?: unknown };
+        if (!Number.isSafeInteger(body.id) || !Number.isSafeInteger(body.app_id)) {
+          throw new SlotlockCmsError(`GitHub named no installation of the CMS App on ${options.repository}`, 502);
+        }
+        const installationId = String(body.id);
+        if (options.installationId !== undefined && options.installationId !== installationId) {
+          throw new SlotlockCmsError(
+            `The CMS App's installation ${options.installationId} is not the App's installation on ${options.repository} (${installationId})`,
+            500,
+          );
+        }
+        return { installationId, appId: String(body.app_id) };
+      })();
+      found.catch(() => {
+        if (identity === found) identity = null;
+      });
+      identity = found;
+    }
+    return identity;
+  }
+
   async function installationToken(): Promise<string> {
     if (token && token.until > now()) return token.value;
-    const response = await fetcher(`${API}/app/installations/${options.installationId}/access_tokens`, {
+    const { installationId } = await app();
+    const response = await fetcher(`${API}/app/installations/${installationId}/access_tokens`, {
       method: 'POST',
-      headers: { ...HEADERS, Authorization: `Bearer ${await appJwt()}` },
+      // This repository only, whatever else the installation reaches.
+      headers: { ...HEADERS, Authorization: `Bearer ${await appJwt()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repositories: [name] }),
       redirect: 'manual',
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new SlotlockCmsError(`GitHub refused the CMS App's token (${response.status})`, 502);
+    if (!response.ok) {
+      // A found installation may have gone (the App reinstalled): look it up again next time.
+      if (!NUMERIC_ID.test(options.appId) || options.installationId === undefined) identity = null;
+      throw new SlotlockCmsError(`GitHub refused the CMS App's token (${response.status})`, 502);
+    }
     const body = (await response.json()) as { token?: unknown; expires_at?: unknown };
     if (typeof body.token !== 'string') throw new SlotlockCmsError('GitHub gave the CMS App no token', 502);
     const expires = typeof body.expires_at === 'string' ? Date.parse(body.expires_at) : Number.NaN;
@@ -554,6 +619,7 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     },
 
     async appComments(number) {
+      const { appId } = await app();
       // Every page, oldest first, so the App's latest comment is read however many others came before.
       const bodies: string[] = [];
       for (let page = 1; page <= COMMENT_PAGES; page += 1) {
@@ -561,7 +627,7 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
           'GET', `${repo}/issues/${number}/comments?per_page=100&page=${page}`,
         );
         for (const item of body ?? []) {
-          if (String(item.performed_via_github_app?.id ?? '') === options.appId && typeof item.body === 'string') bodies.push(item.body);
+          if (String(item.performed_via_github_app?.id ?? '') === appId && typeof item.body === 'string') bodies.push(item.body);
         }
         if ((body ?? []).length < 100) return bodies;
       }

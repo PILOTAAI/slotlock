@@ -1,16 +1,26 @@
-// Creating a GitHub App from a manifest, the part scripts/create-release-app.mjs (the release app)
-// and scripts/configure-admin-console.mjs (the Slotlock CMS App) share. It serves a page on
-// 127.0.0.1 that hands GitHub the manifest; the person clicks "Create GitHub App", then installs it
-// on the one repository. Before anything is stored:
+// The release app, this repository's one GitHub App, and what scripts/create-release-app.mjs
+// (which creates it) and scripts/configure-admin-console.mjs (which gives the admin console a key of
+// it) share.
+//
+// Creating it from a manifest serves a page on 127.0.0.1 that hands GitHub the manifest; the person
+// clicks "Create GitHub App", then installs it on the one repository. Before anything is stored:
 //   - the app GitHub created must belong to the owner and hold exactly the manifest's permissions;
 //   - a short-lived installation token (revoked straight after) must reach exactly that repository,
 //     with exactly those permissions.
-// The private key stays in memory: the caller stores it through gh's stdin, never on disk, in an
-// argument or on screen.
+// Adopting it (checkAdoptedApp), with a private key of its own, checks the same of the app as it is,
+// and says what the owner changes on GitHub when it is not so: its permissions in the app's
+// settings, then the installation's review request for them.
+// The private key stays in memory: the caller stores it through gh's or Wrangler's stdin, never on
+// disk, in an argument or on screen.
 //
 // Environment (for tests): SLOTLOCK_GITHUB_URL, SLOTLOCK_GITHUB_API_URL, SLOTLOCK_POLL_SECONDS (3),
 // SLOTLOCK_WAIT_MINUTES (30).
 //
+// Read from the GitHub docs on 2026-11-14: GET /app (the authenticated app: id, slug, client_id,
+// owner, permissions), the installation's permissions and app_id in "Get a repository installation
+// for the authenticated app", the JWT's `iss` as the client ID ("Use of the client ID is
+// recommended"), and "Changing the permissions of a GitHub App" (Permissions & events; an
+// installation keeps its permissions until the new ones are approved).
 // Endpoints and fields read from the GitHub docs on 2026-10-23:
 //   https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
 //   https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest
@@ -32,6 +42,33 @@ export const waitMs = Number(process.env.SLOTLOCK_WAIT_MINUTES || '30') * 60_000
 
 /** A failure the script explains and exits 1 on. Its message never holds a private key. */
 export class Failure extends Error {}
+
+/**
+ * The release app (scripts/create-release-app.mjs): the one GitHub App, installed on this repository
+ * only. Its permissions are what its users need between them, and each mints tokens with only its own
+ * part:
+ *   - Release a version (release-version.yml): contents and pull requests write;
+ *   - the CMS schedule (cms-schedule.yml), with the same key in the same environment: contents and
+ *     pull requests write, checks read;
+ *   - the admin console (workers/admin), with a private key of its own, revocable alone: contents,
+ *     pull requests and issues write (posts, the status page's incidents), actions, checks and
+ *     commit statuses read (deploys, a post's checks).
+ * GitHub adds metadata: read to every app.
+ */
+export const RELEASE_APP = Object.freeze({
+  name: 'PILOTAAI Slotlock release',
+  environment: 'release-app',
+  keySecret: 'RELEASE_APP_PRIVATE_KEY',
+  clientIdVariable: 'RELEASE_APP_CLIENT_ID',
+  permissions: Object.freeze({
+    actions: 'read',
+    checks: 'read',
+    contents: 'write',
+    issues: 'write',
+    pull_requests: 'write',
+    statuses: 'read',
+  }),
+});
 
 /** Runs gh. The input, when there is one, goes on stdin and never into a message. */
 export function gh(args, input) {
@@ -204,8 +241,8 @@ async function convert(code, spec) {
   return { ...app, settings };
 }
 
-/** Whether the installation reaches exactly this repository with exactly the app's permissions. */
-async function checkInstallation(app, installationId, spec) {
+/** Mints a short-lived installation token, hands `use` GitHub's answer, and revokes it straight after. */
+async function withInstallationToken(app, installationId, spec, use) {
   const minted = await githubApi(`/app/installations/${installationId}/access_tokens`, {
     method: 'POST',
     token: appJwt(app),
@@ -214,41 +251,144 @@ async function checkInstallation(app, installationId, spec) {
   if (minted.status !== 201 || !minted.body?.token) {
     throw new Failure(`GitHub would not mint an installation token (HTTP ${minted.status}).`);
   }
-  const token = minted.body.token;
   try {
-    if (!samePermissions(minted.body.permissions, spec.permissions)) {
-      throw new Failure(
-        `The installation has ${describePermissions(minted.body.permissions)}, not ${listPermissions(spec.permissions)}. Delete the app and run this again: ${app.settings}`,
-      );
-    }
-    const listed = await githubApi('/installation/repositories?per_page=100', {
-      token,
-      agent: spec.agent,
-    });
-    if (listed.status !== 200 || !listed.body) {
-      throw new Failure(
-        `GitHub would not list the installation's repositories (HTTP ${listed.status}).`,
-      );
-    }
-    const names = (listed.body.repositories ?? []).map((repository) => repository.full_name);
-    const exact =
-      minted.body.repository_selection === 'selected' &&
-      listed.body.total_count === 1 &&
-      names.length === 1 &&
-      String(names[0]).toLowerCase() === `${spec.owner}/${spec.repo}`.toLowerCase();
-    if (exact) return { ok: true };
-    const reach =
-      minted.body.repository_selection === 'all'
-        ? `every repository in ${spec.owner}`
-        : `${listed.body.total_count} repositories (${names.join(', ')})`;
-    return {
-      ok: false,
-      problem: `The installation reaches ${reach}. Limit it to ${spec.repo}: ${web}/organizations/${spec.owner}/settings/installations/${installationId} > Only select repositories > ${spec.repo} > Save.`,
-    };
+    return await use(minted.body);
   } finally {
     // Revoke the check's token now rather than let it live for an hour.
-    await githubApi('/installation/token', { method: 'DELETE', token, agent: spec.agent });
+    await githubApi('/installation/token', { method: 'DELETE', token: minted.body.token, agent: spec.agent });
   }
+}
+
+/** Whether the installation reaches exactly this repository with exactly the app's permissions. */
+function checkInstallation(app, installationId, spec) {
+  return withInstallationToken(app, installationId, spec, (minted) => {
+    if (!samePermissions(minted.permissions, spec.permissions)) {
+      throw new Failure(
+        `The installation has ${describePermissions(minted.permissions)}, not ${listPermissions(spec.permissions)}. Delete the app and run this again: ${app.settings}`,
+      );
+    }
+    return reachesOnly(minted, installationId, spec);
+  });
+}
+
+/** Whether an installation token's installation reaches exactly the repository, and if not, how to limit it. */
+async function reachesOnly(minted, installationId, spec) {
+  const listed = await githubApi('/installation/repositories?per_page=100', {
+    token: minted.token,
+    agent: spec.agent,
+  });
+  if (listed.status !== 200 || !listed.body) {
+    throw new Failure(`GitHub would not list the installation's repositories (HTTP ${listed.status}).`);
+  }
+  const names = (listed.body.repositories ?? []).map((repository) => repository.full_name);
+  const exact =
+    minted.repository_selection === 'selected' &&
+    listed.body.total_count === 1 &&
+    names.length === 1 &&
+    String(names[0]).toLowerCase() === `${spec.owner}/${spec.repo}`.toLowerCase();
+  if (exact) return { ok: true };
+  const reach =
+    minted.repository_selection === 'all'
+      ? `every repository in ${spec.owner}`
+      : `${listed.body.total_count} repositories (${names.join(', ')})`;
+  return {
+    ok: false,
+    problem: `The installation reaches ${reach}. Limit it to ${spec.repo}: ${web}/organizations/${spec.owner}/settings/installations/${installationId} > Only select repositories > ${spec.repo} > Save.`,
+  };
+}
+
+/** A repository permission as an app's Permissions & events page names it ("Pull requests"). */
+function permissionName(name) {
+  if (name === 'statuses') return 'Commit statuses';
+  const words = name.replaceAll('_', ' ');
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
+}
+const LEVEL_NAMES = { read: 'Read-only', write: 'Read and write' };
+const LEVEL_RANK = { read: 1, write: 2, admin: 3 };
+
+/** What to set on the settings page for granted to become wanted: each permission at another level, or one too many. */
+function permissionChanges(granted, wanted) {
+  const changes = [];
+  for (const [name, level] of Object.entries(wanted)) {
+    if (granted?.[name] !== level) changes.push(`${permissionName(name)}: ${LEVEL_NAMES[level] ?? level}`);
+  }
+  for (const [name, level] of Object.entries(granted ?? {})) {
+    if (name in wanted || (name === 'metadata' && level === 'read')) continue;
+    changes.push(`${permissionName(name)}: No access`);
+  }
+  return changes;
+}
+
+/**
+ * Whether an installation lacks a wanted permission, or has it at a lower level: only then does an
+ * owner have to approve the app's new permissions for it. A removed one takes effect at once.
+ */
+function lacksPermissions(granted, wanted) {
+  return Object.entries(wanted).some(([name, level]) => (LEVEL_RANK[granted?.[name]] ?? 0) < (LEVEL_RANK[level] ?? 0));
+}
+
+/**
+ * Checks an app that already exists, signing in as it with one of its private keys: that it belongs
+ * to the owner, asks for exactly these permissions, and that its installation on the repository has
+ * accepted them and reaches that repository alone.
+ *
+ * spec: { owner, repo, clientId, pem, permissions, agent }
+ * Returns { app: { id, slug, client_id }, installationId, steps }. `steps` is empty when the app can
+ * be used as it is; otherwise it is what an owner of the organization does on GitHub, in order. A key
+ * GitHub refuses, or an app another account owns, fails.
+ */
+export async function checkAdoptedApp(spec) {
+  const signer = { client_id: spec.clientId, pem: spec.pem };
+  const self = await githubApi('/app', { token: appJwt(signer), agent: spec.agent });
+  if (self.status !== 200 || !self.body) {
+    throw new Failure(
+      `GitHub refused the key for the app with client ID ${spec.clientId} (HTTP ${self.status}): it is not a private key of that app, or it was deleted.`,
+    );
+  }
+  const app = { id: self.body.id, slug: self.body.slug, client_id: self.body.client_id };
+  if (
+    !Number.isSafeInteger(app.id) ||
+    typeof app.slug !== 'string' ||
+    !/^[a-z0-9-]+$/.test(app.slug) ||
+    app.client_id !== spec.clientId
+  ) {
+    throw new Failure(`GitHub did not answer as the app with client ID ${spec.clientId}.`);
+  }
+  if (String(self.body.owner?.login).toLowerCase() !== spec.owner.toLowerCase()) {
+    throw new Failure(`The app ${app.slug} belongs to ${self.body.owner?.login}, not ${spec.owner}.`);
+  }
+  const steps = [];
+  const changes = permissionChanges(self.body.permissions, spec.permissions);
+  if (changes.length > 0) {
+    steps.push(
+      `Set its permissions: ${web}/organizations/${spec.owner}/settings/apps/${app.slug}/permissions > Repository permissions > ${changes.join('; ')} > Save changes.`,
+    );
+  }
+  const found = await githubApi(`/repos/${spec.owner}/${spec.repo}/installation`, {
+    token: appJwt(signer),
+    agent: spec.agent,
+  });
+  if (found.status === 404) {
+    steps.push(
+      `Install it on ${spec.repo} only: ${web}/apps/${app.slug}/installations/new (Only select repositories > ${spec.repo} > Install).`,
+    );
+    return { app, installationId: null, steps };
+  }
+  if (found.status !== 200 || !Number.isSafeInteger(found.body?.id) || found.body?.app_id !== app.id) {
+    throw new Failure(`GitHub answered HTTP ${found.status} for the app's installation on ${spec.repo}.`);
+  }
+  const installationId = found.body.id;
+  // An installation keeps the permissions it accepted until an owner approves the app's new ones.
+  if (lacksPermissions(found.body.permissions, spec.permissions)) {
+    steps.push(
+      `${changes.length > 0 ? 'Then accept them' : 'Accept its new permissions'} for the installation: ${web}/organizations/${spec.owner}/settings/installations/${installationId} > Review request > Accept new permissions.`,
+    );
+  }
+  const reach = await withInstallationToken(signer, installationId, spec, (minted) =>
+    reachesOnly(minted, installationId, spec),
+  );
+  if (!reach.ok) steps.push(reach.problem);
+  return { app, installationId, steps };
 }
 
 function sleep(ms) {

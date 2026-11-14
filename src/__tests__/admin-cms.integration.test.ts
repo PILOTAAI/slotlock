@@ -14,7 +14,7 @@ import { mergeDuePosts } from '../../scripts/cms-scheduled-merge.mjs';
 import { type SlotlockAdmin, createSlotlockAdmin } from '../admin/app.js';
 import { createSlotlockStore } from '../store.js';
 import { Browser, CONSOLE_KEY, ORIGIN, SoftwarePasskey, createGithubSignInFetch, sha, staffSession } from './helpers/admin-browser.js';
-import { FAKE_APP_ID, FAKE_INSTALLATION, FAKE_REPOSITORY, type FakeGithubRepo, createFakeGithubRepo } from './helpers/fake-github-repo.js';
+import { FAKE_APP_SLUG, FAKE_CLIENT_ID, FAKE_REPOSITORY, FAKE_TOKEN, type FakeGithubRepo, createFakeGithubRepo } from './helpers/fake-github-repo.js';
 
 const url = process.env.DATABASE_URL?.trim();
 const SITE = 'https://slotlock.pylota.io';
@@ -162,10 +162,10 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
       sessionSecret: 'a-test-session-secret-of-forty-characters', consoleKey: CONSOLE_KEY,
       github: { clientId: 'client-id', clientSecret: 'client-secret' },
       access: { verify: async (request) => (request.headers.get('cf-access-jwt-assertion') === 'ok' ? { email: 'staff@example.com', sub: 'sub-1' } : null) },
+      // The release app by its Client ID and the console's key alone: the installation is found.
       cms: {
-        appId: FAKE_APP_ID,
+        appId: FAKE_CLIENT_ID,
         privateKey: repo.privateKey,
-        installationId: FAKE_INSTALLATION,
         repository: FAKE_REPOSITORY,
         siteUrl: SITE,
         previewHost: 'slotlock-site-preview.example.workers.dev',
@@ -404,7 +404,7 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     // Others' comments before the App's (anyone may comment on a public repository) do not hide it.
     pull?.comments.splice(0, 0, ...Array.from({ length: 150 }, (_, index) => ({ body: `Looks good ${index}`, app: false })));
     const run = (when: string) =>
-      mergeDuePosts({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch, now: () => Date.parse(when) });
+      mergeDuePosts({ token: FAKE_TOKEN, appSlug: FAKE_APP_SLUG, repository: FAKE_REPOSITORY, fetch: repo.fetch, now: () => Date.parse(when) });
     expect(await run('2026-11-14T08:00:00Z')).toEqual([{ number: pull?.number, slug: later, outcome: 'waiting for 2026-11-14T09:00Z' }]);
     // Main moved on: the workflow brings the branch up to date, and merges on its next run, since the
     // post itself is what the Owner scheduled.
@@ -430,12 +430,17 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     repo.pushToBranch('cms/labelled-elsewhere', { 'site/content/blog/labelled-elsewhere.md': text }, 'By hand');
     labelled.labels.push('cms', 'cms:scheduled');
     labelled.comments.push({ body: `<!-- slotlock-cms:schedule sha=${headOf('labelled-elsewhere')} at=2026-11-01T00:00Z by=octo-owner -->`, app: false });
+    // Nor does another App's comment with the same words: only the release app's own counts.
+    labelled.comments.push({ body: `<!-- slotlock-cms:schedule sha=${headOf('labelled-elsewhere')} at=2026-11-01T00:00Z by=octo-owner -->`, app: { id: 15368, slug: 'github-actions' } });
     // A fork's branch of a CMS name, even with the label and the App's own words copied, is not touched.
     const forked = repo.openPull('cms/from-a-fork', 'Blog: from a fork', 'someone/slotlock');
     repo.pushToBranch('cms/from-a-fork', { 'site/content/blog/from-a-fork.md': text }, 'From a fork');
     forked.labels.push('cms', 'cms:scheduled');
 
-    const results = await mergeDuePosts({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch, now: () => Date.parse('2026-11-15T10:00:00Z') });
+    const minted = repo.calls.filter((call) => call.endsWith('/access_tokens')).length;
+    const results = await mergeDuePosts({ token: FAKE_TOKEN, appSlug: FAKE_APP_SLUG, repository: FAKE_REPOSITORY, fetch: repo.fetch, now: () => Date.parse('2026-11-15T10:00:00Z') });
+    // The script is handed a token: it never holds the App's key, so never mints one itself.
+    expect(repo.calls.filter((call) => call.endsWith('/access_tokens'))).toHaveLength(minted);
     expect(results.map((result) => result.outcome).sort()).toEqual([
       'unscheduled: the admin console did not schedule it.',
       'unscheduled: the post changed after an Owner scheduled it.',

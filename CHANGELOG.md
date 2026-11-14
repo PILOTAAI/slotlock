@@ -3,6 +3,44 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- **One GitHub App.** The admin console's Content, Communications > Status page and both Deploys
+  panels, and the hourly CMS schedule, use the release app (`pilotaai-slotlock-release`) instead of
+  a "Slotlock CMS" App of their own. The release app now holds what its users need between them:
+  contents, pull requests and issues write, and actions, checks and statuses read
+  (`scripts/create-release-app.mjs`). Each token asks only for its own part. Release a version still
+  asks for contents and pull requests alone. An app made before this needs the new permissions added
+  in its settings, then accepted on its installation (the installation's **Review request**).
+- **The console needs only the App's Client ID and a key.** `SLOTLOCK_ADMIN_CMS_APP_ID` takes the
+  App's Client ID, the JWT issuer GitHub recommends; a numeric App ID still works. With
+  `SLOTLOCK_ADMIN_CMS_INSTALLATION` empty, the console finds the App's installation on the
+  repository (`GET /repos/{owner}/{repo}/installation`) once and keeps it. `SLOTLOCK_ADMIN_CMS_APP_KEY`
+  is a private key of the App made for the console alone, so it can be revoked without touching
+  releases.
+- **`cms-schedule.yml` runs in the `release-app` environment** with `RELEASE_APP_CLIENT_ID` and
+  `RELEASE_APP_PRIVATE_KEY`, and records no deployment for its hourly runs. Its token
+  (`actions/create-github-app-token`, pinned) has contents and pull requests write and checks read.
+  `scripts/cms-scheduled-merge.mjs` takes that token and the App's slug (`CMS_TOKEN`,
+  `CMS_APP_SLUG`) and never holds a key. The `CMS_APP_ID` and `CMS_APP_INSTALLATION` variables, the
+  `CMS_APP_KEY` secret and the `cms` environment are no longer used, and
+  `scripts/configure-github.sh` no longer creates that environment: delete them.
+- **`scripts/configure-admin-console.mjs go-live` creates no GitHub App.** It adopts the release app.
+  Given `SLOTLOCK_ADMIN_CMS_APP_KEY_FILE`, the console's own key, it first checks, signed in as the
+  App, three things: the App asks for exactly those permissions, its installation has accepted them,
+  and it reaches PILOTAAI/slotlock alone. If one fails, it prints the owner's steps on GitHub and
+  deploys and stores nothing. Then it stores the key in the Worker only. `--no-open` is gone.
+
+### Security
+
+- SECURITY.md describes the one App and the key each user has, what a leaked console key could do
+  until it is deleted, and why the "Protect main" ruleset's required checks are what keep such a
+  key from changing `main` on its own.
+- The console's installation tokens are limited to the site's repository, whatever else the
+  installation reaches.
+
 ## 0.11.0 - 2026-11-14
 
 ### Security
