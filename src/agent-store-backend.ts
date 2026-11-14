@@ -4369,8 +4369,18 @@ export function createSlotlockStoreApplicationBackend(
     async partnerEraseAccount(context, input) {
       const { partners, partner } = partnerOf(context);
       if (input.confirm !== input.account) throw new SlotlockAgentOperationError('confirmation_mismatch', 400);
-      const erased = await partners.eraseAccount(partner, input.account as string);
-      if (!erased.erased) throw new SlotlockAgentOperationError('account_not_found', 404);
+      const tenantRef = await partners.tenantOf(partner, input.account as string);
+      if (!tenantRef) throw new SlotlockAgentOperationError('account_not_found', 404);
+      // As /v1/tenant/erase: read under the account's lock, in the erasure's transaction, so no
+      // suspension lands between. A suspended account's data is kept for Pylota to erase; the
+      // partner lifts its own suspension first, and cannot lift one Pylota made.
+      const inAccount = { ...context, principal: { ...context.principal, tenantRef } };
+      const erased = await withTenant(store, inAccount, async (tenant) => {
+        if (await tenant.isTenantSuspended({ tenantRef })) {
+          throw new SlotlockAgentOperationError('tenant_suspended', 403);
+        }
+        return tenant.eraseTenant({ tenantRef });
+      }, WRITE);
       return { erased: true, rows: erased.total };
     },
 

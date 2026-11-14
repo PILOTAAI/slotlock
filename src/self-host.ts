@@ -2957,9 +2957,11 @@ Commands:
                            invoice; safe to run again
   tenant status            Print whether the tenant is suspended
   tenant suspend [--reason <text>]
-                           Suspend the tenant: it may read, and writes nothing; its keys get
-                           no new secret (as SLOTLOCK_MIGRATE_DATABASE_URL's role when set:
-                           only the schema owner suspends)
+                           Suspend the tenant: it writes nothing, and its API keys are refused
+                           and get no new secret; its dashboard still reads. One its partner
+                           suspended becomes yours, which the partner cannot lift (as
+                           SLOTLOCK_MIGRATE_DATABASE_URL's role when set: only the schema owner
+                           suspends)
   tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
   tenant export [--out <dir>]
                            Print everything the tenant keeps, read at one moment, one JSON line a
