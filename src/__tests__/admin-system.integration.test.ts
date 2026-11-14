@@ -517,6 +517,17 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     const page = await text(staff.owner, '/communications');
     expect(page).toContain(`#${probe?.number} Hosted Slotlock API is down`);
     expect(page).not.toContain('The docs search misses a page');
+    // The Status page tab is laid out as Announcements is: the form on the left, and on the right
+    // the open incidents as the status page lists them, each with its update form.
+    const status = page.slice(page.indexOf('id="status"'));
+    const composer = status.slice(status.indexOf('<div class="composer">'));
+    expect(status).toContain('<div class="composer">');
+    expect(composer.indexOf('action="/communications/status"')).toBeGreaterThan(-1);
+    expect(composer.indexOf('action="/communications/status"')).toBeLessThan(composer.indexOf('<div class="composer-preview">'));
+    const preview = composer.slice(composer.indexOf('<div class="composer-preview">'));
+    expect(preview).toContain(`#${probe?.number} Hosted Slotlock API is down`);
+    expect(preview).toContain('action="/communications/status/update"');
+    expect(status.slice(0, status.indexOf('<div class="composer">'))).not.toContain('<details class="popover"');
 
     expect((await form(staff.owner, '/communications/status', { title: 'Slow bookings in Europe', body: 'Booking calls take up to five seconds. We are looking into it.' }, '/communications')).headers.get('location'))
       .toBe('/communications?done=incident_opened');

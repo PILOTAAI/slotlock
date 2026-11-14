@@ -113,6 +113,9 @@ versioning.
 - **Near quota** means at 80% of a monthly quota or more, the first share the account's owner is
   told of, on Usage as on Accounts' view of that name and its count. Usage listed the twenty
   busiest accounts whatever their share, so accounts at 1 to 4% of their quota were "near" it.
+- Communications' **Status page** tab is laid out as Announcements is: the new incident's form on
+  the left (no longer behind a button), and on the right what the status page shows now, each open
+  incident with its update form. It left the right half of the page empty.
 
 ### Security
 

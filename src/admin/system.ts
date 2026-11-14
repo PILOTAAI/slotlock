@@ -30,7 +30,6 @@ import {
   lastDays,
   menu,
   pill,
-  popover,
   reasonField,
   section,
   stats,
@@ -315,34 +314,41 @@ export function slotlockCommunicationsPage(data: SlotlockCommunicationsPageData,
       { label: 'All', href: '/communications?ended=1', current: data.endedToo },
     ], 'views'),
   });
-  const incidents = providerPart('The status page', data.incidents,
-    html`It needs Slotlock's GitHub App with Issues (read and write).`,
-    ({ open, closed }) => html`
-      ${open.length === 0
-        ? html`<div class="callout good"><p>No open incident. The status page shows hosted Slotlock as up.</p></div>`
-        : html`<div class="incidents">${open.map((issue) => html`<div class="incident">
-            <p><a href="${issue.url}" rel="noreferrer"><strong>#${issue.number} ${issue.title}</strong></a> <span class="muted">Opened ${when(issue.createdAt)} · ${count(issue.comments)} ${issue.comments === 1 ? 'update' : 'updates'}</span></p>
-            ${data.mayAct
-              ? html`<form class="form" method="post" action="/communications/status/update">${csrf}<input type="hidden" name="issue" value="${issue.number}">
-                  ${field({ id: `update-${issue.number}`, label: 'Update', public: true, control: html`<textarea id="update-${issue.number}" name="body" rows="2" maxlength="2000" required></textarea>` })}
-                  <label class="check"><input type="checkbox" name="close" value="1"> Resolved: close the incident with this update</label>
-                  <div class="form-actions"><button class="btn sm" type="submit">Post update</button></div></form>`
-              : ''}
-          </div>`)}</div>`}
-      ${closed.length
-        ? section('Recently resolved', table('Resolved incidents', ['Incident', 'Opened', 'Resolved'], closed.map((issue) => [
-            html`<a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a>`, html`${when(issue.createdAt)}`, html`${when(issue.closedAt)}`,
-          ]), ''), { level: 3 })
-        : ''}`);
-  const statusPanel = html`${section('Incidents', incidents, {
-    info: info('The status page', html`Incidents are issues labelled <code>status</code> (docs/hosted/status.md); the probe opens and closes its own. Read from GitHub as the page opens.`),
-    aside: html`${data.mayAct && data.incidents.state === 'ok'
-      ? popover('Open an incident', html`<form class="form" method="post" action="/communications/status">${csrf}
-          ${field({ id: 'incident-title', label: 'Title', public: true, control: html`<input id="incident-title" name="title" required maxlength="120" autocomplete="off">` })}
-          ${field({ id: 'incident-body', label: 'What is happening', public: true, control: html`<textarea id="incident-body" name="body" rows="3" maxlength="2000" required></textarea>` })}
-          <div class="form-actions"><button class="btn danger" type="submit">Open incident</button></div></form>`, { tone: 'danger', size: 'sm' })
-      : ''}`,
-  })}`;
+  // The open incidents as the status page lists them (open `status` issues), each with its update form.
+  const openIncidents = (open: readonly SlotlockStatusIssue[]) => open.length === 0
+    ? html`<div class="callout good"><p>No open incident. The status page shows hosted Slotlock as up.</p></div>`
+    : html`<div class="incidents">${open.map((issue) => html`<div class="incident">
+        <p><a href="${issue.url}" rel="noreferrer"><strong>#${issue.number} ${issue.title}</strong></a> <span class="muted">Opened ${when(issue.createdAt)} · ${count(issue.comments)} ${issue.comments === 1 ? 'update' : 'updates'}</span></p>
+        ${data.mayAct
+          ? html`<form class="form" method="post" action="/communications/status/update">${csrf}<input type="hidden" name="issue" value="${issue.number}">
+              ${field({ id: `update-${issue.number}`, label: 'Update', public: true, control: html`<textarea id="update-${issue.number}" name="body" rows="2" maxlength="2000" required></textarea>` })}
+              <label class="check"><input type="checkbox" name="close" value="1"> Resolved: close the incident with this update</label>
+              <div class="form-actions"><button class="btn sm" type="submit">Post update</button></div></form>`
+          : ''}
+      </div>`)}</div>`;
+  const statusInfo = info('The status page', html`Incidents are issues labelled <code>status</code> (docs/hosted/status.md); the probe opens and closes its own. Read from GitHub as the page opens.`);
+  const resolved = (closed: readonly SlotlockStatusIssue[]) => closed.length
+    ? section('Recently resolved', table('Resolved incidents', ['Incident', 'Opened', 'Resolved'], closed.map((issue) => [
+        html`<a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a>`, html`${when(issue.createdAt)}`, html`${when(issue.closedAt)}`,
+      ]), ''), { level: 3 })
+    : '';
+  // As Announcements: the form on the left, and on the right what the status page shows now.
+  const statusPanel = data.mayAct && data.incidents.state === 'ok'
+    ? html`<section class="section" aria-labelledby="incident-compose-title">
+        <header class="section-head"><h2 id="incident-compose-title">New incident</h2>${statusInfo}</header>
+        <div class="composer">
+          <form class="form" method="post" action="/communications/status">${csrf}
+            ${field({ id: 'incident-title', label: 'Title', public: true, control: html`<input id="incident-title" name="title" required maxlength="120" autocomplete="off">` })}
+            ${field({ id: 'incident-body', label: 'What is happening', public: true, control: html`<textarea id="incident-body" name="body" rows="4" maxlength="2000" required></textarea>` })}
+            <div class="form-actions"><button class="btn danger" type="submit">Open incident</button></div>
+          </form>
+          <div class="composer-preview"><div class="box"><header class="section-head"><h3>On the status page now</h3></header>${openIncidents(data.incidents.value.open)}</div></div>
+        </div>
+        ${resolved(data.incidents.value.closed)}
+      </section>`
+    : section('Incidents', providerPart('The status page', data.incidents,
+        html`It needs Slotlock's GitHub App with Issues (read and write).`,
+        ({ open, closed }) => html`${openIncidents(open)}${resolved(closed)}`), { info: statusInfo });
   const openCount = data.incidents.state === 'ok' ? data.incidents.value.open.length : 0;
   const body = hashTabs('Communications', [
     { id: 'announcements', label: 'Announcements', body: html`${composer}${list}` },
