@@ -3133,7 +3133,10 @@ describe('the plan page', () => {
     const html = await response.text();
     expect(html).toContain('href="/base/dashboard/plan"');
     expect(html).toContain('<h1>Usage</h1>');
-    expect(html).toContain('<div class="plan-head"><h2>Free</h2>');
+    expect(html).toContain('<span class="plan-now">Free</span>');
+    // Free is marked as the plan in use, Developer offered beside it.
+    expect(html).toMatch(/<article class="plan-col current" id="free"[\s\S]*Current plan/);
+    expect(html).toContain('<article class="plan-col featured" id="developer"');
     expect(html).toContain('<span class="meta"> of 10</span>');
     expect(html).toContain('action="/base/dashboard/plan/upgrade"');
     expect(html).toContain('Monthly, $10 a month');
@@ -3203,12 +3206,46 @@ describe('the plan page', () => {
     expect(back).toContain('once Stripe confirms the payment');
   });
 
+  it("lands on Usage after signing in from the site's Upgrade, where every plan is offered", async () => {
+    const { target } = billed(null);
+    const start = await get(target, '/base/dashboard/sign-in?then=%2Fplan');
+    const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+    const callback = await get(target, `/base/dashboard/callback?code=fake-code&state=${state}`, cookie(start, '__Host-slotlock-oauth')?.pair);
+    expect(callback.headers.get('location')).toBe('/base/dashboard/plan');
+  });
+
+  it("shows the prices Stripe charges over the labels it is configured with, and the labels when Stripe does not answer", async () => {
+    const free: SlotlockTenantPlan = { ...developer, plan: 'free', stripeCustomer: null, stripeSubscription: null, currentPeriodEnd: null };
+    const { billing } = billed(free);
+    const errors: unknown[] = [];
+    let answer: 'stripe' | 'refused' = 'stripe';
+    const shown = {
+      ...billing,
+      shownPrices: vi.fn(async () => {
+        if (answer === 'refused') throw new Error('The provided key does not have the required permissions');
+        return { prices: { month: '£5', year: '£50' } };
+      }),
+    };
+    const target = dashboard({ billing: shown, onError: (error) => void errors.push(error) });
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(html).toContain('Monthly, £5 a month');
+    expect(html).not.toContain('$10');
+    // Refused (a key without Read on Prices): the labels, and the error reported once in ten minutes.
+    answer = 'refused';
+    for (let i = 0; i < 3; i += 1) {
+      expect(await (await get(target, '/base/dashboard/plan', session)).text()).toContain('Monthly, $10 a month');
+    }
+    expect(errors).toHaveLength(1);
+  });
+
   it('shows a Developer tenant its renewal and Manage billing, which opens the portal', async () => {
     const { target, calls } = billed(developer);
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard/plan', session)).text();
-    expect(html).toContain('<div class="plan-head"><h2>Developer</h2>');
-    expect(html).toContain('Renews 2026-12-10 12:00 UTC');
+    expect(html).toContain('<span class="plan-now">Developer</span><span class="pill active">Active</span>');
+    expect(html).toContain('<span class="summary-label">Renews</span><span class="summary-value">10 Dec 2026</span><span class="summary-note">2026-12-10 12:00 UTC</span>');
+    expect(html).toContain('<article class="plan-col current featured" id="developer"');
     expect(html).not.toContain('Upgrade to Developer');
     const manage = await post(target, '/base/dashboard/plan/manage', { csrf: await csrf(target, session) }, session);
     expect(manage.headers.get('location')).toBe('https://billing.stripe.com/p/session/test_1');
@@ -3287,7 +3324,7 @@ describe('the plan page', () => {
     expect(html).toContain('<span>Operations</span><span class="meter-value">45</span>');
     expect(html).toContain('<span>Bookings</span><span class="meter-value">3</span>');
     expect(html).toContain('<span>Holds</span><span class="meter-value">2</span>');
-    expect(html).toContain('Since 2026-10-01 (UTC)');
+    expect(html).toContain('Since 2026-10-01, UTC');
     expect(html).toContain('<td data-label="Key">Booking agent</td><td data-label="Operations">40</td>');
     expect(html).toContain('<td data-label="Key">The dashboard and its assistant</td>');
     expect(html).toContain('<td data-label="Key">A deleted key</td>');
@@ -3316,7 +3353,7 @@ describe('the plan page', () => {
     );
     expect(html).toContain('<span class="meter-value">10<span class="meta"> of 1,000</span>');
     expect(html).toContain("You have used 81% of this month&#39;s operations. They start again on 2026-11-01 00:00 UTC.");
-    expect(html).toContain('with 500,000 operations and 25,000 bookings a month');
+    expect(html).toContain('<li>500,000 operations a month</li><li>25,000 bookings a month</li>');
     operations = 25_000;
     bookings = 1_000;
     html = await page();
@@ -3500,7 +3537,7 @@ describe('usage and plans without Stripe', () => {
     // Nothing redirects to Stripe, so forms still go nowhere but here.
     expect(response.headers.get('content-security-policy')).toContain("form-action 'self';");
     const html = await response.text();
-    expect(html).toContain('<div class="plan-head"><h2>Free</h2>');
+    expect(html).toContain('<span class="plan-now">Free</span>');
     expect(html).toContain('<span>Resources</span><span class="meter-value">0<span class="meta"> of 10</span>');
     expect(html).toContain('This server does not count use yet.');
     expect(html).not.toContain('action="/base/dashboard/plan/upgrade"');
@@ -3515,7 +3552,8 @@ describe('usage and plans without Stripe', () => {
     const target = dashboard({ plans, resources: store });
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard/plan', session)).text();
-    expect(html).toContain('<div class="plan-head"><h2>Free from 9 Dec 2026</h2>');
+    expect(html).toContain('<span class="plan-now">Free from 9 Dec 2026</span>');
+    expect(html).toContain('<p class="plan-hint">Your plan from 9 Dec 2026.</p>');
     expect(html).toContain(
       'From 2026-12-09 00:00 UTC, this workspace is on Free: 10 resources, 10 API keys and 2 webhooks. You have 14 of 10 resources: nothing is removed, but from then, adding another is refused. Upgrade for more.',
     );
@@ -3532,7 +3570,7 @@ describe('usage and plans without Stripe', () => {
     expect(usage).toContain(
       '<li class="attention warn"><span class="attention-text">On Free, you have 10 of 10 resources: adding another is refused. Upgrade for more.</span><a class="attention-action" href="#upgrade">Upgrade</a></li>',
     );
-    expect(usage).toContain('<section class="panel" id="upgrade">');
+    expect(usage).toContain('<section class="plans" id="upgrade"');
     const overview = await (await get(target, '/base/dashboard', session)).text();
     const attention = /<ul class="attention-list"[^>]*>([\s\S]*?)<\/ul>/.exec(overview)?.[1] ?? '';
     expect(attention).toContain('On Free, you have 10 of 10 resources');

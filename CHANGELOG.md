@@ -127,6 +127,21 @@ versioning.
 
 ### Changed
 
+- **A new Usage page.** It opens with the plan at a glance (plan, renewal, workspace), then the
+  limits and this month's use side by side, then the plans side by side: Free, Developer, Team and
+  Custom, each with its price, what it allows and the way to it from here, the current one
+  marked. It follows the dashboard's design, light and dark, and axe finds nothing on it.
+- **Team can be reached from a person's own workspace.** Their Usage page shows Team with
+  **Upgrade** for a team workspace they own or bill for (it opens that workspace's Usage page, where
+  Team is bought) or **Create a team workspace**. Before, it offered Developer only, and the site's
+  Team button led nowhere further. The site's Upgrade buttons now sign people in and land on
+  Usage.
+- **The Usage page shows the prices Stripe charges**, read from the configured price ids with the
+  dashboard's key (Read on Prices) and kept for ten minutes. The configured labels are shown only
+  when Stripe does not answer. The live page had shown "$10 a month" while Stripe charged £5.
+  `configure-stripe.mjs` notes a dashboard key that cannot read Prices.
+- **The dashboard has no Waitlist page.** Agents still use waitlists through the API, MCP and
+  A2A, and the activity feed still shows waitlist offers.
 - **Slotlock Cloud has a public status page**, <https://stats.uptimerobot.com/F7RQohQzXM>: uptime by day for the API, the
   dashboard and the site, checked every five minutes from outside, with incidents and
   announcements. The site's footer and the hosted service pages link to it.

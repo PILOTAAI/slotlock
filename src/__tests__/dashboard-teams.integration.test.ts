@@ -77,6 +77,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ['gus', { id: base + 6, login: 'gus', emails: [] }],
     ['hal', { id: base + 7, login: 'hal', emails: [] }],
     ['ivy', { id: base + 8, login: 'ivy', emails: [] }],
+    ['kim', { id: base + 9, login: 'kim', emails: [] }],
   ]);
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -629,6 +630,67 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     expect(full).not.toContain('action="/dashboard/members/invite"');
     plan = 'team';
     expect(await (await hal.get('/dashboard/settings/members')).text()).toContain('action="/dashboard/members/invite"');
+  });
+
+  it('takes a person from their own Usage page to Team for a team they bill for, at the prices Stripe charges', async () => {
+    const checkouts: Array<{ tenantRef: string; plan?: string; interval: string }> = [];
+    const billed = build({
+      plans: {
+        plan: async () => ({
+          plan: 'free',
+          status: 'active',
+          limits: { resources: 10, apiKeys: 10, webhookEndpoints: 2 },
+          stripeCustomer: null,
+          stripeSubscription: null,
+          currentPeriodEnd: null,
+        }),
+      },
+      billing: {
+        plan: async () => null,
+        checkout: async (input) => {
+          checkouts.push(input);
+          return 'https://checkout.stripe.com/c/pay/cs_test_team';
+        },
+        portal: async () => 'https://billing.stripe.com/p/session/test',
+        // Stale labels, as a deployment might still set them: the page shows Stripe's amounts.
+        prices: { month: '$10', year: '$100' },
+        teamPrices: { month: '$40', year: '$400' },
+        shownPrices: async () => ({ prices: { month: '£5', year: '£50' }, teamPrices: { month: '£15', year: '£150' } }),
+        contact: 'mailto:founder@example.com',
+        formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],
+      },
+    });
+    // With no team yet, Team is a team workspace to make.
+    const kim = new Browser(billed);
+    await signIn(kim, 'kim');
+    const before = await (await kim.get('/dashboard/plan')).text();
+    expect(before).toContain('<a class="button primary" href="/dashboard/teams#team-name">Create a team workspace</a>');
+    expect(before).toContain('Monthly, £5 a month');
+    expect(before).toContain('<span class="price-amount">£15</span>');
+    expect(before).not.toContain('$10');
+
+    await kim.post('/dashboard/teams', '/teams/create', { name: 'Kim Rentals' });
+    const team = await teamOf(kim);
+    tenants.push(team);
+    await kim.post('/dashboard', '/organization', { organization: '' });
+    // Their own workspace now offers Team for the team they own, one step away.
+    const personal = await (await kim.get('/dashboard/plan')).text();
+    expect(personal).toContain('Upgrade to Developer');
+    expect(personal).toContain(`<input type="hidden" name="organization" value="${team}"><input type="hidden" name="then" value="/plan"><button class="primary" type="submit">Upgrade Kim Rentals</button>`);
+
+    // The step lands on the team's Usage page, where Team is bought; nowhere else is a landing.
+    const moved = await kim.post('/dashboard/plan', '/organization', { organization: team, then: '/plan' });
+    expect(moved.headers.get('location')).toBe('/dashboard/plan');
+    const teamPage = await (await kim.get('/dashboard/plan')).text();
+    expect(teamPage).toContain('Monthly, £15 a month');
+    expect(teamPage).toContain('Upgrade to Team');
+    expect(teamPage).not.toContain('Upgrade to Developer');
+    expect(teamPage).toContain('<input type="hidden" name="organization" value=""><input type="hidden" name="then" value="/plan"><button type="submit">Go to your workspace</button>');
+    const bought = await kim.post('/dashboard/plan', '/plan/upgrade', { interval: 'year' });
+    expect(bought.headers.get('location')).toBe('https://checkout.stripe.com/c/pay/cs_test_team');
+    expect(checkouts).toEqual([expect.objectContaining({ tenantRef: team, plan: 'team', interval: 'year' })]);
+    const elsewhere = await kim.post('/dashboard/plan', '/organization', { organization: '', then: 'https://evil.example/' });
+    expect(elsewhere.headers.get('location')).toBe('/dashboard');
   });
 
   it('exports the audit log on Team, as CSV a spreadsheet will not run and as JSON with its chain', async () => {

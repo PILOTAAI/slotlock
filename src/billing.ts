@@ -104,7 +104,38 @@ export interface SlotlockStripe {
   liveSubscriptionsOfTenant(tenantRef: string): Promise<SlotlockStripeSubscription[]>;
   /** The plan a subscription gives, by its price: Team for a Team price, else Developer. */
   planOf?(subscription: SlotlockStripeSubscription): { plan: SlotlockPlan; status: SlotlockPlanStatus };
+  /**
+   * The plans' prices as Stripe holds them, for showing (`£5`, `£50`): read from the configured
+   * price ids, so a page never shows one price and charges another. Kept for ten minutes, an
+   * answer or a refusal alike. Needs Read on Prices.
+   */
+  shownPrices?(): Promise<SlotlockShownPrices>;
 }
+
+/** Each plan's prices as shown: monthly and yearly. */
+export interface SlotlockShownPrices {
+  developer: Readonly<Record<SlotlockBillingInterval, string>>;
+  team?: Readonly<Record<SlotlockBillingInterval, string>>;
+}
+
+/** Currencies Stripe counts in whole units, not hundredths (docs.stripe.com/currencies). */
+const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf']);
+
+/** A Stripe amount as people read it: 500 gbp is `£5`, 1250 gbp `£12.50`. */
+export function formatSlotlockPrice(amount: number, currency: string): string {
+  const code = currency.toLowerCase();
+  const value = ZERO_DECIMAL.has(code) ? amount : amount / 100;
+  const whole = Number.isInteger(value);
+  return new Intl.NumberFormat('en-GB', {
+    style: 'currency',
+    currency: code.toUpperCase(),
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  }).format(value);
+}
+
+/** How long shown prices are kept before Stripe is asked again. */
+const SHOWN_PRICES_MS = 10 * 60_000;
 
 /** Statuses in which a subscription gives its tenant the Developer plan (slotlockPlanOfSubscription). */
 const LIVE = new Set(['active', 'trialing', 'past_due']);
@@ -173,6 +204,17 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
     return (await subscriptionsOfCustomer(customer)).filter(slotlockSubscriptionIsLive);
   }
 
+  async function shownPrice(id: string): Promise<string> {
+    if (!STRIPE_ID.test(id)) throw new SlotlockBillingError('Not a price id');
+    const price = await call<{ unit_amount?: number | null; currency?: string }>('GET', `/v1/prices/${id}`);
+    if (typeof price.unit_amount !== 'number' || typeof price.currency !== 'string' || !/^[a-z]{3}$/i.test(price.currency)) {
+      throw new SlotlockBillingError('Stripe gave a price without an amount');
+    }
+    return formatSlotlockPrice(price.unit_amount, price.currency);
+  }
+
+  let shown: { at: number; prices: Promise<SlotlockShownPrices> } | null = null;
+
   return {
     async checkout({ tenantRef, interval, plan = 'developer', customer, successUrl, cancelUrl }) {
       if (plan === 'team' && !options.teamPrices) throw new SlotlockBillingError('There is no Team price');
@@ -214,6 +256,28 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
     },
     liveSubscriptionsOfCustomer,
     planOf: (subscription) => slotlockPlanOfSubscription(subscription, options.teamPrices),
+    shownPrices() {
+      const at = Date.now();
+      if (!shown || at - shown.at > SHOWN_PRICES_MS) {
+        const team = options.teamPrices;
+        const prices = (async (): Promise<SlotlockShownPrices> => {
+          const [month, year, teamMonth, teamYear] = await Promise.all([
+            shownPrice(options.prices.month),
+            shownPrice(options.prices.year),
+            ...(team ? [shownPrice(team.month), shownPrice(team.year)] : []),
+          ]);
+          return {
+            developer: { month: month as string, year: year as string },
+            ...(teamMonth && teamYear ? { team: { month: teamMonth, year: teamYear } } : {}),
+          };
+        })();
+        // A refusal is kept as long as an answer: a key without Read on Prices asks once per ten
+        // minutes, not on every page.
+        prices.catch(() => undefined);
+        shown = { at, prices };
+      }
+      return shown.prices;
+    },
     async liveSubscriptionsOfTenant(tenantRef) {
       if (!SEARCHABLE.test(tenantRef)) throw new SlotlockBillingError('Not a searchable tenant');
       const page = await call<{ data?: SlotlockStripeSubscription[] }>(

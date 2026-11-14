@@ -404,8 +404,13 @@ its own model.
 
 ## Usage
 
-On hosted Slotlock, **Usage** shows the workspace's plan (or the plan it moves to, and when) against
-its limits, this month's operations, bookings and holds against its quotas, and which key used what.
+On hosted Slotlock, **Usage** opens with the plan at a glance: the plan (or the plan it moves to,
+and when), when it renews, and whose workspace it is. Below are its limits and this month's
+operations, bookings and holds against its quotas, the plans side by side (Free, Developer, Team
+and Custom, at the prices Stripe charges, the current one marked), and which key used what.
+A person's own workspace is offered Developer, and Team by way of a team workspace: **Upgrade** for
+one they own or bill for opens its Usage page, else **Create a team workspace**. A team workspace
+or organization is offered Team, never Developer.
 It says what needs doing first: a failed payment, a quota at 80%, at 100% or used up, or as many
 resources, keys or webhooks as the plan (or the coming plan) allows, or more (nothing is removed;
 adding another is refused). Each of these, and an add refused at a limit, offers an owner the
