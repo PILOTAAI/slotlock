@@ -32,7 +32,7 @@ import {
   slotlockStaffMay,
 } from '../staff-ddl.js';
 import type { SlotlockAccessIdentity } from './access.js';
-import { SLOTLOCK_ADMIN_EDITOR_JS, type SlotlockCmsRequest, createSlotlockAdminCms } from './cms.js';
+import { SLOTLOCK_ADMIN_EDITOR_CSS, SLOTLOCK_ADMIN_EDITOR_JS, type SlotlockCmsRequest, createSlotlockAdminCms } from './cms.js';
 import { type SlotlockCmsGitHub, createSlotlockCmsGitHub } from './github-app.js';
 import { type SlotlockAdminInsightsOptions, createSlotlockAdminInsights } from './insights.js';
 import {
@@ -2872,6 +2872,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       if (path === '/admin.js') return respond(SLOTLOCK_ADMIN_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
       if (path === '/passkey.js') return respond(SLOTLOCK_ADMIN_PASSKEY_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
       if (path === '/editor.js') return respond(SLOTLOCK_ADMIN_EDITOR_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
+      if (path === '/editor.css') return respond(SLOTLOCK_ADMIN_EDITOR_CSS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/css; charset=utf-8');
       // The typefaces, at a path that names their hash: the same bytes for good.
       const font = path.startsWith('/fonts/') ? SLOTLOCK_ADMIN_FONTS.find((entry) => entry.path === path) : undefined;
       if (font) return fontResponse(font);

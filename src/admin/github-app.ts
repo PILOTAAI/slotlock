@@ -40,8 +40,20 @@ export interface SlotlockCmsAuthor {
 
 export interface SlotlockCmsFile {
   path: string;
-  /** Text, or bytes for an image. Null deletes the file. */
-  content: string | Uint8Array | null;
+  /**
+   * Text, or bytes for a picture, a video or a PDF; a blob already in the repository, by its sha (a
+   * rename moves a file without reading it); null deletes the file.
+   */
+  content: string | Uint8Array | { blob: string } | null;
+}
+
+/** A file in a directory, as GitHub lists it. */
+export interface SlotlockCmsEntry {
+  name: string;
+  /** Bytes. */
+  size: number;
+  /** Its blob's sha, which a commit can use again. */
+  sha: string;
 }
 
 export interface SlotlockCmsPullRequest {
@@ -69,10 +81,12 @@ export interface SlotlockCmsGitHub {
   repository: string;
   /** A file's text and blob sha on a branch, or null when it is not there. */
   readFile(path: string, ref: string): Promise<{ text: string; sha: string } | null>;
-  /** A file's bytes on a branch (up to 1 MB), or null when it is not there. */
+  /** A file's bytes on a branch (up to GitHub's 100 MB, read raw), or null when it is not there. */
   readBytes(path: string, ref: string): Promise<Uint8Array | null>;
   /** The names of the files in a directory on a branch (not recursive), or [] when it is not there. */
   listDirectory(path: string, ref: string): Promise<string[]>;
+  /** The files in a directory on a branch, with their sizes and blobs, or [] when it is not there. */
+  listFiles(path: string, ref: string): Promise<SlotlockCmsEntry[]>;
   /** A directory's files with their texts, single files and commits' checks, in one GraphQL query. */
   snapshot(input: { directory: { ref: string; path: string }; files?: { ref: string; path: string }[]; commits?: string[] }): Promise<SlotlockCmsSnapshot>;
   /** The commit a branch points at, or null when it is not there. */
@@ -358,18 +372,25 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     return token.value;
   }
 
-  async function call<T>(method: string, path: string, body?: unknown, allow: readonly number[] = []): Promise<{ status: number; body: T }> {
-    const response = await fetcher(`${API}${path}`, {
+  /** A request as the App: a body is JSON, or bytes that are already JSON (a blob's, written without a copy as a string). */
+  async function send(method: string, path: string, body: unknown, accept?: string): Promise<Response> {
+    return fetcher(`${API}${path}`, {
       method,
       headers: {
         ...HEADERS,
+        ...(accept ? { Accept: accept } : {}),
         Authorization: `Bearer ${await installationToken()}`,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined ? {} : { body: body instanceof Uint8Array ? body : JSON.stringify(body) }),
       redirect: 'manual',
-      signal: AbortSignal.timeout(15_000),
+      // A video's blob takes longer to send than a post.
+      signal: AbortSignal.timeout(body instanceof Uint8Array ? 120_000 : 15_000),
     });
+  }
+
+  async function call<T>(method: string, path: string, body?: unknown, allow: readonly number[] = []): Promise<{ status: number; body: T }> {
+    const response = await send(method, path, body);
     if (!response.ok && !allow.includes(response.status)) {
       const text = await response.text().catch(() => '');
       let message = '';
@@ -399,8 +420,36 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     return body.data;
   }
 
+  /**
+   * A blob's JSON body, {"content":"<base64>","encoding":"base64"}, as bytes: base64 in chunks, so a
+   * video is held once as bytes and once as its encoding, never as strings besides.
+   */
+  function blobBody(bytes: Uint8Array): Uint8Array {
+    const head = encoder.encode('{"content":"');
+    const tail = encoder.encode('","encoding":"base64"}');
+    const out = new Uint8Array(head.length + Math.ceil(bytes.length / 3) * 4 + tail.length);
+    out.set(head);
+    let at = head.length;
+    const chunk = 3 * 0x8000;
+    for (let index = 0; index < bytes.length; index += chunk) {
+      const encoded = encoder.encode(base64(bytes.subarray(index, index + chunk)));
+      out.set(encoded, at);
+      at += encoded.length;
+    }
+    out.set(tail, at);
+    return out;
+  }
+
   const contentsPath = (path: string, ref: string) =>
     `${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`;
+
+  async function listFiles(path: string, ref: string): Promise<SlotlockCmsEntry[]> {
+    const { status, body } = await call<{ name?: unknown; type?: unknown; size?: unknown; sha?: unknown }[] | null>('GET', contentsPath(path, ref), undefined, [404]);
+    if (status === 404 || !Array.isArray(body)) return [];
+    return body
+      .filter((entry) => entry.type === 'file' && typeof entry.name === 'string')
+      .map((entry) => ({ name: entry.name as string, size: Number(entry.size ?? 0), sha: String(entry.sha ?? '') }));
+  }
 
   const branchHead = async (branch: string) =>
     (await call<{ object?: { sha?: string } } | null>('GET', `${repo}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, undefined, [404])).body?.object?.sha ?? null;
@@ -443,16 +492,18 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     },
 
     async readBytes(path, ref) {
-      const { status, body } = await call<{ content?: unknown } | null>('GET', contentsPath(path, ref), undefined, [404]);
-      if (status === 404 || !body || typeof body.content !== 'string') return null;
-      return fromBase64(body.content);
+      // Raw, not JSON: the contents API gives a file over 1 MB only so (up to 100 MB).
+      const response = await send('GET', contentsPath(path, ref), undefined, 'application/vnd.github.raw+json');
+      if (response.status === 404) return null;
+      if (!response.ok) throw new SlotlockCmsError(`GitHub answered ${response.status} to GET /contents/${path}`, response.status >= 500 ? 502 : response.status);
+      return new Uint8Array(await response.arrayBuffer());
     },
 
     async listDirectory(path, ref) {
-      const { status, body } = await call<{ name?: unknown; type?: unknown }[] | null>('GET', contentsPath(path, ref), undefined, [404]);
-      if (status === 404 || !Array.isArray(body)) return [];
-      return body.filter((entry) => entry.type === 'file' && typeof entry.name === 'string').map((entry) => entry.name as string);
+      return (await listFiles(path, ref)).map((entry) => entry.name);
     },
+
+    listFiles,
 
     async snapshot({ directory, files = [], commits = [] }) {
       if (files.length > 50 || commits.length > 50) throw new SlotlockCmsError('A snapshot reads at most 50 files and 50 commits', 500);
@@ -507,8 +558,13 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
           entries.push({ path: file.path, mode: '100644', type: 'blob', sha: null });
           continue;
         }
+        if (!(file.content instanceof Uint8Array) && typeof file.content === 'object') {
+          if (!SHA.test(file.content.blob)) throw new SlotlockCmsError('A blob is 40 hex characters', 400);
+          entries.push({ path: file.path, mode: '100644', type: 'blob', sha: file.content.blob });
+          continue;
+        }
         const bytes = typeof file.content === 'string' ? encoder.encode(file.content) : file.content;
-        const { body: blob } = await call<{ sha?: string }>('POST', `${repo}/git/blobs`, { content: base64(bytes), encoding: 'base64' });
+        const { body: blob } = await call<{ sha?: string }>('POST', `${repo}/git/blobs`, blobBody(bytes));
         entries.push({ path: file.path, mode: '100644', type: 'blob', sha: String(blob?.sha ?? '') });
       }
       const { body: tree } = await call<{ sha?: string }>('POST', `${repo}/git/trees`, { base_tree: parentCommit?.tree?.sha, tree: entries });

@@ -3,10 +3,12 @@
 // writes a post with an image, previews and submits it; an Owner publishes it, once it is up to date
 // with main and its checks pass, and the merge carries everyone's sign-off; a later date schedules
 // it, and the hourly workflow's script publishes it; a published post is renamed with redirects; a
-// draft is discarded. Each step is in the staff log, and the database refuses a role that may not
+// draft is discarded. The editor's script uploads a GIF, a video and a pasted screenshot, each known
+// by its bytes and committed beside the post, and the post that shows them is saved. Each step is in the staff log, and the database refuses a role that may not
 // take it. Needs a role that creates databases and roles; skipped without DATABASE_URL.
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { checkPost, parsePost, renderPostBody } from '../../site/src/lib/post-format.js';
@@ -35,6 +37,9 @@ const source = parsePost(existingText, EXISTING);
 const FACTS = Object.fromEntries([...source.body.matchAll(/\{\{facts\.(\w+)\}\}/g)].map((match) => [match[1] as string, 5]));
 const SLUG = 'calendars-for-agents';
 const IMAGE = '![A van waiting at the depot](/blog/calendars-for-agents/van.png)';
+// The fixture post's files (fixtures/blog/): a GIF, an MP4 and a WebM, and a screenshot.
+const FIXTURES = join(import.meta.dirname, 'fixtures', 'blog', 'a-tour-of-post-formats');
+const fixture = (name: string) => new Uint8Array(readFileSync(join(FIXTURES, name)));
 // A 1×1 PNG.
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 const SITE_PATHS = [
@@ -258,7 +263,7 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
       });
     };
     const notAnImage = await upload(new TextEncoder().encode('<svg onload="alert(1)"></svg>'), 'van.png');
-    expect(notAnImage.headers.get('location')).toBe(`/content/${SLUG}?error=image_invalid`);
+    expect(notAnImage.headers.get('location')).toBe(`/content/${SLUG}?error=file_type`);
     const added = await upload(PNG, 'Van at the depot.PNG', 'van');
     expect(added.headers.get('location')).toBe(`/content/${SLUG}?done=image_added#images`);
     expect(Buffer.from(repo.bytes(`cms/${SLUG}`, `site/public/blog/${SLUG}/van.png`) ?? [])).toEqual(PNG);
@@ -270,6 +275,187 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect(served.headers.get('x-content-type-options')).toBe('nosniff');
     expect(Buffer.from(await served.arrayBuffer())).toEqual(PNG);
     expect(await log('github:1004')).toEqual([`content.saved post:${SLUG}`, `content.image_added post:${SLUG}`]);
+  });
+
+
+  /** A file as the editor's script sends it (or, with script false, as the Media panel's form does). */
+  async function uploadFile(bytes: Uint8Array, filename: string, fields: Record<string, string> = {}, script = true) {
+    const csrf = await csrfOf(editor, `/content/${SLUG}`);
+    const body = new FormData();
+    body.set('csrf', csrf);
+    for (const [name, value] of Object.entries(fields)) body.set(name, value);
+    body.set('image', new Blob([new Uint8Array(bytes)]), filename);
+    const request = new Request(`${ORIGIN}/x`, { method: 'POST', body });
+    const encoded = new Uint8Array(await request.arrayBuffer());
+    return editor.request(`/content/${SLUG}/images`, {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? '',
+        'content-length': String(encoded.length),
+        ...(script ? { 'x-slotlock-admin': '1', accept: 'application/json' } : {}),
+      },
+      body: encoded,
+    });
+  }
+  type Uploaded = { name: string; src: string; kind: string; size: number; head: string; media: string; error?: string };
+
+  it('gives the editor its toolbar, Media panel and dialogs, and lets its page alone play videos and the two players', async () => {
+    const page = await editor.request(`/content/${SLUG}`);
+    const html = await page.text();
+    expect(html).toContain('<link rel="stylesheet" href="/editor.css">');
+    expect(html).toContain(`role="toolbar" aria-label="Formatting" aria-controls="f-body" hidden`);
+    expect(html).toContain(`data-upload="/content/${SLUG}/images"`);
+    for (const action of ['h2', 'h3', 'bold', 'italic', 'link', 'ul', 'ol', 'quote', 'code', 'table', 'divider', 'upload', 'embed']) expect(html, action).toContain(`data-md="${action}"`);
+    expect(html).toContain('aria-keyshortcuts="Control+B Meta+B"');
+    expect(html).toContain('<span>Media</span>');
+    expect(html).toContain('<dialog class="md-dialog" id="file-dialog"');
+    expect(html).toContain('<dialog class="md-dialog" id="embed-dialog"');
+    expect(html).toContain('accept="image/png,image/jpeg,image/webp,image/avif,image/gif,video/mp4,video/webm,application/pdf"');
+    const editorPolicy = page.headers.get('content-security-policy') ?? '';
+    expect(editorPolicy).toContain("script-src 'self'; style-src 'self';");
+    expect(editorPolicy).toContain("media-src 'self'; frame-src https://www.youtube-nocookie.com https://player.vimeo.com");
+    expect(editorPolicy).not.toContain('unsafe-inline');
+    // Every other page keeps the console's CSP as it was: no media, no frames.
+    const listPolicy = (await editor.request('/content')).headers.get('content-security-policy') ?? '';
+    expect(listPolicy).not.toContain('media-src');
+    expect(listPolicy).not.toContain('frame-src');
+    const styles = await editor.request('/editor.css');
+    expect(styles.headers.get('content-type')).toBe('text/css; charset=utf-8');
+    expect(await styles.text()).toContain('.md-toolbar');
+  });
+
+  it('uploads a GIF, a video and a pasted screenshot, each known by its bytes and committed beside the post', async () => {
+    const commitsBefore = repo.blobUploads.length;
+    // A GIF of 1.5 MB: more than GitHub's contents API gives as JSON, and than the console took before.
+    const gifBytes = new Uint8Array(1_500_000);
+    gifBytes.set(fixture('hold-expires.gif'));
+    const gif = await uploadFile(gifBytes, 'hold-expires.gif');
+    expect(gif.status).toBe(200);
+    const gifAnswer = (await gif.json()) as Uploaded;
+    expect(gifAnswer).toMatchObject({ name: 'hold-expires.gif', src: `/blog/${SLUG}/hold-expires.gif`, kind: 'image', size: 1_500_000 });
+    expect(gifAnswer.head).toBe(headOf(SLUG));
+    expect(gifAnswer.media).toContain('hold-expires.gif');
+    expect(gifAnswer.media).toContain('GIF · 1.5 MB');
+    expect(Buffer.from(repo.bytes(`cms/${SLUG}`, `site/public/blog/${SLUG}/hold-expires.gif`) ?? []).equals(Buffer.from(gifBytes))).toBe(true);
+    expect(repo.commit(headOf(SLUG))?.message).toBe(`Blog: add hold-expires.gif to "Calendars for agents: what a booking tool owes them"\n\n${EDITOR_SIGN_OFF}`);
+    // Served to the preview from the branch, read raw.
+    const servedGif = await editor.request(`/blog/${SLUG}/hold-expires.gif`);
+    expect(servedGif.status).toBe(200);
+    expect(servedGif.headers.get('content-type')).toBe('image/gif');
+    expect((await servedGif.arrayBuffer()).byteLength).toBe(1_500_000);
+    expect(repo.rawReads).toContain(`site/public/blog/${SLUG}/hold-expires.gif`);
+
+    // A video through the Media panel's form, without the script: the page reloads on Media.
+    const mp4 = fixture('hold-to-booking.mp4');
+    const video = await uploadFile(mp4, 'Hold to booking.MP4', {}, false);
+    expect(video.headers.get('location')).toBe(`/content/${SLUG}?done=image_added#images`);
+    expect(Buffer.from(repo.bytes(`cms/${SLUG}`, `site/public/blog/${SLUG}/hold-to-booking.mp4`) ?? []).equals(Buffer.from(mp4))).toBe(true);
+    // A player asks for a part of it, as Safari does.
+    const part = await editor.request(`/blog/${SLUG}/hold-to-booking.mp4`, { headers: { range: 'bytes=0-99' } });
+    expect(part.status).toBe(206);
+    expect(part.headers.get('content-range')).toBe(`bytes 0-99/${mp4.length}`);
+    expect(part.headers.get('content-type')).toBe('video/mp4');
+    expect(Buffer.from(await part.arrayBuffer()).equals(Buffer.from(mp4.subarray(0, 100)))).toBe(true);
+    expect((await editor.request(`/blog/${SLUG}/hold-to-booking.mp4`, { headers: { range: `bytes=${mp4.length}-` } })).status).toBe(416);
+    const webm = await uploadFile(fixture('hold-to-booking.webm'), 'hold-to-booking.webm');
+    expect(((await webm.json()) as Uploaded).kind).toBe('video');
+
+    // A screenshot pasted from the clipboard is image.png: the script names it by its alt text, and a
+    // second one with no name is never written over the first.
+    const screenshot = fixture('calendar-week.png');
+    const pasted = (await (await uploadFile(screenshot, 'image.png', { name: 'the-calendar-for-van-3' })).json()) as Uploaded;
+    expect(pasted).toMatchObject({ name: 'the-calendar-for-van-3.png', kind: 'image' });
+    const first = (await (await uploadFile(PNG, 'image.png')).json()) as Uploaded;
+    const second = (await (await uploadFile(PNG, 'image.png')).json()) as Uploaded;
+    expect([first.name, second.name]).toEqual(['image.png', 'image-2.png']);
+    // A file named for what it is not is named for what its bytes are.
+    expect(((await (await uploadFile(PNG, 'pretend.gif')).json()) as Uploaded).name).toBe('pretend.png');
+
+    // Refused before anything is committed: an SVG, HTML or a QuickTime movie, whatever it is named;
+    // a GIF over 10 MB; a request over the largest file before its body is read.
+    const head = headOf(SLUG);
+    const refused = async (bytes: Uint8Array, filename: string, status: number, words: string) => {
+      const answer = await uploadFile(bytes, filename);
+      expect(answer.status, filename).toBe(status);
+      expect(((await answer.json()) as Uploaded).error, filename).toContain(words);
+    };
+    await refused(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'), 'logo.png', 415, 'an SVG');
+    await refused(new TextEncoder().encode('<!doctype html><script>alert(1)</script>'), 'page.pdf', 415, 'refused');
+    const mov = new Uint8Array(64);
+    mov.set(new TextEncoder().encode('\0\0\0\x14ftypqt  \0\0\0\0qt  '));
+    await refused(mov, 'screen-recording.mp4', 415, 'QuickTime');
+    const bigGif = new Uint8Array(10_500_000);
+    bigGif.set(fixture('hold-expires.gif'));
+    await refused(bigGif, 'too-long.gif', 413, '10.5 MB');
+    const bigVideo = new Uint8Array(21_000_000);
+    bigVideo.set(mp4);
+    await refused(bigVideo, 'too-long.mp4', 413, 'Too large');
+    expect(headOf(SLUG)).toBe(head);
+
+    // The Media panel deletes one, without leaving the page.
+    const csrf = await csrfOf(editor, `/content/${SLUG}`);
+    const removed = await editor.request(`/content/${SLUG}/images/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-slotlock-admin': '1', accept: 'application/json' },
+      body: new URLSearchParams({ csrf, name: 'image-2.png' }).toString(),
+    });
+    expect(removed.status).toBe(200);
+    const after = (await removed.json()) as Uploaded;
+    expect(after.head).toBe(headOf(SLUG));
+    expect(after.media).not.toContain('image-2.png');
+    expect(repo.bytes(`cms/${SLUG}`, `site/public/blog/${SLUG}/image-2.png`)).toBeNull();
+    for (const name of ['image.png', 'pretend.png']) {
+      const token = await csrfOf(editor, `/content/${SLUG}`);
+      await editor.request(`/content/${SLUG}/images/remove`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf: token, name }).toString() });
+    }
+
+    // Saved with a post that shows them all: the checks find each file, and the preview renders each.
+    const body = `${(postFields(SLUG).body ?? '').trimEnd()}
+
+![The week's calendar for van 3, one slot held](/blog/${SLUG}/the-calendar-for-van-3.png "Pasted from the clipboard.")
+
+![A hold counting down, then booked](/blog/${SLUG}/hold-expires.gif)
+
+![The hold, as a video](/blog/${SLUG}/hold-to-booking.mp4)
+
+![The hold, in WebM](/blog/${SLUG}/hold-to-booking.webm)
+
+| Format | Largest |
+| --- | --- |
+| GIF | 10 MB |
+`;
+    const token = await csrfOf(editor, `/content/${SLUG}`);
+    const preview = (await (await editor.json('/content/preview', { csrf: token, ...postFields(SLUG, { body }) })).json()) as { html: string; checks: string };
+    expect(preview.html).toContain(`<video src="/blog/${SLUG}/hold-to-booking.mp4" controls preload="metadata" playsinline aria-label="The hold, as a video"></video>`);
+    expect(preview.html).toContain(`<img src="/blog/${SLUG}/hold-expires.gif"`);
+    expect(preview.html).toContain('<div class="table-scroll"');
+    expect(preview.checks).not.toContain('class="bad"');
+    expect(preview.checks).toContain('3 pictures, 2 videos');
+    const saved = await form(editor, `/content/${SLUG}`, { ...postFields(SLUG, { body }), head: headOf(SLUG), intent: 'save' });
+    expect(saved.headers.get('location')).toBe(`/content/${SLUG}?done=saved`);
+    expect(parsePost(repo.text(`cms/${SLUG}`, `site/content/blog/${SLUG}.md`) ?? '', SLUG).body).toContain('hold-to-booking.webm');
+    const files = [...repo.files(`cms/${SLUG}`).keys()].filter((path) => path.startsWith(`site/public/blog/${SLUG}/`)).sort();
+    expect(files).toEqual(['hold-expires.gif', 'hold-to-booking.mp4', 'hold-to-booking.webm', 'the-calendar-for-van-3.png', 'van.png'].map((name) => `site/public/blog/${SLUG}/${name}`));
+    expect(repo.blobUploads.length).toBeGreaterThan(commitsBefore);
+    expect(await log('github:1004')).toEqual(expect.arrayContaining([`content.image_added post:${SLUG}`, `content.image_removed post:${SLUG}`, `content.saved post:${SLUG}`]));
+  });
+
+  it('holds a post to 20 files', async () => {
+    const files = () => [...repo.files(`cms/${SLUG}`).keys()].filter((path) => path.startsWith(`site/public/blog/${SLUG}/`));
+    const added: string[] = [];
+    for (let index = files().length; index < 20; index += 1) {
+      const answer = (await (await uploadFile(PNG, `filler-${index}.png`)).json()) as Uploaded;
+      added.push(answer.name);
+    }
+    expect(files()).toHaveLength(20);
+    const over = await uploadFile(PNG, 'one-too-many.png');
+    expect(over.status).toBe(413);
+    expect(((await over.json()) as Uploaded).error).toContain('at most 20 files');
+    for (const name of added) {
+      const token = await csrfOf(editor, `/content/${SLUG}`);
+      await editor.request(`/content/${SLUG}/images/remove`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf: token, name }).toString() });
+    }
+    expect(files()).toHaveLength(5);
   });
 
   it('previews the post with the site’s own renderer and checks, saving nothing', async () => {
@@ -458,12 +644,17 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
 
   it('renames a published post with redirects from its old address, and discards a draft', async () => {
     const to = 'agents-and-calendars';
+    const uploads = repo.blobUploads.length;
     const renamed = await form(ownerBrowser, `/content/${SLUG}/rename`, { to }, `/content/${SLUG}`);
     expect(renamed.headers.get('location')).toBe(`/content/${to}?done=renamed`);
     const files = repo.files(`cms/${to}`);
     expect(files.has(`site/content/blog/${SLUG}.md`)).toBe(false);
     expect(files.has(`site/public/blog/${SLUG}/van.png`)).toBe(false);
     expect(repo.bytes(`cms/${to}`, `site/public/blog/${to}/van.png`)).not.toBeNull();
+    // The video and the GIF move as the blobs they are: only the post and the redirects are sent.
+    expect(repo.bytes(`cms/${to}`, `site/public/blog/${to}/hold-to-booking.mp4`)?.length).toBe(fixture('hold-to-booking.mp4').length);
+    expect(repo.bytes(`cms/${to}`, `site/public/blog/${to}/hold-expires.gif`)?.length).toBe(1_500_000);
+    expect(repo.blobUploads.length - uploads).toBe(2);
     const moved = parsePost(files.get(`site/content/blog/${to}.md`) ?? '', to);
     expect(moved.body).toContain(`](/blog/${to}/van.png)`);
     expect(moved.front.image).toBe(`blog-${SLUG}`);

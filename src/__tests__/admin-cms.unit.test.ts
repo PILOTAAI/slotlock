@@ -10,7 +10,7 @@ import {
   type SlotlockCmsChange,
   slotlockCmsChangeAllowed,
   slotlockCmsPathAllowed,
-  slotlockImageType,
+  slotlockFileType,
   slotlockPostFromFields,
   slotlockRedirectsWith,
   slotlockScheduleComment,
@@ -34,9 +34,16 @@ describe('the CMS rules the console and the hourly workflow share', () => {
       'site/public/blog/a-post/van.png',
       'site/public/blog/a-post/van.jpeg',
       'site/public/blog/a-post/van.webp',
+      'site/public/blog/a-post/chart.avif',
+      'site/public/blog/a-post/hold.gif',
+      'site/public/blog/a-post/hold.mp4',
+      'site/public/blog/a-post/hold.webm',
+      'site/public/blog/a-post/slides.pdf',
       'site/public/_redirects',
       'site/src/data/authors.json',
       'site/public/blog/a-post/van.svg',
+      'site/public/blog/a-post/page.html',
+      'site/public/blog/a-post/recording.mov',
       'site/public/blog/a-post/nested/van.png',
       'site/content/blog/../../src/index.ts',
       'site/content/blog/A-Post.md',
@@ -47,7 +54,7 @@ describe('the CMS rules the console and the hourly workflow share', () => {
     ];
     const allowed = paths.filter((path) => slotlockCmsPathAllowed(path));
     // The author list is not the console's to change: it never writes it.
-    expect(allowed).toEqual(paths.slice(0, 5));
+    expect(allowed).toEqual(paths.slice(0, 10));
     for (const path of paths) expect(cmsPathAllowed(path), path).toBe(slotlockCmsPathAllowed(path));
   });
 
@@ -55,7 +62,7 @@ describe('the CMS rules the console and the hourly workflow share', () => {
     const change = (path: string, status = 'modified', extra: Partial<SlotlockCmsChange> = {}): SlotlockCmsChange =>
       ({ path, previous: null, status, patch: null, ...extra });
     const redirects = (...lines: string[]) => change('site/public/_redirects', 'modified', { patch: ['@@ -1 +1 @@', ...lines].join('\n') });
-    const own = [change('site/content/blog/second.md', 'added'), change('site/public/blog/second/van.png', 'added')];
+    const own = [change('site/content/blog/second.md', 'added'), change('site/public/blog/second/van.png', 'added'), change('site/public/blog/second/hold.mp4', 'added'), change('site/public/blog/second/slides.pdf', 'added')];
     const rename = [
       change('site/content/blog/first.md', 'removed'),
       change('site/public/blog/first/van.png', 'removed'),
@@ -80,6 +87,7 @@ describe('the CMS rules the console and the hourly workflow share', () => {
       ['redirects GitHub gave no diff of', [...rename.slice(0, 4), change('site/public/_redirects')], false],
       ['the author list', [...own, change('site/src/data/authors.json')], false],
       ['a workflow', [...own, change('.github/workflows/site.yml')], false],
+      ['a page beside the post', [...own, change('site/public/blog/second/page.html', 'added')], false],
     ];
     for (const [name, files, allowed] of cases) {
       expect(slotlockCmsChangeAllowed('second', files), name).toBe(allowed);
@@ -110,12 +118,16 @@ describe('the CMS rules the console and the hourly workflow share', () => {
 });
 
 describe('the CMS console', () => {
-  it('knows an image by its first bytes, never by its name', () => {
-    expect(slotlockImageType(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]))).toBe('png');
-    expect(slotlockImageType(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('jpg');
-    expect(slotlockImageType(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('webp');
-    expect(slotlockImageType(new TextEncoder().encode('<svg onload="alert(1)">'))).toBeNull();
-    expect(slotlockImageType(new TextEncoder().encode('RIFF\0\0\0\0WAVEfmt '))).toBeNull();
+  it('knows a file by its first bytes, never by its name', () => {
+    expect(slotlockFileType(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]))).toBe('png');
+    expect(slotlockFileType(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('jpg');
+    expect(slotlockFileType(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('webp');
+    expect(slotlockFileType(new TextEncoder().encode('<svg onload="alert(1)">'))).toBeNull();
+    expect(slotlockFileType(new TextEncoder().encode('RIFF\0\0\0\0WAVEfmt '))).toBeNull();
+    expect(slotlockFileType(new TextEncoder().encode('GIF89a\x01\0\x01\0'))).toBe('gif');
+    expect(slotlockFileType(new TextEncoder().encode('%PDF-1.7\n'))).toBe('pdf');
+    expect(slotlockFileType(new TextEncoder().encode('\0\0\0\x18ftypisom\0\0\x02\0isomiso2'))).toBe('mp4');
+    expect(slotlockFileType(new TextEncoder().encode('\0\0\0\x14ftypqt  \0\0\0\0qt  '))).toBeNull();
   });
 
   it('redirects a renamed post and its Markdown twin, and points older redirects at the new address', () => {
@@ -234,6 +246,32 @@ describe('the CMS GitHub App client', () => {
     for (let index = 0; index < 250; index += 1) fake?.comments.push({ body: `Comment ${index}`, app: false });
     fake?.comments.push({ body: slotlockScheduleComment({ sha, at: '2026-11-14T09:00Z', by: 'octo-owner' }), app: true });
     expect(slotlockScheduleOf(await github.appComments(pull.number))).toEqual({ sha, at: '2026-11-14T09:00Z', by: 'octo-owner' });
+  });
+
+  it('reads a file over 1 MB raw, lists a folder with sizes and blobs, and moves a file by its blob', async () => {
+    const big = new Uint8Array(1_500_000).fill(7);
+    const repo = createFakeGithubRepo({ 'site/public/blog/a-post/hold.gif': big, 'site/public/blog/a-post/van.png': 'png' });
+    const github = createSlotlockCmsGitHub({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
+    // GitHub's contents API gives a file over 1 MB as JSON with no content: only raw has its bytes.
+    expect(Buffer.from((await github.readBytes('site/public/blog/a-post/hold.gif', 'main')) ?? []).equals(Buffer.from(big))).toBe(true);
+    expect(await github.readBytes('site/public/blog/a-post/missing.gif', 'main')).toBeNull();
+    const listed = await github.listFiles('site/public/blog/a-post', 'main');
+    expect(listed.map((entry) => [entry.name, entry.size])).toEqual([['hold.gif', 1_500_000], ['van.png', 3]]);
+    expect(await github.listDirectory('site/public/blog/a-post', 'main')).toEqual(['hold.gif', 'van.png']);
+    const author = { login: 'octo-editor', id: '1004' };
+    const gif = listed.find((entry) => entry.name === 'hold.gif');
+    await github.commit({
+      branch: 'cms/b-post', base: 'main', author, message: 'Blog: move',
+      files: [{ path: 'site/public/blog/a-post/hold.gif', content: null }, { path: 'site/public/blog/b-post/hold.gif', content: { blob: gif?.sha ?? '' } }],
+    });
+    expect(repo.blobUploads).toEqual([]);
+    expect(repo.bytes('cms/b-post', 'site/public/blog/b-post/hold.gif')?.length).toBe(1_500_000);
+    await expect(github.commit({ branch: 'cms/b-post', base: 'main', author, message: 'x', files: [{ path: 'x', content: { blob: 'not-a-sha' } }] })).rejects.toThrow(/40 hex/);
+    // A new file's bytes go up once, as base64 in a JSON body written without a string copy.
+    const odd = Uint8Array.from({ length: 300_001 }, (_, index) => index % 251);
+    await github.commit({ branch: 'cms/b-post', base: 'main', author, message: 'Blog: add', files: [{ path: 'site/public/blog/b-post/odd.webm', content: odd }] });
+    expect(repo.blobUploads).toEqual([300_001]);
+    expect(Buffer.from(repo.bytes('cms/b-post', 'site/public/blog/b-post/odd.webm') ?? []).equals(Buffer.from(odd))).toBe(true);
   });
 
   it('writes only cms/ branches, signed off as the staff member', async () => {

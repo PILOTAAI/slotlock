@@ -5,6 +5,37 @@ versioning.
 
 ## Unreleased
 
+### Added
+
+- The blog's post editor in the admin console takes everything a technical post needs. A formatting
+  toolbar (H2, H3, bold, italic, link, bulleted and numbered lists, quote, code block, table, divider,
+  upload, embed) with keyboard shortcuts (Ctrl or ⌘ with B, I, K, E, Alt+2, Alt+3, Shift+8,
+  Shift+7, Shift+.); a screenshot pasted into the post, or a file dropped on it, asks for its alt text,
+  uploads and goes in at the cursor; a Media panel lists the post's files to insert or delete; the
+  live preview renders every format, with the post's videos and the YouTube and Vimeo players allowed
+  on the editor's page alone (`media-src 'self'`, `frame-src` for the two hosts). Saving, publishing,
+  scheduling, renaming, the checks, CSRF and the role checks are as they were.
+- The post format (`site/src/lib/post-format.ts`) takes PNG, JPEG, WebP, AVIF and animated GIF
+  pictures and MP4 and WebM videos, each with required alt text and an optional caption
+  (`![Alt](/blog/<slug>/file.mp4 "Caption")`); YouTube and Vimeo addresses as privacy-enhanced
+  players (youtube-nocookie.com, Vimeo with `dnt=1`) in lazy, sandboxed frames with strict id checks;
+  `---` dividers; tables that scroll sideways on a phone; and links to a post's PDFs to download.
+  Every character of a post is still escaped: no raw HTML.
+- A post's files are known by their first bytes, never their names, in the console before anything
+  is committed and again in the site's build, which fails on a file that is not what its name says,
+  is over its size, is missing though the post shows it, or has no post: pictures up to 5 MB, GIFs
+  and PDFs 10 MB, videos 20 MB, and 20 files and 50 MB a post, under Cloudflare's 25 MiB static
+  asset, GitHub's contents API and the console Worker's memory. SVG and anything else is refused.
+- The site's CSP adds `media-src 'self'` and `frame-src https://www.youtube-nocookie.com
+  https://player.vimeo.com`, and `scripts/postbuild.mjs` fails a build with any other frame, an
+  unsandboxed one, or a post picture or video that is not a file of the site. The site's Worker gains
+  one script, `site/worker/range.mjs`, run only for a post's `.mp4` and `.webm` files: static assets
+  answer a Range request with the whole file, and Safari plays a video only from byte ranges.
+- The console sends a post's files to GitHub's blobs API without holding them as strings, reads them
+  raw (GitHub's contents API gives a file over 1 MB as JSON with no content), and a rename moves them
+  by their blobs instead of downloading and sending each again.
+- `site/README.md` says how to write a post: each format, and the limits.
+
 ### Changed
 
 - **Blog posts are managed in the admin console.** The published posts stay on the site and appear

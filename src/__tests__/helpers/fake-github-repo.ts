@@ -62,6 +62,10 @@ export interface FakeGithubRepo {
   merges: { title: string; message: string; number: number }[];
   /** The commits a compare/main...<sha> was asked for, in order. */
   compared: string[];
+  /** Each blob the console created, by its size in bytes, in order. */
+  blobUploads: number[];
+  /** Each file read raw through the contents API, in order. */
+  rawReads: string[];
   /** Issues, numbered after the pull requests: the status page's incidents (labelled status) and others. */
   issues: Map<number, FakeIssue>;
   /** Open an issue as a person (or the status probe) would, outside the console. */
@@ -182,6 +186,8 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       return pull;
     },
     compared: [],
+    blobUploads: [],
+    rawReads: [],
     issues: new Map(),
     openIssue(title, labels) {
       // Issues and pull requests share their numbers, as on GitHub.
@@ -224,7 +230,8 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
     const reply = (body: unknown, status = 200) =>
       new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     const auth = new Headers(init?.headers).get('authorization') ?? '';
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    // The console sends a blob's JSON as bytes (github-app.ts, blobBody), everything else as text.
+    const body = init?.body ? (JSON.parse(init.body instanceof Uint8Array ? new TextDecoder().decode(init.body) : String(init.body)) as Record<string, unknown>) : {};
 
     // GitHub takes the App's Client ID or its App ID as the JWT's issuer.
     const appJwt = () => {
@@ -304,7 +311,7 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       const files = [...new Set([...before.keys(), ...after.keys()])].sort().flatMap((file) => {
         if (before.get(file) === after.get(file)) return [];
         const status = !before.has(file) ? 'added' : !after.has(file) ? 'removed' : 'modified';
-        const binary = /\.(?:png|jpe?g|webp)$/.test(file);
+        const binary = /\.(?:png|jpe?g|webp|avif|gif|mp4|webm|pdf)$/.test(file);
         const was = text(before.get(file)).split('\n').filter(Boolean);
         const now = text(after.get(file)).split('\n').filter(Boolean);
         const patch = binary
@@ -325,7 +332,9 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       return commit ? reply({ sha: match[1], tree: { sha: putTree(commit.tree) } }) : reply({ message: 'Not Found' }, 404);
     }
     if (rest === '/git/blobs' && method === 'POST') {
-      return reply({ sha: putBlob(new Uint8Array(Buffer.from(String(body.content), 'base64'))) }, 201);
+      const bytes = new Uint8Array(Buffer.from(String(body.content), 'base64'));
+      fake.blobUploads.push(bytes.length);
+      return reply({ sha: putBlob(bytes) }, 201);
     }
     if (rest === '/git/trees' && method === 'POST') {
       const tree = new Map(trees.get(String(body.base_tree)) ?? []);
@@ -363,9 +372,21 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
       const tree = treeOf(target.searchParams.get('ref') ?? 'main');
       if (!tree) return reply({ message: 'No commit found for the ref' }, 404);
       const sha = tree.get(file);
-      if (sha) return reply({ type: 'file', sha, encoding: 'base64', content: Buffer.from(blobs.get(sha) as Uint8Array).toString('base64') });
-      const entries = [...tree.keys()].filter((name) => name.startsWith(`${file}/`) && !name.slice(file.length + 1).includes('/'));
-      return entries.length ? reply(entries.map((name) => ({ name: name.slice(file.length + 1), type: 'file' }))) : reply({ message: 'Not Found' }, 404);
+      if (sha) {
+        const bytes = blobs.get(sha) as Uint8Array;
+        // As GitHub's contents API: the raw media type gives the bytes of a file up to 100 MB; JSON
+        // gives the content of one up to 1 MB, and of a larger one an empty content, "none" encoded.
+        if (new Headers(init?.headers).get('accept') === 'application/vnd.github.raw+json') {
+          fake.rawReads.push(file);
+          return bytes.length > 100 * 1024 * 1024 ? reply({ message: 'Too large' }, 403) : new Response(new Uint8Array(bytes), { headers: { 'content-type': 'application/octet-stream' } });
+        }
+        if (bytes.length > 1024 * 1024) return reply({ type: 'file', sha, size: bytes.length, encoding: 'none', content: '' });
+        return reply({ type: 'file', sha, size: bytes.length, encoding: 'base64', content: Buffer.from(bytes).toString('base64') });
+      }
+      const entries = [...tree.entries()].filter(([name]) => name.startsWith(`${file}/`) && !name.slice(file.length + 1).includes('/'));
+      return entries.length
+        ? reply(entries.map(([name, blob]) => ({ name: name.slice(file.length + 1), type: 'file', sha: blob, size: blobs.get(blob)?.length ?? 0 })))
+        : reply({ message: 'Not Found' }, 404);
     }
     if (rest === '/pulls' && method === 'GET') {
       const head = target.searchParams.get('head');
