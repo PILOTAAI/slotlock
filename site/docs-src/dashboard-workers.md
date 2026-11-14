@@ -12,8 +12,9 @@ server serves as.
 
 `workers/dashboard/wrangler.jsonc` is an example: copy it into your own deployment and replace what
 it marks as yours. This repository's Dashboard workflow only checks that the Worker bundles. Deploy
-from your own pipeline with your own Cloudflare token: a token that can deploy Workers can replace
-this one and read its session secret, which signs in as any tenant.
+from your own pipeline with your own Cloudflare token, kept where only your main branch can use it
+([Deploy from GitHub Actions](#deploy-from-github-actions)): a token that can deploy Workers can
+replace this one and read its session secret, which signs in as any tenant.
 
 ## Deploy it
 
@@ -166,7 +167,44 @@ removes the default. A tenant on a paid plan cannot be erased until the subscrip
 (`billing_active`).
 
 5. Deploy: `npm ci --omit=dev` at the repository root (the Worker bundles Slotlock's sources), then
-   `npx wrangler deploy --config <your configuration>` in `workers/dashboard`.
+   `npx wrangler deploy --config <your configuration>` in `workers/dashboard`. Or let GitHub Actions
+   deploy every change, as below.
+
+## Deploy from GitHub Actions
+
+`.github/workflows/dashboard-deploy.yml` deploys the Worker each time CI passes on a push to `main`,
+from exactly the commit CI tested, while it is still `main`'s newest commit. A manual run (Actions,
+Dashboard deploy, Run workflow on `main`) deploys `main`'s newest commit once CI has passed on it.
+Slotlock Cloud deploys this way; in a fork, change the repository named in the workflow's `if`.
+
+Its values are on a GitHub environment named `dashboard` that only `main` can use, so no pull request
+and no other branch can read the token. Set it up once, from a checkout, with `gh` signed in as an
+admin of the repository:
+
+```bash
+scripts/configure-github.sh --dashboard-deploy path/to/your/wrangler.jsonc
+```
+
+It checks the configuration as each deploy does, asks for the Cloudflare account ID and an API token
+(the **Edit Cloudflare Workers** template; add **Hyperdrive Read** so each deploy can check the
+cache is off), checks the token with Cloudflare, and only then stores them: the token and account ID
+as environment secrets, and the configuration as the environment variable
+`SLOTLOCK_DASHBOARD_WRANGLER_CONFIG`. The configuration holds no secret: the Worker's secrets stay
+on the Worker. Run it again with a changed configuration to replace it; `REPLACE_DASHBOARD_SECRETS=1`
+asks for the token again.
+
+Each deploy (`scripts/deploy-dashboard.mjs`):
+
+- refuses a configuration that keeps the example's values, names a var like a secret (vars are plain
+  text in Cloudflare's dashboard and in the deploy log), or sets `SLOTLOCK_FREE_PLAN_FROM`;
+- refuses a Hyperdrive configuration that caches queries, and warns when the token cannot read it;
+- refuses a var that is also one of the Worker's secrets (Cloudflare would refuse the upload), and a
+  Worker without `SLOTLOCK_GITHUB_CLIENT_ID`, `SLOTLOCK_GITHUB_CLIENT_SECRET` or
+  `SLOTLOCK_SESSION_SECRET`;
+- deploys, then checks the live dashboard: `/dashboard` answers 200 with its stylesheet, and an
+  unsigned POST to `/stripe/webhook` answers below 500 (billing that is not fully set up answers 503);
+- when that check fails, deploys the versions that were live before again, checks them, and fails
+  the run. Routes and custom domains are not versioned, so a change to them is not undone.
 
 ## How it runs
 

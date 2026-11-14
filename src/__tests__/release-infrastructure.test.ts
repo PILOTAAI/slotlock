@@ -759,7 +759,7 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     for (const name of ['npm', 'ghcr', 'mcp-registry']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
     }
-    for (const name of ['release-tag', 'release-app', 'site', 'cms', 'site-preview']) {
+    for (const name of ['release-tag', 'release-app', 'site', 'dashboard', 'cms', 'site-preview']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([]);
     }
     // The CMS's environments (RFC 0006, 4.5): the App's key on main only, and the preview token on
@@ -771,6 +771,37 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
       )?.body;
     expect(policy('cms')).toEqual({ name: 'main', type: 'branch' });
     expect(policy('site-preview')).toEqual({ name: 'main', type: 'branch' });
+    // The dashboard's deploy token can replace the Worker and read its session secret: main only.
+    expect(policy('dashboard')).toEqual({ name: 'main', type: 'branch' });
+  });
+
+  // dashboard-deploy.yml holds a token that can replace the dashboard Worker. It runs as main has
+  // it (workflow_run), only for a push to this repository's main that CI passed (a pull request
+  // from a fork's branch called main runs CI too, with head_branch main), and deploys exactly the
+  // commit CI tested, still main's newest.
+  it('deploys the dashboard only from main, on the commit CI passed, from main\'s workflow', () => {
+    const deploy = read('.github/workflows/dashboard-deploy.yml');
+    expect(deploy).toMatch(/^on:\n  workflow_run:\n    workflows: \[CI\]\n    types: \[completed\]\n    branches: \[main\]\n  workflow_dispatch:\n/m);
+    expect(deploy).not.toMatch(/^\s*(pull_request|pull_request_target|push):/m);
+    for (const condition of [
+      "github.repository == 'PILOTAAI/slotlock'",
+      "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+      "github.event.workflow_run.conclusion == 'success'",
+      "github.event.workflow_run.event == 'push'",
+      "github.event.workflow_run.head_branch == 'main'",
+      'github.event.workflow_run.head_repository.full_name == github.repository',
+    ]) expect(deploy).toContain(condition);
+    // Only the deploy job enters the environment, and only after the pick job chose a commit.
+    expect(deploy.match(/^    environment:\n      name: dashboard$/gm)).toHaveLength(1);
+    expect(deploy).toContain("needs: pick\n    if: needs.pick.outputs.sha != ''");
+    expect(deploy).toContain('ref: ${{ needs.pick.outputs.sha }}');
+    expect(deploy).toContain('cancel-in-progress: false');
+    // The tested commit reaches the shell through the environment, never interpolated into it.
+    for (const line of deploy.split('\n').filter((text) => /^\s+(run:|\S.*\$\(|if \[|echo )/.test(text))) {
+      expect(line).not.toContain('${{ github.event');
+    }
+    expect(deploy).toContain('TESTED: ${{ github.event.workflow_run.head_sha }}');
+    expect(deploy).toContain('run: node scripts/deploy-dashboard.mjs');
   });
 
   // A pull_request job runs the workflow as the pull request has it: no such job may hold a secret
@@ -814,6 +845,7 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
   'secret set') cat > "$STUB_LOG/secret-$3"; ls "$TMPDIR" > "$STUB_LOG/tmpdir-while-storing"; exit 0 ;;
+  'variable set') cat > "$STUB_LOG/variable-$3"; exit 0 ;;
 esac
 case "$*" in
   *'--jq .id') echo 42; exit 0 ;;
@@ -843,6 +875,7 @@ case "$path" in
   */code-scanning/default-setup) echo '{"state":"configured","languages":["actions","javascript-typescript"],"query_suite":"extended"}' ;;
   */deployment-branch-policies*) echo '{"branch_policies":[]}' ;;
   */environments/release-tag/secrets*) echo "$STUB_SECRETS" ;;
+  */environments/dashboard/secrets*) echo '{"secrets":[{"name":"CLOUDFLARE_API_TOKEN"},{"name":"CLOUDFLARE_ACCOUNT_ID"}]}' ;;
   repos/PILOTAAI/slotlock/keys*) echo "$STUB_KEYS" ;;
   */rulesets\\?*) echo '[]' ;;
   *) echo '{}' ;;
@@ -913,6 +946,35 @@ esac
     expect(waiting.rulesets, 'the tag rulesets still apply').toHaveLength(2);
     expect(waiting.stderr).toContain(`"CI passed" has not succeeded on main`);
     expect(waiting.stdout).toContain("[ ] Apply the ruleset 'Protect main'");
+  });
+
+  it('stores the dashboard deploy configuration only once it passes the deploy\'s own check', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-dashboard-config-'));
+    scratch.push(dir);
+    const example = read('workers/dashboard/wrangler.jsonc');
+    const production = join(dir, 'production.jsonc');
+    writeFileSync(
+      production,
+      example
+        .replaceAll('dashboard.example.com', 'app.slotlock.pylota.io')
+        .replace('slotlock.example.com', 'slotlock-api.pylota.io')
+        .replace('set-this-to-the-hyperdrive-configuration-id', '0123456789abcdef0123456789abcdef'),
+    );
+    const stored = configure(present, '--dashboard-deploy', production);
+    expect(stored.status, stored.stderr).toBe(0);
+    expect(readFileSync(join(stored.log, 'variable-SLOTLOCK_DASHBOARD_WRANGLER_CONFIG'), 'utf8')).toBe(
+      readFileSync(production, 'utf8'),
+    );
+    expect(stored.calls).toContain('variable set SLOTLOCK_DASHBOARD_WRANGLER_CONFIG --env dashboard --repo PILOTAAI/slotlock');
+    expect(stored.stdout).toContain('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN already set');
+    // The example itself is refused before GitHub is asked to change anything.
+    const example_ = join(dir, 'example.jsonc');
+    writeFileSync(example_, example);
+    const refused = configure(present, '--dashboard-deploy', example_);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('still holds values from the example');
+    expect(refused.calls.filter((call) => !call.startsWith('api user') && !/^api --method GET/.test(call))).toEqual([]);
+    expect(existsSync(join(refused.log, 'variable-SLOTLOCK_DASHBOARD_WRANGLER_CONFIG'))).toBe(false);
   });
 
   it('locks main behind "CI passed" once that check has succeeded on main', () => {

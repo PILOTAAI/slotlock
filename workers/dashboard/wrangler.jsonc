@@ -1,7 +1,8 @@
 // The Slotlock dashboard (src/dashboard.ts) as a Worker: an example configuration to copy, and the
 // one this repository's Dashboard workflow bundles to check the Worker builds. Deploy it from your own
 // pipeline with your own Cloudflare credentials and your own values for everything marked below
-// (README "Dashboard on Cloudflare Workers"); this repository never holds a deploy token.
+// (README "Dashboard on Cloudflare Workers"). Slotlock Cloud's own copy is the `dashboard`
+// environment's SLOTLOCK_DASHBOARD_WRANGLER_CONFIG, which dashboard-deploy.yml deploys from main.
 // Config reference: https://developers.cloudflare.com/workers/wrangler/configuration/ (read 2026-10-18).
 //
 // Before the first deploy:

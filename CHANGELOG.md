@@ -7,6 +7,15 @@ versioning.
 
 ### Added
 
+- **The hosted dashboard deploys itself** (`dashboard-deploy.yml`): each time CI passes on a push to
+  `main`, from exactly the commit CI tested, while it is still `main`'s newest. The Cloudflare token
+  and the production configuration live on a `dashboard` environment only `main` can use, which
+  `scripts/configure-github.sh --dashboard-deploy <config>` sets up once it has checked both. Before
+  deploying, `scripts/deploy-dashboard.mjs` refuses a configuration that keeps the example's values,
+  puts a secret among its vars, sets a var that is also one of the Worker's secrets, lacks a secret
+  the Worker needs, or uses a Hyperdrive configuration that caches queries. After deploying it checks
+  the live dashboard and its Stripe webhook, and rolls back to the versions that were live when the
+  check fails.
 - **`scripts/configure-stripe.mjs` sets up Stripe for both paid plans**, in the sandbox or in live
   mode, and changes only what differs when run again. It creates the Developer and Team products
   with the tax code Managed Payments needs, and the four prices in pounds by lookup key; older
