@@ -1702,10 +1702,16 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     api: options.hosts?.api ?? 'https://slotlock-api.pylota.io/healthz',
     dashboard: options.hosts?.dashboard ?? 'https://app.slotlock.pylota.io/dashboard',
   };
-  /** The workflows whose runs on main the System page lists as deploys. */
+  /**
+   * The workflows whose runs on main the System page lists as deploys: those that deploy (the
+   * dashboard Worker, the site, the status page's Worker) and those that publish a release. The
+   * admin console deploys from its operator's own pipeline, and dashboard.yml only bundles the
+   * Workers to check they build.
+   */
   const DEPLOY_WORKFLOWS = [
+    { workflow: 'dashboard-deploy.yml', label: 'Dashboard Worker' },
     { workflow: 'site.yml', label: 'Site' },
-    { workflow: 'dashboard.yml', label: 'Dashboard and console Workers' },
+    { workflow: 'status-worker.yml', label: 'Status Worker' },
     { workflow: 'image.yml', label: 'Server image' },
     { workflow: 'release.yml', label: 'Releases' },
   ] as const;
@@ -1762,21 +1768,30 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return page(session, 'Communications', '/communications', body, undefined, noticeOf(url));
   }
 
-  /** Each host as it answers now: the API's readiness and version, the dashboard's sign-in page. */
+  /**
+   * Each host as it answers now, with the version it runs: the API's readiness and version
+   * (/healthz), the dashboard's sign-in page and the version in its X-Slotlock-Version header, and
+   * the site's public facts.json, whose `version` the site was built from.
+   */
   async function hostHealth(): Promise<SlotlockHostHealth[]> {
-    const ask = async (name: string, target: string, api: boolean): Promise<SlotlockHostHealth> => {
+    const shownVersion = (value: unknown) => (typeof value === 'string' && /^[0-9A-Za-z.+-]{1,40}$/.test(value) ? value : null);
+    const ask = async (name: string, target: string, read: 'healthz' | 'header' | 'facts'): Promise<SlotlockHostHealth> => {
       const started = now();
       try {
-        const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { Accept: api ? 'application/json' : 'text/html' } });
+        const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { Accept: read === 'header' ? 'text/html' : 'application/json' } });
         let version: string | null = null;
         let up = response.status === 200;
         let answer = `HTTP ${response.status}`;
-        if (api) {
+        if (read === 'healthz') {
           const body = (await response.json().catch(() => ({}))) as { status?: unknown; version?: unknown };
-          version = typeof body.version === 'string' ? body.version.slice(0, 40) : null;
+          version = shownVersion(body.version);
           up = response.status === 200 && body.status === 'ready';
           if (!up && response.status === 200) answer = 'not ready';
+        } else if (read === 'facts') {
+          const body = (await response.json().catch(() => ({}))) as { version?: unknown };
+          version = up ? shownVersion(body.version) : null;
         } else {
+          version = up ? shownVersion(response.headers.get('x-slotlock-version')) : null;
           await response.body?.cancel();
         }
         return { name, url: target, up, answer: up ? 'ok' : answer, version, ms: now() - started };
@@ -1785,9 +1800,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       }
     };
     return Promise.all([
-      ask('API', hostUrls.api, true),
-      ask('Dashboard', hostUrls.dashboard, false),
-      ask('Site', `${siteUrl}/`, false),
+      ask('API', hostUrls.api, 'healthz'),
+      ask('Dashboard', hostUrls.dashboard, 'header'),
+      ask('Site', `${siteUrl}/facts.json`, 'facts'),
     ]);
   }
 

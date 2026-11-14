@@ -1083,6 +1083,11 @@ export interface SlotlockDashboardOptions {
   /** The privacy notice the sign-in page links, an https URL. */
   privacyUrl?: string;
   /**
+   * The Slotlock version the dashboard runs, sent as X-Slotlock-Version on its pages so the staff
+   * console's System page can say what is deployed (the Worker passes package.json's).
+   */
+  version?: string;
+  /**
    * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
    * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
    * `publicUrl`.
@@ -2317,6 +2322,8 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
   const hsts: Record<string, string> =
     publicUrl.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+  const versionHeader: Record<string, string> =
+    options.version && /^[0-9A-Za-z.+-]{1,40}$/.test(options.version) ? { 'X-Slotlock-Version': options.version } : {};
   const service = new URL(options.serviceUrl ?? options.publicUrl);
   const serviceRoot = `${service.origin}${service.pathname.replace(/\/$/, '')}`;
   const mcpUrl = `${serviceRoot}/mcp`;
@@ -2704,6 +2711,7 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
         'Referrer-Policy': REFERRER_POLICY,
         'Cross-Origin-Opener-Policy': 'same-origin',
         ...hsts,
+        ...versionHeader,
         ...headers,
       },
     });

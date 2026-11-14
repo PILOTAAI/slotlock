@@ -358,7 +358,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
       html`${host.version ?? '–'}`,
       html`${count(host.ms)} ms`,
     ]), 'No hosts to check.')}
-    <p class="fine">Asked as this page opened, with a five-second limit. The public status page probes them from GitHub every ten minutes.</p>
+    <p class="fine">Asked as this page opened, with a five-second limit. The public status page probes them every five minutes, from a Cloudflare Worker.</p>
 
     <h2 id="maintenance">Maintenance</h2>
     ${stats([
