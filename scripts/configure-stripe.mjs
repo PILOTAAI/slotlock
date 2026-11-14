@@ -30,8 +30,9 @@
 // (one new version, so billing never runs half set up; secrets, so a deploy keeps them), with:
 //   - the webhook endpoint's signing secret, when Stripe has just made the endpoint;
 //   - SLOTLOCK_WORKER_STRIPE_KEY as STRIPE_SECRET_KEY: the dashboard's restricted key (rk_…), with
-//     Write on Checkout Sessions and Customer portal and Read on Subscriptions and Prices (the
-//     Usage page shows Stripe's own amounts; without Prices, its labels). It is checked
+//     Write on Checkout Sessions and Customer portal and Read on Subscriptions, Prices and Invoices
+//     (the Usage page shows Stripe's own amounts; without Prices, its labels; without Invoices, a
+//     refund is matched to no account, so no alert is raised for it). It is checked
 //     first: it reads a subscription and the portal, and opens a Checkout Session with Managed
 //     Payments and expires it at once (nothing is charged), which also shows Managed Payments is
 //     on. It is stored only if the Worker has, or is given, STRIPE_WEBHOOK_SECRET: without one the
@@ -517,6 +518,13 @@ async function checkWorkerKey(workerKey, price) {
   if (prices.status !== 200) {
     console.log(
       "\nnote: the dashboard's key cannot read Prices, so its Usage page shows the labels it is configured with (SLOTLOCK_PLAN_PRICE_*, else £5 and £50), not Stripe's amounts. Give the key Read on Prices.",
+    );
+  }
+  // A refund names its PaymentIntent; the invoice payments say which subscription it paid for.
+  const payments = await probe(workerKey, 'GET', 'invoice_payments?limit=1');
+  if (payments.status !== 200) {
+    console.log(
+      "\nnote: the dashboard's key cannot read invoice payments, so a refund is matched to no account and no \"Refunded, plan still active\" alert is raised. Give the key Read on Invoices.",
     );
   }
   console.log('\nThe dashboard\'s key reads subscriptions and the portal, and opened (then expired) a Checkout Session with Managed Payments.');

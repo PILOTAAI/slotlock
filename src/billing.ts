@@ -40,7 +40,10 @@ export class SlotlockBillingError extends Error {
 export const SLOTLOCK_STRIPE_API_VERSION = '2026-04-22.dahlia';
 
 export interface SlotlockStripeOptions {
-  /** A restricted key: write on Checkout Sessions and portal sessions, read on Subscriptions. */
+  /**
+   * A restricted key: write on Checkout Sessions and portal sessions, read on Subscriptions (and on
+   * Invoices, to tell which subscription a refunded payment paid).
+   */
   secretKey: string;
   /** The Developer plan's price ids, monthly and yearly. */
   prices: Readonly<Record<SlotlockBillingInterval, string>>;
@@ -112,6 +115,11 @@ export interface SlotlockStripe {
   liveSubscriptionsOfTenant(tenantRef: string): Promise<SlotlockStripeSubscription[]>;
   /** The plan a subscription gives, by its price: Team for a Team price, else Developer. */
   planOf?(subscription: SlotlockStripeSubscription): { plan: SlotlockPlan; status: SlotlockPlanStatus };
+  /**
+   * The subscriptions whose invoices a payment (a PaymentIntent) paid, from its invoice payments.
+   * Needs Read on Invoices: without it, Stripe refuses (403).
+   */
+  paidSubscriptions?(paymentIntent: string): Promise<string[]>;
   /**
    * Whether the subscription carries the metered overage price (`overagePrice`), so its use past the
    * quota is billed. Never without one.
@@ -301,6 +309,28 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
       return call<SlotlockStripeSubscription>('GET', `/v1/subscriptions/${id}`);
     },
     liveSubscriptionsOfCustomer,
+    async paidSubscriptions(paymentIntent) {
+      if (!/^pi_[A-Za-z0-9]{1,250}$/.test(paymentIntent)) throw new SlotlockBillingError('Not a payment intent id');
+      // A Charge names no invoice at this API version, only its PaymentIntent; the invoice payments
+      // say which invoices it paid, and each invoice which subscription made it (Stripe's API
+      // reference, Invoice Payments and Invoices, read 2026-11-14).
+      const page = await call<{ data?: Array<{ invoice?: string | { parent?: { subscription_details?: { subscription?: unknown } | null } | null } }> }>(
+        'GET',
+        `/v1/invoice_payments?${new URLSearchParams({
+          'payment[type]': 'payment_intent',
+          'payment[payment_intent]': paymentIntent,
+          limit: '10',
+          'expand[]': 'data.invoice',
+        }).toString()}`,
+      );
+      const paid = new Set<string>();
+      for (const item of page.data ?? []) {
+        const made = typeof item.invoice === 'object' ? item.invoice?.parent?.subscription_details?.subscription : undefined;
+        const id = typeof made === 'string' ? made : (made as { id?: unknown } | undefined)?.id;
+        if (typeof id === 'string' && STRIPE_ID.test(id)) paid.add(id);
+      }
+      return [...paid];
+    },
     planOf: (subscription) => slotlockPlanOfSubscription(subscription, options.teamPrices),
     carriesOverage: (subscription) => slotlockSubscriptionCarriesPrice(subscription, options.overagePrice),
     shownPrices() {
@@ -457,12 +487,14 @@ function failedInvoiceOf(event: unknown): { id: string; detail: Record<string, s
 /**
  * A refunded charge, from a `charge.refunded` event, whose data.object is a Charge (Stripe's API
  * reference, read 2026-11-14: the event "occurs whenever a charge is refunded, including partial
- * refunds"; a Charge has `id` (ch_…, or py_… for some payment methods), `customer` (an id, or the
- * customer expanded), `amount` and `amount_refunded` in the currency's smallest unit, `currency`,
- * and `refunded`, true only once all of it is refunded). Only those few fields are kept: never the
- * billing details or the card.
+ * refunds"; a Charge has `id` (ch_…, or py_… for some payment methods), `customer` and
+ * `payment_intent` (ids, or the objects expanded), `amount` and `amount_refunded` in the currency's
+ * smallest unit, `currency`, and `refunded`, true only once all of it is refunded; it names no
+ * invoice). Only those few fields are kept: never the billing details or the card.
  */
-function refundedChargeOf(event: unknown): { id: string; customer: string; detail: Record<string, string | number | boolean | null> } | null {
+function refundedChargeOf(
+  event: unknown,
+): { id: string; customer: string; paymentIntent: string | null; detail: Record<string, string | number | boolean | null> } | null {
   const object = (event as { data?: { object?: Record<string, unknown> } })?.data?.object;
   if (!object || object.object !== 'charge' || typeof object.id !== 'string' || !/^(ch|py)_[A-Za-z0-9]{1,250}$/.test(object.id)) {
     return null;
@@ -470,9 +502,11 @@ function refundedChargeOf(event: unknown): { id: string; customer: string; detai
   const customer = typeof object.customer === 'string' ? object.customer : (object.customer as { id?: unknown } | null | undefined)?.id;
   if (typeof customer !== 'string' || !/^cus_[A-Za-z0-9]{1,250}$/.test(customer)) return null;
   const number = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  const intent = typeof object.payment_intent === 'string' ? object.payment_intent : (object.payment_intent as { id?: unknown } | null | undefined)?.id;
   return {
     id: object.id,
     customer,
+    paymentIntent: typeof intent === 'string' && /^pi_[A-Za-z0-9]{1,250}$/.test(intent) ? intent : null,
     detail: {
       amount: number(object.amount),
       amount_refunded: number(object.amount_refunded),
@@ -484,21 +518,36 @@ function refundedChargeOf(event: unknown): { id: string; customer: string; detai
 
 /**
  * A refund is for the people who run the service when it left a plan running: the customer got
- * their money back and still has the plan, so a person ends it or says why not (RFC 0006, M4).
- * Stripe's word on the subscription decides, not the database's: a cancellation made with the
- * refund may arrive after it. True when an alert was noted.
+ * their money back and still has the plan, so a person ends it or says why not (RFC 0006, M4). Only
+ * the account the refunded payment paid for is told: the subscriptions whose invoices it paid, each
+ * of an account whose plan names this customer. Stripe's word on each subscription decides, not the
+ * database's: a cancellation made with the refund may arrive after it. True when an alert was
+ * noted. A key that may not read invoice payments is reported through `onError`, and nothing is
+ * noted, rather than have Stripe retry for days.
  */
 async function noteRefund(
-  deps: { sql: SlotlockSql; stripe: SlotlockStripe },
+  deps: { sql: SlotlockSql; stripe: SlotlockStripe; onError?: (error: unknown) => void },
   charge: NonNullable<ReturnType<typeof refundedChargeOf>>,
 ): Promise<boolean> {
+  // A schema from before this release cannot say whose customer it is, nor take the alert.
   const plans = await readSlotlockPlansOfCustomer(deps.sql, charge.customer);
+  if (!plans || plans.length === 0 || !charge.paymentIntent || !deps.stripe.paidSubscriptions) return false;
+  let paid: string[];
+  try {
+    paid = await deps.stripe.paidSubscriptions(charge.paymentIntent);
+  } catch (error) {
+    const status = (error as { status?: unknown } | null)?.status;
+    if (!(error instanceof SlotlockBillingError) || (status !== 401 && status !== 403)) throw error;
+    deps.onError?.(error);
+    return false;
+  }
   let noted = false;
-  for (const plan of plans ?? []) {
-    if (plan.plan === 'free' || plan.status === 'canceled' || !plan.stripeSubscription || plan.endsAt) continue;
-    const subscription = await deps.stripe.subscription(plan.stripeSubscription);
+  for (const id of paid) {
+    const subscription = await deps.stripe.subscription(id);
+    const tenantRef = subscription.metadata?.tenant_ref;
+    if (!tenantRef || !plans.some((plan) => plan.tenantRef === tenantRef)) continue;
     if (!slotlockSubscriptionIsLive(subscription) || slotlockSubscriptionEnding(subscription)) continue;
-    await noteBillingEvent(deps.sql, 'refunded_plan_active', plan.tenantRef, charge.id, { ...charge.detail, subscription: subscription.id });
+    await noteBillingEvent(deps.sql, 'refunded_plan_active', tenantRef, charge.id, { ...charge.detail, subscription: subscription.id });
     noted = true;
   }
   return noted;

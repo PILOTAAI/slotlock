@@ -202,6 +202,13 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     expect(alerts).toContain('£5.00 of £5.00 refunded');
     expect(alerts).toContain('https://dashboard.stripe.com/payments/ch_Refund1');
     expect(await text(staff.billing, '/')).toContain('1 billing alert');
+    // Part of a payment refunded says only that: the plan may well be meant to carry on.
+    await superuser`SELECT slotlock.note_billing_event('refunded_plan_active', ${PAYING}, 'ch_Refund2',
+      ${superuser.json({ amount: 500, amount_refunded: 200, currency: 'gbp', refunded: false, subscription: 'sub_Pay' })})`;
+    const partly = await text(staff.billing, '/billing');
+    const row = partly.slice(partly.indexOf('ch_Refund2') - 900, partly.indexOf('ch_Refund2'));
+    expect(row).toContain('Partly refunded<span class="sub">£2.00 of £5.00 refunded</span>');
+    expect(row).not.toContain('end the plan');
   });
 
   it("shows people by their provider's name, else display, else reference, with initials and no style attribute", async () => {

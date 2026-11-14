@@ -43,7 +43,7 @@ replace this one and read its session secret, which signs in as any tenant.
    `SLOTLOCK_GITHUB_CLIENT_SECRET` and `SLOTLOCK_SESSION_SECRET`, and `SLOTLOCK_ASSISTANT_SECRET`
    for the assistant.
    For plans and billing (hosted Slotlock), also `STRIPE_SECRET_KEY` (a restricted key: write on
-   Checkout Sessions and Customer portal, read on Subscriptions) and `STRIPE_WEBHOOK_SECRET`; see
+   Checkout Sessions and Customer portal, read on Subscriptions and Invoices) and `STRIPE_WEBHOOK_SECRET`; see
    [Plans and billing](#plans-and-billing).
 #### Plans and billing
 
@@ -76,7 +76,7 @@ Create restricted key):
 | Key | Permissions | Where it goes |
 | --- | --- | --- |
 | Setup (`STRIPE_SECRET_KEY` for the script) | Write: Products, Prices, Webhook Endpoints, Customer portal. Read: Balance | Your terminal only; delete it after |
-| Dashboard (`SLOTLOCK_WORKER_STRIPE_KEY`) | Write: Checkout Sessions, Customer portal. Read: Subscriptions, Prices | The Worker's `STRIPE_SECRET_KEY` |
+| Dashboard (`SLOTLOCK_WORKER_STRIPE_KEY`) | Write: Checkout Sessions, Customer portal. Read: Subscriptions, Prices, Invoices (to match a refund to the subscription it paid) | The Worker's `STRIPE_SECRET_KEY` |
 | Launch check (`SLOTLOCK_CHECK_STRIPE_KEY`) | Read: Products, Prices, Webhook Endpoints, Events | The repository's Actions secret |
 
 ```sh
@@ -95,9 +95,9 @@ webhook endpoint is `<SLOTLOCK_PUBLIC_URL>/stripe/webhook`, with the events
 Each signed subscription event makes the Worker read the subscription from Stripe and set the
 tenant's plan, with the date it ends when it is cancelled: `active` or `trialing` gives the plan,
 `past_due` keeps it while Stripe retries (a failed payment is shown to the people who run the
-service, and closed when it is paid), anything else returns the tenant to Free. A refund whose
-customer's plan Stripe still renews is shown to the people who run the service, to end the plan or
-say why not. A customer with a subscription that is live or `unpaid` cannot start a second one. Nothing is
+service, and closed when it is paid), anything else returns the tenant to Free. A refund of a
+payment for a subscription Stripe still renews is shown to the people who run the service, for the
+account that subscription is for: to end the plan or say why not, or as partly refunded. A customer with a subscription that is live or `unpaid` cannot start a second one. Nothing is
 deleted when a plan ends; the tenant cannot add more until it is under the Free limits. An `unpaid`
 or `incomplete` subscription stays named on the plan, because paying it renews it: until it is
 cancelled in Stripe, the account is not erased and its team is not deleted. An event about an

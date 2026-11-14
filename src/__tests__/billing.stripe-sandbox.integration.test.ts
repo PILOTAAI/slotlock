@@ -295,11 +295,15 @@ describe.skipIf(!KEY || !DATABASE)('billing against the Stripe sandbox', () => {
 
     // The first invoice's charge, refunded in full as staff refund one in Stripe's dashboard. The
     // fields the webhook reads (billing.ts refundedChargeOf), as Stripe's API reference has them
-    // (read 2026-11-14): a Charge's customer, amount, amount_refunded, currency and refunded, and a
-    // Refund's charge.
+    // (read 2026-11-14): a Charge's customer, payment_intent, amount, amount_refunded, currency and
+    // refunded (no invoice at this API version), and a Refund's charge.
     const [paid] = (await api('GET', `charges?customer=${buyer}&limit=1`)).data as StripeObject[];
     expect(paid).toMatchObject({ object: 'charge', customer: buyer, amount: 500, amount_refunded: 0, currency: 'gbp', refunded: false });
     expect(paid?.id).toMatch(/^(ch|py)_[A-Za-z0-9]+$/);
+    expect(paid?.payment_intent).toMatch(/^pi_[A-Za-z0-9]+$/);
+    expect(paid).not.toHaveProperty('invoice');
+    // The payment's invoice payments name the invoice it paid, and that invoice the subscription.
+    expect(await stripe.paidSubscriptions?.(paid?.payment_intent as string)).toEqual([subscription.id]);
     const refund = await api('POST', 'refunds', { charge: paid?.id });
     expect(refund).toMatchObject({ object: 'refund', charge: paid?.id, amount: 500, currency: 'gbp' });
 

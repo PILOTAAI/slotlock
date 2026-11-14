@@ -36,11 +36,14 @@ versioning.
 
 ### Added
 
-- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`:
-  when the refunded charge's customer still has a plan that Stripe says renews, Billing's Needs a
-  person shows "Refunded, plan still active" with the amount, linked to the payment in Stripe. Run
-  `node scripts/configure-stripe.mjs` (it adds the event to an existing endpoint and keeps its
-  others), and `slotlock migrate`; the launch check now expects the event.
+- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`
+  and follows the refunded payment to the subscriptions whose invoices it paid (Stripe's invoice
+  payments): for each that Stripe says still renews, of an account whose plan names that customer,
+  Billing's Needs a person shows "Refunded, plan still active" with the amount, or "Partly refunded",
+  linked to the payment in Stripe. Alerts are kept once per account and Stripe object. Give the
+  dashboard's Stripe key Read on Invoices, run `node scripts/configure-stripe.mjs` (it adds the
+  event to an existing endpoint, keeps its others, and says when the key cannot read invoice
+  payments), and `slotlock migrate`; the launch check now expects the event.
 - **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
   Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
   (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at

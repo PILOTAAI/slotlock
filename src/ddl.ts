@@ -2863,7 +2863,7 @@ REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[23]} FROM PUBLIC;
 
 -- What the Stripe webhook saw that needs a person (RFC 0006, M4): a payment that failed, a second
 -- subscription bought by the same account (for a refund), and a refund that left the account's
--- plan running (to end it, or say why not). One row per Stripe object, so a
+-- plan running (to end it, or say why not). One row per account and Stripe object, so a
 -- retried delivery adds nothing; resolved by staff, or by Stripe when the account's subscription is
 -- paid again.
 CREATE TABLE IF NOT EXISTS slotlock.billing_alerts (
@@ -2883,7 +2883,7 @@ CREATE TABLE IF NOT EXISTS slotlock.billing_alerts (
     AND (resolved_at IS NULL) = (resolved_by IS NULL)
     AND (resolved_by IS NULL OR octet_length(resolved_by) BETWEEN 1 AND 100)
   ),
-  CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, stripe_ref)
+  CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, tenant_ref, stripe_ref)
 );
 CREATE INDEX IF NOT EXISTS slotlock_billing_alerts_open_idx
   ON slotlock.billing_alerts (created_at DESC) WHERE resolved_at IS NULL;
@@ -2910,6 +2910,21 @@ BEGIN
   END IF;
 END
 $slotlock_billing_alerts_refunds$;
+-- One alert per account and Stripe object, no longer per object alone: one payment can pay two
+-- accounts' invoices (a customer who pays for their own account and a team's), and a refund of it
+-- tells each. The wider key holds every row the narrower one did.
+DO $slotlock_billing_alerts_per_account$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.billing_alerts'::regclass AND conname = 'slotlock_billing_alerts_once'
+       AND pg_catalog.pg_get_constraintdef(oid) LIKE '%tenant_ref%'
+  ) THEN
+    ALTER TABLE slotlock.billing_alerts DROP CONSTRAINT IF EXISTS slotlock_billing_alerts_once;
+    ALTER TABLE slotlock.billing_alerts ADD CONSTRAINT slotlock_billing_alerts_once UNIQUE (kind, tenant_ref, stripe_ref);
+  END IF;
+END
+$slotlock_billing_alerts_per_account$;
 REVOKE ALL ON slotlock.billing_alerts FROM PUBLIC;
 
 -- The webhook's record (the serving role's): payment_failed, duplicate_subscription and
