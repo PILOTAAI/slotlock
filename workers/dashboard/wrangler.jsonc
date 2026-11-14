@@ -37,6 +37,15 @@
   // https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public
   // (read 2026-11-14; workerd 1.20261019.1, which wrangler 4.152.0 runs, knows it).
   "compatibility_flags": ["global_fetch_strictly_public"],
+  // Run the Worker next to the database. A dashboard page makes dozens of queries one after another
+  // (the overview about 60), and through Hyperdrive each one travels from wherever the Worker runs
+  // to the database: from an edge far from it, a page takes seconds. Hyperdrive's guidance for
+  // sequential queries is a placement hint that matches the database's region
+  // (developers.cloudflare.com/hyperdrive/concepts/how-hyperdrive-works/, "Reduce latency with
+  // Placement", read 2026-11-14). Yours: the region nearest your database, such as
+  // "gcp:europe-west2" for London, or { "mode": "smart" }. scripts/deploy-dashboard.mjs refuses a
+  // configuration without one.
+  "placement": { "region": "aws:us-east-1" },
   // Yours: the dashboard's hostname. A Custom Domain gets its own certificate at any depth; no Worker
   // route in the zone may match it, because a route runs before a Custom Domain.
   "routes": [{ "pattern": "dashboard.example.com", "custom_domain": true }],

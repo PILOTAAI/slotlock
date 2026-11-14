@@ -95,7 +95,8 @@ function config(vars: Record<string, string> = {}, extra = '') {
   "name": "slotlock-dashboard",
   "main": "worker.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": ["global_fetch_strictly_public"],${extra}
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "placement": { "region": "gcp:europe-west2" },${extra}
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "${HYPERDRIVE}" }],
   "vars": ${JSON.stringify({ SLOTLOCK_PUBLIC_URL: base, SLOTLOCK_SERVICE_URL: 'https://slotlock-api.test', ...vars })},
 }
@@ -208,6 +209,8 @@ describe('scripts/deploy-dashboard.mjs', () => {
     ['no strictly public fetch', null, '"compatibility_flags" must include "global_fetch_strictly_public"'],
     ['the private-origin fetch', null, '"compatibility_flags" must include "global_fetch_strictly_public"'],
     ['a flag listed twice', null, '"compatibility_flags" lists global_fetch_strictly_public more than once'],
+    ['no placement', null, '"placement" must run the Worker near its database'],
+    ['an empty placement', null, '"placement" must run the Worker near its database'],
     ['not JSON', '{ "name": ', 'It is not JSON or JSONC'],
   ])('refuses %s before it asks Cloudflare anything', async (name, given, message) => {
     const text =
@@ -222,6 +225,10 @@ describe('scripts/deploy-dashboard.mjs', () => {
           '["global_fetch_strictly_public"]',
           '["global_fetch_strictly_public", "global_fetch_private_origin"]',
         ),
+        // As downloaded with `wrangler init --from-dash` and stored on 14 November: the Worker ran at
+        // the edge, every query crossed to the database in London, and pages took seconds.
+        'no placement': config().replace('  "placement": { "region": "gcp:europe-west2" },\n', ''),
+        'an empty placement': config().replace('{ "region": "gcp:europe-west2" }', '{ "region": " " }'),
         // As stored on 14 November: Cloudflare refused the upload with code 10021.
         'a flag listed twice': config().replace(
           '["global_fetch_strictly_public"]',

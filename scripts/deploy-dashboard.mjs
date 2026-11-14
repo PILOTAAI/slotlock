@@ -24,7 +24,8 @@
 // origin (http on loopback only); nothing left from the example (example.com, "set-this-to"); no var named like a secret
 // (…_SECRET, …_SECRETS, …_TOKEN, …_KEY, …_PASSWORD), since vars are plain text in Cloudflare's
 // dashboard and in the deploy log; no SLOTLOCK_FREE_PLAN_FROM, which makes billing answer 503; no
-// compatibility flag listed twice, which Cloudflare refuses at upload; and
+// compatibility flag listed twice, which Cloudflare refuses at upload; a placement near the database
+// (every page makes dozens of queries in turn, each crossing from the Worker to the database); and
 // the global_fetch_strictly_public compatibility flag, without which the Worker's fetch of a URL a
 // member gives reaches a hostname in its own zone past that zone's security settings
 // (https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public,
@@ -135,6 +136,17 @@ export function configProblems(text) {
     problems.push(
       '"compatibility_flags" must include "global_fetch_strictly_public", as wrangler.jsonc does: without it, the ' +
         'Worker\'s fetch of a URL a member gives reaches a hostname in its own zone past the zone\'s security settings.',
+    );
+  }
+  const placement = config.placement && typeof config.placement === 'object' ? config.placement : {};
+  const placed =
+    placement.mode === 'smart' ||
+    ['region', 'host', 'hostname'].some((key) => typeof placement[key] === 'string' && placement[key].trim() !== '');
+  if (!placed) {
+    problems.push(
+      '"placement" must run the Worker near its database, as wrangler.jsonc does ({ "region": "gcp:europe-west2" } ' +
+        'for a database in London, or { "mode": "smart" }): a page makes dozens of queries one after another, and from ' +
+        'an edge far from the database each one crosses that distance, so pages take seconds.',
     );
   }
   const twice = [...new Set(flags.filter((flag, at) => flags.indexOf(flag) !== at))];
