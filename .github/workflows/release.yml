@@ -357,23 +357,35 @@ jobs:
     timeout-minutes: 10
     environment: go-module
     permissions:
-      # Push the clients/go/v<version> tag with GITHUB_TOKEN; a tag it pushes starts no workflow.
-      contents: write
+      # The clients/go/v<version> tag is pushed with the release deploy key, not GITHUB_TOKEN: the
+      # "Release tags" ruleset lets only admins and deploy keys create one, so no other token that
+      # can write to the repository publishes a module version (scripts/configure-github.sh). The
+      # push starts no workflow: release.yml's v* does not match across a slash.
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          # Kept for the one tag push below; the only code this job runs is this repository's own
-          # script, from the tagged commit.
-          persist-credentials: true
-      - name: Tag the module
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: scripts/tag-go-module.sh "${VERSION#v}" "$GITHUB_SHA"
+      # Set up before the key is on disk: after the checkout, the job runs only git, this
+      # repository's own script from the tagged commit, and the Go toolchain.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.24'
           cache: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Kept in the local git config for the one tag push below. With a key, origin is the SSH
+          # URL, so the push can only authenticate with it.
+          ssh-key: ${{ secrets.TAG_RELEASE_DEPLOY_KEY }}
+          persist-credentials: true
+      - name: Tag the module
+        env:
+          VERSION: ${{ github.ref_name }}
+          HAS_DEPLOY_KEY: ${{ secrets.TAG_RELEASE_DEPLOY_KEY != '' }}
+        run: |
+          if [ "$HAS_DEPLOY_KEY" != true ]; then
+            echo "::error::The go-module environment has no TAG_RELEASE_DEPLOY_KEY: run scripts/bootstrap-release.sh $VERSION once (an admin); it sets it up and re-runs this job."
+            exit 1
+          fi
+          scripts/tag-go-module.sh "${VERSION#v}" "$GITHUB_SHA"
       # The proxy fetches a version the first time it is asked for, and lists it from then on.
       - name: Ask the Go module proxy for it
         env:

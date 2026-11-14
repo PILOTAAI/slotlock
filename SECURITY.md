@@ -301,6 +301,39 @@ replaces a console key or session secret, nor re-adds a staff member, that is al
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
 
+## Releases
+
+A release comes only from a protected `v<version>` tag (GOVERNANCE.md, Releases). Only an admin or
+the release deploy key can create a `v*` tag, or a Go client version's `clients/go/v*` tag, and only
+an admin can move or delete one. The key lives in two GitHub environments: `release-tag`, which only
+runs on `main` can read, and `go-module`, which a release's run can read once a maintainer approves
+it. A workflow's `GITHUB_TOKEN`, the Slotlock CMS App and any other token that can write to the
+repository cannot create either tag.
+
+Before you run a server image, check that `image.yml` built it, in the run for that version's tag,
+on a GitHub-hosted runner:
+
+```sh
+gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock \
+  --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml \
+  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+```
+
+`--signer-workflow` alone is not enough: it accepts `image.yml` run from any branch, which the
+`ghcr` environment's reviewer never saw.
+
+The MCP Registry entry `io.github.PILOTAAI/slotlock` is published by `mcp-registry.yml` once a
+maintainer approves it. The registry, though, decides who may publish to `io.github.PILOTAAI` by
+GitHub organization, not by repository or workflow: a workflow in any PILOTAAI repository that can
+request an OIDC token, and the organization's members (`mcp-publisher login github`), could publish
+a version of it. Nothing in this repository can narrow that, and we accept it. A domain namespace
+(`io.pylota/slotlock`, proven by a key published in pylota.io's DNS) would tie publishing to that
+key and to whoever runs that DNS, but it is another server's name: every client would have to move
+to it, and this name would stay open to the organization. Instead, the organization keeps its members and repositories to those
+who need them, `launch-check.yml` fails when the registry's latest version is not the release's, and
+an entry is only as good as its image: install one whose package is
+`ghcr.io/pilotaai/slotlock:<version>`, and verify that image as above.
+
 ## Dependencies
 
 The published package depends on `ical.js`, `rrule` and `zod`, and on `postgres` as a peer; the

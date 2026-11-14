@@ -55,6 +55,15 @@ docker run -d -p 127.0.0.1:8080:8080 \
   ghcr.io/pilotaai/slotlock:{{version}}
 ```
 
+To check that the release workflow built the image, from that version's tag, on a GitHub-hosted
+runner:
+
+```sh
+gh attestation verify oci://ghcr.io/pilotaai/slotlock:{{version}} --repo PILOTAAI/slotlock \
+  --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml \
+  --source-ref refs/tags/v{{version}} --deny-self-hosted-runners
+```
+
 ## Without Docker
 
 ```sh

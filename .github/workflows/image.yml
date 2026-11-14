@@ -1,14 +1,18 @@
 # Image: build the server image for linux/amd64 and linux/arm64, push it to
 # ghcr.io/pilotaai/slotlock, and attest its build provenance (verify with
 # `gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock
-# --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml`). Its second job runs
-# mcp-registry.yml, which publishes server.json, once the image is pushed.
+# --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml --source-ref refs/tags/v<version>
+# --deny-self-hosted-runners`, as SECURITY.md gives it). Its second job runs mcp-registry.yml, which
+# publishes server.json, once the image is pushed.
 #
 # release.yml calls it for a v* tag once its "Verify, test and pack" job has passed, so an image or a
 # registry entry never goes out for a tag whose tests failed. The push waits in the `ghcr`
 # environment, and the registry entry in `mcp-registry`, for a required reviewer
 # (scripts/configure-github.sh). An attestation made in a reusable workflow is signed by that
 # workflow (gh attestation verify), so the signer stays image.yml, and the source ref is the tag.
+# Both are checked: --signer-workflow alone matches image.yml run from any ref, and a branch can
+# call its own copy of this file without the ghcr environment. Only an admin or the release deploy
+# key creates a v* tag, so --source-ref refs/tags/v<version> leaves only this tag's run.
 #
 # One-time setup by the repository owner: after the first push, make the ghcr.io/pilotaai/slotlock
 # package public (Package settings > Change visibility; GitHub has no API for it). New GHCR packages

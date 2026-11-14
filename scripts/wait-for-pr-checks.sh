@@ -3,10 +3,11 @@
 # GitHub holds the workflow runs of a pull request that github-actions[bot] opens until someone with
 # write access approves them ("Approve workflows to run" on the pull request), and only a pull
 # request's own runs count as its required checks: a run started any other way at the same commit
-# does not. So this waits through the approval, then for each run to finish. It fails when a run
-# fails, or when the wait runs out.
+# does not, nor does one of a fork's pull request. So this waits through the approval, then for
+# each run from this repository's own branch to finish. It fails when a run fails, or when the wait
+# runs out.
 #   scripts/wait-for-pr-checks.sh <commit> <pull request url> <workflow file>...
-# Needs gh logged in (GH_TOKEN) in a checkout of the repository.
+# Needs gh logged in (GH_TOKEN) with actions: read on GITHUB_REPOSITORY.
 # Environment: SLOTLOCK_POLL_SECONDS (default 30), SLOTLOCK_WAIT_MINUTES (default 300).
 set -eu
 [ "$#" -ge 3 ] || {
@@ -32,9 +33,13 @@ while :; do
   held=''
   report=''
   for workflow in "$@"; do
-    # The newest pull request run of the workflow at the commit: "<id> <status> <conclusion>".
-    run=$(gh run list --workflow "$workflow" --commit "$commit" --event pull_request --limit 1 \
-      --json databaseId,status,conclusion --jq '.[0] // empty | "\(.databaseId) \(.status) \(.conclusion)"')
+    # The newest pull request run of the workflow at the commit, from this repository's own branch:
+    # "<id> <status> <conclusion>". The release commit is public, so a fork's pull request can carry
+    # it too, and its runs, held for approval or not, are not this pull request's checks. gh run
+    # list cannot tell them apart; the API names each run's head repository.
+    run=$(REPOSITORY=$repository gh api \
+      "repos/$repository/actions/workflows/$workflow/runs?head_sha=$commit&event=pull_request&per_page=100" \
+      --jq '[.workflow_runs[] | select(.head_repository.full_name == env.REPOSITORY)][0] // empty | "\(.id) \(.status) \(.conclusion)"')
     id=${run%% *}
     rest=${run#* }
     status=${rest%% *}
