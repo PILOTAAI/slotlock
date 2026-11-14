@@ -3,6 +3,14 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- Admin console: a redesign of how it looks, not what it does: every route, form field, CSRF check and role check is as it was. Some pages read a little more (Home's chart and lists, the list beside an open case or privacy request), each read recorded in the staff log as before. A sidebar beside one raised card that scrolls on its own, a 52px top bar with the breadcrumb title, status pills, the account search and the page's actions, and fluid pages on a 12-column grid with no maximum width. Stat tiles with changes and trends, 240px charts with a 7d/30d/90d/12m range (areas for trends, stacked bars for parts), sticky-header tables whose rows open, account cells with initials and a second line, an inspector beside an account, a case and a privacy request, split views for Cases and Privacy, tabs within a page, drawers for quick edits, and toasts with Undo. Accounts gains saved views (All, Paying, Past due, Suspended, Near quota, Partners, Test) and Plan, Kind, Created and Last active filters, the staff log Date, Who, Action and Account filters and an entry drawer with the hash chain, and both export the rows shown as CSV (`?format=csv`). Communications previews the dashboard's banner as customers see it, in both themes, as you type, and finds an account by name. Eyebrows, ledes and most hints are gone; definitions open from an ⓘ.
+- Admin console: Inter and Geist Mono are self-hosted (the Latin woff2 subsets of `@fontsource-variable/inter` and `@fontsource-variable/geist-mono` 5.3.0, SIL Open Font License 1.1, pinned as dev dependencies and embedded by `scripts/admin-fonts.mjs`), served from the console at hashed paths cached for a year; the CSP adds `font-src 'self'` and nothing else.
+- The dashboard and the console share their colours from `src/design-tokens.ts`; the dashboard renders exactly the values it did. The console's tokens pass WCAG 2.2 AA in both themes, which `design-tokens.unit.test.ts` checks, and `admin-console-visual.integration.test.ts` renders every console page in Chromium at 390, 1440 and 1920 pixels, dark and light, checking it against axe-core 4.14.0 (a new, pinned dev dependency), the CSP and sideways scrolling.
+
 ## 0.11.0 - 2026-11-14
 
 ### Security
