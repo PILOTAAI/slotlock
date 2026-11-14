@@ -37,7 +37,8 @@ import {
   SlotlockCmsError,
   slotlockSignOff,
 } from './github-app.js';
-import { Html, day, html, pageHead, pill, table, when } from './ui.js';
+import { type Crumb, Html, day, emptyState, facts, field, html, info, pill, popover, table, tabs } from './ui.js';
+import { SLOTLOCK_ADMIN_SETUP_DOCS as SLOTLOCK_CMS_SETUP_DOCS } from './system.js';
 
 export type { SlotlockCmsChange } from './github-app.js';
 
@@ -213,6 +214,13 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   github: { kind: 'warn', text: 'GitHub did not take that change, and nothing was published. Try again in a minute.' },
 });
 
+/** What a CMS page puts in the console's top bar. */
+export interface SlotlockCmsHead {
+  crumbs?: Crumb[];
+  pills?: Html;
+  actions?: Html;
+}
+
 /** What the console gives the CMS for one request. */
 export interface SlotlockCmsRequest {
   /** staff_ref: github:<id> */
@@ -223,7 +231,7 @@ export interface SlotlockCmsRequest {
   fresh: boolean;
   csrfOk(token: string): boolean;
   csrf: string;
-  page(title: string, path: string, body: Html, notice?: Notice, status?: number): Response;
+  page(title: string, path: string, body: Html, notice?: Notice, status?: number, head?: SlotlockCmsHead): Response;
   redirect(location: string): Response;
   json(value: unknown, status?: number): Response;
   /** Record a step in the staff log; the database checks the role and throws 42501 if it is not allowed. */
@@ -536,9 +544,10 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     options.previewHost ? `https://pr-${pull.number}-${options.previewHost}/blog/${slug}/` : null;
 
   function notConnected(context: SlotlockCmsRequest, path: string): Response {
-    return context.page('Content', path, html`
-      ${pageHead('Content', 'Posts', 'Write, review and publish the blog.')}
-      <div class="empty"><p>The CMS is not connected. Install the Slotlock CMS GitHub App on the site's repository, then set <code>SLOTLOCK_ADMIN_CMS_APP_ID</code>, <code>SLOTLOCK_ADMIN_CMS_INSTALLATION</code> and the secret <code>SLOTLOCK_ADMIN_CMS_APP_KEY</code> on the console's Worker (RFC 0006, Phase 0).</p></div>`);
+    return context.page('Content', path, emptyState(
+      html`The CMS is not connected. ${info('Connecting the CMS', html`Install Slotlock's GitHub App on the site's repository, then set <code>SLOTLOCK_ADMIN_CMS_APP_ID</code> and the secret <code>SLOTLOCK_ADMIN_CMS_APP_KEY</code> on the console's Worker (RFC 0006, Phase 0).`)}`,
+      html`<a class="btn primary" href="${SLOTLOCK_CMS_SETUP_DOCS}" rel="noreferrer">Connect GitHub</a>`,
+    ));
   }
 
   async function listPage(context: SlotlockCmsRequest, url: URL): Promise<Response> {
@@ -574,17 +583,26 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     });
     const ordered = [...rows.values()].sort((a, b) =>
       Number(Boolean(b.pull)) - Number(Boolean(a.pull)) || (b.post?.front.date ?? '').localeCompare(a.post?.front.date ?? '') || a.slug.localeCompare(b.slug));
+    const published = (row: (typeof ordered)[number]) => Boolean(row.onMain && isLive(row.onMain, now()));
+    const view = url.searchParams.get('view') === 'drafts' ? 'drafts' : url.searchParams.get('view') === 'published' ? 'published' : 'all';
+    const shown = ordered.filter((row) => view === 'all' || (view === 'published' ? published(row) : Boolean(row.pull) || !published(row)));
     const code = url.searchParams.get('done') ?? url.searchParams.get('error');
     const body = html`
-      ${pageHead('Content', 'Posts', 'Write, review and publish the blog. Each post is a file in the repository; a draft is a pull request the site’s checks run on.', html`<a class="btn primary" href="/content/new">New post</a>`)}
-      ${table('Posts', ['Post', 'Status', 'Author', 'Date', 'Pull request'], ordered.map((row) => [
-        html`<a href="/content/${row.slug}">${row.post?.front.title ?? row.slug}</a><span class="sub mono">/blog/${row.slug}/</span>`,
+      ${tabs('Views', [
+        { label: 'All', href: '/content', current: view === 'all', count: ordered.length },
+        { label: 'Drafts', href: '/content?view=drafts', current: view === 'drafts', count: ordered.filter((row) => Boolean(row.pull) || !published(row)).length },
+        { label: 'Published', href: '/content?view=published', current: view === 'published', count: ordered.filter(published).length },
+      ], 'views')}
+      ${table('Posts', ['Post', 'Status', 'Checks', 'Author', 'Updated'], shown.map((row) => [
+        html`<span class="ac-text"><a href="/content/${row.slug}">${row.post?.front.title ?? row.slug}</a><span class="sub mono">/blog/${row.slug}/</span></span>`,
         html`${statusPill(row)}${row.schedule && row.pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">${row.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`,
+        row.pull ? html`${checksPill(row.checks)}<span class="sub"><a href="${row.pull.url}" rel="noreferrer">#${row.pull.number}</a></span>` : html`–`,
         html`${row.post?.front.author ?? '–'}`,
-        html`${row.post ? day(row.post.front.date) : '–'}`,
-        row.pull ? html`<a href="${row.pull.url}" rel="noreferrer">#${row.pull.number}</a> ${checksPill(row.checks)}` : html`–`,
-      ]), 'No posts yet.')}`;
-    return context.page('Content', '/content', body, code && Object.hasOwn(NOTICES, code) ? NOTICES[code] : undefined);
+        html`${row.post ? day(row.post.front.updated ?? row.post.front.date) : '–'}`,
+      ]), view === 'all' ? emptyState('No posts yet.', html`<a class="btn primary" href="/content/new">New post</a>`) : 'Nothing here.', { hrefs: shown.map((row) => `/content/${row.slug}`) })}`;
+    return context.page('Content', '/content', body, code && Object.hasOwn(NOTICES, code) ? NOTICES[code] : undefined, 200, {
+      actions: html`<a class="btn primary" href="/content/new">New post</a>`,
+    });
   }
 
   function editorPage(context: SlotlockCmsRequest, input: {
@@ -606,140 +624,127 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     const searchTitle = fields.seoTitle || fields.title;
     const counter = (name: string, value: string, low: number, high: number) =>
       html`<span class="counter${value.length < low || value.length > high ? ' off' : ''}" data-counter="${name}" data-low="${String(low)}" data-high="${String(high)}">${String(value.length)} / ${String(low)} to ${String(high)}</span>`;
-    const text = (name: keyof Fields, label: string, hint: string | Html = '', type = 'text', extra: Html | string = '') => html`
-      <label for="f-${name}">${label} ${hint ? html`<span class="hint">${hint}</span>` : ''}</label>
-      <input id="f-${name}" name="${name}" type="${type}" value="${fields[name]}" maxlength="${String(FIELD_LIMITS[name])}" ${extra}>`;
+    /** A field of the post that sits outside its form (in the inspector), joined to it by the form attribute. */
+    const text = (name: keyof Fields, label: string, options: { type?: string; optional?: boolean; extra?: Html | null; attrs?: Html | string } = {}) => field({
+      id: `f-${name}`, label, ...(options.optional ? { optional: true } : {}), ...(options.extra ? { extra: options.extra } : {}),
+      control: html`<input id="f-${name}" name="${name}" form="post-form" type="${options.type ?? 'text'}" value="${fields[name]}" maxlength="${String(FIELD_LIMITS[name])}" ${options.attrs ?? ''}>`,
+    });
     const imageRows = input.postContext.images.map((name) => html`<li>
         <code>${`![Describe the image](${postImagePath(slug ?? '')}${name})`}</code>
         <form method="post" action="/content/${slug ?? ''}/images/remove"><input type="hidden" name="csrf" value="${context.csrf}"><input type="hidden" name="name" value="${name}"><button class="link" type="submit">Remove</button></form>
       </li>`);
+    const later = state?.post?.front.publishAt && Date.parse(state.post.front.publishAt) > now();
+    const publishing = Boolean(slug && state && pull && canPublish);
+    const actions = html`
+      <button class="btn" type="submit" form="post-form" name="intent" value="save">Save draft</button>
+      <button class="btn${publishing ? '' : ' primary'}" type="submit" form="post-form" name="intent" value="submit">Submit for review</button>
+      ${publishing && state && pull ? html`<form class="inline publish" method="post" action="/content/${state.slug}/publish">
+          <input type="hidden" name="csrf" value="${context.csrf}">
+          <input type="hidden" name="sha" value="${pull.headSha}">
+          <button class="btn primary" type="submit" title="Merges commit ${pull.headSha.slice(0, 7)} into main once the checks pass">${later ? 'Schedule' : 'Publish'}</button>
+        </form>` : ''}`;
+    const statusFacts = slug && state ? html`<section>
+        ${facts([
+          ['Status', html`${statusPill(state)}${state.schedule && pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">For ${state.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`],
+          pull ? ['Pull request', html`<a href="${pull.url}" rel="noreferrer">#${pull.number}</a> ${checksPill(state.checks)}`] : null,
+          pull && previewUrl(pull, slug) ? ['Preview deploy', html`<a href="${previewUrl(pull, slug) ?? ''}" rel="noreferrer">The whole site, with this post</a>`] : null,
+          state.onMain && isLive(state.onMain, now()) ? ['Live', html`<a href="${site}/blog/${slug}/" rel="noreferrer">${site.replace('https://', '')}/blog/${slug}/</a>`] : null,
+          pull && canPublish ? ['Publishes', html`<code>${pull.headSha.slice(0, 7)}</code>${info('Publishing', `Merges this commit into main${later ? ', or schedules it for its publish time' : ''}. It needs the checks to pass and a passkey in the last 15 minutes.`)}`] : null,
+        ])}
+        ${pull && canPublish && pull.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<form method="post" action="/content/${state.slug}/unschedule"><input type="hidden" name="csrf" value="${context.csrf}"><button class="link" type="submit">Unschedule</button></form>` : ''}
+      </section>` : '';
     const body = html`
-      ${pageHead('Content', state?.post?.front.title || (slug ? slug : 'New post'), slug ? html`${state ? statusPill(state) : ''} <span class="sub-inline mono">/blog/${slug}/</span>` : 'A post is a file in the repository. Saving it opens a pull request the site’s checks run on.',
-        html`<a class="btn" href="/content">All posts</a>`)}
-      ${input.problem ? html`<p class="notice warn" role="alert">${input.problem}</p>` : ''}
-      <div class="cms">
-        <form id="post-form" class="form cms-main" method="post" action="${action}" data-slug="${slug ?? ''}">
+      ${input.problem ? html`<div class="callout warn" role="alert"><p>${input.problem}</p></div>` : ''}
+      <div class="editor">
+        <form id="post-form" class="editor-main form" method="post" action="${action}" data-slug="${slug ?? ''}">
           <input type="hidden" name="csrf" value="${context.csrf}">
           <input type="hidden" name="head" value="${state?.branchHead ?? ''}">
-          ${slug ? html`<input type="hidden" name="slug" value="${slug}">` : text('slug', 'Address', html`/blog/<em>this</em>/: lowercase words and hyphens`, 'text', html`required pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off" spellcheck="false"`)}
-          <label for="f-title">Title ${counter('title', fields.title, 20, 65)}</label>
-          <input id="f-title" name="title" type="text" value="${fields.title}" maxlength="200" required>
-          ${text('seoTitle', 'Search title', 'when the title is over 65 characters')}
-          <label for="f-description">Description ${counter('description', fields.description, 70, 160)}</label>
-          <textarea id="f-description" name="description" rows="3" maxlength="400" required>${fields.description}</textarea>
-          <div class="cms-row">
-            <div>${text('date', 'Date', '', 'date', 'required')}</div>
-            <div>${text('updated', 'Updated', '', 'date')}</div>
-            <div>${text('publishAt', 'Publish at', 'UTC, optional', 'datetime-local')}</div>
-          </div>
-          <div class="cms-row">
-            <div>
-              <label for="f-author">Author</label>
-              <select id="f-author" name="author" required>
+          ${slug ? html`<input type="hidden" name="slug" value="${slug}">` : field({ id: 'f-slug', label: 'Address', extra: info('The address', html`/blog/<em>this</em>/: lowercase words and hyphens.`), control: html`<input id="f-slug" name="slug" type="text" value="${fields.slug}" maxlength="${String(FIELD_LIMITS.slug)}" required pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off" spellcheck="false">` })}
+          ${field({ id: 'f-title', label: 'Title', extra: counter('title', fields.title, 20, 65), control: html`<input id="f-title" class="title-input" name="title" type="text" value="${fields.title}" maxlength="200" required>` })}
+          ${field({ id: 'f-body', label: 'Post', extra: info('Markdown', html`## headings, lists, &gt; quotes, tables, \`\`\` code, ![alt](/blog/…/image.png), {{facts.name}}`), control: html`<textarea id="f-body" class="cms-body" name="body" rows="26" maxlength="100000" spellcheck="true">${fields.body}</textarea>` })}
+          <p class="readback" id="preview-status" role="status"></p>
+        </form>
+        <section class="preview-pane" aria-label="Preview">
+          <fieldset class="ptabs"><legend class="sr-only">Preview as</legend>
+            <label><input type="radio" name="preview-as" id="pt-article" checked><span>Article</span></label>
+            <label><input type="radio" name="preview-as" id="pt-serp"><span>Search result</span></label>
+            <label><input type="radio" name="preview-as" id="pt-card"><span>Link card</span></label>
+          </fieldset>
+          <div class="ppanel pp-article"><article class="article" id="preview">${new Html(evaluation?.html ?? '')}</article></div>
+          <div class="ppanel pp-serp"><div class="serp" id="serp">
+            <span class="serp-url">${site.replace('https://', '')} › blog › ${slug ?? fields.slug}</span>
+            <span class="serp-title" data-serp="title">${searchTitle || 'The title'}</span>
+            <span class="serp-text" data-serp="description">${fields.description || 'The description.'}</span>
+          </div></div>
+          <div class="ppanel pp-card"><div class="og" aria-hidden="true"><span class="og-eyebrow" data-serp="eyebrow">${fields.eyebrow || 'Blog'}</span><span class="og-title" data-serp="og-title">${fields.title || 'The title'}</span><span class="og-site">slotlock.pylota.io</span></div></div>
+        </section>
+        <aside class="inspector" aria-label="Post">
+          <fieldset class="ptabs"><legend class="sr-only">Settings</legend>
+            <label><input type="radio" name="inspect" id="it-post" checked><span>Post</span></label>
+            <label><input type="radio" name="inspect" id="it-seo"><span>SEO</span></label>
+            <label><input type="radio" name="inspect" id="it-images"><span>Images</span></label>
+          </fieldset>
+          <div class="itabs-panel ip-post form">
+            ${statusFacts}
+            <div class="form-grid">
+              ${text('date', 'Date', { type: 'date', attrs: 'required' })}
+              ${text('updated', 'Updated', { type: 'date', optional: true })}
+            </div>
+            ${text('publishAt', 'Publish at, UTC', { type: 'datetime-local', optional: true })}
+            ${field({ id: 'f-author', label: 'Author', control: html`<select id="f-author" name="author" form="post-form" required>
                 <option value="">Choose</option>
                 ${Object.entries(authors).map(([key, author]) => html`<option value="${key}" ${fields.author === key ? new Html('selected') : ''}>${author.name}</option>`)}
-              </select>
-            </div>
-            <div>${text('tags', 'Tags', 'comma between, 1 to 5')}</div>
-            <div>${text('eyebrow', 'Eyebrow', 'e.g. Case study')}</div>
+              </select>` })}
+            ${text('tags', 'Tags', { extra: info('Tags', 'One to five, with a comma between.') })}
+            ${text('eyebrow', 'Eyebrow', { optional: true })}
+            <section aria-labelledby="checks-title"><h2 id="checks-title">Checks ${info('Checks', 'The site’s own rules. Submitting needs every one to pass; GitHub runs the site’s build on the pull request too.')}</h2>
+              <ul class="checks" id="checks">${checksList(evaluation?.checks ?? null)}</ul></section>
+            ${slug && state ? dangerPanel(context, state) : ''}
           </div>
-          ${text('imageAlt', 'Link preview alt text', 'what the drawn preview image says')}
-          <label for="f-related">Related pages <span class="hint">1 to 4, each "Label | /path" on its own line</span></label>
-          <textarea id="f-related" name="related" rows="3" maxlength="2000">${fields.related}</textarea>
-          <label for="f-body">Post <span class="hint">Markdown: ## headings, lists, &gt; quotes, tables, \`\`\` code, ![alt](/blog/…/image.png), {{facts.name}}</span></label>
-          <textarea id="f-body" class="mono cms-body" name="body" rows="26" maxlength="100000" spellcheck="true">${fields.body}</textarea>
-          <div class="cms-actions">
-            <button class="btn" type="submit" name="intent" value="save">Save draft</button>
-            <button class="btn primary" type="submit" name="intent" value="submit">Submit for review</button>
-            <span class="fine" id="preview-status" role="status"></span>
+          <div class="itabs-panel ip-seo form">
+            ${text('seoTitle', 'Search title', { optional: true, extra: info('Search title', 'For a title over 65 characters: what search results show instead.') })}
+            ${field({ id: 'f-description', label: 'Description', extra: counter('description', fields.description, 70, 160), control: html`<textarea id="f-description" name="description" form="post-form" rows="3" maxlength="400" required>${fields.description}</textarea>` })}
+            ${text('imageAlt', 'Link card alt text')}
+            ${field({ id: 'f-related', label: 'Related pages', extra: info('Related pages', 'One to four, each "Label | /path" on its own line.'), control: html`<textarea id="f-related" name="related" form="post-form" rows="4" maxlength="2000" placeholder="Label | /path">${fields.related}</textarea>` })}
           </div>
-        </form>
-        <aside class="cms-rail" aria-label="Post">
-          ${slug && state ? html`<section class="panel">
-            <h2 class="rail-title">Status</h2>
-            <dl>
-              <div><dt>Status</dt><dd>${statusPill(state)}${state.schedule && pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">For ${state.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}</dd></div>
-              ${pull ? html`<div><dt>Pull request</dt><dd><a href="${pull.url}" rel="noreferrer">#${pull.number}</a> ${checksPill(state.checks)}</dd></div>` : ''}
-              ${pull && previewUrl(pull, slug) ? html`<div><dt>Preview deploy</dt><dd><a href="${previewUrl(pull, slug) ?? ''}" rel="noreferrer">The whole site, with this post</a></dd></div>` : ''}
-              ${state.onMain && isLive(state.onMain, now()) ? html`<div><dt>Live</dt><dd><a href="${site}/blog/${slug}/" rel="noreferrer">${site.replace('https://', '')}/blog/${slug}/</a></dd></div>` : ''}
-            </dl>
-            ${pull && canPublish ? publishPanel(context, state) : ''}
-          </section>` : ''}
-          <section class="panel">
-            <h2 class="rail-title">Checks</h2>
-            <ul class="checks" id="checks">${checksList(evaluation?.checks ?? null)}</ul>
-            <p class="fine">The site’s own rules. Submitting needs every one to pass; GitHub runs the site’s build on the pull request too.</p>
-          </section>
-          <section class="panel">
-            <h2 class="rail-title">In search results</h2>
-            <div class="serp" id="serp">
-              <span class="serp-url">${site.replace('https://', '')} › blog › ${slug ?? fields.slug}</span>
-              <span class="serp-title" data-serp="title">${searchTitle || 'The title'}</span>
-              <span class="serp-text" data-serp="description">${fields.description || 'The description.'}</span>
-            </div>
-          </section>
-          <section class="panel">
-            <h2 class="rail-title">Link preview</h2>
-            <div class="og" aria-hidden="true"><span class="og-eyebrow" data-serp="eyebrow">${fields.eyebrow || 'Blog'}</span><span class="og-title" data-serp="og-title">${fields.title || 'The title'}</span><span class="og-site">slotlock.pylota.io</span></div>
-            <p class="fine">Drawn by the site’s build from the title when the post is first built.</p>
-          </section>
-          ${slug && state ? html`<section class="panel" id="images">
-            <h2 class="rail-title">Images</h2>
-            ${imageRows.length ? html`<ul class="list images">${imageRows}</ul>` : html`<p class="fine">No images yet.</p>`}
-            ${state.branchHead || state.onMain ? html`<form class="form" method="post" action="/content/${slug}/images" enctype="multipart/form-data">
+          <div class="itabs-panel ip-images form" id="images">
+            ${imageRows.length ? html`<ul class="list images">${imageRows}</ul>` : html`<p class="muted">No images yet.</p>`}
+            ${slug && state && (state.branchHead || state.onMain) ? html`<form class="form" method="post" action="/content/${slug}/images" enctype="multipart/form-data">
               <input type="hidden" name="csrf" value="${context.csrf}">
-              <label for="f-image">Add an image <span class="hint">PNG, JPEG or WebP, up to 1 MB</span></label>
-              <input id="f-image" name="image" type="file" accept="image/png,image/jpeg,image/webp" required>
-              <label for="f-image-name">File name <span class="hint">optional, lowercase words and hyphens</span></label>
-              <input id="f-image-name" name="name" type="text" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off">
-              <button class="btn" type="submit">Upload</button>
-            </form>` : html`<p class="fine">Save the post first, then add its images.</p>`}
-          </section>
-          ${dangerPanel(context, state)}` : ''}
+              ${field({ id: 'f-image', label: 'Image', extra: info('Images', 'PNG, JPEG or WebP, up to 1 MB.'), control: html`<input id="f-image" name="image" type="file" accept="image/png,image/jpeg,image/webp" required>` })}
+              ${field({ id: 'f-image-name', label: 'File name', optional: true, control: html`<input id="f-image-name" name="name" type="text" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off">` })}
+              <div class="form-actions"><button class="btn sm" type="submit">Upload</button></div>
+            </form>` : html`<p class="muted">Save the post first, then add its images.</p>`}
+          </div>
         </aside>
-      </div>
-      <section class="cms-preview" aria-labelledby="preview-title">
-        <h2 id="preview-title">Preview</h2>
-        <article class="article" id="preview">${new Html(evaluation?.html ?? '')}</article>
-      </section>`;
-    return context.page(state?.post?.front.title || 'New post', '/content', body, input.notice, input.status ?? 200);
+      </div>`;
+    return context.page(state?.post?.front.title || (slug ?? 'New post'), '/content', body, input.notice, input.status ?? 200, {
+      crumbs: [{ label: 'Content', href: '/content' }],
+      ...(state ? { pills: html`${statusPill(state)}${pull ? checksPill(state.checks) : ''}` } : {}),
+      actions,
+    });
   }
 
   function checksList(checks: PostCheck[] | null): Html {
-    if (!checks) return html`<li class="fine">Shown once the post has a title and a body.</li>`;
+    if (!checks) return html`<li class="muted">Shown once the post has a title and a body.</li>`;
     return html`${checks.map((check) => html`<li class="${check.ok ? 'ok' : 'bad'}"><span class="mark" aria-hidden="true">${check.ok ? '✓' : '✗'}</span><span><strong>${check.name}</strong><span class="sr-only">${check.ok ? ': passes.' : ': fails.'}</span> <span class="sub">${check.detail}</span></span></li>`)}`;
-  }
-
-  function publishPanel(context: SlotlockCmsRequest, state: PostState): Html {
-    const pull = state.pull as SlotlockCmsPullRequest;
-    const scheduled = pull.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL);
-    const later = state.post?.front.publishAt && Date.parse(state.post.front.publishAt) > now();
-    return html`<form class="form publish" method="post" action="/content/${state.slug}/publish">
-        <input type="hidden" name="csrf" value="${context.csrf}">
-        <input type="hidden" name="sha" value="${pull.headSha}">
-        <p class="fine">Merges commit <code>${pull.headSha.slice(0, 7)}</code> into main${later ? ', or schedules it for its publish time' : ''}. It needs the checks to pass and a passkey in the last 15 minutes.</p>
-        <button class="btn primary" type="submit">${later ? 'Schedule' : 'Publish'}</button>
-      </form>
-      ${scheduled ? html`<form method="post" action="/content/${state.slug}/unschedule"><input type="hidden" name="csrf" value="${context.csrf}"><button class="link" type="submit">Unschedule</button></form>` : ''}`;
   }
 
   function dangerPanel(context: SlotlockCmsRequest, state: PostState): Html {
     const renameable = state.onMain && isLive(state.onMain, now()) && !state.branchHead;
     if (!renameable && !state.branchHead) return html``;
-    return html`<section class="panel">
-      <h2 class="rail-title">${renameable ? 'Address' : 'Draft'}</h2>
-      ${renameable ? html`<form class="form" method="post" action="/content/${state.slug}/rename">
+    return html`<section aria-labelledby="post-danger">
+      <h2 id="post-danger">${renameable ? 'Address' : 'Draft'}</h2>
+      ${renameable ? popover('Rename', html`<form class="form" method="post" action="/content/${state.slug}/rename">
         <input type="hidden" name="csrf" value="${context.csrf}">
-        <label for="f-rename">New address <span class="hint">/blog/<em>this</em>/</span></label>
-        <input id="f-rename" name="to" type="text" required maxlength="120" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off" spellcheck="false">
-        <p class="fine">Opens a pull request that moves the post and its images, and redirects the old address.</p>
-        <button class="btn" type="submit">Rename</button>
-      </form>` : ''}
-      ${state.branchHead ? html`<form class="form" method="post" action="/content/${state.slug}/discard">
+        ${field({ id: 'f-rename', label: 'New address', extra: info('Renaming', 'Opens a pull request that moves the post and its images, and redirects the old address.'), control: html`<input id="f-rename" name="to" type="text" required maxlength="120" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off" spellcheck="false">` })}
+        <div class="form-actions"><button class="btn primary" type="submit">Rename</button></div>
+      </form>`, { size: 'sm', align: 'left' }) : ''}
+      ${state.branchHead ? popover('Discard draft', html`<form class="form" method="post" action="/content/${state.slug}/discard">
         <input type="hidden" name="csrf" value="${context.csrf}">
-        <p class="fine">Closes the pull request and deletes the branch. ${state.onMain ? 'The published post stays as it is.' : 'The post was never published, so it goes.'}</p>
-        <button class="btn danger" type="submit">Discard draft</button>
-      </form>` : ''}
+        <p class="muted">Closes the pull request and deletes the branch. ${state.onMain ? 'The published post stays as it is.' : 'The post was never published, so it goes.'}</p>
+        <div class="form-actions"><button class="btn danger" type="submit">Discard draft</button></div>
+      </form>`, { tone: 'danger', size: 'sm', align: 'left' }) : ''}
     </section>`;
   }
 
@@ -995,7 +1000,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
   async function publish(request: Request, context: SlotlockCmsRequest, slug: string): Promise<Response> {
     const form = await formOf(request, 4096);
     if (!form || !context.csrfOk(form.get('csrf') ?? '')) return context.redirect('/content?error=invalid');
-    if (!slotlockStaffMay(context.role, 'content.publish')) return context.page('Not allowed', '/content', pageHead('Content', 'Not allowed', `Your role (${context.role}) does not publish posts.`), undefined, 403);
+    if (!slotlockStaffMay(context.role, 'content.publish')) return context.page('Not allowed', '/content', emptyState(`Your role (${context.role}) does not publish posts.`), undefined, 403, { crumbs: [{ label: 'Content', href: '/content' }] });
     if (!context.fresh) return passkeyAgain(context, slug);
     const sha = form.get('sha') ?? '';
     const github = requireGithub();
@@ -1069,7 +1074,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
   async function unschedule(request: Request, context: SlotlockCmsRequest, slug: string): Promise<Response> {
     const form = await formOf(request, 4096);
     if (!form || !context.csrfOk(form.get('csrf') ?? '')) return context.redirect('/content?error=invalid');
-    if (!slotlockStaffMay(context.role, 'content.publish')) return context.page('Not allowed', '/content', pageHead('Content', 'Not allowed', `Your role (${context.role}) does not publish posts.`), undefined, 403);
+    if (!slotlockStaffMay(context.role, 'content.publish')) return context.page('Not allowed', '/content', emptyState(`Your role (${context.role}) does not publish posts.`), undefined, 403, { crumbs: [{ label: 'Content', href: '/content' }] });
     if (!context.fresh) return passkeyAgain(context, slug);
     const github = requireGithub();
     const pull = await github.pullRequestFor(branchOf(slug));
@@ -1110,12 +1115,11 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     }
     const state = await postState(slug);
     if (!state.post && !state.broken) {
-      return context.page('Not found', '/content', html`${pageHead('Content', 'Not found', 'There is no post at this address.')}<p><a class="btn" href="/content">All posts</a></p>`, undefined, 404);
+      return context.page('Not found', '/content', emptyState('There is no post at this address.', html`<a class="btn" href="/content">All posts</a>`), undefined, 404, { crumbs: [{ label: 'Content', href: '/content' }] });
     }
     if (!state.post) {
-      return context.page('Content', '/content', html`${pageHead('Content', slug, 'The post’s file does not read, so the console cannot open it.')}
-        <p class="notice warn">${state.broken ?? ''}</p>
-        <p>Fix <code>site/content/blog/${slug}.md</code> on GitHub${state.pull ? html` (<a href="${state.pull.url}" rel="noreferrer">#${state.pull.number}</a>)` : ''}, then open it here again.</p>`, undefined, 422);
+      return context.page(slug, '/content', html`<div class="callout warn"><p>The post’s file does not read: ${state.broken ?? ''}</p></div>
+        <p class="prose">Fix <code>site/content/blog/${slug}.md</code> on GitHub${state.pull ? html` (<a href="${state.pull.url}" rel="noreferrer">#${state.pull.number}</a>)` : ''}, then open it here again.</p>`, undefined, 422, { crumbs: [{ label: 'Content', href: '/content' }] });
     }
     const evaluation = await evaluate(state.post, state.context);
     return editorPage(context, { state, postContext: state.context, fields: fieldsOf(state.post, slug, now()), evaluation, ...(notice ? { notice } : {}) });
@@ -1142,7 +1146,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
         const match = POST_ROUTE.exec(path);
         const slug = match?.[1];
         if (!match || !slug || !slugOk(slug)) {
-          return context.page('Not found', '/content', pageHead('Content', 'Not found', 'There is no page at this address.'), undefined, 404);
+          return context.page('Not found', '/content', emptyState('There is no page at this address.', html`<a class="btn" href="/content">All posts</a>`), undefined, 404, { crumbs: [{ label: 'Content', href: '/content' }] });
         }
         if (!post) return match[2] ? context.redirect(`/content/${slug}`) : await editor(context, url, slug);
         switch (match[2]) {
@@ -1164,7 +1168,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       } catch (error) {
         if (error instanceof SlotlockCmsError) {
           console.error('slotlock-admin-cms', error.status, error.message);
-          return context.page('Content', '/content', html`${pageHead('Content', 'GitHub did not answer', 'The console could not read the blog from GitHub just now. Nothing was changed.')}<p><a class="btn" href="/content">Try again</a></p>`, undefined, 502);
+          return context.page('GitHub did not answer', '/content', emptyState('The console could not read the blog from GitHub just now. Nothing was changed.', html`<a class="btn" href="/content">Try again</a>`), undefined, 502, { crumbs: [{ label: 'Content', href: '/content' }] });
         }
         throw error;
       }
@@ -1224,11 +1228,20 @@ export const SLOTLOCK_ADMIN_EDITOR_JS = `(() => {
       if (mine === sent) status.textContent = 'The preview could not be updated.';
     }
   };
-  form.addEventListener('input', () => {
+  // The post's settings sit in the inspector, joined to the form by its id: their input reaches the
+  // document, not the form.
+  document.addEventListener('input', (event) => {
+    if (!event.target || event.target.form !== form) return;
     counters();
     clearTimeout(timer);
     timer = setTimeout(refresh, 700);
   });
+  // A required setting in a tab out of sight: show its tab, so the browser can point at it.
+  document.addEventListener('invalid', (event) => {
+    const panel = event.target instanceof Element ? event.target.closest('.itabs-panel') : null;
+    const tab = panel ? document.getElementById(panel.classList.contains('ip-seo') ? 'it-seo' : panel.classList.contains('ip-images') ? 'it-images' : 'it-post') : null;
+    if (tab && !tab.checked) tab.checked = true;
+  }, true);
   counters();
 })();
 `;

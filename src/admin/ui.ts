@@ -687,18 +687,6 @@ export function partsBar(label: string, parts: { name: string; value: number }[]
   </div>`;
 }
 
-// ---------- For the pages still on the old head (Site, Communications, System, Content) ----------
-/** The page title, with an eyebrow and an optional lede and actions: the pages not moved to the top bar yet. */
-export function pageHead(_eyebrow: string, title: string, lede?: string | Html | null, actions?: Html): Html {
-  return html`<div class="section-head"><h2>${title}</h2>${actions ? html`<div class="section-aside">${actions}</div>` : ''}</div>${lede ? html`<p class="muted section-lead">${lede}</p>` : ''}`;
-}
-
-/** Daily counts as a bar chart: the pages not moved to chart() yet. */
-export function bars(label: string, points: { day: string; count: number }[], days = 30): Html {
-  const keys = lastDays(days, Date.now());
-  return chart({ title: label, labels: keys, series: [{ name: label, values: keys.map((key) => points.find((point) => point.day === key)?.count ?? 0) }], kind: 'bars' });
-}
-
 // ---------- Forms ----------
 export interface FieldInput {
   id: string;
