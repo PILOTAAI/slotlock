@@ -206,6 +206,8 @@ const expectedFiles = new Set([
   'rules.d.ts',
   'sandbox.js',
   'sandbox.d.ts',
+  'schema-functions.js',
+  'schema-functions.d.ts',
   'hours.js',
   'hours.d.ts',
   'ranges.js',
