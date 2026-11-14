@@ -201,7 +201,7 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(home.status).toBe(200);
     const text = await home.text();
     expect(text).toContain('octo-owner');
-    expect(text).toContain('Needs attention');
+    expect(text).toContain('Needs a person');
     expect(text).toContain('href="/staff/log"');
     expect(await log('github:1001')).toEqual(
       expect.arrayContaining(['staff.signed_in', 'staff.passkey_added', 'home.viewed']),
@@ -247,25 +247,27 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const byCustomer = await (await browser.request('/accounts?q=cus_TEST123')).text();
     expect(byCustomer).toContain(encodeURIComponent(PERSON));
 
-    // A login: the database keeps ids only, so the console asks GitHub which id it is.
+    // A login no one has signed in with since logins were kept: the console asks GitHub which id
+    // it is (admin-data.integration covers finding one the database holds).
     const search = await browser.request('/search?q=someone');
     expect(search.status).toBe(303);
-    expect(search.headers.get('location')).toBe('/accounts?q=424242&for=someone');
+    expect(search.headers.get('location')).toBe('/accounts?q=someone');
     const found = await (await browser.request(search.headers.get('location') ?? '')).text();
     expect(found).toContain(encodeURIComponent(PERSON));
+    expect(found).toContain('GitHub account <strong>someone</strong> is id <code>424242</code>');
 
     const detail = await browser.request(`/accounts/${encodeURIComponent(PERSON)}`);
     expect(detail.status).toBe(200);
     const body = await detail.text();
     expect(body).toContain('slk_AbCd1234');
     expect(body).toContain('https://dashboard.stripe.com/customers/cus_TEST123');
-    expect(body).toContain('someone');
     expect(body).not.toContain('secret');
     expect((await browser.request('/accounts/github%3A1')).status).toBe(404);
 
-    const staffLog = await (await browser.request('/staff/log')).text();
-    expect(staffLog).toContain('search.github_lookup');
-    expect(staffLog).toContain('account.viewed');
+    // Views and searches are in the log, shown when asked.
+    const staffLog = await (await browser.request('/staff/log?views=1')).text();
+    expect(staffLog).toContain('title="search.github_lookup"');
+    expect(staffLog).toContain('title="account.viewed"');
     const actions = await log('github:1001');
     expect(actions).toEqual(expect.arrayContaining(['accounts.searched', 'search.github_lookup', 'account.viewed', 'account.keys_viewed']));
   });
@@ -631,10 +633,12 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
       const price = (amount: number, interval: string, usage = 'licensed') => ({ unit_amount: amount, currency: 'eur', recurring: { interval, interval_count: 1, usage_type: usage } });
       return new Response(JSON.stringify({
         has_more: false,
+        // Each tagged with its account, as Checkout tags Slotlock's (another product's is not counted).
         data: [
-          { id: 'sub_m', status: 'active', created: month, items: { data: [{ price: price(1900, 'month'), quantity: 1 }, { price: price(1, 'month', 'metered') }] } },
-          { id: 'sub_y', status: 'past_due', created: 1, items: { data: [{ price: price(19000, 'year'), quantity: 1 }] } },
-          { id: 'sub_c', status: 'canceled', created: 1, canceled_at: month, items: { data: [{ price: price(1900, 'month') }] } },
+          { id: 'sub_m', status: 'active', created: month, metadata: { tenant_ref: PERSON }, items: { data: [{ price: price(1900, 'month'), quantity: 1 }, { price: price(1, 'month', 'metered') }] } },
+          { id: 'sub_y', status: 'past_due', created: 1, metadata: { tenant_ref: 'github:1' }, items: { data: [{ price: price(19000, 'year'), quantity: 1 }] } },
+          { id: 'sub_c', status: 'canceled', created: 1, canceled_at: month, ended_at: month, metadata: { tenant_ref: 'github:2' }, items: { data: [{ price: price(1900, 'month') }] } },
+          { id: 'sub_x', status: 'active', created: month, metadata: {}, items: { data: [{ price: price(9900, 'month'), quantity: 1 }] } },
         ],
       }), { headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
@@ -650,12 +654,13 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const first = await (await browser.request('/billing')).text();
     // €19 a month, plus €190 a year (€15.83 a month); the metered overage price has no fixed amount.
     expect(first).toContain('€34.83');
-    expect(first).toContain('2 live subscriptions');
+    expect(first).toContain('2 paying subscriptions in Stripe');
+    expect(first).toMatch(/Cancelled this month<\/span>\s*<strong class="stat-value">1</);
     expect(first).toMatch(/New this month<\/span>\s*<strong class="stat-value">1</);
     // The second page is from the hour's cache: the same numbers, no second read of Stripe.
     expect(await (await browser.request('/billing')).text()).toContain('€34.83');
     expect(calls).toHaveLength(1);
-    const [kept] = await superuser<{ type: string }[]>`SELECT jsonb_typeof(value) AS type FROM slotlock.admin_cache WHERE key = 'revenue:summary'`;
+    const [kept] = await superuser<{ type: string }[]>`SELECT jsonb_typeof(value) AS type FROM slotlock.admin_cache WHERE key = 'revenue:slotlock'`;
     expect(kept?.type).toBe('object');
 
     const usage = await (await browser.request('/usage')).text();
@@ -737,6 +742,48 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect((await first.request('/accounts')).status).toBe(200);
     await asOwner((tx) => tx`SELECT slotlock.staff_reset('github:1020', 'cli:ops', ${sha('lost')}, ${new Date(Date.now() + 86_400_000)})`);
     expect((await first.request('/accounts')).headers.get('location')).toBe('/sign-in');
+  });
+
+  it('serves its typefaces for good, finds accounts by view, by name for a form, and as CSV, and opens a staff log entry', async () => {
+    const browser = browsers.owner();
+    await browser.signIn('code-owner');
+    expect((await browser.usePasskey(ownerKey)).status).toBe(200);
+    // The fonts: same-origin files at a path that names their hash, which the CSP allows and nothing else.
+    const page = await browser.request('/');
+    expect(page.headers.get('content-security-policy')).toContain("font-src 'self'");
+    const font = /href="(\/fonts\/inter-[0-9a-f]{12}\.woff2)"/.exec(await page.text())?.[1] ?? '';
+    const served = await new Browser(() => admin, '').request(font);
+    expect(served.status).toBe(200);
+    expect(served.headers.get('content-type')).toBe('font/woff2');
+    expect(served.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect((await new Browser(() => admin, '').request('/fonts/inter-000000000000.woff2')).status).toBe(403);
+    // Views the database filters, and views the console filters.
+    expect(await (await browser.request('/accounts?view=paying')).text()).toContain(`href="/accounts/${encodeURIComponent(PERSON)}"`);
+    expect(await (await browser.request('/accounts?view=suspended')).text()).not.toContain(`href="/accounts/${encodeURIComponent(PERSON)}"`);
+    expect(await (await browser.request('/accounts?kind=team')).text()).not.toContain(`href="/accounts/${encodeURIComponent(PERSON)}"`);
+    // A form's typeahead: the reference, and the name to show for it.
+    const found = await browser.request('/accounts?format=json&q=424242');
+    expect(found.headers.get('content-type')).toContain('application/json');
+    // No name or display kept for this person yet: the reference.
+    // A bare reference: no initials (the list shows a person instead), and nothing more to say.
+    expect(await found.json()).toEqual([{ ref: PERSON, label: PERSON, sub: null, initials: null, tone: expect.any(Number), kind: 'person' }]);
+    // Export: the rows on the screen, as CSV, a cell that would start a formula quoted as text.
+    const exported = await browser.request('/accounts?view=paying&format=csv');
+    expect(exported.headers.get('content-type')).toBe('text/csv; charset=utf-8');
+    expect(exported.headers.get('content-disposition')).toBe('attachment; filename="accounts.csv"');
+    const lines = (await exported.text()).split('\r\n');
+    expect(lines[0]).toBe('account,name,kind,plan,plan_status,suspended,operations_month,bookings_month,last_active,created');
+    expect(lines.some((line) => line.startsWith(`${PERSON},`))).toBe(true);
+    // The staff log: filtered, exported, and an entry opened in a drawer with the chain beside it.
+    const mine = await (await browser.request(`/staff/log?${new URLSearchParams({ who: 'github:1001', action: 'accounts.searched', views: '1' }).toString()}`)).text();
+    expect(mine).toContain('title="accounts.searched"');
+    expect(mine).not.toContain('title="staff.signed_out"');
+    const csv = await (await browser.request('/staff/log?format=csv&views=1')).text();
+    expect(csv.split('\r\n')[0]).toBe('chain_index,occurred_at,staff,action,account,target,reason');
+    expect(csv).toContain('accounts.searched');
+    const entry = await (await browser.request('/staff/log?entry=1')).text();
+    expect(entry).toContain('role="dialog"');
+    expect(entry).toContain('Hash chain');
   });
 
   it('shows no notice or label that a link from elsewhere names, only what its own action did', async () => {

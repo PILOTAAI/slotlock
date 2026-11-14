@@ -36,6 +36,68 @@ versioning.
   App, three things: the App asks for exactly those permissions, its installation has accepted them,
   and it reaches PILOTAAI/slotlock alone. If one fails, it prints the owner's steps on GitHub and
   deploys and stores nothing. Then it stores the key in the Worker only. `--no-open` is gone.
+- Admin console: a redesign of how it looks, not what it does: every route, form field, CSRF check and role check is as it was. Some pages read a little more (Home's chart and lists, the list beside an open case or privacy request), each read recorded in the staff log as before. A sidebar beside one raised card that scrolls on its own, a 52px top bar with the breadcrumb title, status pills, the account search and the page's actions, and fluid pages on a 12-column grid with no maximum width. Stat tiles with changes and trends, 240px charts with a 7d/30d/90d/12m range (areas for trends, stacked bars for parts), sticky-header tables whose rows open, account cells with initials and a second line, an inspector beside an account, a case and a privacy request, split views for Cases and Privacy, tabs within a page, drawers for quick edits, and toasts with Undo. Accounts gains saved views (All, Paying, Past due, Suspended, Near quota, Partners, Test) and Plan, Kind, Created and Last active filters, the staff log Date, Who, Action and Account filters and an entry drawer with the hash chain, and both export the rows shown as CSV (`?format=csv`). Communications previews the dashboard's banner as customers see it, in both themes, as you type, and finds an account by name. Eyebrows, ledes and most hints are gone; definitions open from an ⓘ.
+- Admin console: Inter and Geist Mono are self-hosted (the Latin woff2 subsets of `@fontsource-variable/inter` and `@fontsource-variable/geist-mono` 5.3.0, SIL Open Font License 1.1, pinned as dev dependencies and embedded by `scripts/admin-fonts.mjs`), served from the console at hashed paths cached for a year; the CSP adds `font-src 'self'` and nothing else.
+- Admin console: an account is shown by its name everywhere it is listed, not only on Accounts: Home's cases, Billing's Needs a person, overrides, alerts and Ending (and the forms that pick one), Usage's and Accounts' near quota, the case and privacy queues and records, the staff log's Account column, filter and entries, announcements to one account, feature flags and their changes, accounts whose maintenance is failing, and the account typeahead, each as the shared account cell (name, else login or email, else reference, on its initials' colour, with a long reference shortened and whole in its title). The names come with each function's rows, joined to `slotlock.staff_directory`: `admin_cases`, `admin_overrides`, `admin_billing_alerts`, `admin_privacy_requests`, `admin_announcements` and `admin_staff_log` gain `account_name` and `account_display`, `admin_usage_accounts` gains `name` and `display` (each dropped and made again by `slotlock migrate`, which reapplies the console role's grants), and `admin_case`, `admin_privacy_request`, `admin_billing`'s Ending, `admin_flags` and `admin_system`'s failing accounts carry them too. What each records in the staff log is unchanged.
+- The dashboard and the console share their colours from `src/design-tokens.ts`; the dashboard renders exactly the values it did. The console's tokens pass WCAG 2.2 AA in both themes, which `design-tokens.unit.test.ts` checks, and `admin-console-visual.integration.test.ts` renders every console page in Chromium at 390, 1440 and 1920 pixels, dark and light, checking it against axe-core 4.14.0 (a new, pinned dev dependency), the CSP and sideways scrolling.
+
+### Added
+
+- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`
+  and follows the refunded payment to the subscriptions whose invoices it paid (Stripe's invoice
+  payments): for each that Stripe says still renews, of an account whose plan names that customer,
+  Billing's Needs a person shows "Refunded, plan still active" with the amount, or "Partly refunded",
+  linked to the payment in Stripe. Alerts are kept once per account and Stripe object. Give the
+  dashboard's Stripe key Read on Invoices, run `node scripts/configure-stripe.mjs` (it adds the
+  event to an existing endpoint, keeps its others, and says when the key cannot read invoice
+  payments), and `slotlock migrate`; the launch check now expects the event.
+- **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
+  Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
+  (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at
+  most 80 characters) and erased with the person. Google sign-in asks
+  for the `profile` scope, which its name claim needs. The console shows each account by its name,
+  else its login or email, else its reference, with initials and a second line, and finds accounts
+  by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched
+  login the database does not hold. Staff are shown by the GitHub login kept at their last console
+  sign-in, and deployment-role commands as "Command line". A person's own account's export
+  (`POST /v1/tenant/exports`, and the one staff make for a privacy request) includes that name and
+  display and when they last signed in (`dashboard_people`, through `slotlock.tenant_export_person`,
+  which the dashboard asks for first). PRIVACY.md says what is kept and when it goes.
+- **The Staff log in words.** Each action has a plain-English label (its code in the label's title),
+  views and searches are hidden unless asked (`?views=1`), and the log filters by who (`who=`, or
+  `cli` for the command line), action, account and days (`from`, `to`). The hash chain is checked
+  as before. `slotlock.admin_staff_log` takes the filters: deploy the console after
+  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL`, which also reruns the console's grants for
+  the admin functions whose results grew.
+
+### Fixed
+
+- **The staff console's billing figures are defined once, and Home and Billing agree.** Paying is a
+  plan Pylota sells (Developer or Team) whose Stripe subscription is active or past due, out of any
+  trial and not set to end (`slotlock.staff_subscribed_plans`); Home counted active plans with or
+  without a subscription, partners' included, and Billing counted past due ones that were set to end.
+  Stripe's figures follow the same rule and count Slotlock's subscriptions only (those Checkout tags
+  with `tenant_ref`): monthly recurring revenue no longer includes another product's subscriptions or
+  ones cancelled at the end of their period; trials are counted apart; a new **Ending** figure gives
+  the subscriptions set to end, what they bring in a month and when each ends; **New this month**
+  leaves out checkouts never paid (`incomplete`, `incomplete_expired`); and **Cancelled this month**
+  counts subscriptions that ended this month (`ended_at`), not ones cancelled for later.
+- The Stripe webhook keeps when a cancelled subscription ends, and whether it is in a trial
+  (`tenant_plans.ends_at`, `trialing`), so Accounts and the account page say "Developer · ends 14 Dec"
+  without asking Stripe. Run `slotlock migrate`: until then the dashboard asks for the new function
+  and writes the plan as before.
+- `slotlock billing daily` records the overage it reports as the overage report's run too, so the
+  console's Billing jobs no longer says `overage report` never ran.
+- The System page: the status page's probe runs every five minutes from a Cloudflare Worker (it said
+  every ten minutes from GitHub); the dashboard and the site show the version they run (the
+  dashboard's `X-Slotlock-Version` header on its pages, the site's `facts.json`); and Deploys lists
+  the workflows that deploy (`dashboard-deploy.yml`, `site.yml`, `status-worker.yml`, besides the
+  image and releases), not `dashboard.yml`, which only bundles the Workers.
+- The sidebar marks only Staff log on the Staff log page, not Staff as well.
+- The staff log, kept six years and past any erasure, keeps an account search's words only when they
+  name an account by reference, an id, a key's prefix or a Stripe customer; a search by name, login
+  or email (the console's GitHub lookup included) is kept as a digest keyed with the deployment's
+  secret (`slotlock.staff_search_record`). Entries written before this change stay as they were.
 
 ### Security
 

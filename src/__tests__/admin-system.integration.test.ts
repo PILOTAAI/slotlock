@@ -107,6 +107,9 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
   const BING_KEY = 'bingkey0123456789abcdef';
   /** Every request the console made to a provider, "host path". */
   const providerCalls: string[] = [];
+  /** Every request the System page made to the dashboard and the site. */
+  const hostCalls: string[] = [];
+  let dashboardDown = false;
 
   /** Search Console, Bing, Cloudflare and the hosts, as the console reaches them. */
   async function providers(input: string | URL | Request, init?: RequestInit): Promise<Response | null> {
@@ -158,8 +161,15 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
       }] } }, errors: null });
     }
     if (target.hostname === 'api.slotlock.test') return reply({ status: 'ready', version: '0.10.0', checks: ['database'] });
-    if (target.hostname === 'dashboard.slotlock.test') return new Response('down', { status: 503 });
-    if (target.hostname === 'site.slotlock.test') return new Response('<!doctype html>', { status: 200 });
+    // The dashboard says its version in a header on its sign-in page; the site in its facts.json.
+    if (target.hostname === 'dashboard.slotlock.test') {
+      hostCalls.push(`${target.hostname}${target.pathname}`);
+      return dashboardDown ? new Response('down', { status: 503 }) : new Response('<!doctype html>', { status: 200, headers: { 'x-slotlock-version': '0.10.1' } });
+    }
+    if (target.hostname === 'site.slotlock.test') {
+      hostCalls.push(`${target.hostname}${target.pathname}`);
+      return target.pathname === '/facts.json' ? reply({ version: '0.10.2', toolCount: 19 }) : new Response('<!doctype html>', { status: 200 });
+    }
     return null;
   }
 
@@ -228,7 +238,10 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
       head_sha: 'a'.repeat(40), html_url: `https://github.com/${FAKE_REPOSITORY}/actions/runs/${id}`, created_at: new Date(clock - id * 60_000).toISOString(),
     });
     repo.runs.set('site.yml', [run('Site', 11, 'success'), run('Site', 12, 'failure')]);
-    repo.runs.set('dashboard.yml', [run('Dashboard', 21, null)]);
+    repo.runs.set('dashboard-deploy.yml', [run('Dashboard deploy', 21, null)]);
+    repo.runs.set('status-worker.yml', [run('Status Worker', 41, 'success')]);
+    // Bundles and checks the Workers, deploys nothing: never listed as a deploy.
+    repo.runs.set('dashboard.yml', [run('Dashboard', 51, 'success')]);
     repo.runs.set('image.yml', [run('Image', 31, 'success')]);
     repo.runs.set('release.yml', []);
 
@@ -565,11 +578,32 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     await app.createWebhook({ principal: { tenantRef: BEA, scopes: ['admin'] }, signal: new AbortController().signal } as never, { url: 'https://hooks.example.com/slotlock' });
     await superuser`UPDATE slotlock.webhook_endpoints SET failing_since = now() - interval '2 hours', attempts = 4 WHERE tenant_ref = ${BEA}`;
     const system = await text(staff.owner, '/system');
-    expect(system).toContain('0.10.0');
-    const dashboardRow = system.slice(system.indexOf('https://dashboard.slotlock.test/dashboard'));
-    expect(dashboardRow.slice(0, 300)).toContain('<span class="pill bad">Down</span><span class="sub">HTTP 503</span>');
-    expect(system).toContain('Dashboard and console Workers');
+    const hostRow = (url: string) => {
+      const row = system.slice(system.indexOf(url));
+      return row.slice(0, row.indexOf('</tr>'));
+    };
+    // Each host's own version: the API's from /healthz, the dashboard's from its header, the site's
+    // from its facts.json.
+    expect(hostRow('https://api.slotlock.test/healthz')).toContain('0.10.0');
+    expect(hostRow('https://dashboard.slotlock.test/dashboard')).toContain('<span class="pill good">Up</span>');
+    expect(hostRow('https://dashboard.slotlock.test/dashboard')).toContain('0.10.1');
+    expect(hostRow('https://site.slotlock.test/facts.json')).toContain('0.10.2');
+    expect(hostCalls).toEqual(expect.arrayContaining(['dashboard.slotlock.test/dashboard', 'site.slotlock.test/facts.json']));
+    // The status page's probe, as it runs: a Cloudflare Worker, every five minutes.
+    expect(system).toContain('The public status page probes them every five minutes, from a Cloudflare Worker.');
+    expect(system).not.toContain('from GitHub every ten minutes');
+    // The workflows that deploy: the dashboard Worker, the site and the status Worker.
+    expect(system).toContain('Dashboard Worker');
+    expect(system).toContain('Status Worker');
+    expect(system).not.toContain('Dashboard and console Workers');
+    expect(system).not.toContain('actions/runs/51');
     expect(system).toContain('Running');
+    // A host that does not answer 200 is down, and says no version.
+    dashboardDown = true;
+    const down = await text(staff.owner, '/system');
+    const downRow = down.slice(down.indexOf('https://dashboard.slotlock.test/dashboard'));
+    expect(downRow.slice(0, downRow.indexOf('</tr>'))).toContain('<span class="pill bad">Down</span><span class="sub">HTTP 503</span>');
+    dashboardDown = false;
     expect(system).toMatch(/<span class="stat-label">Failing<\/span>\s*<strong class="stat-value">1<\/strong>/);
     expect(system).toContain('connected to sc-domain:slotlock.pylota.io');
     expect(system).toContain(`connected to ${FAKE_REPOSITORY}`);

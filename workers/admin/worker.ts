@@ -9,7 +9,7 @@
 //
 // A Worker may not use a database client from another request, so each request opens its own
 // (Hyperdrive keeps the connections). The console is built once per isolate and reaches the request's
-// client through AsyncLocalStorage, so its cache of GitHub logins lasts as long as the isolate.
+// client through AsyncLocalStorage, so its caches last as long as the isolate.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import postgres, { type Sql } from 'postgres';
 import { createSlotlockAccessVerifier } from '../../src/admin/access.js';

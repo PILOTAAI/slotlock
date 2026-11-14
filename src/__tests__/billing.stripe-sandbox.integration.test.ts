@@ -2,7 +2,7 @@
 // sessions scripts/configure-stripe.mjs sets up, and every event a subscription's life sends,
 // signed and fed to the dashboard's webhook (billing.ts) with real Postgres. Stripe test clocks
 // stand in for the months: a renewal that fails and recovers, a switch to yearly, cancelling at the
-// end of the period, and the same for Team.
+// end of the period, and the same for Team; and a refund that leaves a plan running.
 //
 // Runs only with a sandbox key and a database; it refuses a live key:
 //   SLOTLOCK_STRIPE_SANDBOX_KEY=sk_test_… DATABASE_URL=… npx vitest run src/__tests__/billing.stripe-sandbox.integration.test.ts
@@ -35,6 +35,7 @@ const TYPES = [
   'customer.subscription.deleted',
   'invoice.paid',
   'invoice.payment_failed',
+  'charge.refunded',
 ];
 
 // biome-ignore lint/suspicious/noExplicitAny: Stripe's objects, read field by field below.
@@ -155,8 +156,9 @@ describe.skipIf(!KEY || !DATABASE)('billing against the Stripe sandbox', () => {
     for (const event of events) {
       delivered.add(event.id);
       // As Stripe renders it at the account's default API version, and at the pinned one, as the
-      // webhook endpoint (configure-stripe.mjs) receives it.
-      expect(await deliver(event), `${event.type} at ${event.api_version}`).toEqual({ status: 200, text: 'Updated.' });
+      // webhook endpoint (configure-stripe.mjs) receives it. A refund is noted, not a plan set.
+      const answer = event.type === 'charge.refunded' ? 'Noted.' : 'Updated.';
+      expect(await deliver(event), `${event.type} at ${event.api_version}`).toEqual({ status: 200, text: answer });
       const object = event.data.object;
       const path = object.object === 'invoice' ? `invoices/${object.id}` : object.object === 'subscription' ? `subscriptions/${object.id}` : null;
       if (path) {
@@ -277,6 +279,51 @@ describe.skipIf(!KEY || !DATABASE)('billing against the Stripe sandbox', () => {
     await advance(year + 3600);
     await settle(buyer, 'customer.subscription.deleted');
     expect(await readSlotlockTenantPlan(sql, ref)).toMatchObject({ plan: 'free', stripeSubscription: null, currentPeriodEnd: null });
+    expect(errors).toEqual([]);
+  }, STEP);
+
+  it('notes a refund that left the plan running, from the Charge Stripe sends', async () => {
+    const ref = tenant('refund');
+    const buyer = await customer();
+    const subscription = await api('POST', 'subscriptions', {
+      customer: buyer,
+      'items[0][price]': price('developer_monthly'),
+      'metadata[tenant_ref]': ref,
+    });
+    await settle(buyer, 'invoice.paid');
+    expect(await readSlotlockTenantPlan(sql, ref)).toMatchObject({ plan: 'developer', status: 'active', stripeCustomer: buyer });
+
+    // The first invoice's charge, refunded in full as staff refund one in Stripe's dashboard. The
+    // fields the webhook reads (billing.ts refundedChargeOf), as Stripe's API reference has them
+    // (read 2026-11-14): a Charge's customer, payment_intent, amount, amount_refunded, currency and
+    // refunded (no invoice at this API version), and a Refund's charge.
+    const [paid] = (await api('GET', `charges?customer=${buyer}&limit=1`)).data as StripeObject[];
+    expect(paid).toMatchObject({ object: 'charge', customer: buyer, amount: 500, amount_refunded: 0, currency: 'gbp', refunded: false });
+    expect(paid?.id).toMatch(/^(ch|py)_[A-Za-z0-9]+$/);
+    expect(paid?.payment_intent).toMatch(/^pi_[A-Za-z0-9]+$/);
+    expect(paid).not.toHaveProperty('invoice');
+    // The payment's invoice payments name the invoice it paid, and that invoice the subscription.
+    expect(await stripe.paidSubscriptions?.(paid?.payment_intent as string)).toEqual([subscription.id]);
+    const refund = await api('POST', 'refunds', { charge: paid?.id });
+    expect(refund).toMatchObject({ object: 'refund', charge: paid?.id, amount: 500, currency: 'gbp' });
+
+    const events = await settle(buyer, 'charge.refunded');
+    const sent = events.find((event) => event.type === 'charge.refunded')?.data.object as StripeObject;
+    expect(sent).toMatchObject({ object: 'charge', id: paid?.id, customer: buyer, amount: 500, amount_refunded: 500, refunded: true, currency: 'gbp' });
+    // The plan still renews: a person ends it, or says why not.
+    expect(await readSlotlockTenantPlan(sql, ref)).toMatchObject({ plan: 'developer', status: 'active' });
+    const alerts = await sql<{ kind: string; detail: Record<string, unknown> }[]>`
+      SELECT kind, detail FROM slotlock.billing_alerts WHERE tenant_ref = ${ref} AND stripe_ref = ${paid?.id as string}`;
+    expect(alerts).toEqual([
+      {
+        kind: 'refunded_plan_active',
+        detail: { amount: 500, amount_refunded: 500, currency: 'gbp', refunded: true, subscription: subscription.id },
+      },
+    ]);
+    await sql`DELETE FROM slotlock.billing_alerts WHERE tenant_ref = ${ref}`;
+    await api('DELETE', `subscriptions/${subscription.id}`);
+    await settle(buyer, 'customer.subscription.deleted');
+    expect(await readSlotlockTenantPlan(sql, ref)).toMatchObject({ plan: 'free', stripeSubscription: null });
     expect(errors).toEqual([]);
   }, STEP);
 

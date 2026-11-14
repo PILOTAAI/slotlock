@@ -640,9 +640,11 @@ The month close stays in `billing daily`, which the deployment schedules. It sen
 through Stripe with a write key, and the console holds only a key that reads (4.6). The console
 shows each partner's month instead.
 
-The database keeps no GitHub login or email for a person, only the numeric id, and that does not
-change. The console reads logins from GitHub's public profile API when it shows or searches an
-account, and caches them for an hour. PRIVACY.md says so before the console goes live.
+The console shows a person by what the dashboard keeps from their last sign-in while team
+workspaces are offered (`dashboard_people`: their GitHub login or verified Google email, and from
+14 November 2026 their provider's name), and a staff member by the GitHub login kept at their last
+console sign-in; it asks GitHub's public profile API only for a searched login the database does
+not hold, and caches that for an hour. PRIVACY.md says so.
 
 **Where Phase 4 stands.** The CMS is built and tested. Its done-when holds, end to end against a
 fake GitHub and a real site build: an Editor writes a post with an image in the console, an Owner
