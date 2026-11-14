@@ -12,8 +12,8 @@
 #                                                only set up dashboard-deploy.yml: the dashboard
 #                                                environment, its Cloudflare secrets (checked with
 #                                                Cloudflare) and the production configuration
-#   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml pushes
-#                                                release tags with
+#   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml and the
+#                                                Go module job push release tags with
 #   scripts/configure-github.sh --allow-actions-pull-requests
 #                                                also let GITHUB_TOKEN open (and approve) pull
 #                                                requests, for release-version.yml without the
@@ -103,10 +103,11 @@ BRANCH_RULESET='Protect main'
 TAG_RULESET='Release tags'
 TAG_KEEP_RULESET='Release tags are permanent'
 
-# tag-release.yml's deploy key: its title on GitHub, and the release-tag environment secret that
-# holds its private half.
+# The release deploy key: its title on GitHub, the secret that holds its private half, and the
+# environments that hold that secret (tag-release.yml's, and release.yml's go-module job's).
 TAG_KEY_TITLE='slotlock tag-release (GitHub Actions)'
 TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
+TAG_KEY_ENVIRONMENTS='release-tag go-module'
 
 usage() {
   sed -n '2,/^# Needs bash/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
@@ -473,14 +474,16 @@ configure_environments() {
   # The language clients' publish jobs in release.yml, one environment per registry, so each
   # registry's trusted publisher (PyPI, crates.io, NuGet) can name its own environment and a
   # maintainer approves each one. maven-central holds the Central Portal token and the signing key
-  # (docs/release/clients.md); go-module pushes the clients/go/v* tag with GITHUB_TOKEN.
+  # (docs/release/clients.md); go-module holds the release deploy key (configure_tag_key), which
+  # pushes the clients/go/v* tag.
   for name in pypi crates-io nuget maven-central go-module; do
     configure_environment "$name" "$reviewers" tag 'v*'
   done
 
   # release-tag: tag-release.yml's job, on a push to main or a manual run on main. It holds the
-  # deploy key that job pushes release tags with, so only runs on main can read it. No reviewer:
-  # the version already went through a pull request into main.
+  # deploy key that job pushes release tags with, so of the runs that do not wait for a reviewer,
+  # only runs on main can read it. No reviewer: the version already went through a pull request
+  # into main.
   configure_environment release-tag '[]' branch main
   configure_tag_key
 
@@ -515,34 +518,43 @@ configure_environments() {
   configure_environment site-preview '[]' branch main
 }
 
-# The deploy key tag-release.yml pushes release tags with: a tag pushed with GITHUB_TOKEN starts no
-# workflow, and one pushed with a deploy key starts release.yml. Like every deploy key
-# with write access it can do what a repository admin can, so its private half exists only in the
-# release-tag environment secret, which GitHub hands to runs on main alone. It is generated here in
-# a private temporary directory, its public half sent to GitHub and its private half to the secret
-# on stdin, and the directory deleted: nothing prints or keeps it. A new key replaces the old one
-# before the old one is deleted, so a release in between still finds a key.
+# The release deploy key. tag-release.yml pushes v* tags with it: a tag pushed with GITHUB_TOKEN
+# starts no workflow, and one pushed with a deploy key starts release.yml. release.yml's go-module
+# job pushes the Go module's clients/go/v* tag with it too, since the "Release tags" ruleset (step 4)
+# lets only admins and deploy keys create one; that push starts nothing, as release.yml's v* does not
+# match across a slash. Like every deploy key with write access it can do what a repository admin
+# can, so its private half exists only in two environment secrets: release-tag's, which GitHub hands
+# to runs on main alone, and go-module's, which it hands to a v* tag's run once a maintainer has
+# approved it. It is generated here in a private temporary directory, its public half sent to GitHub
+# and its private half to the secrets on stdin, and the directory deleted: nothing prints or keeps
+# it. A new key replaces the old one before the old one is deleted, so a release in between still
+# finds a key. GitHub never returns a secret, so an environment without it gets a new key, in both.
 configure_tag_key() {
-  local keys secrets old_ids id
+  local keys secrets old_ids id env missing=''
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '\n> GET /repos/%s/%s/keys and /repos/%s/%s/environments/release-tag/secrets\n  (dry run: not sent)\n' \
-      "$OWNER" "$REPO" "$OWNER" "$REPO" >&3
-    printf '> unless both are set: ssh-keygen -t ed25519 in a private temporary directory, then\n' >&3
+    printf '\n> GET /repos/%s/%s/keys and /repos/%s/%s/environments/{%s}/secrets\n  (dry run: not sent)\n' \
+      "$OWNER" "$REPO" "$OWNER" "$REPO" "$(printf '%s' "$TAG_KEY_ENVIRONMENTS" | tr ' ' ,)" >&3
+    printf '> unless all are set: ssh-keygen -t ed25519 in a private temporary directory, then\n' >&3
     gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" \
       '{title: $title, key: "<the new public key>", read_only: false}')"
-    printf '\n> gh secret set %s --env release-tag --repo %s/%s, with the private key on stdin\n' \
-      "$TAG_KEY_SECRET" "$OWNER" "$REPO" >&3
+    for env in $TAG_KEY_ENVIRONMENTS; do
+      printf '\n> gh secret set %s --env %s --repo %s/%s, with the private key on stdin\n' \
+        "$TAG_KEY_SECRET" "$env" "$OWNER" "$REPO" >&3
+    done
     printf '> then DELETE /repos/%s/%s/keys/<id> for the key it replaces, if any\n' "$OWNER" "$REPO" >&3
-    result "release-tag: deploy key and $TAG_KEY_SECRET"
+    result "release-tag, go-module: deploy key and $TAG_KEY_SECRET"
     return 0
   fi
   command -v ssh-keygen >/dev/null 2>&1 || die 'ssh-keygen is required for the release-tag deploy key'
   keys=$(gh_get "repos/$OWNER/$REPO/keys?per_page=100" '[]')
-  secrets=$(gh_get "repos/$OWNER/$REPO/environments/release-tag/secrets?per_page=100" '{"secrets":[]}')
   old_ids=$(printf '%s' "$keys" | jq -r --arg title "$TAG_KEY_TITLE" '.[] | select(.title == $title) | .id')
-  if [ "$ROTATE_TAG_KEY" -eq 0 ] && [ -n "$old_ids" ] &&
-    printf '%s' "$secrets" | jq -e --arg name "$TAG_KEY_SECRET" 'any(.secrets[]; .name == $name)' >/dev/null; then
-    result "release-tag: deploy key and $TAG_KEY_SECRET already set (--rotate-tag-key replaces them)"
+  for env in $TAG_KEY_ENVIRONMENTS; do
+    secrets=$(gh_get "repos/$OWNER/$REPO/environments/$env/secrets?per_page=100" '{"secrets":[]}')
+    printf '%s' "$secrets" | jq -e --arg name "$TAG_KEY_SECRET" 'any(.secrets[]?; .name == $name)' >/dev/null ||
+      missing="$missing $env"
+  done
+  if [ "$ROTATE_TAG_KEY" -eq 0 ] && [ -n "$old_ids" ] && [ -z "$missing" ]; then
+    result "release-tag, go-module: deploy key and $TAG_KEY_SECRET already set (--rotate-tag-key replaces them)"
     return 0
   fi
   # A template, so TMPDIR is honoured on macOS too (its mktemp -d alone ignores it).
@@ -551,14 +563,16 @@ configure_tag_key() {
   ssh-keygen -q -t ed25519 -N '' -C "$TAG_KEY_TITLE" -f "$TAG_KEY_DIR/key"
   gh_api POST "repos/$OWNER/$REPO/keys" "$(jq -n --arg title "$TAG_KEY_TITLE" --rawfile key "$TAG_KEY_DIR/key.pub" \
     '{title: $title, key: ($key | rtrimstr("\n")), read_only: false}')" >/dev/null
-  gh secret set "$TAG_KEY_SECRET" --env release-tag --repo "$OWNER/$REPO" <"$TAG_KEY_DIR/key"
+  for env in $TAG_KEY_ENVIRONMENTS; do
+    gh secret set "$TAG_KEY_SECRET" --env "$env" --repo "$OWNER/$REPO" <"$TAG_KEY_DIR/key"
+  done
   rm -rf "$TAG_KEY_DIR"
   TAG_KEY_DIR=''
   for id in $old_ids; do
     gh_api DELETE "repos/$OWNER/$REPO/keys/$id" >/dev/null
     result "release-tag: removed the deploy key it replaces (id $id)"
   done
-  result "release-tag: new deploy key (write access) and $TAG_KEY_SECRET"
+  result "release-tag, go-module: new deploy key (write access) and $TAG_KEY_SECRET"
 }
 
 # upsert_ruleset TARGET NAME BODY
@@ -695,16 +709,18 @@ configure_branch_ruleset() {
 
 # 4. Release tags.
 configure_tag_ruleset() {
-  step "4. Rulesets '$TAG_RULESET' and '$TAG_KEEP_RULESET' (refs/tags/v*)"
+  step "4. Rulesets '$TAG_RULESET' and '$TAG_KEEP_RULESET' (refs/tags/v*, refs/tags/clients/go/v*)"
   # A v* tag starts release.yml, which stages the npm package and pushes the image (image.yml),
   # running the workflow files of the tagged commit. GOVERNANCE.md says releases come only from a
-  # protected v<version> tag. Only the admin role and deploy keys may create one: tag-release.yml
-  # pushes a merged version's tag with the release-tag deploy key (step 2), the only deploy key
-  # this script adds. A DeployKey bypass cannot name that key (the REST docs: its actor_id "should
-  # be null"), so it covers any write deploy key; that is accepted, and kept to creation by a
-  # second ruleset in which only the admin role may move or delete a release tag. Tag rulesets
-  # allow no "pull requests only" mode, and a deploy key bypass only "always", so every bypass is
-  # "always".
+  # protected v<version> tag. A clients/go/v* tag is a Go module version: proxy.golang.org serves
+  # whatever commit it names, so creating one publishes the Go client. Only the admin role and
+  # deploy keys may create either: tag-release.yml and release.yml's go-module job push them with
+  # the release deploy key (step 2), the only deploy key this script adds. Any other identity that
+  # can write to the repository (a workflow's GITHUB_TOKEN, the Slotlock CMS App) cannot. A
+  # DeployKey bypass cannot name that key (the REST docs: its actor_id "should be null"), so it
+  # covers any write deploy key; that is accepted, and kept to creation by a second ruleset in
+  # which only the admin role may move or delete a release tag. Tag rulesets allow no "pull
+  # requests only" mode, and a deploy key bypass only "always", so every bypass is "always".
   upsert_ruleset tag "$TAG_RULESET" "$(jq -n --arg name "$TAG_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
@@ -713,13 +729,11 @@ configure_tag_ruleset() {
       {actor_id: $role, actor_type: "RepositoryRole", bypass_mode: "always"},
       {actor_id: null, actor_type: "DeployKey", bypass_mode: "always"}
     ],
-    conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+    conditions: {ref_name: {include: ["refs/tags/v*", "refs/tags/clients/go/v*"], exclude: []}},
     rules: [{type: "creation"}]
   }')" || die "$RULESET_ERROR"
   verify_bypass "$RULESET_ID" always
-  # The Go client's clients/go/v* tags are module versions, which must never move either. Creating
-  # one is left to write access: release.yml's go-module job pushes it with GITHUB_TOKEN, which a
-  # ruleset could let through only by trusting every workflow's token.
+  # Both are versions, which must never move or disappear.
   upsert_ruleset tag "$TAG_KEEP_RULESET" "$(jq -n --arg name "$TAG_KEEP_RULESET" --argjson role "$ADMIN_ROLE_ID" '{
     name: $name,
     target: "tag",
@@ -819,8 +833,9 @@ print_checklist() {
     - second release: creates the npm trusted publisher (release.yml, environment npm, stage
       only). npm expires one that has not published within 2 days, so it is created when a
       version is waiting, and the re-run publishes it.
-    The deploy key tag-release.yml pushes v* tags with is created here. scripts/bootstrap-release.sh
-    runs this script when it is missing, re-runs the failed job and finishes the release.
+    The deploy key tag-release.yml pushes v* tags with, and the go-module job clients/go/v* tags,
+    is created here. scripts/bootstrap-release.sh runs this script when it is missing, re-runs the
+    failed job and finishes the release.
 EOF
   if [ "${BRANCH_RULESET_SKIPPED:-0}" = 1 ]; then
     cat <<EOF

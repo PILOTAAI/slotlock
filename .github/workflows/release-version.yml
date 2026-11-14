@@ -28,7 +28,9 @@
 #
 # Run it again with the same version after a failure. It keeps the release branch the failed run left
 # when that already holds this release, so checks already run there still count, replaces it
-# otherwise, and reuses its pull request (scripts/open-release-pr.sh).
+# otherwise, and reuses its pull request (scripts/open-release-pr.sh). Only a pull request from this
+# repository's own branch is ever reused, waited for or merged: a fork's from a branch of the same
+# name, or its runs at the same commit, never are.
 name: Release a version
 
 on:

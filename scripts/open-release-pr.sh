@@ -7,8 +7,9 @@
 # A run that stops before its merge leaves its branch, and perhaps its pull request, behind. When
 # that branch holds nothing but one such release commit, the next run keeps it if it is this same
 # release on the same main, so the checks approved and run on it still count, and otherwise replaces
-# it, only as it was read here (a lease), so a push made since is never lost. An open pull request is
-# reused. A branch holding anything else stops the run.
+# it, only as it was read here (a lease), so a push made since is never lost. An open pull request
+# from this repository's own branch is reused; a fork's from a branch of the same name never is. A
+# branch holding anything else stops the run.
 #   scripts/open-release-pr.sh <version>
 # Needs git with an origin it can push to and origin/main fetched, and gh logged in (GH_TOKEN).
 set -eu
@@ -21,6 +22,9 @@ fail() {
   exit 1
 }
 version=$1
+# The branch goes into a query string below: only a version's characters.
+. "$(dirname "$0")/semver.sh"
+is_version "$version" || fail "$version is not a version like 1.2.3 or 1.2.3-rc.1 (no leading v)."
 branch="release/v$version"
 server=${GITHUB_SERVER_URL:-https://github.com}
 repository=${GITHUB_REPOSITORY:-PILOTAAI/slotlock}
@@ -60,10 +64,13 @@ else
   git push -q --force-with-lease="refs/heads/$branch:$lease" origin "refs/heads/$branch" >&2
 fi
 
-# open_pr: the number of the open pull request from the branch into main, or nothing.
+# open_pr: the number of the open pull request into main from this repository's own branch, or
+# nothing. Anyone can open one from a fork's branch of the same name, and gh pr list --head matches
+# the name alone, so the head is bound to the owner here and to the repository itself below.
 open_pr() {
-  gh pr list --repo "$repository" --head "$branch" --base main --state open \
-    --json number --jq '.[0].number // empty'
+  REPOSITORY=$repository gh api \
+    "repos/$repository/pulls?state=open&base=main&head=${repository%%/*}:$branch&per_page=100" \
+    --jq '[.[] | select(.head.repo.full_name == env.REPOSITORY)][0].number // empty'
 }
 pr=$(open_pr)
 if [ -z "$pr" ]; then
