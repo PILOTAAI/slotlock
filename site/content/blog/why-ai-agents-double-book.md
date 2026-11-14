@@ -16,6 +16,8 @@ related:
   - Free/busy certainty | /docs/concepts/#freebusy-certainty
   - Security model | /docs/security/
 ---
+![Calendar for AI agents](/blog/why-ai-agents-double-book/g1.png)
+
 An AI agent with a calendar tool can book a meeting room, a rental van or a court in seconds. Give several agents the same tool and the bookings start to collide. The cause is rarely the model. It is a calendar API built for people clicking one button at a time.
 
 ## 1. Agents run in parallel
