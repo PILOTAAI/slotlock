@@ -36,6 +36,33 @@ versioning.
   by their blobs instead of downloading and sending each again.
 - `site/README.md` says how to write a post: each format, and the limits.
 
+- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`
+  and follows the refunded payment to the subscriptions whose invoices it paid (Stripe's invoice
+  payments): for each that Stripe says still renews, of an account whose plan names that customer,
+  Billing's Needs a person shows "Refunded, plan still active" with the amount, or "Partly refunded",
+  linked to the payment in Stripe. Alerts are kept once per account and Stripe object. Give the
+  dashboard's Stripe key Read on Invoices, run `node scripts/configure-stripe.mjs` (it adds the
+  event to an existing endpoint, keeps its others, and says when the key cannot read invoice
+  payments), and `slotlock migrate`; the launch check now expects the event.
+- **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
+  Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
+  (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at
+  most 80 characters) and erased with the person. Google sign-in asks
+  for the `profile` scope, which its name claim needs. The console shows each account by its name,
+  else its login or email, else its reference, with initials and a second line, and finds accounts
+  by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched
+  login the database does not hold. Staff are shown by the GitHub login kept at their last console
+  sign-in, and deployment-role commands as "Command line". A person's own account's export
+  (`POST /v1/tenant/exports`, and the one staff make for a privacy request) includes that name and
+  display and when they last signed in (`dashboard_people`, through `slotlock.tenant_export_person`,
+  which the dashboard asks for first). PRIVACY.md says what is kept and when it goes.
+- **The Staff log in words.** Each action has a plain-English label (its code in the label's title),
+  views and searches are hidden unless asked (`?views=1`), and the log filters by who (`who=`, or
+  `cli` for the command line), action, account and days (`from`, `to`). The hash chain is checked
+  as before. `slotlock.admin_staff_log` takes the filters: deploy the console after
+  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL`, which also reruns the console's grants for
+  the admin functions whose results grew.
+
 ### Changed
 
 - **Blog posts are managed in the admin console.** The published posts stay on the site and appear
@@ -71,35 +98,6 @@ versioning.
 - Admin console: Inter and Geist Mono are self-hosted (the Latin woff2 subsets of `@fontsource-variable/inter` and `@fontsource-variable/geist-mono` 5.3.0, SIL Open Font License 1.1, pinned as dev dependencies and embedded by `scripts/admin-fonts.mjs`), served from the console at hashed paths cached for a year; the CSP adds `font-src 'self'` and nothing else.
 - Admin console: an account is shown by its name everywhere it is listed, not only on Accounts: Home's cases, Billing's Needs a person, overrides, alerts and Ending (and the forms that pick one), Usage's and Accounts' near quota, the case and privacy queues and records, the staff log's Account column, filter and entries, announcements to one account, feature flags and their changes, accounts whose maintenance is failing, and the account typeahead, each as the shared account cell (name, else login or email, else reference, on its initials' colour, with a long reference shortened and whole in its title). The names come with each function's rows, joined to `slotlock.staff_directory`: `admin_cases`, `admin_overrides`, `admin_billing_alerts`, `admin_privacy_requests`, `admin_announcements` and `admin_staff_log` gain `account_name` and `account_display`, `admin_usage_accounts` gains `name` and `display` (each dropped and made again by `slotlock migrate`, which reapplies the console role's grants), and `admin_case`, `admin_privacy_request`, `admin_billing`'s Ending, `admin_flags` and `admin_system`'s failing accounts carry them too. What each records in the staff log is unchanged.
 - The dashboard and the console share their colours from `src/design-tokens.ts`; the dashboard renders exactly the values it did. The console's tokens pass WCAG 2.2 AA in both themes, which `design-tokens.unit.test.ts` checks, and `admin-console-visual.integration.test.ts` renders every console page in Chromium at 390, 1440 and 1920 pixels, dark and light, checking it against axe-core 4.14.0 (a new, pinned dev dependency), the CSP and sideways scrolling.
-
-### Added
-
-- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`
-  and follows the refunded payment to the subscriptions whose invoices it paid (Stripe's invoice
-  payments): for each that Stripe says still renews, of an account whose plan names that customer,
-  Billing's Needs a person shows "Refunded, plan still active" with the amount, or "Partly refunded",
-  linked to the payment in Stripe. Alerts are kept once per account and Stripe object. Give the
-  dashboard's Stripe key Read on Invoices, run `node scripts/configure-stripe.mjs` (it adds the
-  event to an existing endpoint, keeps its others, and says when the key cannot read invoice
-  payments), and `slotlock migrate`; the launch check now expects the event.
-- **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
-  Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
-  (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at
-  most 80 characters) and erased with the person. Google sign-in asks
-  for the `profile` scope, which its name claim needs. The console shows each account by its name,
-  else its login or email, else its reference, with initials and a second line, and finds accounts
-  by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched
-  login the database does not hold. Staff are shown by the GitHub login kept at their last console
-  sign-in, and deployment-role commands as "Command line". A person's own account's export
-  (`POST /v1/tenant/exports`, and the one staff make for a privacy request) includes that name and
-  display and when they last signed in (`dashboard_people`, through `slotlock.tenant_export_person`,
-  which the dashboard asks for first). PRIVACY.md says what is kept and when it goes.
-- **The Staff log in words.** Each action has a plain-English label (its code in the label's title),
-  views and searches are hidden unless asked (`?views=1`), and the log filters by who (`who=`, or
-  `cli` for the command line), action, account and days (`from`, `to`). The hash chain is checked
-  as before. `slotlock.admin_staff_log` takes the filters: deploy the console after
-  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL`, which also reruns the console's grants for
-  the admin functions whose results grew.
 
 ### Fixed
 
