@@ -112,7 +112,10 @@ own site. We use no analytics or advertising cookies, so there is nothing to con
 The website at `https://slotlock.pylota.io` counts visits with Cloudflare Web Analytics. It sets no
 cookie and stores nothing in your browser; it records the page, the site that linked to it, the
 browser, the country and how long the page took to load, and we see only totals. We use the totals
-to learn which pages people read and how they find them. From 14 November 2026 our staff console
+to learn which pages people read and how they find them. A blog post may embed a video from YouTube
+(its privacy-enhanced youtube-nocookie.com player) or Vimeo (with do-not-track set), which your
+browser loads from that site, under its privacy policy, only on a page that includes one. From 14
+November 2026 our staff console
 also reads, from Google Search Console and Bing Webmaster Tools, how often each page of the website
 and each search showed in their results and was clicked: totals by page and by search, never who
 searched.
