@@ -65,10 +65,17 @@ jobs:
             echo "::notice title=Dashboard deploy::Skipped $sha: main has moved on to $main, whose own CI run deploys it."
             exit 0
           fi
+          # A manual run deploys only a commit CI passed. While CI is still running on it, this run
+          # stands aside (CI's own completion deploys it); a commit CI failed, or never ran on, fails.
           if [ -z "$TESTED" ]; then
-            passed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&event=push&status=success&per_page=1" --jq .total_count)
-            if [ "$passed" = 0 ]; then
-              echo "::error title=Dashboard deploy::CI has not passed on main's newest commit $sha. It deploys on its own once it does."
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&event=push&per_page=20" \
+              --jq '[.workflow_runs[] | {status, conclusion}]')
+            if ! jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              if jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+                echo "::notice title=Dashboard deploy::CI is still running on main's newest commit $sha. It deploys on its own once CI passes."
+                exit 0
+              fi
+              echo "::error title=Dashboard deploy::CI has not passed on main's newest commit $sha, so it is not deployed."
               exit 1
             fi
           fi
