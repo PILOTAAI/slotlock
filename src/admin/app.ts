@@ -66,6 +66,15 @@ import {
   slotlockShortDate,
   slotlockStripeLink,
 } from './billing-figures.js';
+import { SLOTLOCK_ADMIN_PEOPLE_CSS, slotlockAvatar, slotlockPersonCell, slotlockShownPerson } from './people.js';
+import {
+  SLOTLOCK_STAFF_ACTION_LABELS,
+  slotlockStaffActionLabel,
+  slotlockStaffActor,
+  slotlockStaffLogFilters,
+  slotlockStaffLogQuery,
+  slotlockStaffLogRange,
+} from './staff-log.js';
 import {
   Html,
   SLOTLOCK_ADMIN_CSS,
@@ -103,7 +112,10 @@ export interface SlotlockAdminOptions {
    */
   access: { verify(request: Request): Promise<SlotlockAccessIdentity | null> } | null;
   insecureWithoutAccess?: boolean;
-  /** Reads GitHub's public profiles (logins by id and back); a token raises GitHub's rate limit. */
+  /**
+   * Reads a public GitHub profile by login, for a search by a login the database does not hold; a
+   * token raises GitHub's rate limit.
+   */
   githubToken?: string;
   /**
    * A restricted Stripe key that reads subscriptions and invoices (RFC 0006, 4.6): revenue on the
@@ -293,7 +305,7 @@ interface Session {
    * database, not this cookie, says who it is and whether it still holds.
    */
   t: string;
-  /** GitHub login, shown in the console only (never stored in the database). */
+  /** GitHub login, as GitHub gave it at sign-in: shown in the sidebar, and kept on the member's row. */
   l: string;
   r: SlotlockStaffRole;
   /** 'github' after GitHub, 'full' after a passkey. */
@@ -426,6 +438,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   // ---------- GitHub ----------
+  /**
+   * A public GitHub profile, by login: only for a search by a login no one signed in with since the
+   * database kept logins (accounts()). Pages never ask GitHub to name anyone.
+   */
   async function githubProfile(path: string): Promise<{ id: string; login: string; type: string } | null> {
     const cached = githubCache.get(path);
     if (cached && cached.until > now()) return cached.value;
@@ -461,10 +477,6 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     githubCache.set(path, { value, until: now() + GITHUB_CACHE_MS });
     return value;
   }
-  const loginOf = async (ref: string) => {
-    const id = /^(?:github|github-org):([1-9][0-9]{0,19})$/.exec(ref)?.[1];
-    return id ? ((await githubProfile(`/user/${id}`))?.login ?? null) : null;
-  };
 
   // ---------- Pages ----------
   const navFor = (session: Session) => [
@@ -497,12 +509,21 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const code = url.searchParams.get('done') ?? url.searchParams.get('error');
     return code && Object.hasOwn(NOTICES, code) ? NOTICES[code] : undefined;
   };
-  /** GitHub logins for staff references (github:<id>); a cli:<user> stays as it is. */
-  const staffNames = async (refs: readonly string[]) => {
-    // Each member looked up once, however many rows name them.
-    const unique = [...new Set(refs)];
-    const names = new Map(await Promise.all(unique.map(async (ref) => [ref, ref.startsWith('github:') ? ((await loginOf(ref)) ?? ref) : ref] as const)));
-    return refs.map((ref) => names.get(ref) ?? ref);
+  /**
+   * Staff references by the GitHub login each member last signed in with, which the database keeps
+   * (one query, never GitHub); a deployment-role command (cli:<user>) as "Command line".
+   */
+  const staffNames = async (session: Session, refs: readonly string[]) => {
+    const members = [...new Set(refs)].filter((ref) => ref.startsWith('github:')).slice(0, 100);
+    const logins = new Map<string, string>();
+    if (members.length > 0) {
+      const sql = options.sql();
+      for (const row of await sql<{ staff_ref: string; login: string }[]>`
+        SELECT * FROM slotlock.admin_staff_logins(${session.t}, ${sql.array(members)}::text[])`) {
+        logins.set(row.staff_ref, row.login);
+      }
+    }
+    return refs.map((ref) => slotlockStaffActor(ref, logins.get(ref)).name);
   };
 
   const kindPill = (kind: string) => pill(kind, kind === 'test' ? 'warn' : 'muted');
@@ -592,27 +613,34 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const plan = ['free', 'developer', 'team'].includes(url.searchParams.get('plan') ?? '') ? url.searchParams.get('plan') : null;
     const status = ['active', 'suspended'].includes(url.searchParams.get('status') ?? '') ? url.searchParams.get('status') : null;
     const after = url.searchParams.get('after')?.slice(0, 500) || null;
-    // The login a search found, only when GitHub says that id is that login: a link cannot label an
-    // account with a login of its choosing.
-    const asked = url.searchParams.get('for');
-    const githubFor = asked && /^[1-9][0-9]{0,19}$/.test(q) && (await loginOf(`github:${q}`))?.toLowerCase() === asked.toLowerCase() ? asked : null;
     const sql = options.sql();
-    const rows = await sql<{
-      account_ref: string; kind: string; name: string | null; created_at: Date | null; last_active: Date | null;
+    type Row = {
+      account_ref: string; kind: string; name: string | null; display?: string | null; created_at: Date | null; last_active: Date | null;
       plan: string; plan_status: string | null; plan_ends_at?: Date | null; suspended: boolean; operations_month: string; bookings_month: string;
-    }[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${q || null}, ${plan}, ${status}, ${after}, ${PAGE})`;
-    const named = await Promise.all(
-      rows.map(async (row) => row.name ?? (row.kind === 'person' && row.account_ref.startsWith('github:') && rows.length <= 10 ? await loginOf(row.account_ref) : null)),
-    );
+    };
+    const find = (query: string) =>
+      sql<Row[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${query || null}, ${plan}, ${status}, ${after}, ${PAGE})`;
+    let rows = await find(q);
+    // People are found by the name and display they last signed in with. A GitHub login no one has
+    // signed in with since those were kept: GitHub says which id it is, and the id is searched.
+    let githubFor: { login: string; id: string } | null = null;
+    if (rows.length === 0 && !after && GITHUB_LOGIN.test(q) && !/^[0-9]+$/.test(q) && !/^(slk|cus)_/.test(q)) {
+      const profile = await githubProfile(`/users/${encodeURIComponent(q)}`);
+      if (profile) {
+        await record(session.t, 'search.github_lookup', null, q);
+        githubFor = { login: profile.login, id: profile.id };
+        rows = await find(profile.id);
+      }
+    }
     const option = (value: string, label: string, current: string | null) =>
       html`<option value="${value}" ${current === value ? html`selected` : ''}>${label}</option>`;
     const last = rows.at(-1)?.account_ref;
     const next = new URLSearchParams({ ...(q ? { q } : {}), ...(plan ? { plan } : {}), ...(status ? { status } : {}), ...(last ? { after: last } : {}) });
     const body = html`
-      ${pageHead('Slotlock Cloud', 'Accounts', githubFor ? html`GitHub account <strong>${githubFor}</strong> is id <code>${q}</code>.` : 'Every person, team, organization and partner account. Test environments are hidden unless you search for one.')}
+      ${pageHead('Slotlock Cloud', 'Accounts', githubFor ? html`GitHub account <strong>${githubFor.login}</strong> is id <code>${githubFor.id}</code>.` : 'Every person, team, organization and partner account. Test environments are hidden unless you search for one.')}
       <form class="filters" method="get" action="/accounts">
         <label class="sr-only" for="accounts-q">Search</label>
-        <input id="accounts-q" name="q" value="${q}" placeholder="Reference, id, slk_ prefix, cus_ customer, name">
+        <input id="accounts-q" name="q" value="${q}" placeholder="Name, login, email, reference, id, slk_ prefix, cus_ customer">
         <label class="sr-only" for="accounts-plan">Plan</label>
         <select id="accounts-plan" name="plan">${option('', 'Any plan', plan ?? '')}${option('free', 'Free', plan)}${option('developer', 'Developer', plan)}${option('team', 'Team', plan)}</select>
         <label class="sr-only" for="accounts-status">Status</label>
@@ -622,8 +650,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ${table(
         'Accounts',
         ['Account', 'Plan', 'Status', 'This month', 'Last active', 'Created'],
-        rows.map((row, index) => [
-          html`<a href="${accountHref(row.account_ref)}">${named[index] ?? row.account_ref}</a><span class="sub mono">${named[index] ? row.account_ref : ''} ${kindPill(row.kind)}</span>`,
+        rows.map((row) => [
+          slotlockPersonCell(slotlockShownPerson({ ref: row.account_ref, name: row.name, display: row.display ?? null }), accountHref(row.account_ref), html` ${kindPill(row.kind)}`),
           planPill(row.plan, row.plan_ends_at),
           statusPill(row.suspended, row.plan_status),
           html`${count(row.operations_month)} operations<span class="sub">${count(row.bookings_month)} bookings</span>`,
@@ -647,13 +675,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const person = PERSON_REF.test(ref);
     const act = slotlockStaffMay(session.r, 'accounts.act');
     const safety = slotlockStaffMay(session.r, 'safety.act');
-    const [keys, usage, audit, login, sessions, notes, cases, overrides] = await Promise.all([
+    const [keys, usage, audit, sessions, notes, cases, overrides] = await Promise.all([
       sql<{ id: string; name: string; prefix: string; scopes: string[]; created_at: Date; expires_at: Date | null; last_used_at: Date | null; revoked_at: Date | null }[]>`
         SELECT * FROM slotlock.admin_account_keys(${session.t}, ${ref})`,
       sql<{ day: Date; metric: string; count: string }[]>`SELECT * FROM slotlock.admin_account_usage(${session.t}, ${ref}, 30)`,
       sql<{ occurred_at: Date; action: string; actor_type: string; actor_ref: string; target_type: string | null; target_ref: string | null; outcome: string; reason: string | null }[]>`
         SELECT * FROM slotlock.admin_account_audit(${session.t}, ${ref}, 50)`,
-      loginOf(ref),
       person
         ? sql<{ handle: string; started_at: Date; last_seen_at: Date; expires_at: Date }[]>`
             SELECT * FROM slotlock.admin_account_sessions(${session.t}, ${ref})`
@@ -665,7 +692,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       sql<OverrideRow[]>`SELECT * FROM slotlock.admin_account_overrides(${session.t}, ${ref})`,
     ]);
     const plan = await planSection(session, ref, data, overrides);
-    const authors = await staffNames(notes.map((note) => note.staff_ref));
+    const suspender = typeof data.suspended_by === 'string' ? data.suspended_by : null;
+    const names = await staffNames(session, [...notes.map((note) => note.staff_ref), ...(suspender ? [suspender] : [])]);
+    const authors = names.slice(0, notes.length);
+    const suspendedBy = suspender ? names.at(-1) : null;
     // What it is held to now, an override included; else its plan row's.
     const held = (data.effective ?? null) as { max_resources: number; max_api_keys: number; max_webhook_endpoints: number } | null;
     const limits = held
@@ -676,7 +706,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       html`<div class="meter"><span><span>${label}</span><span>${count(value)}${max ? ` of ${count(max)}` : ''}</span></span>${max ? html`<progress max="${max}" value="${Math.min(value, max)}">${value}</progress>` : ''}</div>`;
     const series = (metric: string) =>
       usage.filter((point) => point.metric === metric).map((point) => ({ day: day(point.day), count: Number(point.count) }));
-    const title = String(data.name ?? login ?? ref);
+    // A person by the name and display their provider gave at their last sign-in; else the reference.
+    const shown = slotlockShownPerson({
+      ref,
+      name: typeof data.name === 'string' ? data.name : null,
+      display: typeof data.display === 'string' ? data.display : null,
+    });
+    const title = shown.primary;
     const endsAt = typeof data.plan_ends_at === 'string' ? data.plan_ends_at : null;
     const stripe = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
     const base = accountHref(ref);
@@ -689,12 +725,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const activeKey = (key: { revoked_at: Date | null; expires_at: Date | null }) =>
       !key.revoked_at && !(key.expires_at && new Date(key.expires_at).getTime() < now_);
     const body = html`
-      ${pageHead(`Account · ${String(data.kind)}`, title, html`<code>${ref}</code> <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan), endsAt)} ${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
+      ${pageHead(`Account · ${String(data.kind)}`, title, html`${slotlockAvatar(shown)} ${shown.secondary ? html`<span class="sub-inline">${shown.secondary}</span>` : html`<code>${ref}</code>`} <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan), endsAt)} ${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
         html`${stripe ? html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe</a>` : ''}${slotlockStaffMay(session.r, 'system.act') && data.kind !== 'test' ? html`<a class="btn" href="/communications?${new URLSearchParams({ account: ref }).toString()}">Send a notice</a>` : ''}${safety ? html`<a class="btn ${suspended ? '' : 'danger'}" href="#danger">${suspended ? 'Lift suspension' : 'Suspend'}</a>` : ''}`)}
       <div class="grid-2">
         <div>
           ${suspended
-            ? html`<div class="notice warn"><p><strong>Suspended ${when(data.suspended_at as string)}</strong>${data.suspended_by ? html` by <span class="mono">${String(data.suspended_by)}</span>` : ''}. It can read, writes nothing, and its keys are refused.</p>
+            ? html`<div class="notice warn"><p><strong>Suspended ${when(data.suspended_at as string)}</strong>${suspendedBy ? html` by ${suspendedBy}` : ''}. It can read, writes nothing, and its keys are refused.</p>
                 ${data.suspension_reason ? html`<p>Reason: ${String(data.suspension_reason)}</p>` : ''}
                 ${data.suspension_message ? html`<p>The customer sees: “${String(data.suspension_message)}”</p>` : html`<p class="fine">No message for the customer.</p>`}</div>`
             : ''}
@@ -837,7 +873,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return respond(layout(shellOf(session, 'Not found', '/cases'), pageHead('Cases', 'No such case', `There is no case #${id}.`)), 404, { 'Set-Cookie': sessionCookie(session) });
     }
     const history = (found.history ?? []) as { occurred_at: string; staff_ref: string; action: string; reason: string | null }[];
-    const names = await staffNames([String(found.opened_by), ...history.map((event) => event.staff_ref)]);
+    const names = await staffNames(session, [String(found.opened_by), ...history.map((event) => event.staff_ref)]);
     const open = found.status === 'open';
     const account_ = typeof found.account_ref === 'string' ? found.account_ref : null;
     const option = (value: string, label: string, current: unknown) =>
@@ -965,7 +1001,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (!account) return redirect('/privacy');
     const rows = await options.sql()<{ request_id: string; erased_at: Date; rows_erased: string; asked_by: string; approved_by: string; erased_by: string }[]>`
       SELECT * FROM slotlock.admin_privacy_receipts(${session.t}, ${account})`;
-    const names = await staffNames(rows.flatMap((row) => [row.asked_by, row.approved_by, row.erased_by]));
+    const names = await staffNames(session, rows.flatMap((row) => [row.asked_by, row.approved_by, row.erased_by]));
     const body = html`
       ${pageHead('Privacy', 'Erasure receipts', html`For <span class="mono">${account}</span>. A receipt names the account only by a digest, which this lookup matches.`)}
       ${table('Receipts', ['Request', 'Erased', 'Rows', 'Asked, approved and erased by'], rows.map((row, index) => [
@@ -995,7 +1031,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const receipt = found.receipt as { rows: number; asked_by: string; approved_by: string; erased_by: string; erased_at: string; digest: string } | null;
     const people = [text('opened_by'), text('verified_by'), text('erasure_asked_by'), text('erasure_approved_by'), text('closed_by'),
       receipt?.erased_by ?? null].map((ref) => ref ?? '');
-    const names = await staffNames(people);
+    const names = await staffNames(session, people);
     const nameOf = (index: number) => names[index] || people[index] || '';
     const mayErase = slotlockStaffMay(session.r, 'privacy.erase');
     const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}">`;
@@ -1099,30 +1135,43 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   }
 
   async function staff(session: Session): Promise<Response> {
-    const rows = await options.sql()<{ staff_ref: string; role: string; status: string; added_by: string; added_at: Date; last_seen_at: Date | null; passkeys: number; enrolling: boolean }[]>`
+    const rows = await options.sql()<{ staff_ref: string; login?: string | null; role: string; status: string; added_by: string; added_at: Date; last_seen_at: Date | null; passkeys: number; enrolling: boolean }[]>`
       SELECT * FROM slotlock.admin_staff(${session.t})`;
-    const logins = await Promise.all(rows.map((row) => loginOf(row.staff_ref)));
+    // Each member by the login they last signed in with (kept at sign-in); who added them likewise.
+    const logins = new Map(rows.map((row) => [row.staff_ref, row.login ?? null]));
+    const addedBy = (ref: string) => slotlockStaffActor(ref, logins.get(ref));
     const body = html`
       ${pageHead('Slotlock Cloud', 'Staff', html`Who can use this console. Add, change and remove staff with <code>slotlock staff</code> as the schema owner.`)}
-      ${table('Staff', ['Member', 'Role', 'Status', 'Passkeys', 'Last seen', 'Added'], rows.map((row, index) => [
-        html`${logins[index] ?? row.staff_ref}<span class="sub mono">${row.staff_ref}</span>`,
+      ${table('Staff', ['Member', 'Role', 'Status', 'Passkeys', 'Last seen', 'Added'], rows.map((row) => [
+        slotlockPersonCell(slotlockShownPerson({ ref: row.staff_ref, display: row.login ?? null })),
         pill(row.role, row.role === 'owner' ? 'info' : 'muted'),
         row.status === 'active' ? pill('Active', 'good') : pill('Removed', 'muted'),
         html`${count(row.passkeys)}${row.enrolling ? html`<span class="sub">Code issued</span>` : ''}`,
         html`${when(row.last_seen_at)}`,
-        html`${day(row.added_at)}<span class="sub mono">${row.added_by}</span>`,
+        html`${day(row.added_at)}<span class="sub" title="${row.added_by}">${addedBy(row.added_by).name}</span>`,
       ]), 'No staff.')}`;
     return page(session, 'Staff', '/staff', body);
   }
 
   async function staffLog(session: Session, url: URL): Promise<Response> {
     const before = /^[1-9][0-9]{0,18}$/.test(url.searchParams.get('before') ?? '') ? BigInt(url.searchParams.get('before') as string) : null;
-    const rows = await options.sql()<{ chain_index: string; occurred_at: Date; staff_ref: string; action: string; account_ref: string | null; target: string | null; reason: string | null }[]>`
-      SELECT * FROM slotlock.admin_staff_log(${session.t}, ${before === null ? null : before.toString()}, ${PAGE})`;
+    // Narrowed by who, action, account and days, from the query; views only when asked.
+    const filters = slotlockStaffLogFilters(url.searchParams);
+    const { since, until } = slotlockStaffLogRange(filters);
+    const sql = options.sql();
+    const [rows, [chainRow], members] = await Promise.all([
+      sql<{ chain_index: string; occurred_at: Date; staff_ref: string; staff_login: string | null; action: string; account_ref: string | null; target: string | null; reason: string | null }[]>`
+        SELECT * FROM slotlock.admin_staff_log(${session.t}, ${before === null ? null : before.toString()}, ${PAGE},
+          ${filters.who}, ${filters.action}, ${filters.account}, ${since}, ${until}, ${filters.views})`,
+      sql<{ chain: { checked: number; broken_at: number | null; head_index: number | null; head_hash: string | null } }[]>`
+        SELECT slotlock.admin_staff_log_chain(${session.t}) AS chain`,
+      sql<{ staff_ref: string; login: string | null }[]>`SELECT staff_ref, login FROM slotlock.admin_staff(${session.t})`,
+    ]);
     const last = rows.at(-1)?.chain_index;
-    const [chainRow] = await options.sql()<{ chain: { checked: number; broken_at: number | null; head_index: number | null; head_hash: string | null } }[]>`
-      SELECT slotlock.admin_staff_log_chain(${session.t}) AS chain`;
     const chain = chainRow?.chain;
+    const option = (value: string, label: string, current: string | null) =>
+      html`<option value="${value}" ${current === value ? html`selected` : ''}>${label}</option>`;
+    const actions = Object.entries(SLOTLOCK_STAFF_ACTION_LABELS).sort((a, b) => a[1].localeCompare(b[1]));
     const body = html`
       ${pageHead('Slotlock Cloud', 'Staff log', 'Every sign-in, every view of an account and every staff action, newest first. It only grows, and each entry is chained to the one before by SHA-256.')}
       ${chain?.broken_at
@@ -1130,29 +1179,36 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         : chain?.head_index
           ? html`<p class="fine">The newest ${count(chain.checked)} entries check out. Head: #${String(chain.head_index)} <code class="mono">${chain.head_hash ?? ''}</code>. Record it somewhere the database's owner cannot change: a later rewrite of the log would not match it.</p>`
           : ''}
-      ${table('Staff log', ['#', 'When', 'Who', 'Action', 'Account'], rows.map((row) => [
-        html`<span class="mono">${row.chain_index}</span>`,
-        html`${when(row.occurred_at)}`,
-        html`<span class="mono">${row.staff_ref}</span>`,
-        html`<code>${row.action}</code>${row.target ? html`<span class="sub mono">${row.target}</span>` : ''}${row.reason ? html`<span class="sub">${row.reason}</span>` : ''}`,
-        row.account_ref ? html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>` : html`–`,
-      ]), 'The log is empty.')}
-      ${rows.length === PAGE && last ? html`<p class="pager"><a class="btn" href="/staff/log?before=${last}">Older</a></p>` : ''}`;
+      <form class="filters" method="get" action="/staff/log">
+        <label class="sr-only" for="log-who">Who</label>
+        <select id="log-who" name="who">${option('', 'Anyone', filters.who ?? '')}${members.map((member) => option(member.staff_ref, member.login ?? member.staff_ref, filters.who))}${option('cli', 'Command line', filters.who)}</select>
+        <label class="sr-only" for="log-action">Action</label>
+        <select id="log-action" name="action">${option('', 'Any action', filters.action ?? '')}${actions.map(([code, label]) => option(code, label, filters.action))}</select>
+        <label class="sr-only" for="log-account">Account</label>
+        <input id="log-account" name="account" value="${filters.account ?? ''}" placeholder="Account reference" autocomplete="off" spellcheck="false">
+        <label class="sr-only" for="log-from">From</label><input id="log-from" name="from" type="date" value="${filters.from ?? ''}">
+        <label class="sr-only" for="log-to">To</label><input id="log-to" name="to" type="date" value="${filters.to ?? ''}">
+        <label class="choice"><input type="checkbox" name="views" value="1" ${filters.views ? html`checked` : ''}> Show views</label>
+        <button class="btn" type="submit">Filter</button>
+      </form>
+      ${table('Staff log', ['#', 'When', 'Who', 'Action', 'Account'], rows.map((row) => {
+        const actor = slotlockStaffActor(row.staff_ref, row.staff_login);
+        return [
+          html`<span class="mono">${row.chain_index}</span>`,
+          html`${when(row.occurred_at)}`,
+          html`<a href="/staff/log?${slotlockStaffLogQuery({ ...filters, who: actor.command ? 'cli' : row.staff_ref }).toString()}" title="${row.staff_ref}">${actor.name}</a>`,
+          html`<span title="${row.action}">${slotlockStaffActionLabel(row.action)}</span>${row.target ? html`<span class="sub mono">${row.target}</span>` : ''}${row.reason ? html`<span class="sub">${row.reason}</span>` : ''}`,
+          row.account_ref ? html`<a class="mono" href="${accountHref(row.account_ref)}">${row.account_ref}</a>` : html`–`,
+        ];
+      }), filters.views ? 'Nothing in the log matches.' : 'Nothing but views matches: tick Show views to see them.')}
+      ${rows.length === PAGE && last ? html`<p class="pager"><a class="btn" href="/staff/log?${slotlockStaffLogQuery(filters, { before: last }).toString()}">Older</a></p>` : ''}`;
     return page(session, 'Staff log', '/staff/log', body);
   }
 
-  async function search(session: Session, url: URL): Promise<Response> {
+  /** The top bar's search: Accounts finds the account (by name, login, email, reference, key or customer). */
+  async function search(_session: Session, url: URL): Promise<Response> {
     const q = (url.searchParams.get('q') ?? '').trim().slice(0, 200);
-    if (!q) return redirect('/accounts');
-    // A GitHub login: the database keeps only ids, so ask GitHub which id the login is.
-    if (GITHUB_LOGIN.test(q) && !/^[0-9]+$/.test(q) && !/^(slk|cus)_/.test(q)) {
-      const profile = await githubProfile(`/users/${encodeURIComponent(q)}`);
-      if (profile) {
-        await record(session.t, 'search.github_lookup', null, q.slice(0, 200));
-        return redirect(`/accounts?${new URLSearchParams({ q: profile.id, for: profile.login }).toString()}`);
-      }
-    }
-    return redirect(`/accounts?${new URLSearchParams({ q }).toString()}`);
+    return redirect(q ? `/accounts?${new URLSearchParams({ q }).toString()}` : '/accounts');
   }
 
   // ---------- Sign-in ----------
@@ -1222,6 +1278,11 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (typeof role !== 'string' || !(SLOTLOCK_STAFF_ROLES as readonly string[]).includes(role) || typeof token !== 'string' || !SESSION_TOKEN.test(token)) {
       return refused('Not staff', `GitHub account ${user.login} is not on the Slotlock staff. The attempt was recorded.`);
     }
+    // The login GitHub just gave, kept so pages name this member without asking GitHub. Last, and
+    // never in the way: a database from before it lacks the function, and the sign-in stands.
+    await options.sql()`SELECT slotlock.admin_staff_login(${token}, ${user.login})`.catch((error: unknown) => {
+      console.error('slotlock-admin staff login not kept', (error as { code?: unknown } | null)?.code ?? 'unknown');
+    });
     // Half signed in: enough to reach the passkey step, for 15 minutes. The passkey starts the 8 hours.
     const session: Session = { s: staffRef, t: token, l: user.login, r: role as SlotlockStaffRole, st: 'github', iat: now(), seen: now(), exp: now() + FRESH_MS };
     return redirect('/passkey', [clear(OAUTH_COOKIE), sessionCookie(session)]);
@@ -1411,7 +1472,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     // Slotlock's subscriptions only, by the rule the database counts paying plans by (stripe.ts).
     const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:slotlock', () => stripe.revenue()) : null;
     const ending = slotlockEndingRows((billing.ending ?? []) as { account_ref: string; plan: string | null; ends_at: string }[], revenue);
-    const askers = await staffNames(overrides.map((item) => item.created_by));
+    const askers = await staffNames(session, overrides.map((item) => item.created_by));
     const may = (capability: SlotlockStaffCapability) => slotlockStaffMay(session.r, capability);
     const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}"><input type="hidden" name="back" value="/billing">`;
     const openAlerts = alerts.filter((alert) => !alert.resolved_at);
@@ -1560,7 +1621,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const inForce = overrides.find((item) => item.state === 'in_force');
     const live = overrides.filter((item) => item.state === 'in_force' || item.state === 'pending');
     const approvable = overrides.filter((item) => item.state === 'pending' && item.created_by !== session.s);
-    const names = await staffNames(overrides.map((item) => item.created_by));
+    const names = await staffNames(session, overrides.map((item) => item.created_by));
     const stripeCustomer = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
     const customer = stripe && stripeCustomer && may('accounts.read')
       ? await cached<SlotlockStripeCustomer>(session, `account:stripe:${stripeCustomer}`, () => stripe.customer(stripeCustomer))
@@ -1656,9 +1717,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return value === null ? { state: 'failed' } : { state: 'ok', value };
   }
   /** Staff references and their GitHub logins, for a page that names who did what. */
-  const namesOf = async (refs: readonly string[]) => {
+  const namesOf = async (session: Session, refs: readonly string[]) => {
     const unique = [...new Set(refs)];
-    const names = await staffNames(unique);
+    const names = await staffNames(session, unique);
     return new Map(unique.map((ref, index) => [ref, names[index] ?? ref]));
   };
 
@@ -1695,7 +1756,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       endedToo,
       account,
       incidents,
-      names: await namesOf(rows.map((row) => row.created_by)),
+      names: await namesOf(session, rows.map((row) => row.created_by)),
       now: now(),
     }, accountHref);
     return page(session, 'Communications', '/communications', body, undefined, noticeOf(url));
@@ -1762,7 +1823,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         { name: 'Bing Webmaster Tools', value: options.insights?.bing ? `connected to ${options.insights.bing.site}` : 'not set' },
         { name: 'Cloudflare Web Analytics', value: connected(options.insights?.cloudflare) },
       ],
-      names: await namesOf([...flags.flags.map((flag) => flag.set_by), ...flags.history.map((event) => event.staff_ref)]),
+      names: await namesOf(session, [...flags.flags.map((flag) => flag.set_by), ...flags.history.map((event) => event.staff_ref)]),
       now: now(),
     }, accountHref);
     return page(session, 'System', '/system', body, undefined, noticeOf(url));
@@ -2292,7 +2353,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       }
     }
     if (request.method === 'GET') {
-      if (path === '/admin.css') return respond(SLOTLOCK_ADMIN_CSS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/css; charset=utf-8');
+      if (path === '/admin.css') return respond(`${SLOTLOCK_ADMIN_CSS}${SLOTLOCK_ADMIN_PEOPLE_CSS}`, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/css; charset=utf-8');
       if (path === '/admin.js') return respond(SLOTLOCK_ADMIN_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
       if (path === '/passkey.js') return respond(SLOTLOCK_ADMIN_PASSKEY_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');
       if (path === '/editor.js') return respond(SLOTLOCK_ADMIN_EDITOR_JS, 200, { 'Cache-Control': 'public, max-age=300' }, 'text/javascript; charset=utf-8');

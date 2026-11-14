@@ -62,8 +62,17 @@ export interface Shell {
 const isCurrent = (path: string, href: string) =>
   href === '/' ? path === '/' : path === href || path.startsWith(`${href}/`);
 
+/**
+ * The nav item a page is in: the one whose href is the path, or the longest that is a section of
+ * it, so /staff/log marks Staff log alone and not Staff as well.
+ */
+export function currentNavHref(path: string, nav: readonly NavItem[]): string | null {
+  return nav.filter((item) => isCurrent(path, item.href)).reduce<string | null>((best, item) => (best === null || item.href.length > best.length ? item.href : best), null);
+}
+
 /** A page inside the console: sidebar, top bar with search, then the page itself. */
 export function layout(shell: Shell, body: Html): Html {
+  const current = currentNavHref(shell.path, shell.nav);
   return html`<!doctype html>
 <html lang="en-GB">
 <head>
@@ -82,7 +91,7 @@ ${shell.script ? html`<script src="${shell.script}" defer></script>` : ''}
     <a class="brand" href="/">${LOCKUP}<span class="badge">Admin</span></a>
     <nav class="nav" aria-label="Sections">
       ${shell.nav.map(
-        (item) => html`<a href="${item.href}" ${isCurrent(shell.path, item.href) ? new Html('aria-current="page"') : ''}>
+        (item) => html`<a href="${item.href}" ${item.href === current ? new Html('aria-current="page"') : ''}>
           <span>${item.label}</span>${item.count ? html`<span class="count">${item.count.toLocaleString('en-GB')}</span>` : ''}
         </a>`,
       )}

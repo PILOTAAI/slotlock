@@ -1,7 +1,8 @@
-// Upgrading a database shaped as 0.11.0 left it to this release's billing: the plan's end date and
-// trial, a refund alert, and the admin function whose results grew (dropped and made again, since
-// CREATE OR REPLACE cannot change what a function returns). In a database of its own; needs a role
-// that creates databases and roles, skipped without DATABASE_URL.
+// Upgrading a database shaped as 0.11.0 left it to this release's billing and names: the plan's end
+// date and trial, a refund alert, a person's provider name, a staff member's login, and the admin
+// functions whose results grew (dropped and made again, since CREATE OR REPLACE cannot change what a
+// function returns). In a database of its own; needs a role that creates databases and roles,
+// skipped without DATABASE_URL.
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -23,19 +24,38 @@ async function shapeAsRelease0110(sql: postgres.Sql) {
       AND jsonb_typeof(detail) = 'object' AND pg_column_size(detail) <= 2048
       AND (resolved_at IS NULL) = (resolved_by IS NULL)
       AND (resolved_by IS NULL OR octet_length(resolved_by) BETWEEN 1 AND 100));
+    ALTER TABLE slotlock.dashboard_people DROP COLUMN name;
+    ALTER TABLE slotlock.staff_members DROP COLUMN login;
     DROP FUNCTION slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean);
     DROP FUNCTION slotlock.tenant_plans_of_customer(text);
+    DROP FUNCTION slotlock.dashboard_name(text, text);
+    DROP FUNCTION slotlock.admin_staff_login(text, text);
+    DROP FUNCTION slotlock.admin_staff_logins(text, text[]);
     DROP FUNCTION slotlock.staff_subscribed_plans();
+    DROP FUNCTION slotlock.admin_staff_log(text, bigint, integer, text, text, text, timestamptz, timestamptz, boolean);
+    CREATE FUNCTION slotlock.admin_staff_log(actor text, before bigint, page_size integer)
+      RETURNS TABLE (chain_index bigint, occurred_at timestamptz, staff_ref text, action text,
+                     account_ref text, target text, reason text, metadata jsonb)
+      LANGUAGE sql AS $$ SELECT NULL::bigint, NULL::timestamptz, NULL, NULL, NULL, NULL, NULL, NULL::jsonb WHERE false $$;
+    DROP FUNCTION slotlock.staff_directory();
+    CREATE FUNCTION slotlock.staff_directory()
+      RETURNS TABLE (account_ref text, kind text, name text, created_at timestamptz)
+      LANGUAGE sql AS $$ SELECT NULL, NULL, NULL, NULL::timestamptz WHERE false $$;
     DROP FUNCTION slotlock.admin_accounts(text, text, text, text, text, integer);
     CREATE FUNCTION slotlock.admin_accounts(actor text, query text, plan_filter text, status_filter text, after text, page_size integer)
       RETURNS TABLE (account_ref text, kind text, name text, created_at timestamptz, last_active date,
                      plan text, plan_status text, suspended boolean, stripe_customer text,
                      operations_month bigint, bookings_month bigint)
       LANGUAGE sql AS $$ SELECT NULL, NULL, NULL, NULL::timestamptz, NULL::date, NULL, NULL, NULL::boolean, NULL, NULL::bigint, NULL::bigint WHERE false $$;
+    DROP FUNCTION slotlock.admin_staff(text);
+    CREATE FUNCTION slotlock.admin_staff(actor text)
+      RETURNS TABLE (staff_ref text, role text, status text, added_by text, added_at timestamptz,
+                     last_seen_at timestamptz, passkeys integer, enrolling boolean)
+      LANGUAGE sql AS $$ SELECT NULL, NULL, NULL, NULL, NULL::timestamptz, NULL::timestamptz, NULL::integer, NULL::boolean WHERE false $$;
   `);
 }
 
-describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing figures', () => {
+describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing figures and names', () => {
   const suffix = randomBytes(6).toString('hex');
   const database = `slotlock_figures_up_${suffix}`;
   const adminRole = `slotlock_admin_${suffix}`;
@@ -91,34 +111,49 @@ describe.skipIf(!url)('upgrading a 0.11.0 database to the console’s billing fi
 
     // A plan from before: renews (no end date), out of any trial, until the webhook says otherwise.
     expect(await sql`SELECT ends_at, trialing FROM slotlock.tenant_plans WHERE tenant_ref = 'github:7001'`).toEqual([{ ends_at: null, trialing: false }]);
+    expect(await columns('dashboard_people')).toContain('name');
+    expect(await columns('staff_members')).toContain('login');
+    expect(await sql`SELECT display, name FROM slotlock.dashboard_people WHERE person_ref = 'github:7001'`).toEqual([{ display: '@upgraded', name: null }]);
 
     // The wider check holds every alert from before, and takes a refund's, validated after the migration.
     await sql`INSERT INTO slotlock.billing_alerts (kind, tenant_ref, stripe_ref) VALUES ('refunded_plan_active', 'github:7001', 'ch_Up1')`;
     expect((await sql`SELECT kind FROM slotlock.billing_alerts ORDER BY id`).map((row) => row.kind)).toEqual(['payment_failed', 'refunded_plan_active']);
     const unchecked = await sql`
       SELECT conname FROM pg_constraint WHERE connamespace = 'slotlock'::regnamespace AND NOT convalidated
-         AND conname = 'slotlock_billing_alerts_valid'`;
+         AND conname IN ('slotlock_billing_alerts_valid', 'slotlock_dashboard_people_name_valid', 'slotlock_staff_members_login_valid')`;
     expect(unchecked).toEqual([]);
+    await expect(sql`UPDATE slotlock.dashboard_people SET name = ${'Ada\u0007'} WHERE person_ref = 'github:7001'`).rejects.toMatchObject({ code: '23514' });
+    await expect(sql`UPDATE slotlock.staff_members SET login = '<b>' WHERE staff_ref = 'github:7101'`).rejects.toMatchObject({ code: '23514' });
 
-    // The function whose results grew, made again with its new column, and the new ones.
-    expect(await resultColumns('slotlock.admin_accounts(text, text, text, text, text, integer)')).toContain('plan_ends_at');
+    // The functions whose results grew, made again with their new columns; the staff log's old form gone.
+    expect(await resultColumns('slotlock.staff_directory()')).toContain('display');
+    expect(await resultColumns('slotlock.admin_accounts(text, text, text, text, text, integer)')).toEqual(expect.arrayContaining(['display', 'plan_ends_at']));
+    expect(await resultColumns('slotlock.admin_staff(text)')).toContain('login');
+    expect(await oidOf('slotlock.admin_staff_log(text, bigint, integer)')).toBeNull();
     for (const signature of [
       'slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean)',
       'slotlock.tenant_plans_of_customer(text)',
+      'slotlock.dashboard_name(text, text)',
       'slotlock.staff_subscribed_plans()',
+      'slotlock.admin_staff_log(text, bigint, integer, text, text, text, timestamptz, timestamptz, boolean)',
     ]) {
       expect(await oidOf(signature), signature).not.toBeNull();
     }
 
     // The console's role runs them again once its grants are rerun, as `slotlock migrate` does.
     const session = await staffSession(sql, 'github:7101');
-    const listed = await adminSql<{ account_ref: string; plan_ends_at: Date | null }[]>`
-      SELECT account_ref, plan_ends_at FROM slotlock.admin_accounts(${session}, 'github:7001', NULL, NULL, NULL, 10)`;
-    expect(listed).toEqual([{ account_ref: 'github:7001', plan_ends_at: null }]);
+    const listed = await adminSql<{ account_ref: string; display: string | null; plan_ends_at: Date | null }[]>`
+      SELECT account_ref, display, plan_ends_at FROM slotlock.admin_accounts(${session}, '@upgraded', NULL, NULL, NULL, 10)`;
+    expect(listed).toEqual([{ account_ref: 'github:7001', display: '@upgraded', plan_ends_at: null }]);
+    expect(await adminSql`SELECT staff_ref, login FROM slotlock.admin_staff(${session})`).toEqual([{ staff_ref: 'github:7101', login: null }]);
   });
 
   it('changes nothing when it runs again: no function is dropped and made again', async () => {
-    const signatures = ['slotlock.admin_accounts(text, text, text, text, text, integer)'];
+    const signatures = [
+      'slotlock.staff_directory()',
+      'slotlock.admin_accounts(text, text, text, text, text, integer)',
+      'slotlock.admin_staff(text)',
+    ];
     const before = await Promise.all(signatures.map(oidOf));
     await createSlotlockStore(sql).applySchema();
     expect(await Promise.all(signatures.map(oidOf))).toEqual(before);

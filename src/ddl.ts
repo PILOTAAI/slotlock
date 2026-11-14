@@ -320,6 +320,8 @@ export const SLOTLOCK_DASHBOARD_FUNCTIONS = Object.freeze([
   'slotlock.member_scope(text, text)',
   'slotlock.set_member_scope(text, text, text, jsonb)',
   'slotlock.member_scopes(text)',
+  // The name a person's provider gives, beside their display, at sign-in (the staff console's).
+  'slotlock.dashboard_name(text, text)',
   ...SLOTLOCK_IDENTITY_FUNCTIONS,
   ...SLOTLOCK_SSO_FUNCTIONS,
   ...SLOTLOCK_SCIM_FUNCTIONS,
@@ -1477,6 +1479,28 @@ BEGIN
 END
 $slotlock_people_display$;
 
+-- The name the person's provider gives (GitHub's profile name, Google's name claim), as they last
+-- signed in, for the staff console to show an account by: never an identifier, and gone with the
+-- person's row when they are erased (erase_tenant). The dashboard cleans it (workspaces.ts
+-- slotlockPersonName: no control or bidirectional-text characters, trimmed, 80 characters) and
+-- dashboard_name keeps only a name that passes; this check holds what reads the same in any
+-- encoding (no ASCII control character).
+ALTER TABLE slotlock.dashboard_people ADD COLUMN IF NOT EXISTS name text;
+DO $slotlock_people_name$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_dashboard_people_name_valid'
+       AND conrelid = 'slotlock.dashboard_people'::regclass
+  ) THEN
+    -- NOT VALID: the column is new, and DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after.
+    ALTER TABLE slotlock.dashboard_people ADD CONSTRAINT slotlock_dashboard_people_name_valid
+      CHECK (name IS NULL OR (char_length(name) BETWEEN 1 AND 80 AND name = btrim(name)
+                              AND name !~ '[\\u0001-\\u001F\\u007F]')) NOT VALID;
+  END IF;
+END
+$slotlock_people_name$;
+
 -- Invitations to a team workspace: to an email address or a GitHub account, with a role, by a
 -- member entitled to give it. Only a SHA-256 digest of the token is kept (the token is 256 random
 -- bits, shown or sent once). An invitation is pending until accepted, revoked or past expires_at;
@@ -1553,6 +1577,35 @@ BEGIN
 END
 $slotlock_dashboard_display$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[9]} FROM PUBLIC;
+
+-- A person's name as their provider gives it, cleaned by the dashboard (slotlockPersonName), at
+-- sign-in; none clears it. A name that is not clean is kept as none, never refused, so sign-in
+-- cannot fail on it: over 80 characters, or holding a control or bidirectional-text character. In
+-- a UTF-8 database a pattern sees characters; in another (SQL_ASCII) it sees bytes, where only
+-- plain ASCII can be told apart, so only such a name is kept there. Nothing is cut here: in a
+-- database of another encoding, cutting could split a character.
+CREATE OR REPLACE FUNCTION slotlock.dashboard_name(requested_person text, requested_name text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_dashboard_name$
+DECLARE
+  kept text := nullif(btrim(requested_name), '');
+BEGIN
+  IF kept IS NOT NULL AND (char_length(kept) > 80 OR kept ~ '[\\u0001-\\u001F\\u007F]'
+      OR CASE WHEN pg_catalog.getdatabaseencoding() = 'UTF8'
+              THEN kept ~ '[\\u0080-\\u009F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]'
+              ELSE kept ~ '[^\\u0020-\\u007E]' END) THEN
+    kept := NULL;
+  END IF;
+  UPDATE slotlock.dashboard_people person
+     SET name = kept
+   WHERE person.person_ref = requested_person AND person.name IS DISTINCT FROM kept;
+END
+$slotlock_dashboard_name$;
+REVOKE ALL ON FUNCTION slotlock.dashboard_name(text, text) FROM PUBLIC;
 
 -- A new team workspace, its creator its Owner. With requested_cap, a person may have created at
 -- most that many team workspaces that are not on a paid plan. One being deleted counts until it is

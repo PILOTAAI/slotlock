@@ -211,7 +211,7 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     const [no] = await adminSql<{ opened: unknown }[]>`SELECT slotlock.admin_sign_in(${STRANGER}, ${CONSOLE_KEY}) AS opened`;
     expect(no?.opened).toBeNull();
     const log = await adminSql<{ staff_ref: string; action: string }[]>`
-      SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20)`;
+      SELECT staff_ref, action FROM slotlock.admin_staff_log(${await as(OWNER)}, NULL, 20, NULL, NULL, NULL, NULL, NULL, true)`;
     expect(log).toEqual(
       expect.arrayContaining([
         { staff_ref: OWNER, action: 'staff.signed_in' },

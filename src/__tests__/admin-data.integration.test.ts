@@ -1,7 +1,10 @@
-// The staff console's figures against real PostgreSQL, end to end through its pages: Home and
-// Billing count paying plans by one rule (and Stripe's revenue by the same), a plan set to end says
-// when on Accounts and the account page, and a refund that left a plan running needs a person.
-// Needs a role that creates databases and roles; skipped without DATABASE_URL.
+// The staff console's figures and names against real PostgreSQL, end to end through its pages:
+// Home and Billing count paying plans by one rule (and Stripe's revenue by the same), a plan set to
+// end says when on Accounts and the account page, a refund that left a plan running needs a person,
+// people are shown by the name and display their provider gave (with initials, never a style
+// attribute), and staff by the login they last signed in with, without asking GitHub; the Staff log
+// names who, says what in words, hides views unless asked, and filters. Needs a role that creates
+// databases and roles; skipped without DATABASE_URL.
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -28,7 +31,7 @@ const CANCELLED = `github:${BASE + 14}`;
 const thisYear = new Date().getUTCFullYear();
 const ENDS = new Date(Date.UTC(thisYear, 11, 14));
 
-describe.skipIf(!url)('billing figures in the admin console (real Postgres)', () => {
+describe.skipIf(!url)('figures and names in the admin console (real Postgres)', () => {
   const suffix = randomBytes(6).toString('hex');
   const database = `slotlock_figures_${suffix}`;
   const owner = `slotlock_owner_${suffix}`;
@@ -112,8 +115,8 @@ describe.skipIf(!url)('billing figures in the admin console (real Postgres)', ()
 
     // People, as the dashboard keeps them at sign-in (dashboard-teams.integration covers that).
     await superuser`
-      INSERT INTO slotlock.dashboard_people (person_ref, display) VALUES
-        (${ADA}, '@ada'), (${GRACE}, 'grace@navy.example'), (${NOBODY}, NULL)`;
+      INSERT INTO slotlock.dashboard_people (person_ref, display, name) VALUES
+        (${ADA}, '@ada', 'Ada Lovelace'), (${GRACE}, 'grace@navy.example', NULL), (${NOBODY}, NULL, NULL)`;
     const plan = (tenant: string, name: string, status: string, subscription: string | null, extra: { ends?: Date; trialing?: boolean; source?: string } = {}) => superuser`
       INSERT INTO slotlock.tenant_plans (tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints,
                                          stripe_customer, stripe_subscription, ends_at, trialing, source, partner_id,
@@ -199,5 +202,109 @@ describe.skipIf(!url)('billing figures in the admin console (real Postgres)', ()
     expect(alerts).toContain('£5.00 of £5.00 refunded');
     expect(alerts).toContain('https://dashboard.stripe.com/payments/ch_Refund1');
     expect(await text(staff.billing, '/')).toContain('1 billing alert');
+  });
+
+  it("shows people by their provider's name, else display, else reference, with initials and no style attribute", async () => {
+    const accounts = await text(staff.owner, '/accounts');
+    const rowOf = (ref: string) => {
+      const at = accounts.indexOf(`href="/accounts/${encodeURIComponent(ref)}"`);
+      expect(at, ref).toBeGreaterThan(-1);
+      const start = accounts.lastIndexOf('<tr>', at);
+      return accounts.slice(start, accounts.indexOf('</tr>', at));
+    };
+    expect(rowOf(ADA)).toMatch(/<span class="avatar avatar-t\d" aria-hidden="true">AL<\/span>/);
+    expect(rowOf(ADA)).toContain('>Ada Lovelace</a>');
+    expect(rowOf(ADA)).toContain(`@ada · ${ADA}`);
+    expect(rowOf(GRACE)).toContain('>grace@navy.example</a>');
+    expect(rowOf(GRACE)).toMatch(/avatar-t\d" aria-hidden="true">G</);
+    expect(rowOf(NOBODY)).toContain(`>${NOBODY}</a>`);
+    // The same account, the same colour, every time.
+    expect(/avatar-t(\d)/.exec(rowOf(ADA))?.[1]).toBe(/avatar-t(\d)/.exec(await text(staff.owner, `/accounts/${encodeURIComponent(ADA)}`))?.[1]);
+    expect(accounts.toLowerCase()).not.toContain(' style=');
+    const css = await (await staff.owner.request('/admin.css')).text();
+    for (let tone = 0; tone < 8; tone += 1) expect(css).toContain(`.avatar-t${tone}{`);
+    const page = await text(staff.owner, `/accounts/${encodeURIComponent(ADA)}`);
+    expect(page).toContain('<h1>Ada Lovelace</h1>');
+    expect(page).toContain(`@ada · ${ADA}`);
+    // Names come from the database: GitHub is never asked.
+    expect(github).toEqual([]);
+  });
+
+  it('finds people by name and by display, and asks GitHub only for a login the database does not hold', async () => {
+    for (const query of ['lovelace', '@ada', 'ADA', 'navy.example']) {
+      const search = await staff.owner.request(`/search?${new URLSearchParams({ q: query }).toString()}`);
+      const found = await text(staff.owner, search.headers.get('location') ?? '');
+      expect(found, query).toContain(`href="/accounts/${encodeURIComponent(query.includes('navy') ? GRACE : ADA)}"`);
+    }
+    expect(github).toEqual([]);
+    // An @ alone names no one.
+    expect(await text(staff.owner, '/accounts?q=%40')).toContain('No account matches that search.');
+    // A login no one signed in with since names were kept: GitHub says which id it is.
+    const search = await staff.owner.request('/search?q=someone');
+    const found = await text(staff.owner, search.headers.get('location') ?? '');
+    expect(found).toContain(`href="/accounts/${encodeURIComponent(NOBODY)}"`);
+    expect(found).toContain(`GitHub account <strong>someone</strong> is id <code>${BASE + 2}</code>`);
+    expect(github).toEqual(['/users/someone']);
+    const [lookup] = await superuser<{ target: string }[]>`
+      SELECT target FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY chain_index DESC LIMIT 1`;
+    expect(lookup?.target).toBe('someone');
+  });
+
+  it('names staff by the login they last signed in with, and the command line as such', async () => {
+    expect(await superuser`SELECT staff_ref, login FROM slotlock.staff_members ORDER BY staff_ref`).toEqual([
+      { staff_ref: 'github:1001', login: 'octo-owner' },
+      { staff_ref: 'github:1003', login: 'octo-billing' },
+    ]);
+    const page = await text(staff.owner, '/staff');
+    const row = page.slice(page.indexOf('octo-billing'));
+    expect(row.slice(0, row.indexOf('</tr>'))).toContain('Command line');
+    // A login GitHub would never give is not kept.
+    const token = (await adminSql<{ opened: { session: string } }[]>`SELECT slotlock.admin_sign_in('github:1003', ${CONSOLE_KEY}) AS opened`)[0]?.opened.session;
+    expect((await adminSql<{ kept: boolean }[]>`SELECT slotlock.admin_staff_login(${token ?? ''}, '<b>x</b>') AS kept`)[0]?.kept).toBe(false);
+    expect((await superuser<{ login: string }[]>`SELECT login FROM slotlock.staff_members WHERE staff_ref = 'github:1003'`)[0]?.login).toBe('octo-billing');
+    expect(github).toEqual(['/users/someone']);
+  });
+
+  it('shows the staff log by login and in words, hides views unless asked, and filters', async () => {
+    await superuser`SELECT slotlock.staff_operator_record('cli:node', 'account.suspended', ${PAYING}, 'Chargeback')`;
+    const log = await text(staff.owner, '/staff/log');
+    // Only Staff log is the current page in the sidebar, not Staff as well.
+    expect(log).toContain('<a href="/staff/log" aria-current="page">');
+    expect(log).not.toMatch(/<a href="\/staff" aria-current/);
+    const rows = log.slice(log.indexOf('<tbody>'), log.indexOf('</tbody>'));
+    expect(rows).toContain('octo-owner');
+    expect(rows).toContain('Command line');
+    expect(rows).toContain('<span title="account.suspended">Suspended an account</span>');
+    expect(rows).toContain('<span title="staff.signed_in">Signed in</span>');
+    // Views are recorded, but only shown when asked.
+    expect(rows).not.toContain('title="home.viewed"');
+    expect(rows).not.toContain('title="accounts.searched"');
+    const withViews = await text(staff.owner, '/staff/log?views=1');
+    expect(withViews).toContain('<span title="home.viewed">Opened Home</span>');
+    expect(withViews).toContain('title="account.viewed"');
+    // The hash chain is still checked.
+    expect(log).toMatch(/The newest \d+ entries check out/);
+
+    const filtered = async (query: Record<string, string>) => {
+      const page = await text(staff.owner, `/staff/log?${new URLSearchParams(query).toString()}`);
+      return [...page.slice(page.indexOf('<tbody>'), page.indexOf('</tbody>')).matchAll(/<span title="([a-z_.]+)">/g)].map((match) => match[1]);
+    };
+    // Every deployment-role command, whichever user ran it.
+    expect(new Set(await filtered({ who: 'cli' }))).toEqual(new Set(['staff.console_key_set', 'staff.added', 'account.suspended']));
+    expect(await filtered({ who: 'cli:node' })).toEqual(['account.suspended']);
+    expect(new Set(await filtered({ who: 'github:1003' }))).toEqual(new Set(['staff.signed_in', 'staff.passkey_added']));
+    expect(await filtered({ action: 'account.suspended' })).toEqual(['account.suspended']);
+    // Opening an account records only views of it: none shown unless asked.
+    expect(await filtered({ account: ADA })).toEqual([]);
+    const viewed = await filtered({ account: ADA, views: '1' });
+    expect(viewed).toContain('account.viewed');
+    expect(viewed.every((action) => /\.([a-z_]+_)?(viewed|listed)$/.test(action as string))).toBe(true);
+    const today = new Date().toISOString().slice(0, 10);
+    expect((await filtered({ from: today, to: today })).length).toBeGreaterThan(0);
+    expect(await filtered({ to: '2000-01-01' })).toEqual([]);
+    // A filter that is not one is left out, never passed on.
+    expect((await staff.owner.request("/staff/log?who=x'%3B--&action=%3Cscript%3E&from=nope")).status).toBe(200);
+    // Older pages keep the filters.
+    expect(withViews).toMatch(/href="\/staff\/log\?views=1&amp;before=\d+">Older<\/a>/);
   });
 });

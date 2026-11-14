@@ -247,25 +247,27 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const byCustomer = await (await browser.request('/accounts?q=cus_TEST123')).text();
     expect(byCustomer).toContain(encodeURIComponent(PERSON));
 
-    // A login: the database keeps ids only, so the console asks GitHub which id it is.
+    // A login no one has signed in with since logins were kept: the console asks GitHub which id
+    // it is (admin-data.integration covers finding one the database holds).
     const search = await browser.request('/search?q=someone');
     expect(search.status).toBe(303);
-    expect(search.headers.get('location')).toBe('/accounts?q=424242&for=someone');
+    expect(search.headers.get('location')).toBe('/accounts?q=someone');
     const found = await (await browser.request(search.headers.get('location') ?? '')).text();
     expect(found).toContain(encodeURIComponent(PERSON));
+    expect(found).toContain('GitHub account <strong>someone</strong> is id <code>424242</code>');
 
     const detail = await browser.request(`/accounts/${encodeURIComponent(PERSON)}`);
     expect(detail.status).toBe(200);
     const body = await detail.text();
     expect(body).toContain('slk_AbCd1234');
     expect(body).toContain('https://dashboard.stripe.com/customers/cus_TEST123');
-    expect(body).toContain('someone');
     expect(body).not.toContain('secret');
     expect((await browser.request('/accounts/github%3A1')).status).toBe(404);
 
-    const staffLog = await (await browser.request('/staff/log')).text();
-    expect(staffLog).toContain('search.github_lookup');
-    expect(staffLog).toContain('account.viewed');
+    // Views and searches are in the log, shown when asked.
+    const staffLog = await (await browser.request('/staff/log?views=1')).text();
+    expect(staffLog).toContain('title="search.github_lookup"');
+    expect(staffLog).toContain('title="account.viewed"');
     const actions = await log('github:1001');
     expect(actions).toEqual(expect.arrayContaining(['accounts.searched', 'search.github_lookup', 'account.viewed', 'account.keys_viewed']));
   });

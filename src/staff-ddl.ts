@@ -60,6 +60,13 @@ export function slotlockStaffMay(role: SlotlockStaffRole, capability: SlotlockSt
 
 /** A staff member's reference: their GitHub account id, as the dashboard's people are named. */
 export const SLOTLOCK_STAFF_REF_PATTERN = '^github:[1-9][0-9]{0,19}$';
+/** A GitHub login, as GitHub allows one: the staff member's, kept at each sign-in. */
+export const SLOTLOCK_STAFF_LOGIN_PATTERN = '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$';
+/**
+ * Staff log actions that only read: a page or a list opened, a search. Every one is recorded (RFC
+ * 0006, 4.4), and the Staff log page hides them unless asked, so what staff did stands out.
+ */
+export const SLOTLOCK_STAFF_VIEW_ACTION_PATTERN = '^([a-z_]+\\.([a-z_]+_)?(viewed|listed|searched)|search\\.[a-z_]+)$';
 /** Who did something in the staff log: a staff member, or a deployment-role command (`cli:<user>`). */
 const STAFF_ACTOR_PATTERN = '^(github:[1-9][0-9]{0,19}|cli:[a-z_][a-z0-9_.-]{0,63})$';
 /** Days an enrollment code lasts: long enough to receive it, short enough to be worthless later. */
@@ -180,7 +187,7 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_account_usage(text, text, integer)',
   'slotlock.admin_account_audit(text, text, integer)',
   'slotlock.admin_staff(text)',
-  'slotlock.admin_staff_log(text, bigint, integer)',
+  'slotlock.admin_staff_log(text, bigint, integer, text, text, text, timestamptz, timestamptz, boolean)',
   'slotlock.admin_staff_log_chain(text)',
   'slotlock.admin_passkeys(text)',
   'slotlock.admin_passkey_enroll(text, bytea, bytea, bytea, integer, bigint, text, bytea)',
@@ -228,6 +235,10 @@ export const SLOTLOCK_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.admin_flag_clear(text, bigint, text)',
   'slotlock.admin_system(text)',
   'slotlock.admin_status_record(text, text, integer, jsonb)',
+  // Staff by their GitHub logins, kept at sign-in, so the console names who did what without
+  // asking GitHub.
+  'slotlock.admin_staff_login(text, text)',
+  'slotlock.admin_staff_logins(text, text[])',
 ] as const);
 
 /**
@@ -2362,6 +2373,21 @@ CREATE TABLE IF NOT EXISTS slotlock.staff_members (
   )
 );
 ALTER TABLE slotlock.staff_members ENABLE ROW LEVEL SECURITY;
+-- The member's GitHub login, as GitHub gave it at their last sign-in to the console: the console
+-- names staff by it without asking GitHub. Null until they sign in.
+ALTER TABLE slotlock.staff_members ADD COLUMN IF NOT EXISTS login text;
+DO $slotlock_staff_members_login$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+     WHERE conrelid = 'slotlock.staff_members'::regclass AND conname = 'slotlock_staff_members_login_valid'
+  ) THEN
+    -- NOT VALID: the column is new, and DEPLOYMENT_VALIDATE_CONSTRAINTS validates it after.
+    ALTER TABLE slotlock.staff_members ADD CONSTRAINT slotlock_staff_members_login_valid
+      CHECK (login IS NULL OR login ~ '${SLOTLOCK_STAFF_LOGIN_PATTERN}') NOT VALID;
+  END IF;
+END
+$slotlock_staff_members_login$;
 REVOKE ALL ON slotlock.staff_members FROM PUBLIC;
 
 -- Each member's passkeys (WebAuthn), the console's second factor: the public key and its counter.
@@ -2674,10 +2700,14 @@ $slotlock_staff_sessions_end$;
 
 -- Every account: a person (github:, google:), an organization (github-org:), a team workspace
 -- (team:), a partner's account (partner:), and any other tenant holding data or a plan. Test
--- environments (~test) are listed too; the console hides them unless asked. Names only where the
--- database keeps one: a person's login is never stored (PRIVACY.md).
+-- environments (~test) are listed too; the console hides them unless asked. Its name: a team's or
+-- partner account's own, an organization's GitHub login, or the name a person's provider gave at
+-- their last sign-in; and a person's display, their GitHub login or verified Google email as they
+-- last signed in. Both are kept only while team workspaces are offered, and go when the person is
+-- erased (PRIVACY.md).
+${reshaped('slotlock.staff_directory()', 'display')}
 CREATE OR REPLACE FUNCTION slotlock.staff_directory()
-RETURNS TABLE (account_ref text, kind text, name text, created_at timestamptz)
+RETURNS TABLE (account_ref text, kind text, name text, display text, created_at timestamptz)
 LANGUAGE sql
 STABLE
 SET search_path = pg_catalog, slotlock, pg_temp
@@ -2699,7 +2729,8 @@ AS $slotlock_staff_directory$
            WHEN refs.ref LIKE 'partner:%' THEN 'partner'
            ELSE 'other'
          END,
-         coalesce(team.name, org.login, partner.account),
+         coalesce(team.name, org.login, partner.account, person.name),
+         person.display,
          coalesce(person.created_at, team.created_at, partner.created_at)
     FROM refs
     LEFT JOIN slotlock.dashboard_people person ON person.person_ref = refs.ref
@@ -2944,12 +2975,12 @@ $slotlock_admin_home$;
 
 -- The account directory, a page at a time, by account reference. A query finds an account by its
 -- reference (or the start of one), a GitHub account id, an API key (only its prefix is read or
--- recorded, never the rest), a Stripe customer, or the name of a team, organization or partner
--- account. Without a query, test environments are left out. With each, when its subscription is
--- set to end.
+-- recorded, never the rest), a Stripe customer, the name of a team, organization or partner
+-- account, or a person's name or display (their login or email, a leading @ or not). Without a
+-- query, test environments are left out. With each, when its subscription is set to end.
 ${reshaped('slotlock.admin_accounts(text, text, text, text, text, integer)', 'plan_ends_at')}
 CREATE OR REPLACE FUNCTION slotlock.admin_accounts(actor text, query text, plan_filter text, status_filter text, after text, page_size integer)
-RETURNS TABLE (account_ref text, kind text, name text, created_at timestamptz, last_active date,
+RETURNS TABLE (account_ref text, kind text, name text, display text, created_at timestamptz, last_active date,
                plan text, plan_status text, plan_ends_at timestamptz, suspended boolean, stripe_customer text,
                operations_month bigint, bookings_month bigint)
 LANGUAGE plpgsql
@@ -2976,7 +3007,7 @@ BEGIN
     'query', coalesce(key_prefix, wanted), 'plan', plan_filter, 'status', status_filter, 'after', after)));
   RETURN QUERY
   WITH found AS (
-    SELECT listed.account_ref, listed.kind, listed.name, listed.created_at
+    SELECT listed.account_ref, listed.kind, listed.name, listed.display, listed.created_at
       FROM slotlock.staff_directory() listed
      WHERE (after IS NULL OR listed.account_ref > after)
        AND CASE
@@ -2989,9 +3020,10 @@ BEGIN
              ELSE listed.account_ref = wanted
                OR left(listed.account_ref, char_length(wanted)) = wanted
                OR strpos(lower(coalesce(listed.name, '')), lower(wanted)) > 0
+               OR strpos(lower(coalesce(listed.display, '')), lower(nullif(ltrim(wanted, '@'), ''))) > 0
            END
   )
-  SELECT found.account_ref, found.kind, found.name, found.created_at,
+  SELECT found.account_ref, found.kind, found.name, found.display, found.created_at,
          (SELECT max(used.day) FROM slotlock.usage_daily used WHERE used.tenant_ref = found.account_ref),
          coalesce(planned.plan, partner.plan, 'free'),
          planned.status,
@@ -3036,7 +3068,7 @@ BEGIN
     RAISE EXCEPTION 'admin_account_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT jsonb_build_object(
-    'account_ref', listed.account_ref, 'kind', listed.kind, 'name', listed.name,
+    'account_ref', listed.account_ref, 'kind', listed.kind, 'name', listed.name, 'display', listed.display,
     'created_at', listed.created_at,
     'plan', coalesce(planned.plan, partner.plan, 'free'), 'plan_status', planned.status,
     'plan_ends_at', CASE WHEN planned.status <> 'canceled' AND planned.stripe_subscription IS NOT NULL
@@ -3162,9 +3194,11 @@ BEGIN
 END
 $slotlock_admin_account_audit$;
 
--- The staff list, with how many passkeys each member has. Owner only.
+-- The staff list, with each member's GitHub login as they last signed in and how many passkeys
+-- they have. Owner only.
+${reshaped('slotlock.admin_staff(text)', 'login')}
 CREATE OR REPLACE FUNCTION slotlock.admin_staff(actor text)
-RETURNS TABLE (staff_ref text, role text, status text, added_by text, added_at timestamptz,
+RETURNS TABLE (staff_ref text, login text, role text, status text, added_by text, added_at timestamptz,
                last_seen_at timestamptz, passkeys integer, enrolling boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -3175,7 +3209,7 @@ BEGIN
   actor := slotlock.staff_session(actor, 'staff.read', false);
   PERFORM slotlock.staff_log(actor, 'staff.list_viewed', NULL, NULL, NULL, '{}'::jsonb);
   RETURN QUERY
-  SELECT member.staff_ref, member.role, member.status, member.added_by, member.added_at,
+  SELECT member.staff_ref, member.login, member.role, member.status, member.added_by, member.added_at,
          member.last_seen_at,
          (SELECT count(*)::integer FROM slotlock.staff_passkeys key WHERE key.staff_ref = member.staff_ref),
          member.enrollment_expires_at IS NOT NULL AND member.enrollment_expires_at > statement_timestamp()
@@ -3184,9 +3218,15 @@ BEGIN
 END
 $slotlock_admin_staff$;
 
--- The staff log, newest first, a page at a time (before: a chain index). Owner only.
-CREATE OR REPLACE FUNCTION slotlock.admin_staff_log(actor text, before bigint, page_size integer)
-RETURNS TABLE (chain_index bigint, occurred_at timestamptz, staff_ref text, action text,
+-- The staff log, newest first, a page at a time (before: a chain index), with each member's GitHub
+-- login as they last signed in. Narrowed to one member (who: a staff reference, or 'cli' for every
+-- deployment-role command), one action, one account and a time range [since, until); views (a
+-- page or list opened, a search: SLOTLOCK_STAFF_VIEW_ACTION_PATTERN) only with with_views. Owner
+-- only. The form before the filters is dropped: the console asks with them.
+DROP FUNCTION IF EXISTS slotlock.admin_staff_log(text, bigint, integer);
+CREATE OR REPLACE FUNCTION slotlock.admin_staff_log(actor text, before bigint, page_size integer, who text,
+  wanted_action text, account text, since timestamptz, until timestamptz, with_views boolean)
+RETURNS TABLE (chain_index bigint, occurred_at timestamptz, staff_ref text, staff_login text, action text,
                account_ref text, target text, reason text, metadata jsonb)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -3198,10 +3238,17 @@ DECLARE
 BEGIN
   actor := slotlock.staff_session(actor, 'staff.log', false);
   RETURN QUERY
-  SELECT event.chain_index, event.occurred_at, event.staff_ref, event.action, event.account_ref,
+  SELECT event.chain_index, event.occurred_at, event.staff_ref, member.login, event.action, event.account_ref,
          event.target, event.reason, event.metadata
     FROM slotlock.staff_audit_events event
-   WHERE before IS NULL OR event.chain_index < before
+    LEFT JOIN slotlock.staff_members member ON member.staff_ref = event.staff_ref
+   WHERE (before IS NULL OR event.chain_index < before)
+     AND (who IS NULL OR event.staff_ref = who OR (who = 'cli' AND event.staff_ref LIKE 'cli:%'))
+     AND (wanted_action IS NULL OR event.action = wanted_action)
+     AND (account IS NULL OR event.account_ref = account)
+     AND (since IS NULL OR event.occurred_at >= since)
+     AND (until IS NULL OR event.occurred_at < until)
+     AND (coalesce(with_views, false) OR event.action !~ '${SLOTLOCK_STAFF_VIEW_ACTION_PATTERN}')
    ORDER BY event.chain_index DESC
    LIMIT shown;
 END
@@ -3225,6 +3272,46 @@ BEGIN
   RETURN result;
 END
 $slotlock_admin_staff_log_chain$;
+
+-- The signed-in member's GitHub login, as GitHub gave it to the console at this sign-in: kept, so
+-- pages name staff without asking GitHub. Not recorded: the sign-in is. False for a login GitHub
+-- would not give.
+CREATE OR REPLACE FUNCTION slotlock.admin_staff_login(actor text, member_login text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_staff_login$
+BEGIN
+  actor := slotlock.staff_session(actor, 'home', true);
+  IF member_login IS NULL OR member_login !~ '${SLOTLOCK_STAFF_LOGIN_PATTERN}' THEN
+    RETURN false;
+  END IF;
+  UPDATE slotlock.staff_members member SET login = member_login
+   WHERE member.staff_ref = actor AND member.login IS DISTINCT FROM member_login;
+  RETURN true;
+END
+$slotlock_admin_staff_login$;
+
+-- Staff members' GitHub logins, for the few references a page names (who wrote a note, asked for
+-- an override, set a flag): at most a page's worth, members only. Not recorded: the page is.
+CREATE OR REPLACE FUNCTION slotlock.admin_staff_logins(actor text, refs text[])
+RETURNS TABLE (staff_ref text, login text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_admin_staff_logins$
+#variable_conflict use_column
+BEGIN
+  actor := slotlock.staff_session(actor, 'home', false);
+  IF cardinality(refs) > ${SLOTLOCK_ADMIN_PAGE_LIMIT} THEN
+    RAISE EXCEPTION 'admin_staff_logins' USING ERRCODE = '22023';
+  END IF;
+  RETURN QUERY
+  SELECT member.staff_ref, member.login FROM slotlock.staff_members member
+   WHERE member.staff_ref = ANY (refs) AND member.login IS NOT NULL;
+END
+$slotlock_admin_staff_logins$;
 
 -- The caller's own passkeys, to check a sign-in against. Any active member.
 CREATE OR REPLACE FUNCTION slotlock.admin_passkeys(actor text)
