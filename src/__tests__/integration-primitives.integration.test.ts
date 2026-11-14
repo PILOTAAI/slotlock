@@ -451,4 +451,78 @@ describe.skipIf(!url)('integration primitives (real Postgres)', () => {
       replayed: true,
     });
   });
+
+  it('lets an agent add priced time only from a paid hold of it, however it writes the event', async () => {
+    const bay = await resource('bay-grow');
+    const free = await resource('bay-free');
+    expect(
+      (await call('PUT', `/v1/resources/${bay}/booking-rules`, { rules: { hold_price: { amount_minor: 2000, currency: 'GBP' } } })).status,
+    ).toBe(200);
+    const agent = (operation: string, input: Record<string, unknown>) =>
+      invokeSlotlockAgentOperation({
+        operation: operation as never,
+        input,
+        request: new Request(BASE),
+        options: {
+          backend: agentBackend,
+          authenticate: async () => ({ subject: 'agent-grow', tenantRef, scopes: ['read', 'write'] }),
+          authorize: async () => true,
+        },
+      }) as Promise<{ ok: boolean; code?: string; data?: Record<string, unknown> }>;
+    const busy = async () =>
+      (
+        await sql<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM slotlock.reservations WHERE resource_id = ${bay} AND status = 'confirmed'`
+      )[0]?.count;
+
+    // Transparent, it occupies nothing and needs no payment; made opaque, it would.
+    const shown = await agent('slotlock_create_event', {
+      resource_id: bay, starts_at: at(1), ends_at: at(2), timezone: 'UTC', transparency: 'transparent', idempotency_key: 'grow-shown',
+    });
+    expect(shown).toMatchObject({ ok: true });
+    const shownId = (shown.data?.event as { id: string }).id;
+    expect(
+      await agent('slotlock_update_event', { event_id: shownId, expected_revision: 1, transparency: 'opaque', idempotency_key: 'grow-opaque' }),
+    ).toMatchObject({ ok: false, code: 'payment_required' });
+    // Nor moved onto it from a resource without a price.
+    const elsewhere = await agent('slotlock_create_event', {
+      resource_id: free, starts_at: at(3), ends_at: at(4), timezone: 'UTC', idempotency_key: 'grow-elsewhere',
+    });
+    expect(elsewhere).toMatchObject({ ok: true });
+    expect(
+      await agent('slotlock_update_event', {
+        event_id: (elsewhere.data?.event as { id: string }).id, expected_revision: 1, resource_id: bay, idempotency_key: 'grow-onto',
+      }),
+    ).toMatchObject({ ok: false, code: 'payment_required' });
+    expect(await busy()).toBe(0);
+
+    // One paid hold books the hour it holds, and only that.
+    const held = await agent('slotlock_hold_slots', {
+      slots: [{ resource_id: bay, start: at(5), end: at(6) }], ttl_seconds: 600, idempotency_key: 'grow-hold',
+    });
+    const hold = (held.data?.holds as { hold_id: string }[])[0];
+    expect((await call('POST', `/v1/holds/${hold?.hold_id}/paid`, { payment_ref: 'pi_grow', received: { amount_minor: 2000, currency: 'GBP' } })).status).toBe(200);
+    const booked = await agent('slotlock_confirm_slot', { hold_id: hold?.hold_id, idempotency_key: 'grow-book' });
+    expect(booked).toMatchObject({ ok: true });
+    const paid = { event_id: (booked.data?.event as { id: string }).id, expected_revision: 1 };
+    for (const [key, change] of [
+      ['grow-daily', { recurrence_rule: 'FREQ=DAILY;COUNT=30' }],
+      ['grow-yearly', { recurrence_rule: 'FREQ=YEARLY;INTERVAL=2' }],
+      ['grow-longer', { ends_at: at(8) }],
+      ['grow-moved', { starts_at: at(9), ends_at: at(10) }],
+    ] as const) {
+      expect(await agent('slotlock_update_event', { ...paid, ...change, idempotency_key: key })).toMatchObject({
+        ok: false,
+        code: 'payment_required',
+      });
+    }
+    expect(await busy()).toBe(1);
+    // What it already holds changes freely: its details, or less of its time.
+    expect(await agent('slotlock_update_event', { ...paid, title: 'Paid', idempotency_key: 'grow-title' })).toMatchObject({ ok: true });
+    expect(
+      await agent('slotlock_update_event', { ...paid, expected_revision: 2, ends_at: at(5.5), idempotency_key: 'grow-shorter' }),
+    ).toMatchObject({ ok: true });
+    // Your own systems set their own terms.
+    expect((await call('PUT', '/v1/reservations/grow-admin', { resource_id: bay, start: at(11), end: at(12), revision: 1 })).status).toBe(200);
+  });
 });

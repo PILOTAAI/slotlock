@@ -232,7 +232,7 @@ describe.skipIf(!url)('the booking lifecycle (real Postgres)', () => {
       await agent('slotlock_delete_event', { event_id: created.id, expected_revision: created.revision, idempotency_key: 'd2' }),
     ).toMatchObject({ ok: true });
     // Nor may it let the time go another way: made transparent (as a cancellation), or made a
-    // series, whose cancellation no cutoff holds (as a move).
+    // series (as a move).
     const close2 = { event_id: closeEvent.id, expected_revision: closeEvent.revision };
     expect(await agent('slotlock_update_event', { ...close2, transparency: 'transparent', idempotency_key: 'u1' })).toMatchObject({
       ok: false,
@@ -311,5 +311,94 @@ describe.skipIf(!url)('the booking lifecycle (real Postgres)', () => {
     });
     const [kept] = await sql<{ cutoff_anchor: Date | null }[]>`SELECT cutoff_anchor FROM slotlock.calendar_events WHERE resource_id = ${van}`;
     expect(kept?.cutoff_anchor?.toISOString()).toBe(at(soon + 2 * HOUR));
+  });
+
+  it('holds a series by its next occurrence, and a late booking however it is reshaped, to the cutoffs and the fee', async () => {
+    const van = await resource('van-shape');
+    const spare = await resource('van-spare');
+    // Moves allowed until an hour before; cancelling free only until a day before.
+    expect(
+      (
+        await call('PUT', `/v1/resources/${van}/booking-rules`, {
+          rules: {
+            cancel_cutoff_minutes: 1_440,
+            reschedule_cutoff_minutes: 60,
+            cancellation_fee: { amount_minor: 4_000, currency: 'EUR', within_minutes: 1_440 },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    const at = (ms: number) => new Date(ms - (ms % MINUTE)).toISOString();
+    const book = async (key: string, start: number, extra: Record<string, unknown> = {}) => {
+      const made = await agent('slotlock_create_event', {
+        resource_id: van, starts_at: at(start), ends_at: at(start + HOUR), timezone: 'UTC', idempotency_key: key, ...extra,
+      });
+      expect(made.ok).toBe(true);
+      return (made.data?.event as { id: string }).id;
+    };
+    const change = (id: string, revision: number, key: string, input: Record<string, unknown>) =>
+      agent('slotlock_update_event', { event_id: id, expected_revision: revision, idempotency_key: key, ...input });
+    const cancel = (id: string, revision: number, key: string) =>
+      agent('slotlock_delete_event', { event_id: id, expected_revision: revision, idempotency_key: key });
+    const late = { ok: false, code: 'booking_rule_cancel_cutoff' };
+    // Inside the cancel cutoff, outside the reschedule cutoff; and a month on.
+    const soon = (hours: number) => Date.now() + hours * HOUR;
+    const later = (hours: number) => Date.now() + 30 * 24 * HOUR + hours * HOUR;
+
+    // Made a one-occurrence series while it may still move: as late as it was.
+    const a = await book('shape-a', soon(2));
+    expect(await cancel(a, 1, 'shape-a1')).toMatchObject(late);
+    expect(await change(a, 1, 'shape-a2', { recurrence_rule: 'FREQ=DAILY;COUNT=1' })).toMatchObject({ ok: true });
+    expect(await cancel(a, 2, 'shape-a3')).toMatchObject(late);
+
+    // Booked as a series, it is judged by its next occurrence: to move, to let go and to cancel.
+    const b = await book('shape-b', Date.now() + 40 * MINUTE, { recurrence_rule: 'FREQ=DAILY;COUNT=1' });
+    expect(await change(b, 1, 'shape-b1', { starts_at: at(later(0)), ends_at: at(later(1)) })).toMatchObject({
+      ok: false,
+      code: 'booking_rule_reschedule_cutoff',
+    });
+    expect(await change(b, 1, 'shape-b2', { transparency: 'transparent' })).toMatchObject(late);
+    expect(await cancel(b, 1, 'shape-b3')).toMatchObject(late);
+    // Under way, with nothing still to come, it is as late as a one-off under way.
+    const going = await book('shape-b7', Date.now() - 50 * MINUTE, { recurrence_rule: 'FREQ=DAILY;COUNT=1' });
+    expect(await cancel(going, 1, 'shape-b8')).toMatchObject(late);
+    // Its details change freely; its exceptions are its times.
+    const first = Date.now() + 15 * MINUTE;
+    const c = await book('shape-c', first, {
+      ends_at: at(first + 20 * MINUTE),
+      recurrence_rule: 'FREQ=DAILY;COUNT=3',
+      recurrence_exceptions: [{ recurrence_id: at(first + 24 * HOUR), cancelled: true }],
+    });
+    expect(await change(c, 1, 'shape-c1', { title: 'Renamed' })).toMatchObject({ ok: true });
+    expect(await change(c, 2, 'shape-c2', { recurrence_exceptions: [] })).toMatchObject({
+      ok: false,
+      code: 'booking_rule_reschedule_cutoff',
+    });
+    // Moved while it may still move, it stays as late as it was.
+    const b2 = await book('shape-b4', soon(4), { recurrence_rule: 'FREQ=DAILY;COUNT=2' });
+    expect(await change(b2, 1, 'shape-b5', { starts_at: at(later(2)), ends_at: at(later(3)) })).toMatchObject({ ok: true });
+    expect(await cancel(b2, 2, 'shape-b6')).toMatchObject(late);
+
+    // Nor may it leave the resource whose rules make it late; one that is not late may.
+    const d = await book('shape-d', soon(6));
+    expect(await change(d, 1, 'shape-d1', { resource_id: spare })).toMatchObject(late);
+    expect(await cancel(d, 1, 'shape-d2')).toMatchObject(late);
+    const away = await book('shape-d3', later(4));
+    expect(await change(away, 1, 'shape-d4', { resource_id: spare })).toMatchObject({ ok: true });
+
+    // A series whose next occurrence is days away is cancelled free.
+    const e = await book('shape-e', Date.now() + 3 * 24 * HOUR, { recurrence_rule: 'FREQ=DAILY;COUNT=3' });
+    expect(await cancel(e, 1, 'shape-e1')).toMatchObject({ ok: true });
+
+    // An admin cancels the late series with a reason, and the fee is recorded on it.
+    const [series] = await sql<{ id: string }[]>`
+      SELECT id FROM slotlock.calendar_events WHERE resource_id = ${van} AND external_ref = ${a}`;
+    const path = `/v1/tenant/events/${series?.id}?expected_revision=2&idempotency_key=shape-a4`;
+    expect(await call('DELETE', path)).toMatchObject({ status: 409, body: { error: { code: 'booking_rule_cancel_cutoff' } } });
+    const forced = await call('DELETE', `${path}&override_reason=${encodeURIComponent('Agreed')}`);
+    expect(forced.body).toMatchObject({ cancelled: true, cancellation_fee: { amount_minor: 4_000, currency: 'EUR' } });
+    const fees = await sql<{ data: { cancellation_fee?: unknown } }[]>`
+      SELECT data FROM slotlock.outbox WHERE tenant_ref = ${tenantRef} AND resource_id = ${van} AND type = 'event.cancelled' ORDER BY id`;
+    expect(fees.map((row) => row.data.cancellation_fee ?? null)).toEqual([null, { amount_minor: 4_000, currency: 'EUR' }]);
   });
 });

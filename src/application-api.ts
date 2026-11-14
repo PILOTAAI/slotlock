@@ -2304,7 +2304,7 @@ export const SLOTLOCK_APPLICATION_OPERATIONS: readonly SlotlockApplicationOperat
           // Required, so clients always send it; the Idempotency-Key header may stand in, since the
           // server copies it in before validation.
           idempotency_key: IDEMPOTENCY_KEY,
-          /** An admin's reason for cancelling a one-off event past its cancel cutoff (RFC 0004 B5). */
+          /** An admin's reason for cancelling an event past its cancel cutoff (RFC 0004 B5). */
           override_reason: OVERRIDE_REASON.optional(),
         })
         .strict(),

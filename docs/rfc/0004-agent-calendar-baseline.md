@@ -422,7 +422,11 @@ As built:
   and moves of their own events are held to the cutoffs with no override.
 - The fee is `{ amountMinor, currency, withinMinutes? }`. A late cancellation answers it, and its
   tombstone and feed change keep it.
-- A recurring series is not held to the cutoffs: cancelling it cancels what is still to come.
+- A recurring series is held to the cutoffs by its next occurrence not yet started (or, with none
+  left, the one under way): cancelling it cancels what is still to come.
+- A late booking stays late. Moved, or made a series, it keeps the start it had for its
+  cancellation. An agent's late event may not move to another resource, which would leave the
+  rules that make it late.
 
 **B6. Waitlists that match (T1).** Status: built.
 - An entry matches any slot of its length within its window, on a resource or a pool.
@@ -512,6 +516,9 @@ Stripe before marking a hold paid and refunds one whose hold expired first, when
   Stripe account.
 - Slotlock records payment state and never processes money. Managed Payments cannot carry
   marketplace flows, so this is the tenant's own account, not Slotlock's.
+- On a resource with a hold price, an agent adds time only from its own paid hold of that time:
+  a new event, one moved onto the resource, one made opaque, and occurrences the event did not
+  already hold all answer `payment_required` otherwise.
 
 **C4. Two-way sync (T2, last).** Status: built in `@slotlock/sync`: times only, under a neutral
 title; its own bookings are subtracted from what it reads back, and one changed in the calendar is

@@ -152,8 +152,8 @@ Cancellation and reschedule policies (RFC 0004 B5): `cancelCutoffMinutes` and
 admin can, with `override_reason` (or `overrideReason`), which the tombstone and the feed keep.
 `cancellationFee` (`{ amountMinor, currency, withinMinutes? }`) is recorded on a late cancellation
 (its tombstone, `reservation.cancelled` or `event.cancelled`, and the API's answer) for you to
-charge: Slotlock moves no money. A series is not held to the cutoffs: cancelling one cancels what
-is still to come.
+charge: Slotlock moves no money. A series is held to them by its next occurrence not yet started
+(or, with none left, the one under way): cancelling one cancels what is still to come.
 
 ## Calendar standards
 
