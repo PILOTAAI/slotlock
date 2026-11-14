@@ -795,6 +795,12 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     expect(deploy.match(/^    environment:\n      name: dashboard$/gm)).toHaveLength(1);
     expect(deploy).toContain("needs: pick\n    if: needs.pick.outputs.sha != ''");
     expect(deploy).toContain('ref: ${{ needs.pick.outputs.sha }}');
+    // main is refs/heads/main, never the bare name a tag called main would also answer to; the
+    // deploy job checks it again before any secret, so a re-run of an old run deploys nothing.
+    expect(deploy.match(/repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main/g)).toHaveLength(2);
+    expect(deploy).not.toMatch(/commits\/main\b/);
+    expect(deploy).toContain("if: steps.current.outputs.deploy == 'true'\n        env:\n          CLOUDFLARE_API_TOKEN");
+    expect(deploy).toContain('npm ci --omit=dev --ignore-scripts');
     expect(deploy).toContain('cancel-in-progress: false');
     // The tested commit reaches the shell through the environment, never interpolated into it.
     for (const line of deploy.split('\n').filter((text) => /^\s+(run:|\S.*\$\(|if \[|echo )/.test(text))) {
