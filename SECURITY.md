@@ -304,7 +304,7 @@ console role's database URL, once, when it creates that role, for the owner to k
 release settings. PostgreSQL gets that role's password only as a SCRAM verifier, so no server log
 holds it. Cloudflare gets it in Hyperdrive's configuration, which never returns it. The script makes
 the Access policy from the addresses it is given, checks that the GitHub App it creates holds exactly
-the CMS's permissions on this repository alone, refuses to deploy before 12 December 2026, and never
+the CMS's permissions on this repository alone, refuses to deploy before 14 November 2026, and never
 replaces a console key or session secret, nor re-adds a staff member, that is already there.
 
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
