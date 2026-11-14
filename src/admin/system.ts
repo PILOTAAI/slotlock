@@ -52,6 +52,9 @@ export interface SlotlockPageParts {
 /** Where connecting a provider is written down (RFC 0006, Phase 0 and the console's setup). */
 export const SLOTLOCK_ADMIN_SETUP_DOCS = 'https://github.com/PILOTAAI/slotlock/blob/main/docs/rfc/0006-admin-console.md';
 
+/** Where the Site and search page's providers are set up: the hosted docs' section (docs/hosted/README.md). */
+export const SLOTLOCK_ADMIN_SITE_SETUP_DOCS = 'https://slotlock.pylota.io/docs/hosted/#admin-console-site-and-search';
+
 /** What an announcement is about, as the console names it. */
 export const SLOTLOCK_ANNOUNCEMENT_KIND_NAMES: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
   maintenance: 'Planned maintenance',
@@ -72,10 +75,10 @@ const hidden = (csrf: string) => html`<input type="hidden" name="csrf" value="${
 /** A path on the site, from a full URL a search engine gave; the URL itself when it is another site's. */
 const pathOf = (url: string, siteUrl: string) => (url.startsWith(siteUrl) ? url.slice(siteUrl.length) || '/' : url);
 
-/** A provider's part: one compact card to connect it, one line when it failed, else what it read. */
-function providerPart<T>(name: string, read: SlotlockProviderRead<T>, off: Html, render: (value: T) => Html): Html {
+/** A provider's part: one compact card to connect it (`docs` says how), one line when it failed, else what it read. */
+function providerPart<T>(name: string, read: SlotlockProviderRead<T>, off: Html, render: (value: T) => Html, docs = SLOTLOCK_ADMIN_SETUP_DOCS): Html {
   if (read.state === 'off') {
-    return html`<div class="connect"><span class="grow">${name} is not connected.</span>${info(`Connecting ${name}`, off)}<a class="btn sm" href="${SLOTLOCK_ADMIN_SETUP_DOCS}" rel="noreferrer">Connect</a></div>`;
+    return html`<div class="connect"><span class="grow">${name} is not connected.</span>${info(`Connecting ${name}`, off)}<a class="btn sm" href="${docs}" rel="noreferrer">Connect</a></div>`;
   }
   if (read.state === 'failed') return html`<div class="connect"><span class="grow">${name} could not be read just now.</span><span class="muted">Tried again on the next visit.</span></div>`;
   return render(read.value);
@@ -157,7 +160,7 @@ export function slotlockSitePage(data: SlotlockSitePageData): SlotlockPageParts 
                 ]), 'No sitemaps.'), { level: 3 })
               : ''}`
           : ''}`;
-    });
+    }, SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const googlePart = searchPart('Search Console', data.google,
     html`Add a service account to the property as a restricted user, and set <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY</code> and <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY</code>.`, true);
   const bingPart = searchPart('Bing Webmaster Tools', data.bing,
@@ -186,10 +189,10 @@ export function slotlockSitePage(data: SlotlockSitePageData): SlotlockPageParts 
                 html`${row.host}`, html`${count(row.count)}`,
               ]), 'No visits came from another site in this period.'), { level: 3 })}</div>
         </div>`;
-    });
+    }, SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const deployPart = providerPart('GitHub', data.deploys,
     html`The site's deploys come from Slotlock's GitHub App, with Actions (read).`,
-    (runs) => runsTable('Site workflow runs on main', runs, 'No runs of the site workflow on main yet.'));
+    (runs) => runsTable('Site workflow runs on main', runs, 'No runs of the site workflow on main yet.'), SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const body = html`
     ${section('Visitors', visitsPart)}
     ${section('Search', hashTabs('Source', [

@@ -116,6 +116,11 @@ versioning.
 - Communications' **Status page** tab is laid out as Announcements is: the new incident's form on
   the left (no longer behind a button), and on the right what the status page shows now, each open
   incident with its update form. It left the right half of the page empty.
+- Each **Connect** on the console's Site and search page leads to a new section of the hosted page,
+  [Admin console: Site and search](https://slotlock.pylota.io/docs/hosted/#admin-console-site-and-search),
+  which names every setting (`SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY` and `_PROPERTY`,
+  `SLOTLOCK_ADMIN_BING_KEY` and `_SITE`, `SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN` and `_ACCOUNT`, and
+  `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE`), not to the top of RFC 0006.
 
 ### Security
 
