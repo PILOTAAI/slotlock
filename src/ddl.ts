@@ -438,6 +438,8 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   // it; and the plans a Stripe customer pays for, for a refund (billing.ts).
   'slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean)',
   'slotlock.tenant_plans_of_customer(text)',
+  // A person's sign-in record, for their account's export (a subject access request).
+  'slotlock.tenant_export_person(text)',
   // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
   // 0006, M10 and M11; staff-ddl.ts).
   ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
@@ -3415,6 +3417,22 @@ AS $slotlock_tenant_plans_of_customer$
    LIMIT 10;
 $slotlock_tenant_plans_of_customer$;
 REVOKE ALL ON FUNCTION slotlock.tenant_plans_of_customer(text) FROM PUBLIC;
+
+-- What the dashboard keeps of a person, for their own account's export (store.ts, a subject access
+-- request): the name and display it shows them by, and when they last signed in. Never their
+-- session's epoch. A person's own account only: no other account's export holds it.
+CREATE OR REPLACE FUNCTION slotlock.tenant_export_person(requested_tenant_ref text)
+RETURNS TABLE (name text, display text, last_sign_in_at timestamptz)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_export_person$
+  SELECT person.name, person.display, person.last_sign_in_at
+    FROM slotlock.dashboard_people person
+   WHERE person.person_ref = requested_tenant_ref;
+$slotlock_tenant_export_person$;
+REVOKE ALL ON FUNCTION slotlock.tenant_export_person(text) FROM PUBLIC;
 
 -- A tenant's use of the service (usage.ts), by UTC day: operations its keys and the assistant ran
 -- (recorded by the servers), and the bookings and holds it committed (rolled up from its feed). By

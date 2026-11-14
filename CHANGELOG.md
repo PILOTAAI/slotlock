@@ -52,8 +52,10 @@ versioning.
   else its login or email, else its reference, with initials and a second line, and finds accounts
   by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched
   login the database does not hold. Staff are shown by the GitHub login kept at their last console
-  sign-in, and deployment-role commands as "Command line". PRIVACY.md says what is kept and when it
-  goes.
+  sign-in, and deployment-role commands as "Command line". A person's own account's export
+  (`POST /v1/tenant/exports`, and the one staff make for a privacy request) includes that name and
+  display and when they last signed in (`dashboard_people`, through `slotlock.tenant_export_person`,
+  which the dashboard asks for first). PRIVACY.md says what is kept and when it goes.
 - **The Staff log in words.** Each action has a plain-English label (its code in the label's title),
   views and searches are hidden unless asked (`?views=1`), and the log filters by who (`who=`, or
   `cli` for the command line), action, account and days (`from`, `to`). The hash chain is checked

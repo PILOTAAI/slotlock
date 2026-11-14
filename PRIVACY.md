@@ -230,7 +230,8 @@ You can ask us for a copy of your data, to correct it, to erase it, to restrict 
 use it, and to have it in a portable form. Much of it you can read, change, export and delete
 yourself through the API and the dashboard, and you can revoke keys yourself in the dashboard at any
 time. `POST /v1/tenant/exports` makes a copy of everything in your account, read at one moment, as
-JSON objects table by table, for you to download within 24 hours. If you ask us for a copy instead,
+JSON objects table by table, for you to download within 24 hours; for your own account it includes
+the name, login or email the dashboard keeps for you and when you last signed in. If you ask us for a copy instead,
 we check it is you as below and make the same copy, which waits on your dashboard's Privacy page for
 7 days.
 

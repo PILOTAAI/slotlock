@@ -797,6 +797,9 @@ export const SLOTLOCK_TENANT_EXPORT_TABLES = Object.freeze([
   'webhook_endpoints',
   'assistant_settings',
   'api_keys',
+  // The person's own sign-in record, for a person's account: how the dashboard shows them (their
+  // provider's name and their login or verified email) and when they last signed in.
+  'dashboard_people',
   'outbox',
   'audit_events',
 ] as const);
