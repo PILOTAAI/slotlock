@@ -83,7 +83,8 @@ describe('the admin console schema', () => {
 
   it('checks the staff role first in every admin function but sign-in', () => {
     // The passkey step itself, signing out, and nothing else, works before a passkey.
-    const beforePasskey = ['admin_passkeys', 'admin_passkey_challenge', 'admin_passkey_enroll', 'admin_passkey_used', 'admin_sign_out', 'admin_record'];
+    // And keeping the login GitHub gave at sign-in.
+    const beforePasskey = ['admin_passkeys', 'admin_passkey_challenge', 'admin_passkey_enroll', 'admin_passkey_used', 'admin_sign_out', 'admin_record', 'admin_staff_login'];
     for (const signature of SLOTLOCK_ADMIN_FUNCTIONS) {
       if (signature.startsWith('slotlock.admin_sign_in(')) continue;
       const body = named(signature)?.body ?? '';
@@ -104,7 +105,8 @@ describe('the admin console schema', () => {
   it('records every call in the staff log, except the reads the log itself and sign-in need', () => {
     // The log's own reads, sign-in's passkey list, and the provider cache (the page using it is logged).
     // And the session check every request makes (the page it serves records itself).
-    const silent = ['slotlock.admin_staff_log(', 'slotlock.admin_passkeys(', 'slotlock.admin_cache_read(', 'slotlock.admin_cache_write(', 'slotlock.admin_session(', 'slotlock.admin_passkey_challenge(', 'slotlock.admin_staff_log_chain('];
+    // And staff logins: kept at a sign-in (which is recorded), read for a page (which is).
+    const silent = ['slotlock.admin_staff_log(', 'slotlock.admin_passkeys(', 'slotlock.admin_cache_read(', 'slotlock.admin_cache_write(', 'slotlock.admin_session(', 'slotlock.admin_passkey_challenge(', 'slotlock.admin_staff_log_chain(', 'slotlock.admin_staff_login(', 'slotlock.admin_staff_logins('];
     for (const signature of SLOTLOCK_ADMIN_FUNCTIONS) {
       if (silent.some((prefix) => signature.startsWith(prefix))) continue;
       expect(named(signature)?.body, signature).toContain('slotlock.staff_log(');

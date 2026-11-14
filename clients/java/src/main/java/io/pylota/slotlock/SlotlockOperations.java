@@ -3726,10 +3726,10 @@ public abstract class SlotlockOperations {
    * reservation_conflict_archive, hold_payments, calendar_events, calendar_event_attendees,
    * calendar_event_reminders, calendar_event_exceptions, calendar_event_tombstones,
    * calendar_coverage, source_busy, waitlist_entries, approval_policies, approvals, contacts,
-   * webhook_endpoints, assistant_settings, api_keys, outbox, audit_events). Secrets stay out:
-   * webhooks' signing secrets, the assistant's provider key and API keys' digests. 11 tables are
-   * left out as derived, internal or one member's own (each member's conversations with the
-   * assistant). It answers pending at once and is built in the background:
+   * webhook_endpoints, assistant_settings, api_keys, dashboard_people, outbox, audit_events).
+   * Secrets stay out: webhooks' signing secrets, the assistant's provider key and API keys'
+   * digests. 11 tables are left out as derived, internal or one member's own (each member's
+   * conversations with the assistant). It answers pending at once and is built in the background:
    * slotlock_get_tenant_export says when it is ready, then read its parts with
    * slotlock_get_tenant_export_part. Kept 24 hours once ready, then deleted. One is built at a
    * time (409 export_in_progress) and five are kept (409 export_limit_reached); one past 512 MB

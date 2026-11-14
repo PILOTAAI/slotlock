@@ -222,6 +222,12 @@ export type SlotlockTeamRefusal =
 export interface SlotlockWorkspaceTeams {
   /** How the person is shown to others: their GitHub login or verified Google email. */
   setDisplay(person: string, display: string | null): Promise<void>;
+  /**
+   * The name the person's provider gives (GitHub's profile name, Google's name claim), for the
+   * staff console; null clears it. Cleaned again by slotlockPersonName. Nothing on a schema from
+   * before it.
+   */
+  setName?(person: string, name: string | null): Promise<void>;
   /** A new team workspace with the person its Owner; `cap` free team workspaces a person may create. */
   create(person: string, name: string, handle: string, cap: number | null): Promise<{ tenantRef: string } | { refusal: SlotlockTeamRefusal }>;
   info(tenantRef: string): Promise<{ handle: string; name: string } | null>;
@@ -453,12 +459,37 @@ const digest = (token: Buffer) => {
   return token;
 };
 
+/**
+ * Control characters (Cc), format characters (Cf: the bidirectional controls that reorder text
+ * around them, zero-width characters, the soft hyphen, the byte order mark, tags), and line and
+ * paragraph separators (Zl, Zp). The database refuses the same (ddl.ts SLOTLOCK_NAME_UNSHOWN_PATTERN).
+ */
+const UNSHOWN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * A person's name as a provider gives it, made safe to keep and show: a string, without control,
+ * format or separator characters, trimmed, at most 80 characters; null for none.
+ */
+export function slotlockPersonName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const cleaned = Array.from(value.slice(0, 1000).replace(UNSHOWN, '').trim()).slice(0, 80).join('').trim();
+  return cleaned === '' ? null : cleaned;
+}
+
+const DASHBOARD_NAME = 'slotlock.dashboard_name(text,text)';
+
 function createTeams(sql: SlotlockSql): SlotlockWorkspaceTeams {
   return {
     async setDisplay(person, display) {
       if (!PERSON.test(person)) return;
       const shown = display === null ? null : display.slice(0, 254);
       await sql`SELECT slotlock.dashboard_display(${person}::text, ${shown}::text)`;
+    },
+    async setName(person, name) {
+      if (!PERSON.test(person)) return;
+      // Asked first: a failed call can cost a Worker request its connection (schema-functions.ts).
+      if (!(await createSlotlockSchemaFunctions(sql, [DASHBOARD_NAME])(DASHBOARD_NAME))) return;
+      await sql`SELECT slotlock.dashboard_name(${person}::text, ${slotlockPersonName(name)}::text)`;
     },
     async create(person, name, handle, cap) {
       if (!PERSON.test(person)) refuse('needs github:<id> or google:<subject>');

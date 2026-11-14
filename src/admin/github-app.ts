@@ -1,17 +1,31 @@
-// The admin console's CMS on GitHub (RFC 0006, 4.5): the "Slotlock CMS" GitHub App, installed on the
-// site's repository only, with contents and pull requests write. The console commits a post and its
-// images to cms/<slug>, authored and signed off as the staff member (so the DCO check passes), opens
-// a pull request the site's checks run on, and merges it when an Owner publishes it.
+// The admin console's CMS on GitHub (RFC 0006, 4.5), through the release app (scripts/create-release-
+// app.mjs), installed on the site's repository only, with a private key of the console's own. The
+// console commits a post and its images to cms/<slug>, authored and signed off as the staff member
+// (so the DCO check passes), opens a pull request the site's checks run on, and merges it when an
+// Owner publishes it. The status page's incidents and the deploy history go through it too.
 //
 // Only WebCrypto and fetch, so it runs in a Worker. The App's private key may be GitHub's PKCS#1
 // download ("BEGIN RSA PRIVATE KEY") or PKCS#8; the installation token is kept until a minute before
 // it expires.
+//
+// The JWT's issuer is the App's Client ID or its numeric App ID: GitHub takes either and recommends
+// the Client ID ("Generating a JSON Web Token (JWT) for a GitHub App", read 2026-11-14:
+// https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app).
+// Without an installation id, the App's installation on the repository, and the App ID its comments
+// carry, come from GET /repos/{owner}/{repo}/installation with that JWT ("Get a repository
+// installation for the authenticated app", REST docs read 2026-11-14), asked once and kept.
+
+/** A GitHub App's Client ID (Iv1.…, Iv23…), or its numeric App ID as older setups give it. */
+export const SLOTLOCK_GITHUB_APP_ISSUER = /^(?:[1-9][0-9]{0,15}|Iv[0-9A-Za-z._-]{4,60})$/;
+const NUMERIC_ID = /^[1-9][0-9]{0,15}$/;
 
 export interface SlotlockCmsGitHubOptions {
+  /** The App's Client ID, or its numeric App ID. */
   appId: string;
   /** The App's private key, PEM. */
   privateKey: string;
-  installationId: string;
+  /** The App's installation on the repository; found through GitHub when not given. */
+  installationId?: string;
   /** owner/name: the repository the App is installed on. */
   repository: string;
   fetch?: typeof fetch;
@@ -26,8 +40,20 @@ export interface SlotlockCmsAuthor {
 
 export interface SlotlockCmsFile {
   path: string;
-  /** Text, or bytes for an image. Null deletes the file. */
-  content: string | Uint8Array | null;
+  /**
+   * Text, or bytes for a picture, a video or a PDF; a blob already in the repository, by its sha (a
+   * rename moves a file without reading it); null deletes the file.
+   */
+  content: string | Uint8Array | { blob: string } | null;
+}
+
+/** A file in a directory, as GitHub lists it. */
+export interface SlotlockCmsEntry {
+  name: string;
+  /** Bytes. */
+  size: number;
+  /** Its blob's sha, which a commit can use again. */
+  sha: string;
 }
 
 export interface SlotlockCmsPullRequest {
@@ -55,10 +81,12 @@ export interface SlotlockCmsGitHub {
   repository: string;
   /** A file's text and blob sha on a branch, or null when it is not there. */
   readFile(path: string, ref: string): Promise<{ text: string; sha: string } | null>;
-  /** A file's bytes on a branch (up to 1 MB), or null when it is not there. */
+  /** A file's bytes on a branch (up to GitHub's 100 MB, read raw), or null when it is not there. */
   readBytes(path: string, ref: string): Promise<Uint8Array | null>;
   /** The names of the files in a directory on a branch (not recursive), or [] when it is not there. */
   listDirectory(path: string, ref: string): Promise<string[]>;
+  /** The files in a directory on a branch, with their sizes and blobs, or [] when it is not there. */
+  listFiles(path: string, ref: string): Promise<SlotlockCmsEntry[]>;
   /** A directory's files with their texts, single files and commits' checks, in one GraphQL query. */
   snapshot(input: { directory: { ref: string; path: string }; files?: { ref: string; path: string }[]; commits?: string[] }): Promise<SlotlockCmsSnapshot>;
   /** The commit a branch points at, or null when it is not there. */
@@ -243,8 +271,11 @@ const CHECK_STATES: Readonly<Record<string, SlotlockCmsChecks>> = {
 
 export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): SlotlockCmsGitHub {
   if (!REPOSITORY.test(options.repository)) throw new SlotlockCmsError('The CMS repository is owner/name', 500);
-  if (!/^[1-9][0-9]{0,15}$/.test(options.appId) || !/^[1-9][0-9]{0,15}$/.test(options.installationId)) {
-    throw new SlotlockCmsError('The CMS App id and installation id are numbers', 500);
+  if (!SLOTLOCK_GITHUB_APP_ISSUER.test(options.appId)) {
+    throw new SlotlockCmsError('The CMS App is named by its Client ID or its App ID', 500);
+  }
+  if (options.installationId !== undefined && !NUMERIC_ID.test(options.installationId)) {
+    throw new SlotlockCmsError("The CMS App's installation id is a number", 500);
   }
   const fetcher = options.fetch ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
   const now = options.now ?? (() => Date.now());
@@ -277,15 +308,63 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     return `${unsigned}.${base64url(signature)}`;
   }
 
+  /**
+   * The installation to mint tokens for, and the App ID the App's comments carry: as configured for
+   * a numeric App ID with its installation, else from GitHub, asked once and kept. A lookup that
+   * failed is asked again next time.
+   */
+  let identity: Promise<{ installationId: string; appId: string }> | null =
+    NUMERIC_ID.test(options.appId) && options.installationId !== undefined
+      ? Promise.resolve({ installationId: options.installationId, appId: options.appId })
+      : null;
+  function app(): Promise<{ installationId: string; appId: string }> {
+    if (!identity) {
+      const found = (async () => {
+        const response = await fetcher(`${API}/repos/${options.repository}/installation`, {
+          headers: { ...HEADERS, Authorization: `Bearer ${await appJwt()}` },
+          redirect: 'manual',
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+          throw new SlotlockCmsError(`The CMS App is not installed on ${options.repository} (${response.status})`, 502);
+        }
+        const body = (await response.json()) as { id?: unknown; app_id?: unknown };
+        if (!Number.isSafeInteger(body.id) || !Number.isSafeInteger(body.app_id)) {
+          throw new SlotlockCmsError(`GitHub named no installation of the CMS App on ${options.repository}`, 502);
+        }
+        const installationId = String(body.id);
+        if (options.installationId !== undefined && options.installationId !== installationId) {
+          throw new SlotlockCmsError(
+            `The CMS App's installation ${options.installationId} is not the App's installation on ${options.repository} (${installationId})`,
+            500,
+          );
+        }
+        return { installationId, appId: String(body.app_id) };
+      })();
+      found.catch(() => {
+        if (identity === found) identity = null;
+      });
+      identity = found;
+    }
+    return identity;
+  }
+
   async function installationToken(): Promise<string> {
     if (token && token.until > now()) return token.value;
-    const response = await fetcher(`${API}/app/installations/${options.installationId}/access_tokens`, {
+    const { installationId } = await app();
+    const response = await fetcher(`${API}/app/installations/${installationId}/access_tokens`, {
       method: 'POST',
-      headers: { ...HEADERS, Authorization: `Bearer ${await appJwt()}` },
+      // This repository only, whatever else the installation reaches.
+      headers: { ...HEADERS, Authorization: `Bearer ${await appJwt()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repositories: [name] }),
       redirect: 'manual',
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new SlotlockCmsError(`GitHub refused the CMS App's token (${response.status})`, 502);
+    if (!response.ok) {
+      // A found installation may have gone (the App reinstalled): look it up again next time.
+      if (!NUMERIC_ID.test(options.appId) || options.installationId === undefined) identity = null;
+      throw new SlotlockCmsError(`GitHub refused the CMS App's token (${response.status})`, 502);
+    }
     const body = (await response.json()) as { token?: unknown; expires_at?: unknown };
     if (typeof body.token !== 'string') throw new SlotlockCmsError('GitHub gave the CMS App no token', 502);
     const expires = typeof body.expires_at === 'string' ? Date.parse(body.expires_at) : Number.NaN;
@@ -293,18 +372,25 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     return token.value;
   }
 
-  async function call<T>(method: string, path: string, body?: unknown, allow: readonly number[] = []): Promise<{ status: number; body: T }> {
-    const response = await fetcher(`${API}${path}`, {
+  /** A request as the App: a body is JSON, or bytes that are already JSON (a blob's, written without a copy as a string). */
+  async function send(method: string, path: string, body: unknown, accept?: string): Promise<Response> {
+    return fetcher(`${API}${path}`, {
       method,
       headers: {
         ...HEADERS,
+        ...(accept ? { Accept: accept } : {}),
         Authorization: `Bearer ${await installationToken()}`,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined ? {} : { body: body instanceof Uint8Array ? body : JSON.stringify(body) }),
       redirect: 'manual',
-      signal: AbortSignal.timeout(15_000),
+      // A video's blob takes longer to send than a post.
+      signal: AbortSignal.timeout(body instanceof Uint8Array ? 120_000 : 15_000),
     });
+  }
+
+  async function call<T>(method: string, path: string, body?: unknown, allow: readonly number[] = []): Promise<{ status: number; body: T }> {
+    const response = await send(method, path, body);
     if (!response.ok && !allow.includes(response.status)) {
       const text = await response.text().catch(() => '');
       let message = '';
@@ -334,8 +420,36 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     return body.data;
   }
 
+  /**
+   * A blob's JSON body, {"content":"<base64>","encoding":"base64"}, as bytes: base64 in chunks, so a
+   * video is held once as bytes and once as its encoding, never as strings besides.
+   */
+  function blobBody(bytes: Uint8Array): Uint8Array {
+    const head = encoder.encode('{"content":"');
+    const tail = encoder.encode('","encoding":"base64"}');
+    const out = new Uint8Array(head.length + Math.ceil(bytes.length / 3) * 4 + tail.length);
+    out.set(head);
+    let at = head.length;
+    const chunk = 3 * 0x8000;
+    for (let index = 0; index < bytes.length; index += chunk) {
+      const encoded = encoder.encode(base64(bytes.subarray(index, index + chunk)));
+      out.set(encoded, at);
+      at += encoded.length;
+    }
+    out.set(tail, at);
+    return out;
+  }
+
   const contentsPath = (path: string, ref: string) =>
     `${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`;
+
+  async function listFiles(path: string, ref: string): Promise<SlotlockCmsEntry[]> {
+    const { status, body } = await call<{ name?: unknown; type?: unknown; size?: unknown; sha?: unknown }[] | null>('GET', contentsPath(path, ref), undefined, [404]);
+    if (status === 404 || !Array.isArray(body)) return [];
+    return body
+      .filter((entry) => entry.type === 'file' && typeof entry.name === 'string')
+      .map((entry) => ({ name: entry.name as string, size: Number(entry.size ?? 0), sha: String(entry.sha ?? '') }));
+  }
 
   const branchHead = async (branch: string) =>
     (await call<{ object?: { sha?: string } } | null>('GET', `${repo}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, undefined, [404])).body?.object?.sha ?? null;
@@ -378,16 +492,18 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     },
 
     async readBytes(path, ref) {
-      const { status, body } = await call<{ content?: unknown } | null>('GET', contentsPath(path, ref), undefined, [404]);
-      if (status === 404 || !body || typeof body.content !== 'string') return null;
-      return fromBase64(body.content);
+      // Raw, not JSON: the contents API gives a file over 1 MB only so (up to 100 MB).
+      const response = await send('GET', contentsPath(path, ref), undefined, 'application/vnd.github.raw+json');
+      if (response.status === 404) return null;
+      if (!response.ok) throw new SlotlockCmsError(`GitHub answered ${response.status} to GET /contents/${path}`, response.status >= 500 ? 502 : response.status);
+      return new Uint8Array(await response.arrayBuffer());
     },
 
     async listDirectory(path, ref) {
-      const { status, body } = await call<{ name?: unknown; type?: unknown }[] | null>('GET', contentsPath(path, ref), undefined, [404]);
-      if (status === 404 || !Array.isArray(body)) return [];
-      return body.filter((entry) => entry.type === 'file' && typeof entry.name === 'string').map((entry) => entry.name as string);
+      return (await listFiles(path, ref)).map((entry) => entry.name);
     },
+
+    listFiles,
 
     async snapshot({ directory, files = [], commits = [] }) {
       if (files.length > 50 || commits.length > 50) throw new SlotlockCmsError('A snapshot reads at most 50 files and 50 commits', 500);
@@ -442,8 +558,13 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
           entries.push({ path: file.path, mode: '100644', type: 'blob', sha: null });
           continue;
         }
+        if (!(file.content instanceof Uint8Array) && typeof file.content === 'object') {
+          if (!SHA.test(file.content.blob)) throw new SlotlockCmsError('A blob is 40 hex characters', 400);
+          entries.push({ path: file.path, mode: '100644', type: 'blob', sha: file.content.blob });
+          continue;
+        }
         const bytes = typeof file.content === 'string' ? encoder.encode(file.content) : file.content;
-        const { body: blob } = await call<{ sha?: string }>('POST', `${repo}/git/blobs`, { content: base64(bytes), encoding: 'base64' });
+        const { body: blob } = await call<{ sha?: string }>('POST', `${repo}/git/blobs`, blobBody(bytes));
         entries.push({ path: file.path, mode: '100644', type: 'blob', sha: String(blob?.sha ?? '') });
       }
       const { body: tree } = await call<{ sha?: string }>('POST', `${repo}/git/trees`, { base_tree: parentCommit?.tree?.sha, tree: entries });
@@ -554,6 +675,7 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
     },
 
     async appComments(number) {
+      const { appId } = await app();
       // Every page, oldest first, so the App's latest comment is read however many others came before.
       const bodies: string[] = [];
       for (let page = 1; page <= COMMENT_PAGES; page += 1) {
@@ -561,7 +683,7 @@ export function createSlotlockCmsGitHub(options: SlotlockCmsGitHubOptions): Slot
           'GET', `${repo}/issues/${number}/comments?per_page=100&page=${page}`,
         );
         for (const item of body ?? []) {
-          if (String(item.performed_via_github_app?.id ?? '') === options.appId && typeof item.body === 'string') bodies.push(item.body);
+          if (String(item.performed_via_github_app?.id ?? '') === appId && typeof item.body === 'string') bodies.push(item.body);
         }
         if ((body ?? []).length < 100) return bodies;
       }

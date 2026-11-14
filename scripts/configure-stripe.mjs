@@ -11,7 +11,8 @@
 //      (transfer_lookup_key). Each product's default price becomes its monthly one, and every other
 //      licensed price of the product is archived: subscriptions on it carry on, and no one new can
 //      buy it. Metered prices (overage) are left alone.
-//   3. The webhook endpoint at <dashboard>/stripe/webhook, with every event the dashboard acts on.
+//   3. The webhook endpoint at <dashboard>/stripe/webhook, with every event the dashboard acts on
+//      (an endpoint that exists gets the events it lacks, and keeps the rest).
 //      Its signing secret exists only when Stripe creates the endpoint: with --dashboard-worker
 //      <name>, it goes to that Worker as STRIPE_WEBHOOK_SECRET through `wrangler secret put`, on
 //      stdin; without, the script says where Stripe shows it. It is never printed.
@@ -29,8 +30,9 @@
 // (one new version, so billing never runs half set up; secrets, so a deploy keeps them), with:
 //   - the webhook endpoint's signing secret, when Stripe has just made the endpoint;
 //   - SLOTLOCK_WORKER_STRIPE_KEY as STRIPE_SECRET_KEY: the dashboard's restricted key (rk_…), with
-//     Write on Checkout Sessions and Customer portal and Read on Subscriptions and Prices (the
-//     Usage page shows Stripe's own amounts; without Prices, its labels). It is checked
+//     Write on Checkout Sessions and Customer portal and Read on Subscriptions, Prices and Invoices
+//     (the Usage page shows Stripe's own amounts; without Prices, its labels; without Invoices, a
+//     refund is matched to no account, so no alert is raised for it). It is checked
 //     first: it reads a subscription and the portal, and opens a Checkout Session with Managed
 //     Payments and expires it at once (nothing is charged), which also shows Managed Payments is
 //     on. It is stored only if the Worker has, or is given, STRIPE_WEBHOOK_SECRET: without one the
@@ -88,7 +90,11 @@ const PLANS = [
 const CURRENCY = 'gbp';
 /** The reasons the cancellation survey offers (Stripe's own list). */
 const CANCEL_REASONS = ['customer_service', 'low_quality', 'missing_features', 'other', 'switched_service', 'too_complex', 'too_expensive', 'unused'];
-/** What the dashboard's webhook acts on (src/billing.ts). */
+/**
+ * What the dashboard's webhook acts on (src/billing.ts): a subscription's events, and a refund
+ * (charge.refunded), which it notes for the staff console when it left a plan running. An endpoint
+ * made before an event was added gets it on the next run, its other events kept.
+ */
 const EVENTS = [
   'checkout.session.completed',
   'customer.subscription.created',
@@ -96,6 +102,7 @@ const EVENTS = [
   'customer.subscription.deleted',
   'invoice.paid',
   'invoice.payment_failed',
+  'charge.refunded',
 ];
 
 class Failure extends Error {}
@@ -511,6 +518,13 @@ async function checkWorkerKey(workerKey, price) {
   if (prices.status !== 200) {
     console.log(
       "\nnote: the dashboard's key cannot read Prices, so its Usage page shows the labels it is configured with (SLOTLOCK_PLAN_PRICE_*, else £5 and £50), not Stripe's amounts. Give the key Read on Prices.",
+    );
+  }
+  // A refund names its PaymentIntent; the invoice payments say which subscription it paid for.
+  const payments = await probe(workerKey, 'GET', 'invoice_payments?limit=1');
+  if (payments.status !== 200) {
+    console.log(
+      "\nnote: the dashboard's key cannot read invoice payments, so a refund is matched to no account and no \"Refunded, plan still active\" alert is raised. Give the key Read on Invoices.",
     );
   }
   console.log('\nThe dashboard\'s key reads subscriptions and the portal, and opened (then expired) a Checkout Session with Managed Payments.');

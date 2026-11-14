@@ -3,6 +3,175 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- The blog's post editor in the admin console takes everything a technical post needs. A formatting
+  toolbar (H2, H3, bold, italic, link, bulleted and numbered lists, quote, code block, table, divider,
+  upload, embed) with keyboard shortcuts (Ctrl or ⌘ with B, I, K, E, Alt+2, Alt+3, Shift+8,
+  Shift+7, Shift+.); a screenshot pasted into the post, or a file dropped on it, asks for its alt text,
+  uploads and goes in at the cursor; a Media panel lists the post's files to insert or delete; the
+  live preview renders every format, with the post's videos and the YouTube and Vimeo players allowed
+  on the editor's page alone (`media-src 'self'`, `frame-src` for the two hosts). Saving, publishing,
+  scheduling, renaming, the checks, CSRF and the role checks are as they were.
+- The post format (`site/src/lib/post-format.ts`) takes PNG, JPEG, WebP, AVIF and animated GIF
+  pictures and MP4 and WebM videos, each with required alt text and an optional caption
+  (`![Alt](/blog/<slug>/file.mp4 "Caption")`); YouTube and Vimeo addresses as privacy-enhanced
+  players (youtube-nocookie.com, Vimeo with `dnt=1`) in lazy, sandboxed frames with strict id checks;
+  `---` dividers; tables that scroll sideways on a phone; and links to a post's PDFs to download.
+  Every character of a post is still escaped: no raw HTML.
+- A post's files are known by their first bytes, never their names, in the console before anything
+  is committed and again in the site's build, which fails on a file that is not what its name says,
+  is over its size, is missing though the post shows it, or has no post: pictures up to 5 MB, GIFs
+  and PDFs 10 MB, videos 20 MB, and 20 files and 50 MB a post, under Cloudflare's 25 MiB static
+  asset, GitHub's contents API and the console Worker's memory. SVG and anything else is refused.
+- The site's CSP adds `media-src 'self'` and `frame-src https://www.youtube-nocookie.com
+  https://player.vimeo.com`, and `scripts/postbuild.mjs` fails a build with any other frame, an
+  unsandboxed one, or a post picture or video that is not a file of the site. The site's Worker gains
+  one script, `site/worker/range.mjs`, run only for a post's `.mp4` and `.webm` files: static assets
+  answer a Range request with the whole file, and Safari plays a video only from byte ranges.
+- The console sends a post's files to GitHub's blobs API without holding them as strings, reads them
+  raw (GitHub's contents API gives a file over 1 MB as JSON with no content), and a rename moves them
+  by their blobs instead of downloading and sending each again.
+- `site/README.md` says how to write a post: each format, and the limits.
+
+- **A refund that leaves a plan running needs a person.** The Stripe webhook takes `charge.refunded`
+  and follows the refunded payment to the subscriptions whose invoices it paid (Stripe's invoice
+  payments): for each that Stripe says still renews, of an account whose plan names that customer,
+  Billing's Needs a person shows "Refunded, plan still active" with the amount, or "Partly refunded",
+  linked to the payment in Stripe. Alerts are kept once per account and Stripe object. Give the
+  dashboard's Stripe key Read on Invoices, run `node scripts/configure-stripe.mjs` (it adds the
+  event to an existing endpoint, keeps its others, and says when the key cannot read invoice
+  payments), and `slotlock migrate`; the launch check now expects the event.
+- **People by their names.** At dashboard sign-in, with team workspaces offered, the name GitHub or
+  Google gives is kept beside the login or email (`dashboard_people.name`, without control, format
+  (zero-width, soft hyphen, byte order mark, tag, text-direction) or line-separator characters, at
+  most 80 characters) and erased with the person. Google sign-in asks
+  for the `profile` scope, which its name claim needs. The console shows each account by its name,
+  else its login or email, else its reference, with initials and a second line, and finds accounts
+  by name and login or email; it no longer asks GitHub to name accounts or staff, only for a searched
+  login the database does not hold. Staff are shown by the GitHub login kept at their last console
+  sign-in, and deployment-role commands as "Command line". A person's own account's export
+  (`POST /v1/tenant/exports`, and the one staff make for a privacy request) includes that name and
+  display and when they last signed in (`dashboard_people`, through `slotlock.tenant_export_person`,
+  which the dashboard asks for first). PRIVACY.md says what is kept and when it goes.
+- **The Staff log in words.** Each action has a plain-English label (its code in the label's title),
+  views and searches are hidden unless asked (`?views=1`), and the log filters by who (`who=`, or
+  `cli` for the command line), action, account and days (`from`, `to`). The hash chain is checked
+  as before. `slotlock.admin_staff_log` takes the filters: deploy the console after
+  `slotlock migrate` with `SLOTLOCK_ADMIN_DATABASE_URL`, which also reruns the console's grants for
+  the admin functions whose results grew.
+
+### Changed
+
+- **Blog posts are managed in the admin console.** The published posts stay on the site and appear
+  in the console's Content page, where staff edit, schedule, unpublish or delete them. No test
+  depends on which posts the blog holds any more, so deleting one from the console does not fail CI,
+  and the blog page says "No posts yet." when none is published.
+- **One GitHub App.** The admin console's Content, Communications > Status page and both Deploys
+  panels, and the hourly CMS schedule, use the release app (`pilotaai-slotlock-release`) instead of
+  a "Slotlock CMS" App of their own. The release app now holds what its users need between them:
+  contents, pull requests and issues write, and actions, checks and statuses read
+  (`scripts/create-release-app.mjs`). Each token asks only for its own part. Release a version still
+  asks for contents and pull requests alone. An app made before this needs the new permissions added
+  in its settings, then accepted on its installation (the installation's **Review request**).
+- **The console needs only the App's Client ID and a key.** `SLOTLOCK_ADMIN_CMS_APP_ID` takes the
+  App's Client ID, the JWT issuer GitHub recommends; a numeric App ID still works. With
+  `SLOTLOCK_ADMIN_CMS_INSTALLATION` empty, the console finds the App's installation on the
+  repository (`GET /repos/{owner}/{repo}/installation`) once and keeps it. `SLOTLOCK_ADMIN_CMS_APP_KEY`
+  is a private key of the App made for the console alone, so it can be revoked without touching
+  releases.
+- **`cms-schedule.yml` runs in the `release-app` environment** with `RELEASE_APP_CLIENT_ID` and
+  `RELEASE_APP_PRIVATE_KEY`, and records no deployment for its hourly runs. Its token
+  (`actions/create-github-app-token`, pinned) has contents and pull requests write and checks read.
+  `scripts/cms-scheduled-merge.mjs` takes that token and the App's slug (`CMS_TOKEN`,
+  `CMS_APP_SLUG`) and never holds a key. The `CMS_APP_ID` and `CMS_APP_INSTALLATION` variables, the
+  `CMS_APP_KEY` secret and the `cms` environment are no longer used, and
+  `scripts/configure-github.sh` no longer creates that environment: delete them.
+- **`scripts/configure-admin-console.mjs go-live` creates no GitHub App.** It adopts the release app.
+  Given `SLOTLOCK_ADMIN_CMS_APP_KEY_FILE`, the console's own key, it first checks, signed in as the
+  App, three things: the App asks for exactly those permissions, its installation has accepted them,
+  and it reaches PILOTAAI/slotlock alone. If one fails, it prints the owner's steps on GitHub and
+  deploys and stores nothing. Then it stores the key in the Worker only. `--no-open` is gone.
+- Admin console: a redesign of how it looks, not what it does: every route, form field, CSRF check and role check is as it was. Some pages read a little more (Home's chart and lists, the list beside an open case or privacy request), each read recorded in the staff log as before. A sidebar beside one raised card that scrolls on its own, a 52px top bar with the breadcrumb title, status pills, the account search and the page's actions, and fluid pages on a 12-column grid with no maximum width. Stat tiles with changes and trends, 240px charts with a 7d/30d/90d/12m range (areas for trends, stacked bars for parts), sticky-header tables whose rows open, account cells with initials and a second line, an inspector beside an account, a case and a privacy request, split views for Cases and Privacy, tabs within a page, drawers for quick edits, and toasts with Undo. Accounts gains saved views (All, Paying, Past due, Suspended, Near quota, Partners, Test) and Plan, Kind, Created and Last active filters, the staff log Date, Who, Action and Account filters and an entry drawer with the hash chain, and both export the rows shown as CSV (`?format=csv`). Communications previews the dashboard's banner as customers see it, in both themes, as you type, and finds an account by name. Eyebrows, ledes and most hints are gone; definitions open from an ⓘ.
+- Admin console: Inter and Geist Mono are self-hosted (the Latin woff2 subsets of `@fontsource-variable/inter` and `@fontsource-variable/geist-mono` 5.3.0, SIL Open Font License 1.1, pinned as dev dependencies and embedded by `scripts/admin-fonts.mjs`), served from the console at hashed paths cached for a year; the CSP adds `font-src 'self'` and nothing else.
+- Admin console: an account is shown by its name everywhere it is listed, not only on Accounts: Home's cases, Billing's Needs a person, overrides, alerts and Ending (and the forms that pick one), Usage's and Accounts' near quota, the case and privacy queues and records, the staff log's Account column, filter and entries, announcements to one account, feature flags and their changes, accounts whose maintenance is failing, and the account typeahead, each as the shared account cell (name, else login or email, else reference, on its initials' colour, with a long reference shortened and whole in its title). The names come with each function's rows, joined to `slotlock.staff_directory`: `admin_cases`, `admin_overrides`, `admin_billing_alerts`, `admin_privacy_requests`, `admin_announcements` and `admin_staff_log` gain `account_name` and `account_display`, `admin_usage_accounts` gains `name` and `display` (each dropped and made again by `slotlock migrate`, which reapplies the console role's grants), and `admin_case`, `admin_privacy_request`, `admin_billing`'s Ending, `admin_flags` and `admin_system`'s failing accounts carry them too. What each records in the staff log is unchanged.
+- The dashboard and the console share their colours from `src/design-tokens.ts`; the dashboard renders exactly the values it did. The console's tokens pass WCAG 2.2 AA in both themes, which `design-tokens.unit.test.ts` checks, and `admin-console-visual.integration.test.ts` renders every console page in Chromium at 390, 1440 and 1920 pixels, dark and light, checking it against axe-core 4.14.0 (a new, pinned dev dependency), the CSP and sideways scrolling.
+
+### Fixed
+
+- **The staff console's billing figures are defined once, and Home and Billing agree.** Paying is a
+  plan Pylota sells (Developer or Team) whose Stripe subscription is active or past due, out of any
+  trial and not set to end (`slotlock.staff_subscribed_plans`); Home counted active plans with or
+  without a subscription, partners' included, and Billing counted past due ones that were set to end.
+  Stripe's figures follow the same rule and count Slotlock's subscriptions only (those Checkout tags
+  with `tenant_ref`): monthly recurring revenue no longer includes another product's subscriptions or
+  ones cancelled at the end of their period; trials are counted apart; a new **Ending** figure gives
+  the subscriptions set to end, what they bring in a month and when each ends; **New this month**
+  leaves out checkouts never paid (`incomplete`, `incomplete_expired`); and **Cancelled this month**
+  counts subscriptions that ended this month (`ended_at`), not ones cancelled for later.
+- The Stripe webhook keeps when a cancelled subscription ends, and whether it is in a trial
+  (`tenant_plans.ends_at`, `trialing`), so Accounts and the account page say "Developer · ends 14 Dec"
+  without asking Stripe. Run `slotlock migrate`: until then the dashboard asks for the new function
+  and writes the plan as before.
+- `slotlock billing daily` records the overage it reports as the overage report's run too, so the
+  console's Billing jobs no longer says `overage report` never ran.
+- The System page: the status page's probe runs every five minutes from a Cloudflare Worker (it said
+  every ten minutes from GitHub); the dashboard and the site show the version they run (the
+  dashboard's `X-Slotlock-Version` header on its pages, the site's `facts.json`); and Deploys lists
+  the workflows that deploy (`dashboard-deploy.yml`, `site.yml`, `status-worker.yml`, besides the
+  image and releases), not `dashboard.yml`, which only bundles the Workers.
+- The sidebar marks only Staff log on the Staff log page, not Staff as well.
+- The staff log, kept six years and past any erasure, keeps an account search's words only when they
+  name an account by reference, an id, a key's prefix or a Stripe customer; a search by name, login
+  or email (the console's GitHub lookup included) is kept as a digest keyed with the deployment's
+  secret (`slotlock.staff_search_record`). Entries written before this change stay as they were.
+- Accounts' **Paying** and **Past due** views list the plans Home's and Billing's figures count, by
+  the same rule (`slotlock.staff_subscribed_plans`, which `slotlock.admin_accounts` now filters by).
+  Paying listed every active plan but Free, those set to end, trials, partners' and plans with no
+  subscription included, and left out past due ones. Run `slotlock migrate`: until then both views
+  are empty.
+- A payment refunded in full for a plan set to end now needs a person too: the customer has their
+  money back and keeps the plan until it ends, so Billing's alerts say "Refunded in full, plan ends
+  14 Dec" (the alert keeps the end date, `ends_at`). Part of a payment refunded on such a plan still
+  raises nothing, and on a plan that renews still reads "Partly refunded".
+- The System page's headline no longer says "All systems operational" while maintenance is failing:
+  it names hosts that are down, then "Maintenance failing for 1 account" (or that no server has
+  recorded maintenance for some hours) as a warning, and the top bar's pill says the same.
+- **Near quota** means at 80% of a monthly quota or more, the first share the account's owner is
+  told of, on Usage as on Accounts' view of that name and its count. Usage listed the twenty
+  busiest accounts whatever their share, so accounts at 1 to 4% of their quota were "near" it.
+- Communications' **Status page** tab is laid out as Announcements is: the new incident's form on
+  the left (no longer behind a button), and on the right what the status page shows now, each open
+  incident with its update form. It left the right half of the page empty.
+- Each **Connect** on the console's Site and search page leads to a new section of the hosted page,
+  [Admin console: Site and search](https://slotlock.pylota.io/docs/hosted/#admin-console-site-and-search),
+  which names every setting (`SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY` and `_PROPERTY`,
+  `SLOTLOCK_ADMIN_BING_KEY` and `_SITE`, `SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN` and `_ACCOUNT`, and
+  `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE`), not to the top of RFC 0006.
+- The console shows every date one way, as most of it already did: `2026-11-14`, with `09:21` after
+  it for a time. A plan set to end ("Developer · ends 2026-12-14"), Billing's Ending, the refund
+  alert, the charts' dates and an announcement's time in the viewer's zone read "14 Dec" or
+  "Sun, Nov 15" before. On a phone a chart shows three dates under it instead of five.
+- The console's landmarks are unique: each search is named ("Find an account", "Search accounts",
+  "Find a receipt"), and a drawer's head is no longer a second banner beside the top bar. The browser
+  test now fails on a moderate axe finding about landmarks too, not only on serious and critical
+  ones.
+- CI runs the admin console's browser test (every page at three widths, in both themes, under its
+  CSP and axe-core), which no job ran before: a new job, **Admin console in a browser**, installs
+  Chromium for the pinned `playwright` (now a dev dependency, 1.63.0) and keeps the screenshots as
+  an artifact when it fails. "CI passed" waits for it. Elsewhere the browser suites skip, quickly,
+  when Chromium is not installed.
+
+### Security
+
+- SECURITY.md describes the one App and the key each user has, what a leaked console key could do
+  until it is deleted, and why the "Protect main" ruleset's required checks are what keep such a
+  key from changing `main` on its own.
+- The console's installation tokens are limited to the site's repository, whatever else the
+  installation reaches.
+
 ## 0.11.0 - 2026-11-14
 
 ### Security

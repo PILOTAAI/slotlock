@@ -3579,7 +3579,9 @@ describe('Google sign-in', () => {
     expect(await (await get(target, '/base/dashboard')).text()).toContain('Continue with Google');
     const { location, callback, session } = await signInWithGoogle(target, fake);
     expect(location.origin + location.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
-    expect(location.searchParams.get('scope')).toBe('openid email');
+    // `profile` for the name claim (Google keeps it out of the ID token otherwise), which only team
+    // workspaces keep, for the staff console.
+    expect(location.searchParams.get('scope')).toBe('openid email profile');
     expect(location.searchParams.get('code_challenge_method')).toBe('S256');
     expect(location.searchParams.get('redirect_uri')).toBe(`${PUBLIC_URL}/dashboard/callback`);
     expect(callback.status).toBe(303);

@@ -1,7 +1,8 @@
 // The CMS's rules without a database (src/admin/cms.ts, src/admin/github-app.ts, RFC 0006, 4.5): the
 // console and the hourly workflow's script agree on which files a CMS pull request may change and
 // on what a schedule says; an image is known by its bytes; a renamed post's redirects; the fields
-// a post file cannot keep; and the App's key in either format GitHub gives.
+// a post file cannot keep; the App's key in either format GitHub gives; and the App known by its
+// Client ID alone, its installation found on the repository.
 import { createPrivateKey } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { cmsChangeAllowed, cmsPathAllowed, scheduleOf, signOffsOf } from '../../scripts/cms-scheduled-merge.mjs';
@@ -9,14 +10,14 @@ import {
   type SlotlockCmsChange,
   slotlockCmsChangeAllowed,
   slotlockCmsPathAllowed,
-  slotlockImageType,
+  slotlockFileType,
   slotlockPostFromFields,
   slotlockRedirectsWith,
   slotlockScheduleComment,
   slotlockScheduleOf,
 } from '../admin/cms.js';
 import { createSlotlockCmsGitHub, slotlockSignOff } from '../admin/github-app.js';
-import { FAKE_APP_ID, FAKE_INSTALLATION, FAKE_REPOSITORY, createFakeGithubRepo } from './helpers/fake-github-repo.js';
+import { FAKE_APP_ID, FAKE_CLIENT_ID, FAKE_INSTALLATION, FAKE_REPOSITORY, createFakeGithubRepo } from './helpers/fake-github-repo.js';
 
 const SHA = 'a'.repeat(40);
 const fields = {
@@ -33,9 +34,16 @@ describe('the CMS rules the console and the hourly workflow share', () => {
       'site/public/blog/a-post/van.png',
       'site/public/blog/a-post/van.jpeg',
       'site/public/blog/a-post/van.webp',
+      'site/public/blog/a-post/chart.avif',
+      'site/public/blog/a-post/hold.gif',
+      'site/public/blog/a-post/hold.mp4',
+      'site/public/blog/a-post/hold.webm',
+      'site/public/blog/a-post/slides.pdf',
       'site/public/_redirects',
       'site/src/data/authors.json',
       'site/public/blog/a-post/van.svg',
+      'site/public/blog/a-post/page.html',
+      'site/public/blog/a-post/recording.mov',
       'site/public/blog/a-post/nested/van.png',
       'site/content/blog/../../src/index.ts',
       'site/content/blog/A-Post.md',
@@ -46,7 +54,7 @@ describe('the CMS rules the console and the hourly workflow share', () => {
     ];
     const allowed = paths.filter((path) => slotlockCmsPathAllowed(path));
     // The author list is not the console's to change: it never writes it.
-    expect(allowed).toEqual(paths.slice(0, 5));
+    expect(allowed).toEqual(paths.slice(0, 10));
     for (const path of paths) expect(cmsPathAllowed(path), path).toBe(slotlockCmsPathAllowed(path));
   });
 
@@ -54,7 +62,7 @@ describe('the CMS rules the console and the hourly workflow share', () => {
     const change = (path: string, status = 'modified', extra: Partial<SlotlockCmsChange> = {}): SlotlockCmsChange =>
       ({ path, previous: null, status, patch: null, ...extra });
     const redirects = (...lines: string[]) => change('site/public/_redirects', 'modified', { patch: ['@@ -1 +1 @@', ...lines].join('\n') });
-    const own = [change('site/content/blog/second.md', 'added'), change('site/public/blog/second/van.png', 'added')];
+    const own = [change('site/content/blog/second.md', 'added'), change('site/public/blog/second/van.png', 'added'), change('site/public/blog/second/hold.mp4', 'added'), change('site/public/blog/second/slides.pdf', 'added')];
     const rename = [
       change('site/content/blog/first.md', 'removed'),
       change('site/public/blog/first/van.png', 'removed'),
@@ -79,6 +87,7 @@ describe('the CMS rules the console and the hourly workflow share', () => {
       ['redirects GitHub gave no diff of', [...rename.slice(0, 4), change('site/public/_redirects')], false],
       ['the author list', [...own, change('site/src/data/authors.json')], false],
       ['a workflow', [...own, change('.github/workflows/site.yml')], false],
+      ['a page beside the post', [...own, change('site/public/blog/second/page.html', 'added')], false],
     ];
     for (const [name, files, allowed] of cases) {
       expect(slotlockCmsChangeAllowed('second', files), name).toBe(allowed);
@@ -109,12 +118,16 @@ describe('the CMS rules the console and the hourly workflow share', () => {
 });
 
 describe('the CMS console', () => {
-  it('knows an image by its first bytes, never by its name', () => {
-    expect(slotlockImageType(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]))).toBe('png');
-    expect(slotlockImageType(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('jpg');
-    expect(slotlockImageType(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('webp');
-    expect(slotlockImageType(new TextEncoder().encode('<svg onload="alert(1)">'))).toBeNull();
-    expect(slotlockImageType(new TextEncoder().encode('RIFF\0\0\0\0WAVEfmt '))).toBeNull();
+  it('knows a file by its first bytes, never by its name', () => {
+    expect(slotlockFileType(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]))).toBe('png');
+    expect(slotlockFileType(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('jpg');
+    expect(slotlockFileType(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('webp');
+    expect(slotlockFileType(new TextEncoder().encode('<svg onload="alert(1)">'))).toBeNull();
+    expect(slotlockFileType(new TextEncoder().encode('RIFF\0\0\0\0WAVEfmt '))).toBeNull();
+    expect(slotlockFileType(new TextEncoder().encode('GIF89a\x01\0\x01\0'))).toBe('gif');
+    expect(slotlockFileType(new TextEncoder().encode('%PDF-1.7\n'))).toBe('pdf');
+    expect(slotlockFileType(new TextEncoder().encode('\0\0\0\x18ftypisom\0\0\x02\0isomiso2'))).toBe('mp4');
+    expect(slotlockFileType(new TextEncoder().encode('\0\0\0\x14ftypqt  \0\0\0\0qt  '))).toBeNull();
   });
 
   it('redirects a renamed post and its Markdown twin, and points older redirects at the new address', () => {
@@ -172,6 +185,38 @@ describe('the CMS GitHub App client', () => {
     await expect(wrongKey.readFile('site/content/blog/a-post.md', 'main')).rejects.toThrow(/refused the CMS App's token \(401\)/);
   });
 
+  it('signs in by the App\'s Client ID, finds its installation on the repository once, and asks for a token for that repository only', async () => {
+    const repo = createFakeGithubRepo({ 'site/content/blog/a-post.md': 'x' });
+    const github = createSlotlockCmsGitHub({ appId: FAKE_CLIENT_ID, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
+    expect((await github.readFile('site/content/blog/a-post.md', 'main'))?.text).toBe('x');
+    expect(await github.branchHead('cms/a-post')).toBeNull();
+    expect(repo.calls.filter((call) => call === `GET /repos/${FAKE_REPOSITORY}/installation`)).toHaveLength(1);
+    expect(repo.calls.filter((call) => call === `POST /app/installations/${FAKE_INSTALLATION}/access_tokens`)).toHaveLength(1);
+    expect(repo.tokenRequests).toEqual([{ repositories: ['slotlock'] }]);
+    // The App's own comments are known by the App ID the installation names.
+    await github.commit({ branch: 'cms/a-post', base: 'main', files: [{ path: 'site/content/blog/a-post.md', content: 'y' }], message: 'Blog: save', author: { login: 'octo-editor', id: '1004' } });
+    const pull = await github.openPullRequest({ branch: 'cms/a-post', title: 'Blog: a post', body: '' });
+    repo.pulls.get(pull.number)?.comments.push({ body: 'By someone else.', app: false }, { body: 'By the App.', app: true });
+    expect(await github.appComments(pull.number)).toEqual(['By the App.']);
+    expect(repo.calls.filter((call) => call.endsWith('/installation'))).toHaveLength(1);
+
+    // An installation named alongside the Client ID must be the one GitHub has.
+    const wrong = createSlotlockCmsGitHub({ appId: FAKE_CLIENT_ID, installationId: '78', privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
+    await expect(wrong.readFile('site/content/blog/a-post.md', 'main')).rejects.toThrow(/installation 78 is not the App's installation on PILOTAAI\/slotlock \(77\)/);
+    // Not installed there: said, and asked again next time rather than remembered.
+    const elsewhere = createSlotlockCmsGitHub({ appId: FAKE_CLIENT_ID, privateKey: repo.privateKey, repository: 'PILOTAAI/elsewhere', fetch: repo.fetch });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(elsewhere.readFile('x.md', 'main')).rejects.toThrow(/not installed on PILOTAAI\/elsewhere \(404\)/);
+    }
+    expect(repo.calls.filter((call) => call === 'GET /repos/PILOTAAI/elsewhere/installation')).toHaveLength(2);
+
+    // An existing setup's numeric App ID and installation need no lookup.
+    const before = repo.calls.length;
+    const numeric = createSlotlockCmsGitHub({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
+    expect(await numeric.appComments(pull.number)).toEqual(['By the App.']);
+    expect(repo.calls.slice(before).filter((call) => call.endsWith('/installation'))).toEqual([]);
+  });
+
   it('lists what merging a commit brings, reads every page of comments, and keeps only an author\'s own sign-off', async () => {
     const repo = createFakeGithubRepo({ 'site/content/blog/first.md': 'one', 'site/public/_redirects': '/old/ /blog/first/ 301\n' });
     const github = createSlotlockCmsGitHub({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
@@ -203,6 +248,32 @@ describe('the CMS GitHub App client', () => {
     expect(slotlockScheduleOf(await github.appComments(pull.number))).toEqual({ sha, at: '2026-11-14T09:00Z', by: 'octo-owner' });
   });
 
+  it('reads a file over 1 MB raw, lists a folder with sizes and blobs, and moves a file by its blob', async () => {
+    const big = new Uint8Array(1_500_000).fill(7);
+    const repo = createFakeGithubRepo({ 'site/public/blog/a-post/hold.gif': big, 'site/public/blog/a-post/van.png': 'png' });
+    const github = createSlotlockCmsGitHub({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
+    // GitHub's contents API gives a file over 1 MB as JSON with no content: only raw has its bytes.
+    expect(Buffer.from((await github.readBytes('site/public/blog/a-post/hold.gif', 'main')) ?? []).equals(Buffer.from(big))).toBe(true);
+    expect(await github.readBytes('site/public/blog/a-post/missing.gif', 'main')).toBeNull();
+    const listed = await github.listFiles('site/public/blog/a-post', 'main');
+    expect(listed.map((entry) => [entry.name, entry.size])).toEqual([['hold.gif', 1_500_000], ['van.png', 3]]);
+    expect(await github.listDirectory('site/public/blog/a-post', 'main')).toEqual(['hold.gif', 'van.png']);
+    const author = { login: 'octo-editor', id: '1004' };
+    const gif = listed.find((entry) => entry.name === 'hold.gif');
+    await github.commit({
+      branch: 'cms/b-post', base: 'main', author, message: 'Blog: move',
+      files: [{ path: 'site/public/blog/a-post/hold.gif', content: null }, { path: 'site/public/blog/b-post/hold.gif', content: { blob: gif?.sha ?? '' } }],
+    });
+    expect(repo.blobUploads).toEqual([]);
+    expect(repo.bytes('cms/b-post', 'site/public/blog/b-post/hold.gif')?.length).toBe(1_500_000);
+    await expect(github.commit({ branch: 'cms/b-post', base: 'main', author, message: 'x', files: [{ path: 'x', content: { blob: 'not-a-sha' } }] })).rejects.toThrow(/40 hex/);
+    // A new file's bytes go up once, as base64 in a JSON body written without a string copy.
+    const odd = Uint8Array.from({ length: 300_001 }, (_, index) => index % 251);
+    await github.commit({ branch: 'cms/b-post', base: 'main', author, message: 'Blog: add', files: [{ path: 'site/public/blog/b-post/odd.webm', content: odd }] });
+    expect(repo.blobUploads).toEqual([300_001]);
+    expect(Buffer.from(repo.bytes('cms/b-post', 'site/public/blog/b-post/odd.webm') ?? []).equals(Buffer.from(odd))).toBe(true);
+  });
+
   it('writes only cms/ branches, signed off as the staff member', async () => {
     const repo = createFakeGithubRepo({});
     const github = createSlotlockCmsGitHub({ appId: FAKE_APP_ID, installationId: FAKE_INSTALLATION, privateKey: repo.privateKey, repository: FAKE_REPOSITORY, fetch: repo.fetch });
@@ -214,7 +285,8 @@ describe('the CMS GitHub App client', () => {
     expect(slotlockSignOff(author)).toBe('Signed-off-by: octo-editor <1004+octo-editor@users.noreply.github.com>');
     // Saving over a branch that moved since the page was opened is refused.
     await expect(github.commit({ branch: 'cms/a-post', base: 'main', files: [], message: 'x', author, expectHead: null })).rejects.toMatchObject({ status: 409 });
-    expect(() => createSlotlockCmsGitHub({ appId: 'x', installationId: '1', privateKey: '', repository: FAKE_REPOSITORY })).toThrow(/numbers/);
+    expect(() => createSlotlockCmsGitHub({ appId: 'x', installationId: '1', privateKey: '', repository: FAKE_REPOSITORY })).toThrow(/Client ID or its App ID/);
+    expect(() => createSlotlockCmsGitHub({ appId: FAKE_CLIENT_ID, installationId: 'x', privateKey: '', repository: FAKE_REPOSITORY })).toThrow(/installation id is a number/);
     expect(() => createSlotlockCmsGitHub({ appId: '1', installationId: '1', privateKey: '', repository: 'not a repo' })).toThrow(/owner\/name/);
   });
 });

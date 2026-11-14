@@ -2,6 +2,7 @@
 // for announcements, service notices and the status page, and for the system: hosts, deploys,
 // maintenance, webhooks, feature flags and configuration. Rendering only: app.ts reads the data
 // through the admin functions and the providers, checks the role and handles the forms.
+import { SLOTLOCK_ANNOUNCEMENT_LABELS, slotlockAnnouncementBannerParts } from '../design-tokens.js';
 import {
   SLOTLOCK_ANNOUNCEMENT_KINDS,
   SLOTLOCK_ANNOUNCEMENT_MAX,
@@ -14,10 +15,45 @@ import {
 } from '../staff-ddl.js';
 import type { SlotlockStatusIssue, SlotlockWorkflowRun } from './github-app.js';
 import { type SlotlockSearchReport, type SlotlockSearchRow, type SlotlockVisitReport, slotlockLowClickPages } from './insights.js';
-import { type Html, bars, count, html, pageHead, pill, stats, table, when } from './ui.js';
+import {
+  type Html,
+  accountCell,
+  chart,
+  chip,
+  count,
+  drawer,
+  facts,
+  field,
+  hashTabs,
+  html,
+  info,
+  lastDays,
+  menu,
+  pill,
+  reasonField,
+  section,
+  stats,
+  table,
+  tabs,
+  when,
+} from './ui.js';
 
 /** A provider part of a page: not connected, could not be read, or what it said. */
 export type SlotlockProviderRead<T> = { state: 'off' } | { state: 'failed' } | { state: 'ok'; value: T };
+
+/** What a page module gives the console's shell: the page, and what its top bar holds. */
+export interface SlotlockPageParts {
+  body: Html;
+  pills?: Html;
+  actions?: Html;
+  drawer?: Html | null;
+}
+
+/** Where connecting a provider is written down (RFC 0006, Phase 0 and the console's setup). */
+export const SLOTLOCK_ADMIN_SETUP_DOCS = 'https://github.com/PILOTAAI/slotlock/blob/main/docs/rfc/0006-admin-console.md';
+
+/** Where the Site and search page's providers are set up: the hosted docs' section (docs/hosted/README.md). */
+export const SLOTLOCK_ADMIN_SITE_SETUP_DOCS = 'https://slotlock.pylota.io/docs/hosted/#admin-console-site-and-search';
 
 /** What an announcement is about, as the console names it. */
 export const SLOTLOCK_ANNOUNCEMENT_KIND_NAMES: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
@@ -36,24 +72,26 @@ export const SLOTLOCK_FEATURE_FLAG_NAMES: Readonly<Record<SlotlockFeatureFlag, {
 const percent = (ratio: number) => `${(ratio * 100).toFixed(ratio < 0.1 ? 1 : 0)}%`;
 const position = (value: number) => (value > 0 ? value.toFixed(1) : '–');
 const hidden = (csrf: string) => html`<input type="hidden" name="csrf" value="${csrf}">`;
-const reasonField = (id: string, hint: string) =>
-  html`<label for="${id}">Reason <span class="hint">${hint}</span></label><input id="${id}" name="reason" required maxlength="200" autocomplete="off">`;
 /** A path on the site, from a full URL a search engine gave; the URL itself when it is another site's. */
 const pathOf = (url: string, siteUrl: string) => (url.startsWith(siteUrl) ? url.slice(siteUrl.length) || '/' : url);
 
-function providerPart<T>(name: string, read: SlotlockProviderRead<T>, off: Html, render: (value: T) => Html): Html {
-  if (read.state === 'off') return html`<p class="empty">${name} is not connected. ${off}</p>`;
-  if (read.state === 'failed') return html`<p class="empty">${name} could not be read just now. It is tried again on the next visit to this page.</p>`;
+/** A provider's part: one compact card to connect it (`docs` says how), one line when it failed, else what it read. */
+function providerPart<T>(name: string, read: SlotlockProviderRead<T>, off: Html, render: (value: T) => Html, docs = SLOTLOCK_ADMIN_SETUP_DOCS): Html {
+  if (read.state === 'off') {
+    return html`<div class="connect"><span class="grow">${name} is not connected.</span>${info(`Connecting ${name}`, off)}<a class="btn sm" href="${docs}" rel="noreferrer">Connect</a></div>`;
+  }
+  if (read.state === 'failed') return html`<div class="connect"><span class="grow">${name} could not be read just now.</span><span class="muted">Tried again on the next visit.</span></div>`;
   return render(read.value);
 }
 
-function searchRows(caption: string, first: string, rows: readonly SlotlockSearchRow[], label: (row: SlotlockSearchRow) => Html, empty: string): Html {
-  return table(caption, [first, 'Clicks', 'Impressions', 'Click-through', 'Position'], rows.map((row) => [
+function searchRows(caption: string, first: string, rows: readonly SlotlockSearchRow[], label: (row: SlotlockSearchRow) => Html, empty: string, compact = false): Html {
+  return table(caption, compact
+    ? [first, { label: 'Clicks', num: true }, { label: 'Impressions', num: true }]
+    : [first, { label: 'Clicks', num: true }, { label: 'Impressions', num: true }, { label: 'CTR', num: true }, { label: 'Position', num: true }], rows.map((row) => [
     label(row),
     html`${count(row.clicks)}`,
     html`${count(row.impressions)}`,
-    html`${percent(row.ctr)}`,
-    html`${position(row.position)}`,
+    ...(compact ? [] : [html`${percent(row.ctr)}`, html`${position(row.position)}`]),
   ]), empty);
 }
 
@@ -83,95 +121,86 @@ export interface SlotlockSitePageData {
   visits: SlotlockProviderRead<SlotlockVisitReport>;
   /** The site workflow's last runs on main: its builds, checks and deploys. */
   deploys: SlotlockProviderRead<SlotlockWorkflowRun[]>;
+  now: number;
 }
 
-export function slotlockSitePage(data: SlotlockSitePageData): Html {
+export function slotlockSitePage(data: SlotlockSitePageData): SlotlockPageParts {
   const site = data.siteUrl.replace(/\/$/, '');
   const pageLink = (row: SlotlockSearchRow) => {
     const path = pathOf(row.key, site);
     return path.startsWith('/') ? html`<a href="${site}${path}" rel="noreferrer">${path}</a>` : html`${path}`;
   };
-  const read = (at: number) => html`<p class="fine">Read ${when(new Date(at))}, kept for an hour.</p>`;
-  const googlePart = providerPart('Search Console', data.google,
-    html`Add a service account to the property as a restricted user, and set <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY</code> and <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY</code>.`,
-    (report) => {
+  const readAt = (at: number) => info('When it was read', `Read ${when(new Date(at))} UTC, kept for an hour.`);
+  const searchPart = (name: string, read: SlotlockProviderRead<SlotlockSearchReport>, off: Html, google: boolean) =>
+    providerPart(name, read, off, (report) => {
       const posts = report.pages.filter((row) => /^\/blog\/[a-z0-9-]+\/?$/.test(pathOf(row.key, site)));
       const low = slotlockLowClickPages(report.pages);
       return html`
         ${stats([
           { label: 'Clicks', value: count(report.clicks), note: `${report.from} to ${report.to}` },
           { label: 'Impressions', value: count(report.impressions) },
-          { label: 'Click-through', value: report.impressions > 0 ? percent(report.clicks / report.impressions) : '–' },
+          { label: 'CTR', value: report.impressions > 0 ? percent(report.clicks / report.impressions) : '–' },
         ])}
-        <h3>Top queries</h3>
-        ${searchRows('Search Console queries', 'Query', report.queries.slice(0, 15), (row) => html`${row.key}`, 'No queries in this period.')}
-        <h3>Top pages</h3>
-        ${searchRows('Search Console pages', 'Page', report.pages.slice(0, 15), pageLink, 'No pages in this period.')}
-        <h3 id="titles">Worth a new title</h3>
-        <p class="fine">Seen at least 100 times and clicked under 2% of the time (RFC 0005, Phase 5). A clearer title or description may earn the click.</p>
-        ${searchRows('Pages worth a new title', 'Page', low, pageLink, 'No page is seen often and clicked rarely.')}
-        <h3 id="posts">Blog posts</h3>
-        ${searchRows('Blog posts in search', 'Post', posts, pageLink, 'No blog post was seen in Google results in this period.')}
-        ${report.sitemaps.length
-          ? html`<h3>Sitemaps</h3>${table('Sitemaps', ['Sitemap', 'Pages', 'Last read', 'Errors', 'Warnings'], report.sitemaps.map((entry) => [
-              html`<span class="mono">${entry.path}</span>`,
-              html`${count(entry.submitted)}`,
-              html`${when(entry.lastDownloaded)}`,
-              entry.errors > 0 ? pill(String(entry.errors), 'bad') : html`0`,
-              entry.warnings > 0 ? pill(String(entry.warnings), 'warn') : html`0`,
-            ]), 'No sitemaps.')}`
-          : ''}
-        ${read(report.readAt)}`;
-    });
-  const bingPart = providerPart('Bing Webmaster Tools', data.bing,
-    html`Set <code>SLOTLOCK_ADMIN_BING_KEY</code> to an API key from Bing Webmaster Tools' settings, and <code>SLOTLOCK_ADMIN_BING_SITE</code>.`,
-    (report) => html`
-      ${stats([
-        { label: 'Clicks', value: count(report.clicks), note: `${report.from} to ${report.to}, by week` },
-        { label: 'Impressions', value: count(report.impressions) },
-        { label: 'Click-through', value: report.impressions > 0 ? percent(report.clicks / report.impressions) : '–' },
-      ])}
-      <h3>Top queries</h3>
-      ${searchRows('Bing queries', 'Query', report.queries.slice(0, 15), (row) => html`${row.key}`, 'No queries in this period.')}
-      <h3>Top pages</h3>
-      ${searchRows('Bing pages', 'Page', report.pages.slice(0, 15), pageLink, 'No pages in this period.')}
-      ${read(report.readAt)}`);
+        <div class="grid">
+          <div class="c6">${section('Top queries', searchRows(`${name} queries`, 'Query', report.queries.slice(0, 15), (row) => html`${row.key}`, 'No queries in this period.', true), { level: 3, info: readAt(report.readAt) })}</div>
+          <div class="c6">${section('Top pages', searchRows(`${name} pages`, 'Page', report.pages.slice(0, 15), pageLink, 'No pages in this period.', true), { level: 3 })}</div>
+        </div>
+        ${google
+          ? html`<section class="section" id="titles"><header class="section-head"><h3>Worth a new title</h3>${info('Worth a new title', 'Seen at least 100 times and clicked under 2% of the time (RFC 0005, Phase 5). A clearer title or description may earn the click.')}</header>
+              ${searchRows('Pages worth a new title', 'Page', low, pageLink, 'No page is seen often and clicked rarely.')}</section>
+            <section class="section" id="posts"><header class="section-head"><h3>Blog posts</h3></header>
+              ${searchRows('Blog posts in search', 'Post', posts, pageLink, 'No blog post was seen in Google results in this period.')}</section>
+            ${report.sitemaps.length
+              ? section('Sitemaps', table('Sitemaps', ['Sitemap', { label: 'Pages', num: true }, 'Last read', { label: 'Errors', num: true }, { label: 'Warnings', num: true }], report.sitemaps.map((entry) => [
+                  html`<span class="mono">${entry.path}</span>`,
+                  html`${count(entry.submitted)}`,
+                  html`${when(entry.lastDownloaded)}`,
+                  entry.errors > 0 ? pill(String(entry.errors), 'bad') : html`0`,
+                  entry.warnings > 0 ? pill(String(entry.warnings), 'warn') : html`0`,
+                ]), 'No sitemaps.'), { level: 3 })
+              : ''}`
+          : ''}`;
+    }, SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
+  const googlePart = searchPart('Search Console', data.google,
+    html`Add a service account to the property as a restricted user, and set <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY</code> and <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY</code>.`, true);
+  const bingPart = searchPart('Bing Webmaster Tools', data.bing,
+    html`Set <code>SLOTLOCK_ADMIN_BING_KEY</code> to an API key from Bing Webmaster Tools' settings, and <code>SLOTLOCK_ADMIN_BING_SITE</code>.`, false);
   const visitsPart = providerPart('Cloudflare Web Analytics', data.visits,
     html`Set <code>SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN</code> (Account Analytics Read), <code>SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT</code> and <code>SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE</code> (the site tag).`,
-    (report) => html`
-      ${stats([{ label: 'Page loads', value: count(report.pageLoads), note: `${report.from} to ${report.to}` }])}
-      ${bars('Page loads', report.days, 28)}
-      <div class="grid-2">
-        <div>
-          <h3>Top pages</h3>
-          ${table('Top pages by page loads', ['Page', 'Page loads'], report.pages.map((row) => [
+    (report) => {
+      const days = report.days.length ? report.days.map((point) => point.day) : lastDays(28, data.now);
+      return html`
+        <div class="box">${chart({
+          title: 'Page loads',
+          labels: days,
+          series: [{ name: 'Page loads', values: days.map((key) => report.days.find((point) => point.day === key)?.count ?? 0) }],
+          kind: 'area',
+          total: count(report.pageLoads),
+          note: `${report.from} to ${report.to}`,
+          control: info('Cloudflare Web Analytics', `Counts without cookies and keeps no visitor. Read ${when(new Date(report.readAt))} UTC, kept for an hour.`),
+        })}</div>
+        <div class="grid">
+          <div class="c6">${section('Top pages', table('Top pages by page loads', ['Page', { label: 'Page loads', num: true }], report.pages.map((row) => [
             row.path.startsWith('/') ? html`<a href="${site}${row.path}" rel="noreferrer">${row.path}</a>` : html`${row.path}`, html`${count(row.count)}`,
-          ]), 'No page loads in this period.')}
-        </div>
-        <div>
-          <h3>Referrers</h3>
-          ${report.referrers === null
-            ? html`<p class="empty">Cloudflare did not give referrers just now.</p>`
-            : table('Referrers by page loads', ['From', 'Page loads'], report.referrers.map((row) => [
+          ]), 'No page loads in this period.'), { level: 3 })}</div>
+          <div class="c6">${section('Referrers', report.referrers === null
+            ? html`<p class="muted">Cloudflare did not give referrers just now.</p>`
+            : table('Referrers by page loads', ['From', { label: 'Page loads', num: true }], report.referrers.map((row) => [
                 html`${row.host}`, html`${count(row.count)}`,
-              ]), 'No visits came from another site in this period.')}
-        </div>
-      </div>
-      <p class="fine">Cloudflare Web Analytics counts without cookies and keeps no visitor. Read ${when(new Date(report.readAt))}, kept for an hour.</p>`);
+              ]), 'No visits came from another site in this period.'), { level: 3 })}</div>
+        </div>`;
+    }, SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const deployPart = providerPart('GitHub', data.deploys,
-    html`The site's deploys come from the Slotlock CMS GitHub App, with Actions (read).`,
-    (runs) => html`${runsTable('Site workflow runs on main', runs, 'No runs of the site workflow on main yet.')}
-      <p class="fine">Each run builds the site and runs its copy lint and SEO check before it deploys: a failed run deployed nothing.</p>`);
-  return html`
-    ${pageHead('Slotlock Cloud', 'Site and search', 'How the site does in search and with visitors over the last 28 days, and its last deploys. Counts only, never a visitor.')}
-    <h2>Google</h2>
-    ${googlePart}
-    <h2>Bing</h2>
-    ${bingPart}
-    <h2>Visitors</h2>
-    ${visitsPart}
-    <h2 id="deploys">Deploys</h2>
-    ${deployPart}`;
+    html`The site's deploys come from Slotlock's GitHub App, with Actions (read).`,
+    (runs) => runsTable('Site workflow runs on main', runs, 'No runs of the site workflow on main yet.'), SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
+  const body = html`
+    ${section('Visitors', visitsPart)}
+    ${section('Search', hashTabs('Source', [
+      { id: 'google', label: 'Google', body: googlePart },
+      { id: 'bing', label: 'Bing', body: bingPart },
+    ], 'seg'))}
+    ${section('Deploys', deployPart, { id: 'deploys', info: info('Deploys', 'Each run builds the site and runs its copy lint and SEO check before it deploys: a failed run deployed nothing.') })}`;
+  return { body, actions: html`<a class="btn" href="${site}/" rel="noreferrer">Open the site</a>` };
 }
 
 // ---------- M10: Communications ----------
@@ -189,7 +218,14 @@ export interface SlotlockAnnouncementRow {
   created_by: string;
   ended_at: Date | null;
   state: 'live' | 'scheduled' | 'ended' | 'over';
+  /** What its account is called (staff_directory), for one to one account. */
+  account_name?: string | null;
+  account_display?: string | null;
 }
+
+/** An account by what the admin function says it is called, beside its reference. */
+const namedCell = (row: { account_ref: string; account_name?: string | null; account_display?: string | null }, accountHref: (ref: string) => string) =>
+  accountCell({ ref: row.account_ref, name: row.account_name ?? null, display: row.account_display ?? null, href: accountHref(row.account_ref) });
 
 export interface SlotlockCommunicationsPageData {
   csrf: string;
@@ -214,86 +250,114 @@ const STATE_PILLS: Readonly<Record<SlotlockAnnouncementRow['state'], Html>> = {
   over: pill('Ran out', 'muted'),
 };
 
+const PLAN_WORDS: Readonly<Record<string, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
+
 const audienceText = (row: SlotlockAnnouncementRow, accountHref: (ref: string) => string): Html =>
   row.audience === 'everyone'
     ? html`Every account`
     : row.audience === 'plan'
-      ? html`The ${row.plan ?? ''} plan`
-      : html`<a href="${accountHref(row.account_ref ?? '')}" class="mono">${row.account_ref ?? ''}</a><span class="sub">A service notice</span>`;
+      ? html`${chip(PLAN_WORDS[row.plan ?? ''] ?? row.plan ?? '', 'info')} plan`
+      : namedCell({ ...row, account_ref: row.account_ref ?? '' }, accountHref);
 
 /** A datetime-local value, in UTC as the form says. */
 const minuteInput = (ms: number) => new Date(ms).toISOString().slice(0, 16);
 
-export function slotlockCommunicationsPage(data: SlotlockCommunicationsPageData, accountHref: (ref: string) => string): Html {
+/** The dashboard's banner, with its own markup and CSS, on its own canvas in one theme. */
+function bannerPreview(theme: 'light' | 'dark', kind: SlotlockAnnouncementKind): Html {
+  const parts = slotlockAnnouncementBannerParts(kind);
+  return html`<div class="banner-frame ${theme}"><span class="frame-label">Dashboard, ${theme}</span><p class="${parts.className}" data-banner data-placeholder="Your message, as customers read it."><strong>${parts.label}</strong> <span data-banner-message>Your message, as customers read it.</span> <a href="#" hidden>${parts.more}</a></p></div>`;
+}
+
+export function slotlockCommunicationsPage(data: SlotlockCommunicationsPageData, accountHref: (ref: string) => string): SlotlockPageParts {
   const csrf = hidden(data.csrf);
   const rows = data.announcements.map((row) => [
     html`<strong>${SLOTLOCK_ANNOUNCEMENT_KIND_NAMES[row.kind]}.</strong> ${row.message}${row.link ? html`<span class="sub"><a href="${row.link}" rel="noreferrer">${row.link}</a></span>` : ''}`,
     audienceText(row, accountHref),
-    html`${when(row.starts_at)}<span class="sub">to ${when(row.ends_at)}</span>`,
+    html`${when(row.starts_at)}<span class="sub">to ${when(row.ends_at)} UTC</span>`,
     html`${STATE_PILLS[row.state]}<span class="sub">${data.names.get(row.created_by) ?? row.created_by}</span>`,
     data.mayAct && (row.state === 'live' || row.state === 'scheduled')
-      ? html`<form class="inline" method="post" action="/communications/end">${csrf}<input type="hidden" name="announcement" value="${row.id}"><button class="btn" type="submit">End now</button></form>`
+      ? html`<form class="inline" method="post" action="/communications/end">${csrf}<input type="hidden" name="announcement" value="${row.id}"><button class="btn sm" type="submit">End now</button></form>`
       : html``,
   ]);
   const kindOptions = SLOTLOCK_ANNOUNCEMENT_KINDS.map((kind) => html`<option value="${kind}">${SLOTLOCK_ANNOUNCEMENT_KIND_NAMES[kind]}</option>`);
-  const planOptions = SLOTLOCK_STAFF_PLANS.map((plan) => html`<option value="${plan}">${plan}</option>`);
-  const writeForm = data.mayAct
-    ? html`<section class="panel" aria-labelledby="write">
-        <h2 id="write">Write an announcement</h2>
-        <p class="fine">One line above every page of the dashboard while it runs, at most ${SLOTLOCK_ANNOUNCEMENT_MAX_DAYS} days. A notice to one account is a service notice: its audit log says Slotlock staff sent it. Never marketing.</p>
-        <form class="form" method="post" action="/communications">${csrf}
-          <label for="announce-kind">About</label><select id="announce-kind" name="kind">${kindOptions}</select>
-          <label for="announce-audience">For</label>
-          <select id="announce-audience" name="audience">
-            <option value="everyone"${data.account ? '' : html` selected`}>Every account</option>
-            <option value="plan">The accounts on a plan</option>
-            <option value="account"${data.account ? html` selected` : ''}>One account (a service notice)</option>
-          </select>
-          <label for="announce-plan">Plan <span class="hint">for a plan's accounts</span></label><select id="announce-plan" name="plan"><option value="">None</option>${planOptions}</select>
-          <label for="announce-account">Account <span class="hint">for one account: its reference</span></label><input id="announce-account" name="account" value="${data.account ?? ''}" maxlength="500" autocomplete="off" spellcheck="false">
-          <label for="announce-message">Message <span class="hint">one line, up to ${SLOTLOCK_ANNOUNCEMENT_MAX} characters; the customer reads it</span></label><input id="announce-message" name="message" required maxlength="${SLOTLOCK_ANNOUNCEMENT_MAX}" autocomplete="off">
-          <label for="announce-link">Link <span class="hint">optional; https, such as the incident on the status page</span></label><input id="announce-link" name="link" type="url" maxlength="300" placeholder="https://" autocomplete="off">
-          <label for="announce-starts">From <span class="hint">UTC; empty for now</span></label><input id="announce-starts" name="starts" type="datetime-local">
-          <label for="announce-ends">Until <span class="hint">UTC</span></label><input id="announce-ends" name="ends" type="datetime-local" required value="${minuteInput(data.now + 86_400_000)}">
-          <button class="btn primary" type="submit">Announce</button>
-        </form>
+  const planOptions = SLOTLOCK_STAFF_PLANS.map((plan) => html`<option value="${plan}">${PLAN_WORDS[plan] ?? plan}</option>`);
+  const audience = (value: string, label: string, checked: boolean) =>
+    html`<label><input type="radio" name="audience" value="${value}"${checked ? html` checked` : ''}><span>${label}</span></label>`;
+  const firstKind = SLOTLOCK_ANNOUNCEMENT_KINDS[0] ?? 'notice';
+  const composer = data.mayAct
+    ? html`<section class="section" aria-labelledby="compose-title">
+        <header class="section-head"><h2 id="compose-title">New announcement</h2>${info('Announcements', `One line above every page of the dashboard while it runs, at most ${SLOTLOCK_ANNOUNCEMENT_MAX_DAYS} days. A notice to one account is a service notice: its audit log says Slotlock staff sent it. Never marketing.`)}</header>
+        <div class="composer">
+          <form class="form" method="post" action="/communications" data-banner-form data-banner-labels="${JSON.stringify(SLOTLOCK_ANNOUNCEMENT_LABELS)}">${csrf}
+            <div class="form-grid">
+              ${field({ id: 'announce-kind', label: 'Kind', control: html`<select id="announce-kind" name="kind">${kindOptions}</select>` })}
+              <div class="field"><span class="label" id="announce-audience-label">Audience</span>
+                <fieldset class="segmented" aria-labelledby="announce-audience-label">
+                  ${audience('everyone', 'Everyone', !data.account)}${audience('plan', 'Plan', false)}${audience('account', 'Account', Boolean(data.account))}
+                </fieldset></div>
+              <div class="if-plan wide">${field({ id: 'announce-plan', label: 'Plan', control: html`<select id="announce-plan" name="plan"><option value="">Choose a plan</option>${planOptions}</select>` })}</div>
+              <div class="if-account wide">${field({ id: 'announce-account', label: 'Account', control: html`<span class="typeahead"><input id="announce-account" name="account" value="${data.account ?? ''}" maxlength="500" autocomplete="off" spellcheck="false" placeholder="Search by name or reference" data-typeahead></span>` })}</div>
+              ${field({ id: 'announce-message', label: 'Message', public: true, wide: true, extra: html`<span class="counter" data-count-for="announce-message"></span>`, control: html`<input id="announce-message" name="message" required maxlength="${SLOTLOCK_ANNOUNCEMENT_MAX}" autocomplete="off">` })}
+              ${field({ id: 'announce-link', label: 'Link', optional: true, public: true, wide: true, control: html`<input id="announce-link" name="link" type="url" maxlength="300" placeholder="https://" autocomplete="off">` })}
+              ${field({ id: 'announce-starts', label: 'From, UTC', optional: true, control: html`<input id="announce-starts" name="starts" type="datetime-local">`, after: html`<span class="readback" data-local-for="announce-starts" data-empty="Now"></span>` })}
+              ${field({ id: 'announce-ends', label: 'Until, UTC', control: html`<input id="announce-ends" name="ends" type="datetime-local" required value="${minuteInput(data.now + 86_400_000)}">`, after: html`<span class="readback" data-local-for="announce-ends"></span>` })}
+            </div>
+            <div class="form-actions"><button class="btn primary" type="submit">Announce</button></div>
+          </form>
+          <div class="composer-preview" aria-label="Preview">
+            ${bannerPreview('dark', firstKind)}
+            ${bannerPreview('light', firstKind)}
+          </div>
+        </div>
       </section>`
     : '';
-  const incidents = providerPart('The status page', data.incidents,
-    html`It needs the Slotlock CMS GitHub App with Issues (read and write).`,
-    ({ open, closed }) => html`
-      ${open.length === 0
-        ? html`<p class="empty">No open incident. The status page shows hosted Slotlock as up.</p>`
-        : html`<ul class="panel incidents">${open.map((issue) => html`<li>
-            <p><a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a> <span class="sub">Opened ${when(issue.createdAt)}, ${count(issue.comments)} ${issue.comments === 1 ? 'update' : 'updates'}</span></p>
-            ${data.mayAct
-              ? html`<form class="form" method="post" action="/communications/status/update">${csrf}<input type="hidden" name="issue" value="${issue.number}">
-                  <label for="update-${issue.number}">Update <span class="hint">public, on the status page</span></label><textarea id="update-${issue.number}" name="body" rows="2" maxlength="2000" required></textarea>
-                  <label class="check"><input type="checkbox" name="close" value="1"> Resolved: close the incident with this update</label>
-                  <button class="btn" type="submit">Post the update</button></form>`
-              : ''}
-          </li>`)}</ul>`}
-      ${data.mayAct
-        ? html`<details class="act"><summary class="btn">Open an incident</summary>
-            <form class="pop form" method="post" action="/communications/status">${csrf}
-              <label for="incident-title">Title <span class="hint">public: what is affected</span></label><input id="incident-title" name="title" required maxlength="120" autocomplete="off">
-              <label for="incident-body">What is happening <span class="hint">public</span></label><textarea id="incident-body" name="body" rows="3" maxlength="2000" required></textarea>
-              <button class="btn danger" type="submit">Open the incident</button></form></details>`
-        : ''}
-      ${closed.length
-        ? html`<h3>Recently resolved</h3>${table('Resolved incidents', ['Incident', 'Opened', 'Resolved'], closed.map((issue) => [
-            html`<a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a>`, html`${when(issue.createdAt)}`, html`${when(issue.closedAt)}`,
-          ]), '')}`
-        : ''}
-      <p class="fine">Incidents are issues labelled <code>status</code> (docs/hosted/status.md); the probe opens and closes its own. Read from GitHub as the page opens.</p>`);
-  return html`
-    ${pageHead('Slotlock Cloud', 'Communications', 'What customers are told: announcements and service notices on their dashboard, and incidents on the status page. No marketing email is sent from here.')}
-    <h2>Announcements</h2>
-    ${table('Announcements', ['Message', 'For', 'Runs', 'State', 'Action'], rows, data.endedToo ? 'No announcements yet.' : 'Nothing is showing or scheduled.')}
-    <p class="pager">${data.endedToo ? html`<a href="/communications">Hide ended ones</a>` : html`<a href="/communications?ended=1">Show ended ones too</a>`}</p>
-    ${writeForm}
-    <h2 id="status">Status page</h2>
-    ${incidents}`;
+  const list = section(data.endedToo ? 'All announcements' : 'Showing and scheduled', table('Announcements', ['Message', 'Audience', 'Runs', 'State', { label: 'Actions', quiet: true }], rows, data.endedToo ? 'No announcements yet.' : 'Nothing is showing or scheduled.'), {
+    aside: tabs('Announcements', [
+      { label: 'Current', href: '/communications', current: !data.endedToo },
+      { label: 'All', href: '/communications?ended=1', current: data.endedToo },
+    ], 'views'),
+  });
+  // The open incidents as the status page lists them (open `status` issues), each with its update form.
+  const openIncidents = (open: readonly SlotlockStatusIssue[]) => open.length === 0
+    ? html`<div class="callout good"><p>No open incident. The status page shows hosted Slotlock as up.</p></div>`
+    : html`<div class="incidents">${open.map((issue) => html`<div class="incident">
+        <p><a href="${issue.url}" rel="noreferrer"><strong>#${issue.number} ${issue.title}</strong></a> <span class="muted">Opened ${when(issue.createdAt)} · ${count(issue.comments)} ${issue.comments === 1 ? 'update' : 'updates'}</span></p>
+        ${data.mayAct
+          ? html`<form class="form" method="post" action="/communications/status/update">${csrf}<input type="hidden" name="issue" value="${issue.number}">
+              ${field({ id: `update-${issue.number}`, label: 'Update', public: true, control: html`<textarea id="update-${issue.number}" name="body" rows="2" maxlength="2000" required></textarea>` })}
+              <label class="check"><input type="checkbox" name="close" value="1"> Resolved: close the incident with this update</label>
+              <div class="form-actions"><button class="btn sm" type="submit">Post update</button></div></form>`
+          : ''}
+      </div>`)}</div>`;
+  const statusInfo = info('The status page', html`Incidents are issues labelled <code>status</code> (docs/hosted/status.md); the probe opens and closes its own. Read from GitHub as the page opens.`);
+  const resolved = (closed: readonly SlotlockStatusIssue[]) => closed.length
+    ? section('Recently resolved', table('Resolved incidents', ['Incident', 'Opened', 'Resolved'], closed.map((issue) => [
+        html`<a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a>`, html`${when(issue.createdAt)}`, html`${when(issue.closedAt)}`,
+      ]), ''), { level: 3 })
+    : '';
+  // As Announcements: the form on the left, and on the right what the status page shows now.
+  const statusPanel = data.mayAct && data.incidents.state === 'ok'
+    ? html`<section class="section" aria-labelledby="incident-compose-title">
+        <header class="section-head"><h2 id="incident-compose-title">New incident</h2>${statusInfo}</header>
+        <div class="composer">
+          <form class="form" method="post" action="/communications/status">${csrf}
+            ${field({ id: 'incident-title', label: 'Title', public: true, control: html`<input id="incident-title" name="title" required maxlength="120" autocomplete="off">` })}
+            ${field({ id: 'incident-body', label: 'What is happening', public: true, control: html`<textarea id="incident-body" name="body" rows="4" maxlength="2000" required></textarea>` })}
+            <div class="form-actions"><button class="btn danger" type="submit">Open incident</button></div>
+          </form>
+          <div class="composer-preview"><div class="box"><header class="section-head"><h3>On the status page now</h3></header>${openIncidents(data.incidents.value.open)}</div></div>
+        </div>
+        ${resolved(data.incidents.value.closed)}
+      </section>`
+    : section('Incidents', providerPart('The status page', data.incidents,
+        html`It needs Slotlock's GitHub App with Issues (read and write).`,
+        ({ open, closed }) => html`${openIncidents(open)}${resolved(closed)}`), { info: statusInfo });
+  const openCount = data.incidents.state === 'ok' ? data.incidents.value.open.length : 0;
+  const body = hashTabs('Communications', [
+    { id: 'announcements', label: 'Announcements', body: html`${composer}${list}` },
+    { id: 'status', label: 'Status page', body: statusPanel, count: openCount },
+  ]);
+  return { body, ...(openCount ? { pills: pill(`${openCount} open ${openCount === 1 ? 'incident' : 'incidents'}`, 'bad') } : {}) };
 }
 
 // ---------- M11: System ----------
@@ -316,15 +380,15 @@ export interface SlotlockSystemData {
   rounds: { started_at: string; finished_at: string; attention: boolean; summary: Record<string, number> }[];
   failing: {
     account_ref: string; first_failed_at: string; last_failed_at: string; failures: number; error: string;
-    code: string | null; message: string | null;
+    code: string | null; message: string | null; account_name?: string | null; account_display?: string | null;
   }[];
   failing_total: number;
   jobs: Record<string, { finished_at: string; attention: boolean }>;
 }
 
 export interface SlotlockFlagsData {
-  flags: { id: string; flag: SlotlockFeatureFlag; plan: string | null; account_ref: string | null; enabled: boolean; reason: string; set_by: string; set_at: string }[];
-  history: { occurred_at: string; staff_ref: string; action: string; account_ref: string | null; reason: string | null; metadata: { flag?: string; plan?: string | null; from?: boolean | null; to?: boolean | null } }[];
+  flags: { id: string; flag: SlotlockFeatureFlag; plan: string | null; account_ref: string | null; enabled: boolean; reason: string; set_by: string; set_at: string; account_name?: string | null; account_display?: string | null }[];
+  history: { occurred_at: string; staff_ref: string; action: string; account_ref: string | null; reason: string | null; metadata: { flag?: string; plan?: string | null; from?: boolean | null; to?: boolean | null }; account_name?: string | null; account_display?: string | null }[];
 }
 
 export interface SlotlockSystemPageData {
@@ -338,105 +402,126 @@ export interface SlotlockSystemPageData {
   configuration: { name: string; value: string }[];
   names: ReadonlyMap<string, string>;
   now: number;
+  /** The drawer the address asks for: a flag to set (?panel=flag), or one to change (?panel=flag&flag=<id>). */
+  panel?: { kind: 'flag'; id: string | null } | null;
 }
 
 const onOff = (value: boolean | null | undefined) => (value === true ? 'on' : value === false ? 'off' : 'as configured');
 
-export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (ref: string) => string): Html {
+export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (ref: string) => string): SlotlockPageParts {
   const csrf = hidden(data.csrf);
   const { system } = data;
   const last = system.rounds[0];
   const hourSince = last ? data.now - new Date(last.finished_at).getTime() : null;
-  const flagOptions = SLOTLOCK_FEATURE_FLAGS.map((flag) => html`<option value="${flag}">${SLOTLOCK_FEATURE_FLAG_NAMES[flag].name}</option>`);
-  const planOptions = SLOTLOCK_STAFF_PLANS.map((plan) => html`<option value="${plan}">${plan}</option>`);
-  return html`
-    ${pageHead('Slotlock Cloud', 'System', 'Whether each part of the service answers, what last deployed, how maintenance and webhooks are doing, and the features turned on or off.')}
-    <h2>Hosts</h2>
-    ${table('Hosts', ['Host', 'State', 'Version', 'Answered in'], data.hosts.map((host) => [
+  const down = data.hosts.filter((host) => !host.up);
+  // The headline: hosts down, then accounts whose maintenance fails, or no maintenance recorded lately.
+  const failingTotal = Number(system.failing_total);
+  const lateHours = hourSince !== null && hourSince > 3 * 3_600_000 ? Math.floor(hourSince / 3_600_000) : null;
+  const problems = [
+    ...(down.length ? [`${count(down.length)} ${down.length === 1 ? 'host is' : 'hosts are'} down`] : []),
+    ...(failingTotal > 0 ? [`Maintenance failing for ${count(failingTotal)} ${failingTotal === 1 ? 'account' : 'accounts'}`] : []),
+    ...(lateHours !== null ? [`No maintenance recorded for ${count(lateHours)} hours`] : []),
+  ];
+  const tone = down.length ? 'bad' : problems.length ? 'warn' : 'good';
+  const flagName = (flag: string) => SLOTLOCK_FEATURE_FLAG_NAMES[flag as SlotlockFeatureFlag]?.name ?? flag;
+  const editing = data.panel?.kind === 'flag' && data.mayAct ? (data.flags.flags.find((flag) => flag.id === data.panel?.id) ?? null) : null;
+  const option = (value: string, label: string, current: string | null | undefined) => html`<option value="${value}"${current === value ? html` selected` : ''}>${label}</option>`;
+  const flagForm = html`<form class="form" method="post" action="/system/flags">${csrf}
+      ${field({ id: 'flag-name', label: 'Feature', control: html`<select id="flag-name" name="flag">${SLOTLOCK_FEATURE_FLAGS.map((flag) => option(flag, SLOTLOCK_FEATURE_FLAG_NAMES[flag].name, editing?.flag))}</select>` })}
+      <div class="form-grid">
+        ${field({ id: 'flag-plan', label: 'For a plan', control: html`<select id="flag-plan" name="plan"><option value="">None: one account</option>${SLOTLOCK_STAFF_PLANS.map((plan) => option(plan, PLAN_WORDS[plan] ?? plan, editing?.plan))}</select>` })}
+        ${field({ id: 'flag-state', label: 'Set to', control: html`<select id="flag-state" name="enabled">${option('0', 'Off', editing ? (editing.enabled ? '1' : '0') : '0')}${option('1', 'On', editing ? (editing.enabled ? '1' : '0') : '0')}</select>` })}
+      </div>
+      ${field({ id: 'flag-account', label: 'Or one account', control: html`<span class="typeahead"><input id="flag-account" name="account" maxlength="500" autocomplete="off" spellcheck="false" value="${editing?.account_ref ?? ''}" placeholder="Search by name or reference" data-typeahead></span>` })}
+      ${reasonField('flag-reason', { public: true })}
+      <dl class="kv">${SLOTLOCK_FEATURE_FLAGS.map((flag) => html`<div><dt>${SLOTLOCK_FEATURE_FLAG_NAMES[flag].name} off</dt><dd class="muted">${SLOTLOCK_FEATURE_FLAG_NAMES[flag].off}</dd></div>`)}</dl>
+      <div class="form-actions"><button class="btn primary" type="submit">Set flag</button></div>
+    </form>
+    ${editing
+      ? section('Remove', html`<form class="form" method="post" action="/system/flags/clear">${csrf}<input type="hidden" name="flag" value="${editing.id}">${reasonField(`clear-drawer-${editing.id}`, { public: Boolean(editing.account_ref) })}<div class="form-actions"><button class="btn danger" type="submit">Remove flag</button></div></form>`, { level: 3 })
+      : ''}`;
+  const flagDrawer = data.panel?.kind === 'flag' && data.mayAct
+    ? drawer(editing ? `${flagName(editing.flag)}, ${editing.account_ref ? (editing.account_name || editing.account_display || editing.account_ref) : `the ${editing.plan ?? ''} plan`}` : 'Set a flag', flagForm, '/system#flags')
+    : null;
+  const body = html`
+    <nav class="anchors" aria-label="On this page"><a href="#hosts">Hosts</a><a href="#maintenance">Maintenance</a><a href="#webhooks">Webhooks</a><a href="#deploys">Deploys</a><a href="#flags">Flags</a><a href="#configuration">Configuration</a></nav>
+    <div class="headline"><span class="pill ${tone} dot-only" aria-hidden="true"></span><span class="headline-text">${problems.length ? problems.join(' · ') : 'All systems operational'}</span></div>
+    ${section('Hosts', table('Hosts', ['Host', 'State', 'Version', { label: 'Latency', num: true }], data.hosts.map((host) => [
       html`${host.name}<span class="sub mono">${host.url}</span>`,
       host.up ? pill('Up', 'good') : html`${pill('Down', 'bad')}<span class="sub">${host.answer}</span>`,
-      html`${host.version ?? '–'}`,
+      html`${host.version ? html`<code>${host.version}</code>` : '–'}`,
       html`${count(host.ms)} ms`,
-    ]), 'No hosts to check.')}
-    <p class="fine">Asked as this page opened, with a five-second limit. The public status page probes them from GitHub every ten minutes.</p>
+    ]), 'No hosts to check.'), { id: 'hosts', info: info('Hosts', 'Asked as this page opened, with a five-second limit. The public status page probes them every five minutes, from a Cloudflare Worker.') })}
 
-    <h2 id="maintenance">Maintenance</h2>
-    ${stats([
-      { label: 'Accounts failing', value: count(system.failing_total), note: 'A pass failed and none has run since' },
-      { label: 'Last hour recorded', value: last ? `${when(last.finished_at).slice(11)} UTC` : 'Never', note: last ? `${when(last.finished_at).slice(0, 10)}: ${count(last.summary.passes ?? 0)} passes, ${count(last.summary.failed ?? 0)} failed` : 'No server has recorded maintenance' },
-    ])}
-    ${hourSince !== null && hourSince > 3 * 3_600_000 ? html`<p class="notice warn">No server has recorded maintenance for ${Math.floor(hourSince / 3_600_000)} hours. Check that <code>slotlock serve</code> is running.</p>` : ''}
-    <h3>Accounts whose maintenance is failing</h3>
-    ${table('Accounts whose maintenance is failing', ['Account', 'Failing since', 'Last failed', 'Failures', 'Error'], system.failing.map((row) => [
-      html`<a href="${accountHref(row.account_ref)}" class="mono">${row.account_ref}</a>`,
-      html`${when(row.first_failed_at)}`,
-      html`${when(row.last_failed_at)}`,
-      html`${count(row.failures)}`,
-      html`<code>${row.error}${row.code ? ` ${row.code}` : ''}</code>${row.message ? html`<span class="sub">${row.message}</span>` : ''}`,
-    ]), 'Every account’s last pass ran.')}
-    <p class="fine">The error's class, code and first line up to its first quotation mark, where a value would start: never the account's data. Cleared when a pass runs; kept ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days otherwise.</p>
-    <h3>The last day, by server hour</h3>
-    ${table('Maintenance hours', ['Hour to', 'Passes', 'Failed', 'Extended', 'Pruned', 'Released'], system.rounds.map((round) => [
-      html`${when(round.finished_at)}<span class="sub">from ${when(round.started_at)}</span>`,
-      html`${count(round.summary.passes ?? 0)}`,
-      round.attention ? pill(count(round.summary.failed ?? 0), 'bad') : html`0`,
-      html`${count(round.summary.extended ?? 0)}`,
-      html`${count(round.summary.pruned ?? 0)}`,
-      html`${count((round.summary.noShows ?? 0) + (round.summary.approvalsExpired ?? 0))}`,
-    ]), 'No hour recorded yet.')}
-    <h3>Billing jobs</h3>
-    ${table('Billing jobs', ['Job', 'Last run', 'State'], ['billing_daily', 'overage_report'].map((job) => [
-      html`<code>${job.replace('_', ' ')}</code>`,
-      html`${when(system.jobs[job]?.finished_at)}`,
-      system.jobs[job] ? (system.jobs[job]?.attention ? pill('Needs attention', 'warn') : pill('Clean', 'good')) : pill('Never run', 'muted'),
-    ]), '')}
+    <section class="section" id="maintenance"><header class="section-head"><h2>Maintenance</h2></header>
+      ${stats([
+        { label: 'Accounts failing', value: count(system.failing_total) },
+        { label: 'Last hour recorded', value: last ? `${when(last.finished_at).slice(11)} UTC` : 'Never', note: last ? `${when(last.finished_at).slice(0, 10)} · ${count(last.summary.passes ?? 0)} passes, ${count(last.summary.failed ?? 0)} failed` : null },
+      ])}
+      ${lateHours !== null ? html`<div class="callout warn section"><p>No server has recorded maintenance for ${count(lateHours)} hours. Check that <code>slotlock serve</code> is running.</p></div>` : ''}
+      ${section('Accounts whose maintenance is failing', table('Accounts whose maintenance is failing', ['Account', 'Failing since', 'Last failed', { label: 'Failures', num: true }, 'Error'], system.failing.map((row) => [
+        namedCell(row, accountHref),
+        html`${when(row.first_failed_at)}`,
+        html`${when(row.last_failed_at)}`,
+        html`${count(row.failures)}`,
+        html`<code>${row.error}${row.code ? ` ${row.code}` : ''}</code>${row.message ? html`<span class="sub">${row.message}</span>` : ''}`,
+      ]), 'Every account’s last pass ran.'), { level: 3, info: info('Errors', `The error's class, code and first line up to its first quotation mark, where a value would start: never the account's data. Cleared when a pass runs; kept ${SLOTLOCK_MAINTENANCE_FAILURE_DAYS} days otherwise.`) })}
+      ${section('The last day, by server hour', table('Maintenance hours', ['Hour to', { label: 'Passes', num: true }, { label: 'Failed', num: true }, { label: 'Extended', num: true }, { label: 'Pruned', num: true }, { label: 'Released', num: true }], system.rounds.map((round) => [
+        html`${when(round.finished_at)}<span class="sub">from ${when(round.started_at)}</span>`,
+        html`${count(round.summary.passes ?? 0)}`,
+        round.attention ? pill(count(round.summary.failed ?? 0), 'bad') : html`0`,
+        html`${count(round.summary.extended ?? 0)}`,
+        html`${count(round.summary.pruned ?? 0)}`,
+        html`${count((round.summary.noShows ?? 0) + (round.summary.approvalsExpired ?? 0))}`,
+      ]), 'No hour recorded yet.'), { level: 3 })}
+      ${section('Billing jobs', table('Billing jobs', ['Job', 'Last run', 'State'], ['billing_daily', 'overage_report'].map((job) => [
+        html`<code>${job.replace('_', ' ')}</code>`,
+        html`${when(system.jobs[job]?.finished_at)}`,
+        system.jobs[job] ? (system.jobs[job]?.attention ? pill('Needs attention', 'warn') : pill('Clean', 'good')) : pill('Never run', 'muted'),
+      ]), ''), { level: 3 })}
+    </section>
 
-    <h2 id="webhooks">Webhooks</h2>
-    ${stats([
-      { label: 'Endpoints', value: count(system.webhooks.endpoints), note: `${count(system.webhooks.accounts)} accounts with webhooks${system.webhooks.capped ? ', the first counted' : ''}` },
-      { label: 'Failing', value: count(system.webhooks.failing), note: system.webhooks.failing ? `in ${count(system.webhooks.failing_accounts)} accounts, since ${when(system.webhooks.failing_since)}` : 'Every endpoint answered its last delivery' },
-      { label: 'Turned off', value: count(system.webhooks.disabled), note: 'By their owner, or after failing for days' },
-    ])}
-    <p class="fine">Counts only: no endpoint address and no payload. Each account's own page lists its endpoints.</p>
+    ${section('Webhooks', stats([
+      { label: 'Endpoints', value: count(system.webhooks.endpoints), note: `${count(system.webhooks.accounts)} accounts${system.webhooks.capped ? ', the first counted' : ''}` },
+      { label: 'Failing', value: count(system.webhooks.failing), note: system.webhooks.failing ? `in ${count(system.webhooks.failing_accounts)} accounts, since ${when(system.webhooks.failing_since)}` : null },
+      { label: 'Turned off', value: count(system.webhooks.disabled) },
+    ]), { id: 'webhooks', info: info('Webhooks', 'Counts only: no endpoint address and no payload. Each account’s own page lists its endpoints. Turned off: by their owner, or after failing for days.') })}
 
-    <h2 id="deploys">Deploys</h2>
-    ${providerPart('GitHub', data.deploys, html`Deploys come from the Slotlock CMS GitHub App, with Actions (read).`, (workflows) => html`${workflows.map(
-      (workflow) => html`<h3>${workflow.label}</h3>${runsTable(`${workflow.label} runs on main`, workflow.runs, 'No runs on main yet.')}`,
-    )}`)}
+    ${section('Deploys', providerPart('GitHub', data.deploys, html`Deploys come from Slotlock's GitHub App, with Actions (read).`, (workflows) => html`${workflows.map(
+      (workflow) => section(workflow.label, runsTable(`${workflow.label} runs on main`, workflow.runs, 'No runs on main yet.'), { level: 3 }),
+    )}`), { id: 'deploys' })}
 
-    <h2 id="flags">Feature flags</h2>
-    <p class="fine">A feature turned on or off for a plan, or for one account, which outranks its plan. Nothing here turns on a feature the deployment has not configured.</p>
-    ${table('Feature flags', ['Feature', 'For', 'Set to', 'Why', 'Action'], data.flags.flags.map((flag) => [
-      html`${SLOTLOCK_FEATURE_FLAG_NAMES[flag.flag]?.name ?? flag.flag}`,
-      flag.account_ref ? html`<a href="${accountHref(flag.account_ref)}" class="mono">${flag.account_ref}</a>` : html`The ${flag.plan ?? ''} plan`,
-      flag.enabled ? pill('On', 'good') : pill('Off', 'warn'),
-      html`${flag.reason}<span class="sub">${data.names.get(flag.set_by) ?? flag.set_by}, ${when(flag.set_at)}</span>`,
-      data.mayAct
-        ? html`<details class="act"><summary class="btn">Remove</summary><form class="pop form" method="post" action="/system/flags/clear">${csrf}<input type="hidden" name="flag" value="${flag.id}">${reasonField(`clear-${flag.id}`, flag.account_ref ? 'the customer sees it in their audit log' : 'for the staff log')}<button class="btn" type="submit">Remove the flag</button></form></details>`
-        : html``,
-    ]), 'No feature is turned on or off: each follows the deployment.')}
-    ${data.mayAct
-      ? html`<section class="panel" aria-labelledby="set-flag"><h3 id="set-flag">Turn a feature on or off</h3>
-          <form class="form" method="post" action="/system/flags">${csrf}
-            <label for="flag-name">Feature</label><select id="flag-name" name="flag">${flagOptions}</select>
-            <label for="flag-plan">For a plan</label><select id="flag-plan" name="plan"><option value="">None: for one account</option>${planOptions}</select>
-            <label for="flag-account">Or for one account <span class="hint">its reference</span></label><input id="flag-account" name="account" maxlength="500" autocomplete="off" spellcheck="false">
-            <label for="flag-state">Set to</label><select id="flag-state" name="enabled"><option value="0">Off</option><option value="1">On</option></select>
-            ${reasonField('flag-reason', 'an account sees it in its audit log')}
-            <ul class="fine">${SLOTLOCK_FEATURE_FLAGS.map((flag) => html`<li><strong>${SLOTLOCK_FEATURE_FLAG_NAMES[flag].name}</strong> off: ${SLOTLOCK_FEATURE_FLAG_NAMES[flag].off}</li>`)}</ul>
-            <button class="btn primary" type="submit">Set the flag</button>
-          </form></section>`
-      : ''}
-    <h3>Changes</h3>
-    ${table('Feature flag changes', ['When', 'Who', 'Feature', 'Change', 'Why'], data.flags.history.map((event) => [
-      html`${when(event.occurred_at)}`,
-      html`${data.names.get(event.staff_ref) ?? event.staff_ref}`,
-      html`${SLOTLOCK_FEATURE_FLAG_NAMES[(event.metadata.flag ?? '') as SlotlockFeatureFlag]?.name ?? event.metadata.flag ?? ''}<span class="sub">${event.account_ref ? event.account_ref : `the ${event.metadata.plan ?? ''} plan`}</span>`,
-      html`${onOff(event.metadata.from)} → ${event.action === 'flag.cleared' ? 'as configured' : onOff(event.metadata.to)}`,
-      html`${event.reason ?? ''}`,
-    ]), 'No changes yet.')}
+    ${section('Feature flags', html`
+      ${table('Feature flags', ['Feature', 'Scope', 'State', 'Reason', { label: 'Actions', quiet: true }], data.flags.flags.map((flag) => [
+        html`${flagName(flag.flag)}`,
+        flag.account_ref ? namedCell({ ...flag, account_ref: flag.account_ref }, accountHref) : html`${chip(PLAN_WORDS[flag.plan ?? ''] ?? flag.plan ?? '', 'info')} plan`,
+        flag.enabled ? pill('On', 'good') : pill('Off', 'warn'),
+        html`${flag.reason}<span class="sub">${data.names.get(flag.set_by) ?? flag.set_by} · ${when(flag.set_at)}</span>`,
+        data.mayAct
+          ? menu([
+              { label: 'Change', href: `/system?panel=flag&flag=${flag.id}#flags` },
+              { label: 'Remove flag', danger: true, form: html`<form class="form" method="post" action="/system/flags/clear">${csrf}<input type="hidden" name="flag" value="${flag.id}">${reasonField(`clear-${flag.id}`, { public: Boolean(flag.account_ref) })}<button class="btn danger" type="submit">Remove flag</button></form>` },
+            ], `More for ${flagName(flag.flag)}`)
+          : html``,
+      ]), 'No feature is turned on or off: each follows the deployment.', { hrefs: data.mayAct ? data.flags.flags.map((flag) => `/system?panel=flag&flag=${flag.id}#flags`) : [] })}
+      ${section('Changes', table('Feature flag changes', ['When', 'Who', 'Feature', 'Change', 'Why'], data.flags.history.map((event) => [
+        html`${when(event.occurred_at)}`,
+        html`${data.names.get(event.staff_ref) ?? event.staff_ref}`,
+        html`${flagName(event.metadata.flag ?? '')}<span class="sub">${event.account_ref ? (event.account_name || event.account_display || event.account_ref) : `the ${event.metadata.plan ?? ''} plan`}</span>`,
+        html`${onOff(event.metadata.from)} → ${event.action === 'flag.cleared' ? 'as configured' : onOff(event.metadata.to)}`,
+        html`${event.reason ?? ''}`,
+      ]), 'No changes yet.'), { level: 3 })}`, {
+      id: 'flags',
+      info: info('Feature flags', 'A feature turned on or off for a plan, or for one account, which outranks its plan. Nothing here turns on a feature the deployment has not configured.'),
+      aside: data.mayAct ? html`<a class="btn sm" href="/system?panel=flag#flags">Set a flag</a>` : null,
+    })}
 
-    <h2 id="configuration">Configuration</h2>
-    ${table('Configuration', ['Setting', 'Value'], data.configuration.map((entry) => [html`${entry.name}`, html`<span class="mono">${entry.value}</span>`]), '')}
-    <p class="fine">What this console runs with. Secrets are never shown: only whether each is set.</p>`;
+    ${section('Configuration', facts(data.configuration.map((entry) => [entry.name, html`<span class="mono">${entry.value}</span>`])), { id: 'configuration', info: info('Configuration', 'What this console runs with. Secrets are never shown: only whether each is set.') })}`;
+  return {
+    body,
+    pills: down.length
+      ? pill(`${count(down.length)} down`, 'bad')
+      : failingTotal > 0 ? pill('Maintenance failing', 'warn') : lateHours !== null ? pill('Maintenance late', 'warn') : pill('Operational', 'good'),
+    drawer: flagDrawer,
+  };
 }

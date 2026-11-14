@@ -18,9 +18,9 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 ## Start
 
 1. Sign in at `https://app.slotlock.pylota.io/dashboard` with your GitHub or Google account. With
-   GitHub, Slotlock reads your public profile and keeps only your user id and login; it asks for
-   your verified email addresses only when you accept an invitation sent to one. With Google, it
-   reads your account's id and email address, and keeps only those. By signing in you agree to the
+   GitHub, Slotlock reads your public profile and keeps only your user id, login and profile name;
+   it asks for your verified email addresses only when you accept an invitation sent to one. With
+   Google, it reads your account's id, email address and name, and keeps only those. By signing in you agree to the
    [Terms of Service](/TERMS.md) and the [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 2. Add your resources and their weekly hours, then create an API key: **Read only** for an agent
    that only looks, **Read and write** for an agent that books, **Full** for an application that
@@ -147,6 +147,28 @@ an error code that names it. Each plan's [monthly allowances](#monthly-allowance
 
 - [Terms of Service](/TERMS.md) and [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 - [Privacy notice](/PRIVACY.md): what is stored, for how long, and how to have it erased.
+
+## Admin console: Site and search
+
+For the people who run Slotlock Cloud. The admin console's **Site and search** page reads the
+website's last 28 days from three providers, at most once an hour. Each is turned on by settings of
+the console's Worker (`workers/admin/wrangler.jsonc`), the keys as Worker secrets; until all of a
+provider's are set, its part of the page shows **Connect**, which leads here.
+
+- **Search Console:** add a Google service account to the property as a restricted user. Set
+  `SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY` to the service account's JSON key, and
+  `SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY` to the property: `sc-domain:slotlock.pylota.io`, or the
+  `https://` address it was added as.
+- **Bing Webmaster Tools:** set `SLOTLOCK_ADMIN_BING_KEY` to an API key from Bing Webmaster Tools'
+  Settings (API access), and `SLOTLOCK_ADMIN_BING_SITE` to the site as Bing has it,
+  `https://slotlock.pylota.io/`.
+- **Cloudflare Web Analytics:** set `SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN` to an API token with Account
+  Analytics Read and nothing else, `SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT` to the Cloudflare account id,
+  and `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE` to the site tag (each 32 hex characters).
+  `scripts/configure-admin-console.mjs prepare`, given `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE`, sets
+  the last two, and `go-live` asks for the token.
+- **Deploys** come from the release app, as Content does: `SLOTLOCK_ADMIN_CMS_APP_ID` and
+  `SLOTLOCK_ADMIN_CMS_APP_KEY`, with Actions (read).
 
 ## Help
 

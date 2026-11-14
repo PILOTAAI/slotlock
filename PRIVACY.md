@@ -43,7 +43,8 @@ protection officer.
 | When you last signed in to the dashboard, and the number your sessions carry so that **Sign out everywhere** can end them all | The service, when you sign in | While your account exists |
 | Each dashboard session: a SHA-256 digest of its id (never the id itself), when it began, when it was last used (to five minutes), when it ends, and the browser and internet address it began from, listed on your Account page | The service, when you sign in and as you use the dashboard | Until a day after the session ends, expires or is signed out, then deleted; at once when your account is erased |
 | Once teams are offered: your membership of each organization or team workspace (your role in it, whether it is active, where it came from, and when it began and last changed) | GitHub, when you sign in, an invitation you accept, or the workspace's owners and admins | Until the workspace's account or yours is erased; an ended membership is kept so that being added back restores your role |
-| Once team workspaces are offered: your GitHub login, or your Google account's email once Google has verified it, to show you to the members of your team workspaces | GitHub or Google, when you sign in | While your account exists, replaced at each sign-in |
+| Once team workspaces are offered: your GitHub login, or your Google account's email once Google has verified it, to show you to the members of your team workspaces, and to our staff in their console (below) | GitHub or Google, when you sign in | While your account exists, replaced at each sign-in; erased with your account |
+| From 14 November 2026, once team workspaces are offered: the name on your GitHub profile or your Google account, if you gave one there (up to 80 characters, without invisible, control or text-direction characters), so our staff can tell accounts apart in their console. Never shown to anyone else, and never your profile picture | GitHub or Google, when you sign in | While your account exists, replaced at each sign-in, and removed at your next sign-in once you remove it there; erased with your account |
 | Once team workspaces are offered: each team workspace's name and handle, when it was created, and the account that created it | The person who creates it | Until the team's account is erased; the creator's account id until that account is erased |
 | Once team workspaces are offered: invitations to a team workspace: the email address invited, the role offered, who invited and when, when it expires, and a SHA-256 digest of the link's token (never the link itself) | A member of the team who invites you | Until 30 days after it is accepted, withdrawn or expires, then deleted; at once when the team's account, or the inviter's or accepter's, is erased. The email that carries an invitation is kept by Resend for 30 days (Who else processes it) |
 | Once team workspaces are offered, to accept an invitation sent to an email address while signed in with GitHub: the addresses GitHub has verified for your account, read once, of which only the invited one is kept | GitHub, when you confirm the address | Only in your session cookie, never in the database, until you join |
@@ -69,13 +70,13 @@ protection officer.
 | Your dashboard session, in a cookie | The service | 12 hours |
 | The sign-in in progress, in a cookie | The service | 10 minutes |
 | Dashboard assistant settings, if the dashboard offers the assistant and you set it up: the provider, its address, the model, and your provider key, stored only encrypted (AES-256-GCM) with its last four characters to show; and your conversations with it, each titled by its first message | You | Settings while your account exists or until you remove them; each conversation until the person who had it deletes it or the account is erased, at most 100 per person (past that, the least recently used is deleted) |
-| Your plan: which plan, its status and renewal date, and the Stripe customer and subscription ids that link your account to its purchase. Your name, email, billing address, tax id and payment details go to Stripe directly and never reach us | The service and Stripe, if you upgrade | While your account exists |
+| Your plan: which plan, its status and renewal date (or, once you cancel it, the date it ends, and whether it is in a trial), and the Stripe customer and subscription ids that link your account to its purchase. Your name, email, billing address, tax id and payment details go to Stripe directly and never reach us | The service and Stripe, if you upgrade | While your account exists |
 | How much your account uses the service: for each day (UTC), how many operations your keys and the dashboard assistant ran, how many bookings and holds you made, how many changes your webhooks accepted, how many messages were sent to the assistant, and how many resources you held, by API key and by interface (MCP, A2A, REST, the assistant), and which notices of a monthly allowance used (80%, 100%) your account was sent this month. Counts only: never what was asked or answered | The service | 400 days, then deleted; the notices, until the next month's first |
 | Connection details at Cloudflare: IP addresses, request times, paths and headers | Your browser or client, through Cloudflare | Cloudflare's dashboard request logs: at most 7 days |
 | Connection details at our server: IP address, time, path and user agent of each API request, in the log of the proxy in front of it | Your client, through Cloudflare | One file of at most 10 MB, overwritten as it fills |
 | The API server's own logs | The service | See below |
 | Backups of the whole database, encrypted | The service | About five weeks: four weekly full backups and the changes between them |
-| From 14 November 2026, the staff log: each time one of our staff signs in to the staff console, opens an account's page, or acts on an account, with your account's id and the reason given, never your calendar content | The service | Six years, then deleted. It is kept when your account is erased |
+| From 14 November 2026, the staff log: each time one of our staff signs in to the staff console, opens an account's page, searches for an account, or acts on an account, with your account's id and the reason given, never your calendar content. A search by name, login or email is logged only as a digest keyed with a secret of ours, never as the words searched for | The service | Six years, then deleted. It is kept when your account is erased |
 | From 14 November 2026, our staff's internal notes about your account | Our staff | Until your account is erased |
 | From 14 November 2026, abuse cases: a report to abuse@ or what our staff saw, the section of the Acceptable Use Policy, the evidence, what was done and how it ended, with your account's id | A reporter, our staff | Six years after the case is closed, then deleted. Once your account is erased, a case stays without its link to your account |
 | From 14 November 2026, your privacy requests: your account's id, what you asked for, when it arrived, where it is in our privacy mailbox, the word we sent you, the key that showed it was you, and which of our staff handled each step. Never your email address, which stays in the mailbox (below) | You, our staff | Six years after the request is closed, then deleted. Once your account is erased, the request keeps only a digest of its id |
@@ -101,9 +102,9 @@ whether or not its keys are in use.
 
 Sign-in asks GitHub for no permissions beyond your public profile; once teams are offered, it also
 asks to read which organizations you belong to (`read:org`), so you can work in the ones turned on.
-GitHub's token is used once, to read your user id and login (and those organizations), and is then
-dropped. Signing in with Google asks only for your account's id and
-email address (`openid email`); Google's tokens are not kept. The dashboard sets two cookies, both needed for
+GitHub's token is used once, to read your user id, login and profile name (and those organizations),
+and is then dropped. Signing in with Google asks for your account's id, email address and name
+(`openid email profile`); Google's tokens are not kept, nor anything else of your profile. The dashboard sets two cookies, both needed for
 sign-in to work: `__Host-slotlock-oauth` for the ten minutes a sign-in takes, and
 `__Host-slotlock-session` for your session. Both are secure, HTTP-only and limited to the dashboard's
 own site. We use no analytics or advertising cookies, so there is nothing to consent to or turn off.
@@ -111,7 +112,10 @@ own site. We use no analytics or advertising cookies, so there is nothing to con
 The website at `https://slotlock.pylota.io` counts visits with Cloudflare Web Analytics. It sets no
 cookie and stores nothing in your browser; it records the page, the site that linked to it, the
 browser, the country and how long the page took to load, and we see only totals. We use the totals
-to learn which pages people read and how they find them. From 14 November 2026 our staff console
+to learn which pages people read and how they find them. A blog post may embed a video from YouTube
+(its privacy-enhanced youtube-nocookie.com player) or Vimeo (with do-not-track set), which your
+browser loads from that site, under its privacy policy, only on a page that includes one. From 14
+November 2026 our staff console
 also reads, from Google Search Console and Bing Webmaster Tools, how often each page of the website
 and each search showed in their results and was clicked: totals by page and by search, never who
 searched.
@@ -125,13 +129,16 @@ From 14 November 2026, the people who run hosted Slotlock use a staff console of
 them signs in through Cloudflare Access, with GitHub, and with a passkey, and our database checks
 their role again on every page.
 
-- **What they see:** your account's id, plan and its status, usage counts, the names, prefixes and
-  dates of your keys, when your dashboard sessions began and were last used, and your audit log.
+- **What they see:** your account's id, the name and login or email it is shown by, its plan and
+  that plan's status, usage counts, the names, prefixes and dates of your keys, when your dashboard
+  sessions began and were last used, and your audit log.
   Never your calendar content: no staff page shows a booking's or an event's title, description,
   attendees or contacts.
-- **GitHub logins:** to show a login rather than a number, the console asks GitHub's public profile
-  API which login an account id has, and keeps the answer in its memory for an hour. It stores no
-  login.
+- **Names:** the console shows a person's account by the name, and the GitHub login or verified
+  email, kept from their last sign-in (What we hold), and finds it by either; it never asks GitHub to
+  name an account. Only when staff search for a GitHub login that the database does not hold (no one
+  has signed in with it since 14 November 2026) does the console ask GitHub's public profile API
+  which account id it is, and keep the answer in its memory for an hour.
 - **Stripe:** for an account that pays, the console reads its subscriptions and last invoices from
   Stripe, with a key that can only read, and keeps what it read for an hour.
 - **What they record:** every sign-in, every account page opened and every action is in the staff
@@ -163,7 +170,7 @@ their role again on every page.
 | Keeping the service secure and available: authenticating requests, rate limiting, stopping abuse, investigating faults, and restoring from backups | Account, keys, connection details, logs, backups | (f) legitimate interests: a service anyone with a GitHub account can use must be protected from misuse and recoverable after a failure, and the logs hold no request content |
 | Answering you when you write to us | What you send | (b) contract, or (f) legitimate interests when you are not a user |
 | Learning which pages of the website people read, and how they find them | Page views on `slotlock.pylota.io`, counted without cookies (above) | (f) legitimate interests: improving the website, with no way to tell who you are |
-| Running the service day to day: support, billing, handling abuse reports, telling you about maintenance and changes, turning features on or off, finding failed maintenance, and recording what our staff do on accounts | Staff log, internal notes, abuse cases, announcements and notices, feature flags, maintenance failures, billing alerts, plan overrides | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
+| Running the service day to day: support, billing, handling abuse reports, telling you about maintenance and changes, turning features on or off, finding failed maintenance, and recording what our staff do on accounts | Staff log, internal notes, abuse cases, announcements and notices, feature flags, maintenance failures, billing alerts (a payment that failed, a second subscription, a refund that left a plan running), plan overrides, and the name, login or email an account is shown by | (f) legitimate interests: our staff need to see and act on accounts to run the service, and a record of what they did protects you and us; the log holds no calendar content and is deleted after six years |
 | Answering your privacy requests, and showing later that we did | Privacy requests, erasure receipts | (c) legal obligation: UK GDPR Articles 12 to 22, and 5(2), which asks us to be able to show it |
 | Meeting a legal obligation, such as a lawful request from an authority | What the request covers | (c) legal obligation |
 
@@ -178,7 +185,7 @@ not use your data for marketing, and we do not use your calendar content to trai
 | --- | --- | --- |
 | OVHcloud | The server and database that hold all of the data above, and our log store | Its London (UK1) region, United Kingdom |
 | Cloudflare, Inc. | DNS, TLS and the network path to the API, including the tunnel to our server; it serves the website and counts its visits (Web Analytics); it runs the dashboard and keeps its request logs, connects the dashboard to the database (Hyperdrive), and stores our encrypted backups (R2). From 14 November 2026 it also runs our staff console and checks who may reach it (Cloudflare Access): that is our staff's sign-in, not yours | Its global network; the dashboard is placed near the London server; backups in its European Union jurisdiction |
-| GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock. From 14 November 2026 our staff console also reads public GitHub profiles, to show a login for an account id | United States |
+| GitHub, Inc. | Signs you in. GitHub is a separate controller of your GitHub account and learns that you signed in to Slotlock. From 14 November 2026 our staff console also reads a public GitHub profile when staff search for a login no account has signed in with since, to find its account id | United States |
 | Google LLC (Google Workspace) | Hosts the support, abuse and privacy mailboxes, so it holds the email you send us | Its global data centres, including the United States |
 | Resend | Since 12 November 2026, sends each team invitation by email: the invited address, the team's name, who invited, the role offered and the link. It keeps each message, link included, for 30 days and then deletes it; erasing an account here does not reach that copy | The United States |
 | Stripe (the Stripe company named on your invoice) | Sells the Developer plan as merchant of record: takes the payment, calculates and pays sales tax or VAT, and issues invoices. We send it your account's id (`github:<id>`) with each purchase; Stripe is a separate controller of the purchase and keeps its records under [its own privacy policy](https://stripe.com/privacy) | Ireland, the United States and its other locations |
@@ -226,7 +233,8 @@ You can ask us for a copy of your data, to correct it, to erase it, to restrict 
 use it, and to have it in a portable form. Much of it you can read, change, export and delete
 yourself through the API and the dashboard, and you can revoke keys yourself in the dashboard at any
 time. `POST /v1/tenant/exports` makes a copy of everything in your account, read at one moment, as
-JSON objects table by table, for you to download within 24 hours. If you ask us for a copy instead,
+JSON objects table by table, for you to download within 24 hours; for your own account it includes
+the name, login or email the dashboard keeps for you and when you last signed in. If you ask us for a copy instead,
 we check it is you as below and make the same copy, which waits on your dashboard's Privacy page for
 7 days.
 

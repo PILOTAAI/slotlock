@@ -32,8 +32,9 @@
 //                                            Subscriptions and Invoices, and nothing else: revenue
 //                                            on Billing and a customer's subscriptions. Without it
 //                                            those parts say Stripe is not connected
-//       SLOTLOCK_ADMIN_CMS_APP_KEY           the CMS (RFC 0006, 4.5): the private key (.pem) of the
-//                                            "Slotlock CMS" GitHub App, with the vars below
+//       SLOTLOCK_ADMIN_CMS_APP_KEY           Content, the status page and Deploys (RFC 0006, 4.5,
+//                                            M10, M11): a private key (.pem) of the release app
+//                                            generated for this Worker alone, with the vars below
 //       SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY    the Site page (M9): a Google service account's JSON key,
 //                                            the account added to the Search Console property as a
 //                                            restricted user, with the property below
@@ -41,15 +42,16 @@
 //       SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN      an API token with Account Analytics Read and nothing
 //                                            else, for Cloudflare Web Analytics
 //     Each of the last three is optional: without it, its part of the Site page says what to set;
-//   - for the CMS, a GitHub App of its own ("Slotlock CMS"): repository permissions Contents and
-//     Pull requests (read and write), Checks and Commit statuses (read), Metadata (read), and for
-//     the status page and deploy history (M10, M11) Issues (read and write) and Actions (read); no
-//     webhook; installed on the site's repository only. The console comments on and closes only
-//     open issues labelled `status`. Its App ID and installation id go in
-//     SLOTLOCK_ADMIN_CMS_APP_ID and SLOTLOCK_ADMIN_CMS_INSTALLATION below. The App gets no bypass:
-//     main's ruleset (scripts/configure-github.sh) holds its merges to the same required checks,
-//     up to date with main, as everyone's. The console merges only pull requests that change blog
-//     files, at the commit the Owner saw, once its checks pass;
+//   - for the CMS, no GitHub App of its own: the release app (scripts/create-release-app.mjs),
+//     installed on the site's repository only, with repository permissions Contents, Pull requests
+//     and Issues (read and write), Actions, Checks and Commit statuses (read), and Metadata (read);
+//     no webhook. Release a version and the CMS schedule mint their tokens from it with a key of
+//     their own; this Worker gets a second key, so either can be revoked alone. Its Client ID goes
+//     in SLOTLOCK_ADMIN_CMS_APP_ID below; the console finds the installation itself. The console
+//     comments on and closes only open issues labelled `status`. The App gets no bypass: main's
+//     ruleset (scripts/configure-github.sh) holds its merges to the same required checks, up to date
+//     with main, as everyone's. The console merges only pull requests that change blog files, at the
+//     commit the Owner saw, once its checks pass;
 //   - the first Owner, as the schema owner: `slotlock staff add <github-id> owner`, which prints a
 //     one-time code to create their passkey.
 {
@@ -85,8 +87,9 @@
     // application's Application Audience (AUD) tag.
     "SLOTLOCK_ADMIN_ACCESS_TEAM_DOMAIN": "example.cloudflareaccess.com",
     "SLOTLOCK_ADMIN_ACCESS_AUD": "set-this-to-the-access-application-aud",
-    // Yours, for the CMS: the Slotlock CMS App's App ID and its installation id on the repository,
-    // which the App's settings page and its installation's URL show. Leave them empty for no CMS.
+    // Yours, for the CMS: the release app's Client ID (Iv…), as its settings page shows it, or an
+    // older config's numeric App ID. Leave it empty for no CMS. The installation id is optional:
+    // empty, the console asks GitHub for the App's installation on the repository.
     "SLOTLOCK_ADMIN_CMS_APP_ID": "",
     "SLOTLOCK_ADMIN_CMS_INSTALLATION": "",
     // The repository the posts live in, and the live site the editor checks links against.

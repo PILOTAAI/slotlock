@@ -76,7 +76,7 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
     const word = String((await requestRow(id)).verification_word);
     return createSlotlockApiKeyStore(superuser).create({ tenantRef: account, name: word, scopes: ['read'], createdBy });
   }
-  /** Rows the account has in each table with a tenant column. */
+  /** Rows the account has in each table with a tenant column, and its person's sign-in record. */
   async function rowsByTable(account: string) {
     const tables = await superuser<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.columns
@@ -87,6 +87,8 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
       const [row] = await superuser.unsafe<{ count: string }[]>(`SELECT count(*) FROM slotlock.${table_name} WHERE tenant_ref = $1`, [account]);
       counts[table_name] = Number(row?.count ?? 0);
     }
+    const [person] = await superuser<{ count: string }[]>`SELECT count(*) FROM slotlock.dashboard_people WHERE person_ref = ${account}`;
+    counts.dashboard_people = Number(person?.count ?? 0);
     return counts;
   }
 
@@ -226,6 +228,8 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
     expect((await form(browsers.owner, `/privacy/${second}/export`, {}, `/privacy/${second}`)).headers.get('location')).toBe(`/privacy/${second}?error=privacy_export_busy`);
     expect((await requestRow(second)).export_id).toBeNull();
 
+    // What the dashboard keeps of the person, as they last signed in, goes in it too.
+    await superuser`UPDATE slotlock.dashboard_people SET display = '@ada', name = 'Ada Lovelace', last_sign_in_at = '2026-11-01T09:00:00Z' WHERE person_ref = ${ACCOUNT}`;
     // The hourly maintenance builds it once it has waited, and keeps it a week, not a day.
     await superuser`UPDATE slotlock.tenant_exports SET created_at = now() - interval '5 minutes' WHERE id = ${made?.id ?? ''}::uuid`;
     await maintainSlotlockTenant(store, ACCOUNT);
@@ -248,6 +252,11 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
     for (const table of ['resources', 'contacts', 'reservations', 'webhook_endpoints', 'api_keys', 'outbox', 'audit_events']) {
       expect(read[table]?.length ?? 0, table).toBeGreaterThan(0);
     }
+    // A subject access request answered from it includes how the dashboard shows the person.
+    const [person] = (read.dashboard_people ?? []) as { name: string; display: string; last_sign_in_at: string }[];
+    expect(read.dashboard_people).toHaveLength(1);
+    expect(person).toEqual({ name: 'Ada Lovelace', display: '@ada', last_sign_in_at: expect.any(String) });
+    expect(Date.parse(person?.last_sign_in_at ?? '')).toBe(Date.UTC(2026, 10, 1, 9));
     expect(built?.tables).toEqual(Object.fromEntries(Object.entries(read).map(([table, rows]) => [table, rows.length])));
     // No secrets, and nothing of another account.
     expect(JSON.stringify(read)).not.toContain('secret_hash');

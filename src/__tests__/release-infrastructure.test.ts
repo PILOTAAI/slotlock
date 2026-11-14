@@ -807,17 +807,17 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     for (const name of ['npm', 'ghcr', 'mcp-registry']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
     }
-    for (const name of ['release-tag', 'release-app', 'site', 'dashboard', 'cms', 'site-preview']) {
+    for (const name of ['release-tag', 'release-app', 'site', 'dashboard', 'site-preview']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([]);
     }
-    // The CMS's environments (RFC 0006, 4.5): the App's key on main only, and the preview token on
-    // main only too, where site-preview.yml's workflow_run job runs as main has it.
+    // The CMS's schedule uses the release app's environment: there is no cms environment, and the
+    // preview token is on main only too, where site-preview.yml's workflow_run job runs as main has it.
+    expect(environment(requests, 'cms')).toBeUndefined();
     const policy = (name: string) =>
       requests.find(
         (request) =>
           request.method === 'POST' && request.path === `repos/PILOTAAI/slotlock/environments/${name}/deployment-branch-policies`,
       )?.body;
-    expect(policy('cms')).toEqual({ name: 'main', type: 'branch' });
     expect(policy('site-preview')).toEqual({ name: 'main', type: 'branch' });
     // The dashboard's deploy token can replace the Worker and read its session secret: main only.
     expect(policy('dashboard')).toEqual({ name: 'main', type: 'branch' });
@@ -2259,6 +2259,57 @@ printf '%s' "$answer" | jq -r "$filter"
   });
 });
 
+// cms-schedule.yml publishes the admin console's scheduled posts as the release app, the one GitHub
+// App: its key in the release-app environment (main only), a token with only what merging a post
+// needs, and no key of its own.
+describe('the CMS schedule', () => {
+  const workflow = (file: string) => read(join('.github', 'workflows', file));
+  const step = (text: string, name: string) => {
+    const start = text.indexOf(`- name: ${name}`);
+    expect(start, name).toBeGreaterThan(0);
+    const next = text.indexOf('\n      - ', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  };
+
+  it('mints the release app\'s token in its environment, for what merging a post needs and no more', () => {
+    const text = workflow('cms-schedule.yml');
+    expect(text).toMatch(/^permissions: \{\}$/m);
+    // The environment's key, without a deployment for each hourly run.
+    expect(text).toContain('\n    environment:\n      name: release-app\n      deployment: false\n');
+    // A job's `if` reads no environment's variables: the step checks the client ID.
+    expect(text).toMatch(/^ {4}if: github\.ref == 'refs\/heads\/main'$/m);
+    const mint = step(text, "Mint the release app's token");
+    expect(mint).toContain("if: vars.RELEASE_APP_CLIENT_ID != ''");
+    expect(mint).toContain('client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}');
+    expect(mint).toContain('private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}');
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual([
+      'permission-checks: read',
+      'permission-contents: write',
+      'permission-pull-requests: write',
+    ]);
+    // The same action, at the same commit, as Release a version mints its token with.
+    const action = (source: string) => /uses: (actions\/create-github-app-token@[0-9a-f]{40}) # v[\d.]+/.exec(source)?.[1];
+    expect(action(mint)).toBeDefined();
+    expect(action(mint)).toBe(action(workflow('release-version.yml')));
+    // The key reaches only that step; the script gets the token and the App's slug.
+    expect(text.match(/secrets\.\w+/g)).toEqual(['secrets.RELEASE_APP_PRIVATE_KEY']);
+    const merge = step(text, 'Merge the scheduled posts whose time has come');
+    expect(merge).toContain("if: steps.app.outputs.token != ''");
+    expect(merge).toContain('CMS_TOKEN: ${{ steps.app.outputs.token }}');
+    expect(merge).toContain('CMS_APP_SLUG: ${{ steps.app.outputs.app-slug }}');
+    expect(merge).toContain('node scripts/cms-scheduled-merge.mjs');
+    // No second App, no second key, no environment of its own.
+    for (const gone of ['CMS_APP_ID', 'CMS_APP_INSTALLATION', 'CMS_APP_KEY', 'environment: cms']) {
+      expect(text).not.toContain(gone);
+    }
+  });
+
+  it('keeps Release a version\'s token to opening and merging its pull request', () => {
+    const mint = step(workflow('release-version.yml'), "Mint the release app's token");
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual(['permission-contents: write', 'permission-pull-requests: write']);
+  });
+});
+
 describe('release version and merge', () => {
   it('refuses a version that is more than one line', () => {
     const repo = repository();
@@ -2549,6 +2600,44 @@ describe('required checks', () => {
       .parameters.required_status_checks.map((check: { context: string }) => check.context);
     expect(checks).toEqual(['CI passed', 'Signed-off-by']);
     expect(result.stderr).not.toContain('no longer names its jobs');
+  });
+});
+
+describe('the admin console in a browser', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const job = ci.slice(ci.indexOf('\n  browser:\n'), ci.indexOf('\n  image:\n'));
+
+  it('runs in CI with Chromium for the pinned Playwright, against the job\'s PostgreSQL, keeping the screenshots of a failure', () => {
+    expect(job, 'canary: the browser job was found').toContain('name: Admin console in a browser');
+    expect(job).toContain('DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock');
+    const step = (text: string) => job.indexOf(text);
+    // The browser the installed playwright drives, after npm ci installs that version.
+    expect(step('- run: npm ci')).toBeGreaterThan(-1);
+    expect(step('run: npx playwright install --with-deps chromium')).toBeGreaterThan(step('- run: npm ci'));
+    // Required here: a browser that does not start fails the job instead of skipping the file.
+    const run = job.slice(step('- name: Every console page in Chromium'));
+    expect(run).toMatch(/SLOTLOCK_BROWSER_TESTS: required\n\s+SLOTLOCK_ADMIN_SHOTS: \$\{\{ runner\.temp \}\}\/admin-shots\n\s+run: npx vitest run src\/__tests__\/admin-console-visual\.integration\.test\.ts\n/);
+    expect(step('- name: Every console page in Chromium')).toBeGreaterThan(step('npx playwright install'));
+    const keep = job.slice(step('- name: Keep the screenshots'));
+    expect(keep).toMatch(/^- name: Keep the screenshots\n\s+if: failure\(\)\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+\n/);
+    expect(keep).toContain('path: ${{ runner.temp }}/admin-shots');
+  });
+
+  it('pins playwright exactly, at a version whose engines take every Node.js CI runs', () => {
+    const manifest = JSON.parse(read('package.json')) as { devDependencies: Record<string, string> };
+    const pinned = manifest.devDependencies.playwright;
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(read('package-lock.json')) as { packages: Record<string, { version?: string; engines?: { node?: string } }> };
+    for (const name of ['playwright', 'playwright-core']) {
+      const entry = lock.packages[`node_modules/${name}`];
+      expect(entry?.version, name).toBe(pinned);
+      const least = /^>=\s*(\d+)(?:\.\d+){0,2}$/.exec(entry?.engines?.node ?? '')?.[1];
+      expect(least, `${name}'s engines`).toBeDefined();
+      const nodes = [...ci.matchAll(/node-version: '(\d+)'|node: \[([^\]]+)\]/g)]
+        .flatMap(([, one, many]) => (one ? [one] : (many ?? '').split(',').map((value) => value.trim().replace(/'/g, ''))));
+      expect(nodes.length).toBeGreaterThan(0);
+      for (const node of nodes) expect(Number(node), `Node.js ${node}`).toBeGreaterThanOrEqual(Number(least));
+    }
   });
 });
 

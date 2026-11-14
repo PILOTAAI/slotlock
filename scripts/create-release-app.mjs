@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-// Creates the GitHub App that "Release a version" (.github/workflows/release-version.yml) opens and
-// merges release pull requests with: checks on a pull request github-actions[bot] opens wait for a
-// person's approval, an app's run at once.
+// Creates the release app, this repository's one GitHub App. "Release a version"
+// (.github/workflows/release-version.yml) opens and merges release pull requests with it: checks on a
+// pull request github-actions[bot] opens wait for a person's approval, an app's run at once. The CMS
+// schedule (cms-schedule.yml) merges scheduled blog posts with the same key. The admin console
+// writes posts and the status page's incidents, and reads deploys, with a private key of its own
+// (scripts/configure-admin-console.mjs), so either key can be revoked alone.
 //
 // An owner of the PILOTAAI organization runs it once, from a checkout of main:
 //   node scripts/create-release-app.mjs             create the app, install it, store it
@@ -10,11 +13,12 @@
 // Options: --name <app name> (default "PILOTAAI Slotlock release"; GitHub app names are unique),
 // --no-open (print the page's address instead of opening a browser).
 //
-// It serves a page on 127.0.0.1 (scripts/github-app-manifest.mjs, which the Slotlock CMS App shares)
-// that hands GitHub the manifest; you click "Create GitHub App", then
-// install it on PILOTAAI/slotlock only. The app is private, has no webhook, and asks only for
-// contents: write and pull_requests: write: it cannot change workflows, push past the "Protect
-// main" ruleset or create release tags. Before storing anything, a short-lived installation token
+// It serves a page on 127.0.0.1 (scripts/github-app-manifest.mjs) that hands GitHub the manifest;
+// you click "Create GitHub App", then install it on PILOTAAI/slotlock only. The app is private, has
+// no webhook, and asks for what its users need between them (RELEASE_APP there): contents,
+// pull_requests and issues write; actions, checks and statuses read. Each user mints its tokens with
+// only its own part. It cannot change workflows, push past the "Protect main" ruleset or create
+// release tags. Before storing anything, a short-lived installation token
 // (revoked straight after) checks the installation reaches exactly PILOTAAI/slotlock with exactly
 // those permissions. The private key goes to the release-app environment secret
 // RELEASE_APP_PRIVATE_KEY via gh's stdin (never on disk, in an argument or on screen), and the
@@ -38,6 +42,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   Failure,
+  RELEASE_APP,
   createAppFromManifest,
   ghGet,
   ghSet,
@@ -48,12 +53,12 @@ import {
 
 const OWNER = 'PILOTAAI';
 const REPO = 'slotlock';
-const ENVIRONMENT = 'release-app';
-const KEY_SECRET = 'RELEASE_APP_PRIVATE_KEY';
-const CLIENT_ID_VARIABLE = 'RELEASE_APP_CLIENT_ID';
+const ENVIRONMENT = RELEASE_APP.environment;
+const KEY_SECRET = RELEASE_APP.keySecret;
+const CLIENT_ID_VARIABLE = RELEASE_APP.clientIdVariable;
 // What the app asks for. GitHub adds metadata: read to every app.
-const PERMISSIONS = { contents: 'write', pull_requests: 'write' };
-const DEFAULT_NAME = 'PILOTAAI Slotlock release';
+const PERMISSIONS = RELEASE_APP.permissions;
+const DEFAULT_NAME = RELEASE_APP.name;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configureScript =
@@ -85,7 +90,7 @@ export function releaseAppManifest(name, base) {
     name,
     url: `https://github.com/${OWNER}/${REPO}`,
     description:
-      'Opens and merges Slotlock release pull requests for .github/workflows/release-version.yml.',
+      "Opens and merges Slotlock's release pull requests, publishes scheduled blog posts, and keeps the admin console's posts, status page and deploy history.",
     hook_attributes: { url: 'https://slotlock.pylota.io/', active: false },
     redirect_url: `${base}/created`,
     setup_url: `${base}/installed`,
@@ -185,6 +190,9 @@ async function main() {
     );
     console.log(
       `Done. Release a version now opens and merges release pull requests as ${app.slug}[bot], and their checks run without anyone approving them.`,
+    );
+    console.log(
+      `The admin console uses this app with a private key of its own: generate a second one at ${web}/organizations/${OWNER}/settings/apps/${app.slug} (Private keys > Generate a private key), and give it to node scripts/configure-admin-console.mjs go-live as SLOTLOCK_ADMIN_CMS_APP_KEY_FILE.`,
     );
     if (previous) {
       console.log(

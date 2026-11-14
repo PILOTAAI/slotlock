@@ -1,6 +1,7 @@
 // The dashboard assistant end to end in a real browser, against an OpenAI-compatible model with
-// JavaScript off and an Anthropic one with it on. Skipped without DATABASE_URL or Playwright;
-// screenshots go to SLOTLOCK_E2E_SCREENSHOTS when set.
+// JavaScript off and an Anthropic one with it on. Skipped without DATABASE_URL or Playwright's
+// Chromium (`npx playwright install chromium`), unless SLOTLOCK_BROWSER_TESTS=required; screenshots
+// go to SLOTLOCK_E2E_SCREENSHOTS when set.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -60,11 +61,16 @@ function loadPlaywright(): Playwright | null {
   }
 }
 const playwright = url ? loadPlaywright() : null;
+/** Whether Chromium starts: playwright is a dev dependency, but its browser is installed apart. */
+const REQUIRED = process.env.SLOTLOCK_BROWSER_TESTS === 'required';
+const chromiumStarts = playwright && !REQUIRED
+  ? await playwright.chromium.launch().then(async (started) => (await started.close(), true), () => false)
+  : Boolean(playwright);
 
 const API_KEY = `sk-e2e-${randomBytes(12).toString('hex')}-tail`;
 const DAY = 86_400_000;
 
-describe.skipIf(!url || !playwright)('the dashboard assistant in a browser (real Postgres)', () => {
+describe.skipIf(!url || (!chromiumStarts && !REQUIRED))('the dashboard assistant in a browser (real Postgres)', () => {
   const role = `slotlock_e2e_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const password = randomBytes(24).toString('hex');
   let admin: ReturnType<typeof postgres>;

@@ -71,6 +71,7 @@ import {
   SLOTLOCK_DEFINER_FUNCTIONS,
 } from './ddl.js';
 import { SLOTLOCK_ADMIN_FUNCTIONS, SLOTLOCK_PRIVACY_EXPORT_DAYS, createSlotlockAdminRoleGrantsDdl } from './staff-ddl.js';
+import { createSlotlockSchemaFunctions } from './schema-functions.js';
 import { findNextAvailable, mergeIntervals } from './engine.js';
 import {
   SLOTLOCK_CALENDAR_HORIZON_DAYS,
@@ -1341,12 +1342,19 @@ const TENANT_EXPORT_LEFT_OUT_COLUMNS: Partial<Record<SlotlockTenantExportTable, 
 /**
  * Every table an export holds, as one statement (so one snapshot): each row as its table's name
  * and a JSON line, without the tenant. `$1` is the tenant. A hold keeps no tenant of its own: its
- * resource's is its. API keys come from slotlock.list_api_keys, which holds no digest.
+ * resource's is its. API keys come from slotlock.list_api_keys, which holds no digest; a person's
+ * sign-in record from slotlock.tenant_export_person, left out on a schema from before it.
  */
-const TENANT_EXPORT_SQL = SLOTLOCK_TENANT_EXPORT_TABLES.map((table) => {
+const tenantExportSql = (withPerson: boolean) => SLOTLOCK_TENANT_EXPORT_TABLES.flatMap((table) => {
   if (table === 'api_keys') {
     return `SELECT 'api_keys'::text AS table_name, (pg_catalog.to_jsonb(kept) - 'key_tenant_ref')::text AS line
   FROM slotlock.list_api_keys($1) kept`;
+  }
+  if (table === 'dashboard_people') {
+    return withPerson
+      ? [`SELECT 'dashboard_people'::text AS table_name, pg_catalog.to_jsonb(kept)::text AS line
+  FROM slotlock.tenant_export_person($1) kept`]
+      : [];
   }
   const dropped = ['tenant_ref', ...(TENANT_EXPORT_LEFT_OUT_COLUMNS[table] ?? [])].map((column) => ` - '${column}'`).join('');
   const where =
@@ -1357,6 +1365,7 @@ const TENANT_EXPORT_SQL = SLOTLOCK_TENANT_EXPORT_TABLES.map((table) => {
   return `SELECT '${table}'::text AS table_name, (pg_catalog.to_jsonb(kept)${dropped})::text AS line
   FROM slotlock.${table} kept WHERE ${where}`;
 }).join('\nUNION ALL\n');
+const TENANT_EXPORT_PERSON = 'slotlock.tenant_export_person(text)';
 
 /**
  * Read everything the tenant keeps through one cursor (one snapshot), handing each part (one
@@ -1373,7 +1382,9 @@ async function readTenantExport(
     if (current && current.lines.length > 0) await onPart(current);
     current = null;
   };
-  await tx.unsafe(`DECLARE slotlock_tenant_export NO SCROLL CURSOR FOR\n${TENANT_EXPORT_SQL}`, [tenantRef]);
+  // Asked first: a failed call can cost a Worker request its connection (schema-functions.ts).
+  const withPerson = await createSlotlockSchemaFunctions(tx, [TENANT_EXPORT_PERSON])(TENANT_EXPORT_PERSON);
+  await tx.unsafe(`DECLARE slotlock_tenant_export NO SCROLL CURSOR FOR\n${tenantExportSql(withPerson)}`, [tenantRef]);
   for (;;) {
     const rows = await tx.unsafe<{ table_name: SlotlockTenantExportTable; line: string }[]>(
       'FETCH 1000 FROM slotlock_tenant_export',

@@ -20,7 +20,7 @@ const KEY = 'sk_test_configure';
 const WORKER_KEY = 'rk_live_worker';
 const CHECK_KEY = 'rk_live_check';
 const ALLOWED: Record<string, string[]> = {
-  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions', 'GET prices'],
+  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions', 'GET prices', 'GET invoice_payments'],
   rk_live_noprices: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions'],
   rk_live_nocheckout: ['GET subscriptions', 'GET billing_portal/configurations'],
   [CHECK_KEY]: ['GET products', 'GET prices', 'GET webhook_endpoints', 'GET events'],
@@ -178,7 +178,14 @@ beforeAll(async () => {
       endpoints.push(endpoint);
       return send(200, { ...endpoint, secret: SIGNING_SECRET });
     }
-    if (path.startsWith('webhook_endpoints/')) return send(200, {});
+    if (path.startsWith('webhook_endpoints/')) {
+      // As Stripe: enabled_events replaces the list.
+      const endpoint = endpoints.find((item) => item.id === path.split('/')[1]);
+      const events = Object.entries(fields).filter(([name]) => name.startsWith('enabled_events')).map(([, value]) => value);
+      if (endpoint && events.length) endpoint.enabled_events = events;
+      if (endpoint && fields.disabled === 'false') endpoint.status = 'enabled';
+      return send(200, endpoint ?? {});
+    }
     if (path === 'billing_portal/configurations') {
       // Made through the API, a configuration is never the default.
       const portal: Portal = { id: `bpc_${portals.length + 1}`, is_default: false, ...nested(fields) };
@@ -304,6 +311,7 @@ describe('configure-stripe.mjs', () => {
           'customer.subscription.deleted',
           'invoice.paid',
           'invoice.payment_failed',
+          'charge.refunded',
         ],
       },
     ]);
@@ -421,6 +429,26 @@ describe('configure-stripe.mjs', () => {
     expect(real.output).not.toContain(SIGNING_SECRET);
   });
 
+  it('adds charge.refunded to an endpoint made before it, keeping its other events, once', async () => {
+    const before = [
+      'checkout.session.completed',
+      'customer.subscription.created',
+      'customer.subscription.updated',
+      'customer.subscription.deleted',
+      'invoice.paid',
+      'invoice.payment_failed',
+      'customer.updated',
+    ];
+    endpoints = [{ id: 'we_7', url: 'https://app.slotlock.pylota.io/stripe/webhook', status: 'enabled', enabled_events: [...before] }];
+    const first = await run([]);
+    expect(first.code).toBe(0);
+    expect(first.output).toContain('update the webhook endpoint https://app.slotlock.pylota.io/stripe/webhook (we_7): add charge.refunded');
+    expect(endpoints[0]?.enabled_events).toEqual([...before, 'charge.refunded']);
+    const second = await run([]);
+    expect(second.output).toContain('kept the webhook endpoint https://app.slotlock.pylota.io/stripe/webhook (we_7)');
+    expect(writes.filter((write) => write.path === 'webhook_endpoints/we_7')).toHaveLength(1);
+  });
+
   it('adds missing events to a webhook endpoint that exists, and refuses to start without a key', async () => {
     endpoints = [{ id: 'we_9', url: 'https://app.slotlock.pylota.io/stripe/webhook', status: 'enabled', enabled_events: ['checkout.session.completed'] }];
     const result = await run([]);
@@ -492,6 +520,11 @@ describe('configure-stripe.mjs', () => {
     const noPrices = await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: 'rk_live_noprices' });
     expect(noPrices).toMatchObject({ code: 0, stored: 1 });
     expect(noPrices.output).toContain("note: the dashboard's key cannot read Prices");
+    // Nor invoice payments: stored, and said, as a refund is then matched to no account.
+    expect(noPrices.output).toContain("note: the dashboard's key cannot read invoice payments");
+    const full = await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: WORKER_KEY });
+    expect(full).toMatchObject({ code: 0, stored: 1 });
+    expect(full.output).not.toContain('cannot read invoice payments');
     // A check key that cannot read events stays off GitHub.
     dashboardAnswer = 400;
     expect(await attempt({ SLOTLOCK_CHECK_STRIPE_KEY: 'rk_live_noevents' })).toMatchObject({ code: 1, output: expect.stringContaining('cannot read Events') });
