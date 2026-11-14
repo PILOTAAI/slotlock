@@ -260,6 +260,8 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   image_removed: { kind: 'done', text: 'File deleted from the post.' },
   renamed: { kind: 'done', text: 'Renamed on a new pull request, with redirects from the old address. Publish it to make the change live.' },
   discarded: { kind: 'done', text: 'Draft discarded: its pull request is closed and its branch deleted.' },
+  delete_opened: { kind: 'done', text: 'A pull request deletes the post. Publishing it takes the post and its files off the site.' },
+  deleted: { kind: 'done', text: 'Deleted. The post leaves the site when it deploys, in a few minutes.' },
   published: { kind: 'done', text: 'Published. The site deploys in a few minutes.' },
   scheduled: { kind: 'done', text: 'Scheduled. The hourly workflow publishes it when its date comes.' },
   unscheduled: { kind: 'done', text: 'Unscheduled. It waits for an Owner to publish it.' },
@@ -271,6 +273,8 @@ const NOTICES: Readonly<Record<string, Notice>> = Object.freeze({
   save_first: { kind: 'warn', text: 'Save the post first, then add its pictures and videos.' },
   slug_taken: { kind: 'warn', text: 'There is a post or a draft at that address already. Choose another.' },
   rename_draft: { kind: 'warn', text: 'Only a published post with no open draft is renamed here. Discard or publish the draft first.' },
+  delete_cancelled: { kind: 'done', text: 'Kept: the pull request that deleted it is closed.' },
+  delete_draft: { kind: 'warn', text: 'This post has an open pull request. Discard or publish it first, then delete the post.' },
   changed: { kind: 'warn', text: 'The pull request changed since you opened the page. Look at it again, then publish.' },
   not_content: { kind: 'warn', text: 'That pull request changes more than this post: files outside the blog, another post, or redirects a rename did not write. The console does not merge it; review and merge it on GitHub.' },
   not_submitted: { kind: 'warn', text: 'It is still a draft. Choose Ready to publish first.' },
@@ -602,6 +606,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
 
   // ---------- Pages ----------
   const statusPill = (state: { post: ParsedPost | null; pull: SlotlockCmsPullRequest | null; schedule: { sha: string } | null; onMain: ParsedPost | null }, canPublish: boolean) => {
+    if (state.pull && !state.post && state.onMain) return pill('To delete', 'warn');
     if (state.pull) {
       if (state.pull.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL)) {
         return state.schedule ? pill('Scheduled', 'info') : pill('Labelled, not scheduled here', 'warn');
@@ -669,7 +674,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
         { label: 'Published', href: '/content?view=published', current: view === 'published', count: ordered.filter(published).length },
       ], 'views')}
       ${table('Posts', ['Post', 'Status', 'Checks', 'Author', 'Updated'], shown.map((row) => [
-        html`<span class="ac-text"><a href="/content/${row.slug}">${row.post?.front.title ?? row.slug}</a><span class="sub mono">/blog/${row.slug}/</span></span>`,
+        html`<span class="ac-text"><a href="/content/${row.slug}">${(row.post ?? row.onMain)?.front.title ?? row.slug}</a><span class="sub mono">/blog/${row.slug}/</span></span>`,
         html`${statusPill(row, canPublish)}${row.schedule && row.pull?.labels.includes(SLOTLOCK_CMS_SCHEDULED_LABEL) ? html`<span class="sub">${row.schedule.at.replace('T', ' ').replace('Z', ' UTC')}</span>` : ''}`,
         row.pull ? html`${checksPill(row.checks)}<span class="sub"><a href="${row.pull.url}" rel="noreferrer">#${row.pull.number}</a></span>` : html`–`,
         html`${row.post?.front.author ?? '–'}`,
@@ -857,14 +862,21 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
 
   function dangerPanel(context: SlotlockCmsRequest, state: PostState): Html {
     const renameable = state.onMain && isLive(state.onMain, now()) && !state.branchHead;
-    if (!renameable && !state.branchHead) return html``;
+    // A post on main, live or not, with no pull request open for it.
+    const deletable = Boolean(state.onMain) && !state.branchHead;
+    if (!renameable && !deletable && !state.branchHead) return html``;
     return html`<section aria-labelledby="post-danger">
-      <h2 id="post-danger">${renameable ? 'Address' : 'Draft'}</h2>
+      <h2 id="post-danger">${state.branchHead ? 'Draft' : 'Post'}</h2>
       ${renameable ? popover('Rename', html`<form class="form" method="post" action="/content/${state.slug}/rename">
         <input type="hidden" name="csrf" value="${context.csrf}">
         ${field({ id: 'f-rename', label: 'New address', extra: info('Renaming', 'Opens a pull request that moves the post and its files, and redirects the old address.'), control: html`<input id="f-rename" name="to" type="text" required maxlength="120" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off" spellcheck="false">` })}
         <div class="form-actions"><button class="btn primary" type="submit">Rename</button></div>
       </form>`, { size: 'sm', align: 'left' }) : ''}
+      ${deletable ? popover('Delete post', html`<form class="form" method="post" action="/content/${state.slug}/delete">
+        <input type="hidden" name="csrf" value="${context.csrf}">
+        <p class="muted">Opens a pull request that removes the post and its files. Publishing it takes the post off the site, and its address answers Not found.</p>
+        <div class="form-actions"><button class="btn danger" type="submit">Delete post</button></div>
+      </form>`, { tone: 'danger', size: 'sm', ...(renameable ? {} : { align: 'left' as const }) }) : ''}
       ${state.branchHead ? popover('Discard draft', html`<form class="form" method="post" action="/content/${state.slug}/discard">
         <input type="hidden" name="csrf" value="${context.csrf}">
         <p class="muted">Closes the pull request and deletes the branch. ${state.onMain ? 'The published post stays as it is.' : 'The post was never published, so it goes.'}</p>
@@ -1143,6 +1155,66 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     return back(context, `/content/${to}`, 'renamed', true);
   }
 
+  /**
+   * Delete a post: a pull request from cms/<slug> that removes the post and its files, published like
+   * any other change once its checks pass (the site's build fails on a link left pointing at it).
+   */
+  async function remove(request: Request, context: SlotlockCmsRequest, slug: string): Promise<Response> {
+    const form = await formOf(request, 4096);
+    if (!form || !context.csrfOk(form.get('csrf') ?? '')) return context.redirect('/content?error=invalid');
+    if (!context.fresh) return passkeyAgain(context, slug);
+    const github = requireGithub();
+    const state = await postState(slug);
+    if (!state.onMain) return back(context, `/content/${slug}`, 'invalid', false);
+    if (state.branchHead) return back(context, `/content/${slug}`, 'delete_draft', false);
+    await context.record('content.deleted', slug, {});
+    try {
+      const title = state.onMain.front.title;
+      const files: SlotlockCmsFile[] = [
+        { path: postPath(slug), content: null },
+        ...state.context.files.map((entry) => ({ path: `${SLOTLOCK_CMS_IMAGES}/${slug}/${entry.name}`, content: null })),
+      ];
+      await github.commit({
+        branch: branchOf(slug),
+        base: 'main',
+        files,
+        message: `Blog: delete "${title}"`,
+        author: { login: context.login, id: context.staff.slice('github:'.length) },
+        expectHead: null,
+      });
+      await github.openPullRequest({
+        branch: branchOf(slug),
+        title: `Blog: delete "${title}"`,
+        body: `Deleted in the admin console by ${context.login}: \`${postPath(slug)}\` and its files. Publishing it takes /blog/${slug}/ off the site. An Owner publishes it from the console.`,
+      });
+    } catch (error) {
+      if (!githubFailed(error)) throw error;
+      return back(context, `/content/${slug}`, 'github', false);
+    }
+    contexts.delete(slug);
+    return back(context, `/content/${slug}`, 'delete_opened', true);
+  }
+
+  /** A pull request that deletes a post: what publishing it does, and a way to keep the post. */
+  function deletionPage(context: SlotlockCmsRequest, state: PostState, pull: SlotlockCmsPullRequest, notice: Notice | undefined): Response {
+    const canPublish = slotlockStaffMay(context.role, 'content.publish');
+    const body = html`<div class="callout warn"><p>Publishing this pull request deletes the post and its files: <code>/blog/${state.slug}/</code> then answers Not found.</p></div>
+      ${facts([['Pull request', html`<a href="${pull.url}" rel="noreferrer">#${pull.number}</a> ${checksPill(state.checks)}`]])}
+      <form method="post" action="/content/${state.slug}/discard"><input type="hidden" name="csrf" value="${context.csrf}"><button class="btn" type="submit">Keep the post</button></form>`;
+    const actions = canPublish
+      ? html`<form class="inline publish" method="post" action="/content/${state.slug}/publish">
+          <input type="hidden" name="csrf" value="${context.csrf}">
+          <input type="hidden" name="sha" value="${pull.headSha}">
+          <button class="btn danger" type="submit" title="Merges commit ${pull.headSha.slice(0, 7)} into main once the checks pass">Publish deletion</button>
+        </form>`
+      : undefined;
+    return context.page(state.onMain?.front.title ?? state.slug, '/content', body, notice, 200, {
+      crumbs: [{ label: 'Content', href: '/content' }],
+      pills: html`${statusPill(state, canPublish)}${checksPill(state.checks)}`,
+      ...(actions ? { actions } : {}),
+    });
+  }
+
   async function discard(request: Request, context: SlotlockCmsRequest, slug: string): Promise<Response> {
     const form = await formOf(request, 4096);
     if (!form || !context.csrfOk(form.get('csrf') ?? '')) return context.redirect('/content?error=invalid');
@@ -1159,6 +1231,8 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       return back(context, `/content/${slug}`, 'github', false);
     }
     contexts.delete(slug);
+    // Closing a pull request that deleted the post keeps it: back to the post.
+    if (!state.post && state.onMain) return back(context, `/content/${slug}`, 'delete_cancelled', true);
     return back(context, '/content', 'discarded', true);
   }
 
@@ -1176,18 +1250,21 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     // files of whatever the branch holds a moment later).
     const files = await github.commitFiles(sha);
     if (!files || !slotlockCmsChangeAllowed(slug, files)) return back(context, `/content/${slug}`, 'not_content', false);
-    if (!state.post || state.post.front.status !== 'published') return back(context, `/content/${slug}`, 'not_submitted', false);
+    // A deletion: the commit takes the post away, and it is on main to take. Its own checks are the
+    // site's on GitHub (a link left pointing at it fails the build); there is no post left to check.
+    const deleting = !state.post && state.onMain !== null && files.some((file) => file.path === postPath(slug) && file.status === 'removed');
+    if (!deleting && (!state.post || state.post.front.status !== 'published')) return back(context, `/content/${slug}`, 'not_submitted', false);
     const onGithub = await github.checks(sha);
     if (onGithub === 'pending' || onGithub === 'none') return back(context, `/content/${slug}`, 'checks_pending', false);
-    const evaluation = await evaluate(state.post, state.context);
-    if (onGithub === 'failing' || evaluation.checks.some((check) => !check.ok)) return back(context, `/content/${slug}`, 'checks_failing', false);
+    const evaluation = state.post ? await evaluate(state.post, state.context) : null;
+    if (onGithub === 'failing' || evaluation?.checks.some((check) => !check.ok)) return back(context, `/content/${slug}`, 'checks_failing', false);
     const live = await github.pullState(pull.number);
     if (!live.open || live.headSha !== sha) return back(context, `/content/${slug}`, 'changed', false);
     if (live.mergeable === 'dirty') return back(context, `/content/${slug}`, 'conflict', false);
     // Main's ruleset merges only a branch that is up to date with main. Whether this one is comes from
     // the comparison: GitHub's mergeable_state is "unknown" on the first read after main moves.
     const behind = (await github.behindMain(sha)) > 0;
-    const at = state.post.front.publishAt;
+    const at = state.post?.front.publishAt;
     if (at && Date.parse(at) > now()) {
       // The schedule names this commit's content: bringing the branch up to date with main later
       // (here, or by the hourly workflow) keeps it.
@@ -1236,6 +1313,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       return back(context, `/content/${slug}`, 'merge_refused', false);
     }
     contexts.delete(slug);
+    if (deleting) return back(context, '/content', 'deleted', true);
     return back(context, `/content/${slug}`, 'published', true);
   }
 
@@ -1307,6 +1385,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       return editorPage(context, { state: null, postContext: await contextFor('new'), fields: fieldsOf(null, '', now()), evaluation: null, ...(notice ? { notice } : {}) });
     }
     const state = await postState(slug);
+    if (!state.post && !state.broken && state.pull && state.onMain) return deletionPage(context, state, state.pull, notice);
     if (!state.post && !state.broken) {
       return context.page('Not found', '/content', emptyState('There is no post at this address.', html`<a class="btn" href="/content">All posts</a>`), undefined, 404, { crumbs: [{ label: 'Content', href: '/content' }] });
     }
@@ -1319,7 +1398,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
   }
 
   const IMAGE_ROUTE = /^\/blog\/([a-z0-9]+(?:-[a-z0-9]+){0,15})\/([a-z0-9]+(?:-[a-z0-9]+){0,15}\.(?:png|jpe?g|webp|avif|gif|mp4|webm|pdf))$/;
-  const POST_ROUTE = /^\/content\/([a-z0-9]+(?:-[a-z0-9]+){0,15})(?:\/(images|images\/remove|rename|discard|publish|unschedule))?$/;
+  const POST_ROUTE = /^\/content\/([a-z0-9]+(?:-[a-z0-9]+){0,15})(?:\/(images|images\/remove|rename|discard|delete|publish|unschedule))?$/;
 
   return {
     owns(path) {
@@ -1353,6 +1432,8 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
             return await rename(request, context, slug);
           case 'discard':
             return await discard(request, context, slug);
+          case 'delete':
+            return await remove(request, context, slug);
           case 'publish':
             return await publish(request, context, slug);
           default:

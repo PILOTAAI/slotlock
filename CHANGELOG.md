@@ -3,6 +3,22 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- Delete a post from the admin console. Delete post, beside Rename in the post's panel, opens a pull
+  request that removes the post and its files; the post's page then says "To delete", with Publish
+  deletion for an Owner (once its checks pass, so a link left pointing at it fails first) and Keep
+  the post, which closes it. The staff log records `content.deleted` (a database step anyone who
+  writes may take; publishing it needs `content.publish`, as any change does). A draft never
+  published was already removed by Discard draft.
+
+### Fixed
+
+- Links in a blog post's text are underlined, on the site and in the console's preview, so they are
+  not told apart by colour alone (WCAG 1.4.1; axe's link-in-text-block found them in the preview).
+
 ## 0.12.2 - 2026-11-14
 
 ### Changed

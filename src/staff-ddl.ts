@@ -121,7 +121,7 @@ export const SLOTLOCK_POST_SLUG_PATTERN = '^[a-z0-9]+(?:-[a-z0-9]+){0,15}$';
  * publishing, scheduling and unscheduling need content.publish.
  */
 export const SLOTLOCK_CONTENT_STEPS = Object.freeze({
-  write: ['content.saved', 'content.submitted', 'content.image_added', 'content.image_removed', 'content.renamed', 'content.discarded'],
+  write: ['content.saved', 'content.submitted', 'content.image_added', 'content.image_removed', 'content.renamed', 'content.discarded', 'content.deleted'],
   publish: ['content.published', 'content.scheduled', 'content.unscheduled', 'content.updated'],
 } as const);
 export type SlotlockContentStep = (typeof SLOTLOCK_CONTENT_STEPS)[keyof typeof SLOTLOCK_CONTENT_STEPS][number];
@@ -1304,7 +1304,7 @@ const contentSteps = (steps: readonly string[]) => steps.map((step) => `'${step}
  */
 const STAFF_CONTENT_DDL = `
 -- A step in the CMS, recorded before the console asks GitHub for it: content.write for writing a
--- post (saving, submitting, its images, renaming, discarding a draft), content.publish for
+-- post (saving, submitting, its images, renaming, discarding a draft, asking to delete it), content.publish for
 -- publishing, scheduling and unscheduling one. The post is named by its slug.
 CREATE OR REPLACE FUNCTION slotlock.admin_content_record(actor text, happened text, post text, extra jsonb)
 RETURNS void
