@@ -39,6 +39,7 @@ import {
   type SlotlockAnnouncementRow,
   type SlotlockFlagsData,
   type SlotlockHostHealth,
+  type SlotlockPageParts,
   type SlotlockProviderRead,
   type SlotlockSystemData,
   SLOTLOCK_ANNOUNCEMENT_KIND_NAMES,
@@ -2123,6 +2124,13 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     { workflow: 'release.yml', label: 'Releases' },
   ] as const;
 
+  /** A page module's top bar, as the shell takes it. */
+  const partsHead = (parts: SlotlockPageParts): Head => ({
+    ...(parts.pills ? { pills: parts.pills } : {}),
+    ...(parts.actions ? { actions: parts.actions } : {}),
+    ...(parts.drawer ? { drawer: parts.drawer } : {}),
+  });
+
   /** A provider's part of a page: off without it, failed when it could not be read, else its hour's read. */
   async function providerRead<T>(session: Session, key: string, read: (() => Promise<T>) | null): Promise<SlotlockProviderRead<T>> {
     if (!read) return { state: 'off' };
@@ -2144,7 +2152,8 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       providerRead(session, 'site:deploys', github ? () => github.workflowRuns('site.yml', 5) : null),
     ]);
     await record(session.t, 'page.viewed', null, '/site');
-    return page(session, 'Site and search', '/site', slotlockSitePage({ siteUrl, google, bing, visits, deploys }));
+    const parts = slotlockSitePage({ siteUrl, google, bing, visits, deploys, now: now() });
+    return page(session, 'Site and search', '/site', parts.body, undefined, undefined, partsHead(parts));
   }
 
   async function communicationsPage(session: Session, url: URL): Promise<Response> {
@@ -2162,7 +2171,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         incidents = { state: 'failed' };
       }
     }
-    const body = slotlockCommunicationsPage({
+    const parts = slotlockCommunicationsPage({
       csrf: csrfOf(session),
       mayAct: slotlockStaffMay(session.r, 'system.act'),
       announcements: rows,
@@ -2172,7 +2181,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       names: await namesOf(rows.map((row) => row.created_by)),
       now: now(),
     }, accountHref);
-    return page(session, 'Communications', '/communications', body, undefined, noticeOf(url));
+    return page(session, 'Communications', '/communications', parts.body, undefined, noticeOf(url), partsHead(parts));
   }
 
   /** Each host as it answers now: the API's readiness and version, the dashboard's sign-in page. */
@@ -2216,7 +2225,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     ]);
     const flags = flagsRow?.flags ?? { flags: [], history: [] };
     const connected = (value: unknown) => (value ? 'connected' : 'not set');
-    const body = slotlockSystemPage({
+    const parts = slotlockSystemPage({
       csrf: csrfOf(session),
       mayAct: slotlockStaffMay(session.r, 'system.act'),
       system: systemRow?.system as SlotlockSystemData,
@@ -2238,8 +2247,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ],
       names: await namesOf([...flags.flags.map((flag) => flag.set_by), ...flags.history.map((event) => event.staff_ref)]),
       now: now(),
+      panel: url.searchParams.get('panel') === 'flag' ? { kind: 'flag', id: /^[1-9][0-9]{0,17}$/.test(url.searchParams.get('flag') ?? '') ? url.searchParams.get('flag') : null } : null,
     }, accountHref);
-    return page(session, 'System', '/system', body, undefined, noticeOf(url));
+    return page(session, 'System', '/system', parts.body, undefined, noticeOf(url), partsHead(parts));
   }
 
   /** A datetime-local value from a form, read as UTC; null when empty, undefined when not one. */
