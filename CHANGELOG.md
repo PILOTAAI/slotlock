@@ -131,7 +131,7 @@ versioning.
   ones.
 - CI runs the admin console's browser test (every page at three widths, in both themes, under its
   CSP and axe-core), which no job ran before: a new job, **Admin console in a browser**, installs
-  Chromium for the pinned `playwright` (now a dev dependency, 1.65.0) and keeps the screenshots as
+  Chromium for the pinned `playwright` (now a dev dependency, 1.63.0) and keeps the screenshots as
   an artifact when it fails. "CI passed" waits for it. Elsewhere the browser suites skip, quickly,
   when Chromium is not installed.
 
