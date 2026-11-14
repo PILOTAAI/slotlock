@@ -405,6 +405,15 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
   const last = system.rounds[0];
   const hourSince = last ? data.now - new Date(last.finished_at).getTime() : null;
   const down = data.hosts.filter((host) => !host.up);
+  // The headline: hosts down, then accounts whose maintenance fails, or no maintenance recorded lately.
+  const failingTotal = Number(system.failing_total);
+  const lateHours = hourSince !== null && hourSince > 3 * 3_600_000 ? Math.floor(hourSince / 3_600_000) : null;
+  const problems = [
+    ...(down.length ? [`${count(down.length)} ${down.length === 1 ? 'host is' : 'hosts are'} down`] : []),
+    ...(failingTotal > 0 ? [`Maintenance failing for ${count(failingTotal)} ${failingTotal === 1 ? 'account' : 'accounts'}`] : []),
+    ...(lateHours !== null ? [`No maintenance recorded for ${count(lateHours)} hours`] : []),
+  ];
+  const tone = down.length ? 'bad' : problems.length ? 'warn' : 'good';
   const flagName = (flag: string) => SLOTLOCK_FEATURE_FLAG_NAMES[flag as SlotlockFeatureFlag]?.name ?? flag;
   const editing = data.panel?.kind === 'flag' && data.mayAct ? (data.flags.flags.find((flag) => flag.id === data.panel?.id) ?? null) : null;
   const option = (value: string, label: string, current: string | null | undefined) => html`<option value="${value}"${current === value ? html` selected` : ''}>${label}</option>`;
@@ -427,7 +436,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
     : null;
   const body = html`
     <nav class="anchors" aria-label="On this page"><a href="#hosts">Hosts</a><a href="#maintenance">Maintenance</a><a href="#webhooks">Webhooks</a><a href="#deploys">Deploys</a><a href="#flags">Flags</a><a href="#configuration">Configuration</a></nav>
-    <div class="headline">${down.length ? html`<span class="pill bad dot-only" aria-hidden="true"></span>` : html`<span class="pill good dot-only" aria-hidden="true"></span>`}<span class="headline-text">${down.length ? `${down.length} ${down.length === 1 ? 'host is' : 'hosts are'} down` : 'All systems operational'}</span></div>
+    <div class="headline"><span class="pill ${tone} dot-only" aria-hidden="true"></span><span class="headline-text">${problems.length ? problems.join(' · ') : 'All systems operational'}</span></div>
     ${section('Hosts', table('Hosts', ['Host', 'State', 'Version', { label: 'Latency', num: true }], data.hosts.map((host) => [
       html`${host.name}<span class="sub mono">${host.url}</span>`,
       host.up ? pill('Up', 'good') : html`${pill('Down', 'bad')}<span class="sub">${host.answer}</span>`,
@@ -440,7 +449,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
         { label: 'Accounts failing', value: count(system.failing_total) },
         { label: 'Last hour recorded', value: last ? `${when(last.finished_at).slice(11)} UTC` : 'Never', note: last ? `${when(last.finished_at).slice(0, 10)} · ${count(last.summary.passes ?? 0)} passes, ${count(last.summary.failed ?? 0)} failed` : null },
       ])}
-      ${hourSince !== null && hourSince > 3 * 3_600_000 ? html`<div class="callout warn section"><p>No server has recorded maintenance for ${Math.floor(hourSince / 3_600_000)} hours. Check that <code>slotlock serve</code> is running.</p></div>` : ''}
+      ${lateHours !== null ? html`<div class="callout warn section"><p>No server has recorded maintenance for ${count(lateHours)} hours. Check that <code>slotlock serve</code> is running.</p></div>` : ''}
       ${section('Accounts whose maintenance is failing', table('Accounts whose maintenance is failing', ['Account', 'Failing since', 'Last failed', { label: 'Failures', num: true }, 'Error'], system.failing.map((row) => [
         namedCell(row, accountHref),
         html`${when(row.first_failed_at)}`,
@@ -501,7 +510,9 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
     ${section('Configuration', facts(data.configuration.map((entry) => [entry.name, html`<span class="mono">${entry.value}</span>`])), { id: 'configuration', info: info('Configuration', 'What this console runs with. Secrets are never shown: only whether each is set.') })}`;
   return {
     body,
-    pills: down.length ? pill(`${down.length} down`, 'bad') : pill('Operational', 'good'),
+    pills: down.length
+      ? pill(`${count(down.length)} down`, 'bad')
+      : failingTotal > 0 ? pill('Maintenance failing', 'warn') : lateHours !== null ? pill('Maintenance late', 'warn') : pill('Operational', 'good'),
     drawer: flagDrawer,
   };
 }

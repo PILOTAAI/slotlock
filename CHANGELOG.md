@@ -107,6 +107,9 @@ versioning.
   money back and keeps the plan until it ends, so Billing's alerts say "Refunded in full, plan ends
   14 Dec" (the alert keeps the end date, `ends_at`). Part of a payment refunded on such a plan still
   raises nothing, and on a plan that renews still reads "Partly refunded".
+- The System page's headline no longer says "All systems operational" while maintenance is failing:
+  it names hosts that are down, then "Maintenance failing for 1 account" (or that no server has
+  recorded maintenance for some hours) as a warning, and the top bar's pill says the same.
 
 ### Security
 
