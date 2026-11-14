@@ -233,6 +233,13 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     const row = table.slice(table.lastIndexOf('<tr', table.indexOf('ch_Refund2')), table.indexOf('</tr>', table.indexOf('ch_Refund2')));
     expect(row).toContain('Partly refunded<span class="sub">£2.00 of £5.00 refunded</span>');
     expect(row).not.toContain('end the plan');
+    // All of it refunded on a plan set to end: when it ends, so a person can end it sooner.
+    await superuser`SELECT slotlock.note_billing_event('refunded_plan_active', ${ENDING}, 'ch_Refund3',
+      ${superuser.json({ amount: 500, amount_refunded: 500, currency: 'gbp', refunded: true, subscription: 'sub_End', ends_at: ENDS.toISOString() })})`;
+    const ending = await text(staff.billing, '/billing');
+    const endingTable = ending.slice(ending.indexOf('<table', ending.indexOf('id="alerts"')));
+    const endingRow = endingTable.slice(endingTable.lastIndexOf('<tr', endingTable.indexOf('ch_Refund3')), endingTable.indexOf('</tr>', endingTable.indexOf('ch_Refund3')));
+    expect(endingRow).toContain('Refunded in full, plan ends 14 Dec<span class="sub">£5.00 of £5.00 refunded: end it now, or say why not</span>');
   });
 
   it("shows people by their provider's name, else display, else reference, with initials and no style attribute", async () => {

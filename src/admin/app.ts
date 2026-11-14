@@ -1882,7 +1882,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const openAlerts = alerts.filter((alert) => !alert.resolved_at);
     const pending = overrides.filter((item) => item.state === 'pending');
     const approvable = pending.filter((item) => item.created_by !== session.s);
-    const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail);
+    const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail, now());
     const mrr = revenue ? slotlockMoneyByCurrency(revenue.mrr) : null;
     const payingTotal = Object.values(paying).reduce((sum, value) => sum + Number(value), 0);
     const account = (row: { account_ref: string } & Named) => accountOf(session, row.account_ref, namedOf(row));

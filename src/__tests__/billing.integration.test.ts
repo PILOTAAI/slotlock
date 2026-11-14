@@ -643,15 +643,24 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
       invoicePayments.set('pi_R2', ['sub_R2']);
       await send(charge('ch_R2', 'pi_R2', { amount_refunded: 200, refunded: false }));
       expect((await alerts()).at(-1)).toMatchObject({ tenant_ref: team, stripe_ref: 'ch_R2', detail: { amount_refunded: 200, refunded: false } });
-      const noted = (await alerts()).length;
 
-      // Cancelled in Stripe as it was refunded, before that event arrived: Stripe's word, not the
-      // database's, decides, so nothing needs a person.
+      // Set to end, and refunded in full: the customer has all their money back and keeps the plan
+      // until it ends, so a person decides whether to end it now; the alert says when it ends.
       subscriptions.set('sub_R1', theirs('sub_R1', person, 'active', { cancel_at_period_end: true }));
       invoicePayments.set('pi_R3', ['sub_R1']);
-      await send(charge('ch_R3', 'pi_R3'));
+      expect(await send(charge('ch_R3', 'pi_R3'))).toEqual({ status: 200, text: 'Noted.' });
+      expect((await alerts()).at(-1)).toEqual({
+        tenant_ref: person,
+        stripe_ref: 'ch_R3',
+        detail: { amount: 500, amount_refunded: 500, currency: 'gbp', refunded: true, subscription: 'sub_R1', ends_at: '2026-12-09T00:00:00.000Z' },
+      });
+      const noted = (await alerts()).length;
+      // Part of it refunded on a plan set to end: nothing to decide. Cancelled in Stripe as it was
+      // refunded, before that event arrived: Stripe's word, not the database's, decides, so nothing
+      // needs a person.
+      expect(await send(charge('ch_R3p', 'pi_R3', { amount_refunded: 200, refunded: false }))).toEqual({ status: 200, text: 'Ignored.' });
       subscriptions.set('sub_R1', theirs('sub_R1', person, 'canceled'));
-      await send(charge('ch_R4', 'pi_R3'));
+      expect(await send(charge('ch_R4', 'pi_R3'))).toEqual({ status: 200, text: 'Ignored.' });
       subscriptions.set('sub_R1', theirs('sub_R1', person, 'active'));
       // A payment of no subscription's invoice, or no payment to follow: nothing to match it to.
       invoicePayments.set('pi_R5', []);

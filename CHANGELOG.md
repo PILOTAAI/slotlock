@@ -103,6 +103,10 @@ versioning.
   Paying listed every active plan but Free, those set to end, trials, partners' and plans with no
   subscription included, and left out past due ones. Run `slotlock migrate`: until then both views
   are empty.
+- A payment refunded in full for a plan set to end now needs a person too: the customer has their
+  money back and keeps the plan until it ends, so Billing's alerts say "Refunded in full, plan ends
+  14 Dec" (the alert keeps the end date, `ends_at`). Part of a payment refunded on such a plan still
+  raises nothing, and on a plan that renews still reads "Partly refunded".
 
 ### Security
 

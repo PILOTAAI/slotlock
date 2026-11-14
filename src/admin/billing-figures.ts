@@ -38,7 +38,7 @@ export function slotlockStripeLink(ref: string): string {
 }
 
 /** A billing alert in words: what happened, and its detail. */
-export function slotlockBillingAlertWords(kind: string, detail: Record<string, unknown>): { title: string; detail: string | null } {
+export function slotlockBillingAlertWords(kind: string, detail: Record<string, unknown>, nowMs: number = Date.now()): { title: string; detail: string | null } {
   const currency = typeof detail.currency === 'string' ? detail.currency : null;
   if (kind === 'payment_failed') {
     return {
@@ -53,6 +53,13 @@ export function slotlockBillingAlertWords(kind: string, detail: Record<string, u
     // Part of a payment refunded (Stripe's `refunded` is true only once all of it is) says only that:
     // a partial refund is often meant to leave the plan as it is.
     if (detail.refunded === false) return { title: 'Partly refunded', detail: amounts };
+    // All of it refunded on a plan set to end: the customer keeps it until then, for nothing.
+    if (typeof detail.ends_at === 'string') {
+      return {
+        title: `Refunded in full, plan ends ${slotlockShortDate(detail.ends_at, nowMs)}`,
+        detail: amounts ? `${amounts}: end it now, or say why not` : 'End it now, or say why not',
+      };
+    }
     return {
       title: 'Refunded, plan still active',
       detail: amounts ? `${amounts}: end the plan, or say why not` : 'End the plan, or say why not',
