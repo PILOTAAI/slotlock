@@ -34,6 +34,8 @@ interface World {
   /** Events Stripe has not delivered to every endpoint: type, and age in minutes. */
   undelivered: { type: string; minutes: number }[];
   rejectToken: boolean;
+  /** The site's pages send X-Robots-Tag: noindex, as a stray zone rule made them do before launch. */
+  siteNoindex: boolean;
 }
 const healthy = (): World => ({
   cloudVersion: version,
@@ -51,18 +53,21 @@ const healthy = (): World => ({
     { type: 'customer.created', minutes: 600 },
   ],
   rejectToken: false,
+  siteNoindex: false,
 });
 let world = healthy();
 let server: Server;
 let base = '';
 
-function answer(request: IncomingMessage): [number, unknown] {
+function answer(request: IncomingMessage): [number, unknown, Record<string, string>?] {
   const url = new URL(request.url ?? '/', 'http://stub');
   const [, service = '', ...rest] = url.pathname.split('/');
   const path = `/${rest.join('/')}`;
   const authorized = Boolean(request.headers.authorization);
   switch (service) {
     case 'site':
+      // The sitemap may say noindex (it is a file, not a page); a page must not.
+      return [200, '', world.siteNoindex && path !== '/sitemap-index.xml' ? { 'x-robots-tag': 'noindex' } : {}];
     case 'dash':
       return [200, ''];
     case 'api':
@@ -141,8 +146,8 @@ function answer(request: IncomingMessage): [number, unknown] {
 
 beforeAll(async () => {
   server = createServer((request, response) => {
-    const [status, body] = answer(request);
-    response.writeHead(status, { 'content-type': 'application/json' }).end(typeof body === 'string' ? body : JSON.stringify(body));
+    const [status, body, headers = {}] = answer(request);
+    response.writeHead(status, { 'content-type': 'application/json', ...headers }).end(typeof body === 'string' ? body : JSON.stringify(body));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -178,6 +183,7 @@ describe('check-launch.mjs', () => {
     for (const line of [
       `ok   api: /healthz is ready, on ${version}`,
       'ok   api: /mcp refuses a call without a key (401)',
+      `ok   site: ${base}/site/ may be indexed`,
       `ok   Maven Central: has ${version}`,
       `ok   Go: has ${version}`,
       `ok   ghcr.io: has ${version}`,
@@ -198,6 +204,7 @@ describe('check-launch.mjs', () => {
       topics: ['mcp'],
       mcpOpen: true,
       probeSkipped: true,
+      siteNoindex: true,
       // An endpoint made before refunds were noted, and short of another event.
       events: EVENTS.filter((event) => event !== 'invoice.paid' && event !== 'charge.refunded'),
       undelivered: [
@@ -211,6 +218,8 @@ describe('check-launch.mjs', () => {
       `FAIL Maven Central: has no ${version} (404): publish its deployment in the Central Portal, or release the next version`,
       'FAIL GitHub: topics missing: mcp-server, model-context-protocol, ai-agents, booking-api, scheduling-api (run scripts/configure-github.sh)',
       'FAIL api: /mcp answers 200 to a call without a key, not 401',
+      `FAIL site: ${base}/site/ tells search engines not to index it (X-Robots-Tag: noindex): remove the rule that adds it (a Cloudflare Transform Rule on the zone, when this repository's _headers has none)`,
+      `FAIL site: ${base}/site/pricing/ tells search engines not to index it (X-Robots-Tag: noindex): remove the rule that adds it (a Cloudflare Transform Rule on the zone, when this repository's _headers has none)`,
       'FAIL status: the status probe is off: set SLOTLOCK_STATUS_PROBE to on',
       `FAIL Stripe: the webhook at ${base}/dash/stripe/webhook does not get: invoice.paid, charge.refunded`,
       'FAIL Stripe: 2 payment event(s) of the last three days did not reach the webhook, the oldest a checkout.session.completed 2 hour(s) ago',
