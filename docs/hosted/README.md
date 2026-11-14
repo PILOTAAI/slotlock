@@ -50,8 +50,8 @@ Any GitHub or Google account can sign in. Self-hosting stays fully supported: se
 **Team** is for a shared workspace: a team workspace you create on the dashboard's **Teams** page,
 or a GitHub organization an owner has turned Slotlock on for (the dashboard's Teams
 page). Everyone in it shares its resources, keys and history, and its price does not change with how
-many people use it. On Free, each person may create one team workspace, with up to 3 people, open
-invitations included; Developer, a person's plan, does not change that, and Team lifts the limit. Only the workspace's Owners and Billing managers buy or
+many people use it. On Free, each person may create one team workspace (one being deleted counts
+until it goes), with up to 3 people, open invitations included; Developer, a person's plan, does not change that, and Team lifts the limit. Only the workspace's Owners and Billing managers buy or
 manage it.
 
 Every account starts on Free. Upgrade on the dashboard's **Plan** page: Stripe takes the payment as

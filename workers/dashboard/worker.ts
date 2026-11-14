@@ -622,6 +622,12 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               console.error(
                 JSON.stringify({ message: 'slotlock billing duplicate subscription', subscriptions }),
               ),
+            // Its account was erased, so the database keeps nothing of it: the owner cancels it in
+            // Stripe, by this id.
+            onErased: (subscription) =>
+              console.error(
+                JSON.stringify({ message: 'slotlock billing subscription of an erased account', subscription }),
+              ),
           });
         } finally {
           ctx.waitUntil(sql.end({ timeout: 5 }));

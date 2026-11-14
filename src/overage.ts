@@ -3,14 +3,16 @@
 // facts); it stays off until a paid test subscription shows the meter billed and the Terms say what
 // overage costs.
 //
-// With it on: a paying Developer tenant is not refused at 110% of its monthly operations but at
-// SLOTLOCK_OVERAGE_STOP_PERCENT (300% by default); checkout adds the metered price
-// (SLOTLOCK_STRIPE_PRICE_OVERAGE) to its subscription; and `slotlock overage report`, run by the
-// owner (daily, and on the 1st for the month before), sends Stripe a Billing Meter event for each
-// tenant's operations above its quota that it has not reported yet. What was reported is recorded
-// in slotlock.overage_reports first by month, so no operation is billed twice, and each event
-// carries an identifier Stripe deduplicates within a day: Stripe refusing one as already taken counts
-// as sent.
+// With it on: checkout adds the metered price (SLOTLOCK_STRIPE_PRICE_OVERAGE) to a Developer
+// subscription, and the Stripe webhook records which subscriptions carry it
+// (tenant_plans.overage_metered). A paying Developer tenant whose subscription does is not refused at
+// 110% of its monthly operations but at SLOTLOCK_OVERAGE_STOP_PERCENT (300% by default); one whose
+// subscription does not (bought before overage was sold) stops at 110%, and nothing it uses is
+// billed. `slotlock overage report`, run by the owner (daily, and on the 1st for the month before),
+// sends Stripe a Billing Meter event for each metered tenant's operations above its quota that it
+// has not reported yet. What was reported is recorded in slotlock.overage_reports first by month, so
+// no operation is billed twice, and each event carries an identifier Stripe deduplicates within a
+// day: Stripe refusing one as already taken counts as sent.
 import { createHash } from 'node:crypto';
 import type { Sql } from 'postgres';
 import { SLOTLOCK_STRIPE_API_VERSION } from './billing.js';
@@ -35,8 +37,9 @@ export function slotlockMonthOf(at: number): string {
 }
 
 /**
- * Report each paying Developer tenant's operations above its quota in `month` to Stripe, once.
- * Runs as the schema owner. A month can be reported while it runs and once more after it ends.
+ * Report each paying Developer tenant's operations above its quota in `month` to Stripe, once, where
+ * its subscription carries the metered price. Runs as the schema owner, on a schema migrated by this
+ * release. A month can be reported while it runs and once more after it ends.
  */
 export async function reportSlotlockOverage(
   sql: Sql,
@@ -59,7 +62,8 @@ export async function reportSlotlockOverage(
   // The month's last second: a closed month's events are dated in it.
   const monthEnd = Date.UTC(year, monthNumber, 1) - 1_000;
   const quota = SLOTLOCK_PLAN_QUOTAS.developer.operations;
-  // Paying Developer tenants (their own plan, a live subscription) and what they used this month.
+  // Paying Developer tenants (their own plan, a live subscription with the metered price) and what
+  // they used this month.
   const rows = await sql<{ tenant_ref: string; customer: string; used: string; reported: string | null }[]>`
     SELECT plan.tenant_ref, plan.stripe_customer AS customer,
            COALESCE((SELECT sum(used.count) FROM slotlock.usage_daily used
@@ -71,7 +75,7 @@ export async function reportSlotlockOverage(
       FROM slotlock.tenant_plans plan
      WHERE plan.plan = 'developer' AND plan.source = 'direct'
        AND plan.stripe_customer IS NOT NULL AND plan.stripe_subscription IS NOT NULL
-       AND plan.status <> 'canceled'
+       AND plan.status <> 'canceled' AND plan.overage_metered
      ORDER BY plan.tenant_ref`;
   const send = input.stripe.fetch ?? fetch;
   const report: SlotlockOverageReport = { month: input.month, tenants: [], sent: 0, failed: 0 };

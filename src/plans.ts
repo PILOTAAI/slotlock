@@ -81,8 +81,9 @@ export async function readSlotlockTenantQuotas(
   sql: SlotlockSql,
   tenantRef: string,
   /**
-   * Metered overage (SLOTLOCK_OVERAGE=on, overage.ts): a paying Developer tenant is refused only past
-   * this percent of its quota, and what it uses above the quota is billed.
+   * Metered overage (SLOTLOCK_OVERAGE=on, overage.ts): a paying Developer tenant whose subscription
+   * carries the metered price is refused only past this percent of its quota, and what it uses above
+   * the quota is billed.
    */
   options: { overageStopPercent?: number } = {},
 ): Promise<SlotlockPlanQuotas | null> {
@@ -98,10 +99,31 @@ export async function readSlotlockTenantQuotas(
   }
   if (!Object.hasOwn(SLOTLOCK_PLAN_QUOTAS, row.plan)) return null;
   const quotas = SLOTLOCK_PLAN_QUOTAS[row.plan as SlotlockPlan];
-  if (options.overageStopPercent !== undefined && row.plan === 'developer' && row.paid === true) {
+  if (
+    options.overageStopPercent !== undefined &&
+    row.plan === 'developer' &&
+    row.paid === true &&
+    (await readSlotlockTenantPlanOverage(sql, tenantRef))
+  ) {
     return { ...quotas, stopPercent: Math.max(quotas.stopPercent, options.overageStopPercent) };
   }
   return quotas;
+}
+
+/**
+ * Whether the tenant's subscription carries the metered overage price (slotlock.tenant_plan_overage),
+ * so its use past the quota is billed. A schema or grants from before this release cannot say: no,
+ * and the tenant stops at its plan's stop, as it did before overage.
+ */
+async function readSlotlockTenantPlanOverage(sql: SlotlockSql, tenantRef: string): Promise<boolean> {
+  try {
+    const [row] = await sql<{ metered: boolean }[]>`SELECT slotlock.tenant_plan_overage(${tenantRef}::text) AS metered`;
+    return row?.metered === true;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === '42883' || code === '42501') return false;
+    throw error;
+  }
 }
 
 /** The tenant's plan, or null when it has none (no plan limits apply). */
@@ -125,7 +147,10 @@ export async function readSlotlockTenantPlan(
   };
 }
 
-/** Sets the tenant's plan, with the limits that plan allows. */
+/**
+ * Sets the tenant's plan, with the limits that plan allows. An account of the dashboard's that no
+ * longer exists (erased) gets none: refused (`tenant_erased`).
+ */
 export async function setSlotlockTenantPlan(
   sql: SlotlockSql,
   input: {
@@ -142,7 +167,32 @@ export async function setSlotlockTenantPlan(
     ${input.tenantRef}::text, ${input.plan}::text, ${input.status}::text,
     ${limits.resources}::integer, ${limits.apiKeys}::integer, ${limits.webhookEndpoints}::integer,
     ${input.stripeCustomer ?? null}::text, ${input.stripeSubscription ?? null}::text,
-    ${input.currentPeriodEnd ?? null}::timestamptz)`;
+    ${input.currentPeriodEnd ?? null}::timestamptz)`.catch((error: unknown) => {
+    const refused = error as { code?: unknown; hint?: unknown } | null;
+    if (refused?.code !== 'P0002' || refused.hint !== 'tenant_erased') throw error;
+    throw Object.assign(new Error('Slotlock tenant no longer exists: its plan is not written again', { cause: error }), {
+      code: 'tenant_erased' as const,
+    });
+  });
+}
+
+/**
+ * Records whether the subscription the tenant's plan names carries the metered overage price, for
+ * that subscription only. A schema or grants from before this release record nothing, and the tenant
+ * stops at its plan's stop.
+ */
+export async function setSlotlockTenantPlanOverage(
+  sql: SlotlockSql,
+  input: { tenantRef: string; stripeSubscription: string; metered: boolean },
+): Promise<void> {
+  try {
+    await sql`SELECT slotlock.set_tenant_plan_overage(
+      ${input.tenantRef}::text, ${input.stripeSubscription}::text, ${input.metered}::boolean)`;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === '42883' || code === '42501') return;
+    throw error;
+  }
 }
 
 /** The plan every tenant without one of its own is on, from `appliesFrom`. */

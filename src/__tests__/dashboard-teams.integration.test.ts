@@ -78,6 +78,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ['hal', { id: base + 7, login: 'hal', emails: [] }],
     ['ivy', { id: base + 8, login: 'ivy', emails: [] }],
     ['kim', { id: base + 9, login: 'kim', emails: [] }],
+    ['lou', { id: base + 10, login: 'lou', emails: [] }],
   ]);
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -867,6 +868,26 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const audited = await (await hal.get('/dashboard/settings/audit')).text();
     expect(audited).toContain('asked for the team to be deleted');
     expect(audited).toContain('kept the team');
+  });
+
+  it('counts a team being deleted against the Free limit, so keeping it never makes a second free team', async () => {
+    const lou = new Browser(build({ plans: { plan: async () => null } }));
+    await signIn(lou, 'lou');
+    await lou.post('/dashboard/teams', '/teams/create', { name: 'First Try' });
+    const first = await teamOf(lou);
+    tenants.push(first);
+    expect((await lou.post('/dashboard/settings/team', '/teams/delete', { confirm: 'first-try' })).status).toBe(303);
+    // Until it goes, any Owner can keep it: it is still the one free team its creator may hold.
+    const second = await lou.post('/dashboard/teams', '/teams/create', { name: 'Second Try' });
+    expect(second.status).toBe(403);
+    expect(await second.text()).toContain(
+      'Each person may create 1 team on the Free plan. A team being deleted counts until it goes.',
+    );
+    expect((await lou.post('/dashboard/settings/team', '/teams/restore', {})).status).toBe(303);
+    const person = `github:${String(github.get('lou')?.id)}`;
+    expect(await admin`SELECT tenant_ref, status FROM slotlock.workspaces WHERE created_by = ${person}`).toEqual([
+      { tenant_ref: first, status: 'active' },
+    ]);
   });
 
   it("serves a team's keys only with team workspaces on", () => {

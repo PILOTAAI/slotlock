@@ -8,6 +8,7 @@ import {
   type SlotlockPlanStatus,
   readSlotlockTenantPlan,
   setSlotlockTenantPlan,
+  setSlotlockTenantPlanOverage,
 } from './plans.js';
 import type { SlotlockSql } from './store.js';
 
@@ -105,6 +106,11 @@ export interface SlotlockStripe {
   /** The plan a subscription gives, by its price: Team for a Team price, else Developer. */
   planOf?(subscription: SlotlockStripeSubscription): { plan: SlotlockPlan; status: SlotlockPlanStatus };
   /**
+   * Whether the subscription carries the metered overage price (`overagePrice`), so its use past the
+   * quota is billed. Never without one.
+   */
+  carriesOverage?(subscription: SlotlockStripeSubscription): boolean;
+  /**
    * The plans' prices as Stripe holds them, for showing (`£5`, `£50`): read from the configured
    * price ids, so a page never shows one price and charges another. Kept for ten minutes, an
    * answer or a refusal alike. Needs Read on Prices.
@@ -144,10 +150,24 @@ const LIVE = new Set(['active', 'trialing', 'past_due']);
  * and would then make two live subscriptions for one tenant.
  */
 const OWED = new Set([...LIVE, 'unpaid']);
+/**
+ * Statuses that give no plan but that a payment makes live again: `unpaid`, and `incomplete` (a
+ * first payment not yet made). The plan keeps naming such a subscription, so the account is not
+ * erased, nor its team deleted, while Stripe could still renew it.
+ */
+const REVIVABLE = new Set(['unpaid', 'incomplete']);
 
 /** Whether the subscription gives its tenant a plan. */
 export function slotlockSubscriptionIsLive(subscription: SlotlockStripeSubscription): boolean {
   return LIVE.has(subscription.status);
+}
+
+/** Whether any of the subscription's items is at this price. */
+export function slotlockSubscriptionCarriesPrice(subscription: SlotlockStripeSubscription, priceId: string | undefined): boolean {
+  if (!priceId) return false;
+  return (subscription.items?.data ?? []).some(
+    (item) => (typeof item.price === 'string' ? item.price : item.price?.id) === priceId,
+  );
 }
 
 const STRIPE_ID = /^[A-Za-z0-9_]{1,255}$/;
@@ -256,6 +276,7 @@ export function createSlotlockStripe(options: SlotlockStripeOptions): SlotlockSt
     },
     liveSubscriptionsOfCustomer,
     planOf: (subscription) => slotlockPlanOfSubscription(subscription, options.teamPrices),
+    carriesOverage: (subscription) => slotlockSubscriptionCarriesPrice(subscription, options.overagePrice),
     shownPrices() {
       const at = Date.now();
       if (!shown || at - shown.at > SHOWN_PRICES_MS) {
@@ -424,8 +445,10 @@ function subscriptionOf(event: unknown): string | null {
  * subscription, reads that subscription from Stripe (not the event, which may be stale or arrive out
  * of order) and sets its tenant's plan. A tenant that bought twice (two tabs, before either webhook
  * arrived) keeps Developer until its last live subscription ends, and the second purchase is
- * reported through `onDuplicate`, by subscription ids only, for a refund. Answers 400 to an unsigned
- * or unreadable body, 500 when Stripe or the database fails (Stripe retries), and 200 otherwise.
+ * reported through `onDuplicate`, by subscription ids only, for a refund. An erased account gets no
+ * plan back; a subscription of its that could still bill is reported through `onErased`, by its id
+ * only, to be cancelled. Answers 400 to an unsigned or unreadable body, 500 when Stripe or the
+ * database fails (Stripe retries), and 200 otherwise.
  */
 export async function handleSlotlockStripeWebhook(
   request: Request,
@@ -436,6 +459,7 @@ export async function handleSlotlockStripeWebhook(
     now?: () => number;
     onError?: (error: unknown) => void;
     onDuplicate?: (subscriptionIds: readonly string[]) => void;
+    onErased?: (subscriptionId: string) => void;
   },
 ): Promise<Response> {
   const text = (status: number, body: string) =>
@@ -485,14 +509,32 @@ export async function handleSlotlockStripeWebhook(
     const { plan, status } = deps.stripe.planOf?.(chosen) ?? slotlockPlanOfSubscription(chosen);
     const customer = typeof chosen.customer === 'string' ? chosen.customer : chosen.customer.id;
     const end = chosen.items?.data?.[0]?.current_period_end ?? chosen.current_period_end ?? null;
-    await setSlotlockTenantPlan(deps.sql, {
-      tenantRef,
-      plan,
-      status,
-      stripeCustomer: customer,
-      stripeSubscription: plan === 'free' ? null : chosen.id,
-      currentPeriodEnd: plan === 'free' || !end ? null : new Date(end * 1000),
-    });
+    // Named while Stripe can still bill it: an unpaid one gives Free, but paying it renews it, so
+    // erasure and team deletion (which read the name) wait until it is cancelled.
+    const billable = plan === 'free' && !REVIVABLE.has(chosen.status) ? null : chosen.id;
+    try {
+      await setSlotlockTenantPlan(deps.sql, {
+        tenantRef,
+        plan,
+        status,
+        stripeCustomer: customer,
+        stripeSubscription: billable,
+        currentPeriodEnd: plan === 'free' || !end ? null : new Date(end * 1000),
+      });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code !== 'tenant_erased') throw error;
+      // The account was erased: nothing of it is written again. A subscription that could still
+      // bill is reported, by its id only, for the people who run the service to cancel in Stripe.
+      if (billable) deps.onErased?.(billable);
+      return text(200, 'Erased.');
+    }
+    if (billable) {
+      await setSlotlockTenantPlanOverage(deps.sql, {
+        tenantRef,
+        stripeSubscription: billable,
+        metered: deps.stripe.carriesOverage?.(chosen) === true,
+      });
+    }
     // For the people who run the service (RFC 0006, M4): a payment that failed, or one that
     // recovered, which closes the account's open payment alerts.
     const type = (event as { type?: unknown }).type;

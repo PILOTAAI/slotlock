@@ -289,6 +289,10 @@ describe.skipIf(!url)('privacy requests in the admin console (real Postgres)', (
     expect(await (await browsers.owner.request(`/privacy/${id}`)).text()).toContain('Open the customer in Stripe');
     const before = await rowsByTable(ACCOUNT);
     expect(before.resources).toBe(1);
+    // Unpaid, as the webhook records it: Free, but still named, since paying it would renew it.
+    await superuser`UPDATE slotlock.tenant_plans SET plan = 'free', status = 'canceled' WHERE tenant_ref = ${ACCOUNT}`;
+    expect((await form(browsers.owner, `/privacy/${id}/erasure/ask`, {}, `/privacy/${id}`)).headers.get('location')).toBe(`/privacy/${id}?error=privacy_subscription_live`);
+    expect(await (await browsers.owner.request(`/privacy/${id}`)).text()).toContain('The account owes for a subscription that renews if it is paid.');
     // Stripe's webhook records the cancellation.
     await superuser`UPDATE slotlock.tenant_plans SET plan = 'free', status = 'canceled', stripe_subscription = NULL WHERE tenant_ref = ${ACCOUNT}`;
     // 2. A second Owner approves; the one who asked cannot.

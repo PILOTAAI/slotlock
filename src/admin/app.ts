@@ -1009,7 +1009,12 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       steps = html`<ol class="steps">
         ${verifyStep}
         ${step(2, 'Cancel the Stripe subscription', Boolean(receipt) || !live, receipt ? html`<p>Done before the erasure.</p>` : live
-          ? html`<p>${pill('Live', 'bad')} The account pays for ${plan?.plan ?? 'a plan'} (${plan?.status ?? 'active'}). Cancel it in Stripe; the webhook records it within a minute.${stripeLink}</p>`
+          ? html`<p>${pill('Live', 'bad')} ${
+              // Unpaid (or its first payment incomplete): on Free, but paying it would renew it.
+              plan?.status === 'canceled'
+                ? 'The account owes for a subscription that renews if it is paid'
+                : `The account pays for ${plan?.plan ?? 'a plan'} (${plan?.status ?? 'active'})`
+            }. Cancel it in Stripe; the webhook records it within a minute.${stripeLink}</p>`
           : html`<p>No live subscription${plan?.status ? html` (${plan.status})` : ''}.</p>`)}
         ${step(3, 'A second Owner approves', approved, approved
           ? html`<p>Asked by ${nameOf(2)} ${when(String(found.erasure_asked_at))}; approved by ${nameOf(3)} ${when(String(found.erasure_approved_at))}.</p>`
