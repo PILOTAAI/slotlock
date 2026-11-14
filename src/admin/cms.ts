@@ -1184,6 +1184,9 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
     const live = await github.pullState(pull.number);
     if (!live.open || live.headSha !== sha) return back(context, `/content/${slug}`, 'changed', false);
     if (live.mergeable === 'dirty') return back(context, `/content/${slug}`, 'conflict', false);
+    // Main's ruleset merges only a branch that is up to date with main. Whether this one is comes from
+    // the comparison: GitHub's mergeable_state is "unknown" on the first read after main moves.
+    const behind = (await github.behindMain(sha)) > 0;
     const at = state.post.front.publishAt;
     if (at && Date.parse(at) > now()) {
       // The schedule names this commit's content: bringing the branch up to date with main later
@@ -1192,7 +1195,7 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       try {
         await github.comment(pull.number, slotlockScheduleComment({ sha, at, by: context.login }));
         await github.addLabel(pull.number, SLOTLOCK_CMS_SCHEDULED_LABEL);
-        if (live.mergeable === 'behind') await github.updateBranch(pull.number, sha);
+        if (behind) await github.updateBranch(pull.number, sha);
       } catch (error) {
         if (!githubFailed(error)) throw error;
         return back(context, `/content/${slug}`, 'github', false);
@@ -1200,8 +1203,8 @@ export function createSlotlockAdminCms(options: SlotlockAdminCmsOptions): Slotlo
       contexts.delete(slug);
       return back(context, `/content/${slug}`, 'scheduled', true);
     }
-    if (live.mergeable === 'behind') {
-      // Main's ruleset merges only a branch that is up to date with main, and its checks run again.
+    if (behind) {
+      // Brought up to date, its checks run again; the Owner publishes once they pass.
       await context.record('content.updated', slug, { pr: pull.number, sha });
       try {
         await github.updateBranch(pull.number, sha);
@@ -1446,11 +1449,21 @@ export const SLOTLOCK_ADMIN_EDITOR_JS = String.raw`(() => {
     }
   };
   let dirty = false;
+  // Publish merges what is saved on GitHub, never what is in this page: with a change not saved yet,
+  // it waits for the save rather than putting the post live without it.
+  const publish = document.querySelector('form.publish button[type="submit"]');
+  const holdPublish = () => {
+    if (!publish || publish.disabled) return;
+    publish.disabled = true;
+    publish.textContent = 'Save to publish';
+    publish.title = 'Publish puts live what is saved: save your changes first.';
+  };
   // The post's settings sit in the inspector, joined to the form by its id: their input reaches the
   // document, not the form.
   document.addEventListener('input', (event) => {
     if (!event.target || event.target.form !== form) return;
     dirty = true;
+    holdPublish();
     counters();
     clearTimeout(timer);
     timer = setTimeout(refresh, 700);

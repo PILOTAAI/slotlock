@@ -3,6 +3,24 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- Publishing a post from the admin console after main had moved on was refused ("GitHub would not
+  merge it"). The console took a branch to be behind main only when GitHub's `mergeable_state` said
+  `behind`, but GitHub answers `unknown` on the first read after main moves, so it asked to merge a
+  branch the main ruleset still wanted brought up to date. Whether a branch is behind now comes from
+  the comparison with main (`behind_by`): the console brings it up to date and says to publish once
+  its checks pass. The hourly CMS workflow decides the same way.
+- Publish no longer puts a post live without the changes still in the editor. Publish merges what is
+  saved on GitHub; with a change not saved yet, its button reads "Save to publish" and waits.
+- The hourly CMS workflow failed on every run since GitHub's installation tokens became about 520
+  characters (the `ghs_<app id>_<JWT>` format, rolled out by 2 October 2026): it refused any token
+  over 255. A post scheduled from the console would never have gone live. It takes them now.
+  Monday's launch post does not depend on it: it is on main, and the site's scheduled-posts workflow
+  shows it when its time comes.
+
 ## 0.12.1 - 2026-11-14
 
 ### Fixed

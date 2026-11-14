@@ -121,7 +121,9 @@ export function scheduleOf(bodies) {
  * alone.
  */
 export async function mergeDuePosts({ token, appSlug, repository, fetch = globalThis.fetch, now = Date.now }) {
-  if (typeof token !== 'string' || !/^[\w.-]{20,255}$/.test(token)) throw new Error('CMS_TOKEN is an installation token');
+  // GitHub's installation tokens are ghs_<app id>_<JWT> since October 2026, about 520 characters and
+  // varying (changelog 2026-10-02, "Stateless GitHub App installation tokens rolled out"): no fixed length.
+  if (typeof token !== 'string' || !/^[\w.-]{20,4096}$/.test(token)) throw new Error('CMS_TOKEN is an installation token');
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(String(appSlug))) throw new Error("CMS_APP_SLUG is the App's slug");
   if (!/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(String(repository))) throw new Error('CMS_REPOSITORY is owner/name');
   const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'slotlock-cms-schedule' };
@@ -214,9 +216,10 @@ export async function mergeDuePosts({ token, appSlug, repository, fetch = global
       }
     }
     // Main's ruleset merges only a branch that is up to date with main; its checks then run again,
-    // and a later run merges it.
+    // and a later run merges it. Behind is what the comparison says: GitHub's mergeable_state is
+    // "unknown" on the first read after main moves.
     const { body: live } = await call('GET', `${repo}/pulls/${number}`);
-    if (live?.mergeable_state === 'behind') {
+    if (Number(compared?.behind_by ?? 0) > 0) {
       await call('PUT', `${repo}/pulls/${number}/update-branch`, { expected_head_sha: sha }, [422]);
       note('updating: it was behind main, and its checks run again');
       continue;

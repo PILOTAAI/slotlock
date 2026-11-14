@@ -207,6 +207,8 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
     return changed.sort();
   };
   const behind = (pull: FakePull) => !ancestors(refs.get(pull.branch) ?? '').has(refs.get('main') as string);
+  /** The main each pull request's mergeability was last worked out against. */
+  const mergeKnownAt = new Map<number, string>();
   const asPull = (pull: FakePull) => ({
     number: pull.number,
     title: pull.title,
@@ -320,7 +322,11 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
         return [{ filename: file, status, ...(patch === undefined ? {} : { patch }) }];
       });
       fake.compared.push(head);
-      return reply({ status: 'ahead', merge_base_commit: { sha: base }, files });
+      const fromHead = ancestors(head);
+      const behindBy = [...onMain].filter((sha) => !fromHead.has(sha)).length;
+      const aheadBy = [...fromHead].filter((sha) => !onMain.has(sha)).length;
+      const status = behindBy && aheadBy ? 'diverged' : behindBy ? 'behind' : aheadBy ? 'ahead' : 'identical';
+      return reply({ status, ahead_by: aheadBy, behind_by: behindBy, merge_base_commit: { sha: base }, files });
     }
 
     if ((match = /^\/git\/ref\/heads\/(.+)$/.exec(rest)) && method === 'GET') {
@@ -450,7 +456,17 @@ export function createFakeGithubRepo(seed: Record<string, string | Uint8Array>, 
     if (onPull && !pull) return reply({ message: 'Not Found' }, 404);
     if (onPull && pull) {
       const sub = onPull[3] ?? '';
-      if (onPull[1] === 'pulls' && sub === '' && method === 'GET') return reply(asPull(pull));
+      if (onPull[1] === 'pulls' && sub === '' && method === 'GET') {
+        // As GitHub does: mergeability is worked out in the background once main has moved, so the
+        // first read after that answers "unknown" and only a later one the computed state (REST docs,
+        // "Get a pull request": mergeable is null while a background job computes it).
+        const main = refs.get('main') as string;
+        if (pull.state === 'open' && mergeKnownAt.get(pull.number) !== main) {
+          mergeKnownAt.set(pull.number, main);
+          return reply({ ...asPull(pull), mergeable: null, mergeable_state: 'unknown' });
+        }
+        return reply(asPull(pull));
+      }
       if (onPull[1] === 'pulls' && sub === '' && method === 'PATCH') {
         if (body.state === 'closed') pull.state = 'closed';
         return reply(asPull(pull));
