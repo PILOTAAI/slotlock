@@ -109,8 +109,9 @@ import {
   createSlotlockOtlpMetricsExporter,
   readSlotlockOtlpConfig,
 } from './otel.js';
-import { appendFile, mkdir, readdir, readFile } from 'node:fs/promises';
-import { join as joinPath } from 'node:path';
+import { constants as fsConstants } from 'node:fs';
+import { type FileHandle, lstat, mkdir, open, readdir, readFile } from 'node:fs/promises';
+import { dirname, join as joinPath } from 'node:path';
 import type { SlotlockAvailabilityException } from './hours.js';
 import type { SlotlockOverrideResources } from './availability-store.js';
 import { readSlotlockHolidayCalendar } from './holiday-import.js';
@@ -1743,9 +1744,36 @@ function hoursLine(resource: SlotlockResource): string {
 }
 
 /**
+ * Why `out` cannot take an export, or null once it can: made now with mode 0700, or already an empty
+ * directory (as lstat sees it, so not a link) of this user's that no one else may write. Whoever
+ * else can write in it could read the export, or turn a table's file into a link elsewhere.
+ */
+async function exportDirectoryProblem(out: string): Promise<string | null> {
+  await mkdir(dirname(out), { recursive: true });
+  try {
+    await mkdir(out, { mode: 0o700 });
+    return null;
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 'EEXIST') throw error;
+  }
+  const found = await lstat(out);
+  if (found.isSymbolicLink()) return 'is a link';
+  if (!found.isDirectory()) return 'is not a directory';
+  if (found.uid !== process.getuid?.()) return 'belongs to another user';
+  if ((found.mode & 0o022) !== 0) return 'can be written by other users';
+  if ((await readdir(out)).length > 0) return 'is not empty';
+  return null;
+}
+
+/** A table's file, made by the export itself: never an entry that was there, nor through a link. */
+const EXPORT_FILE_FLAGS =
+  fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW | fsConstants.O_APPEND;
+
+/**
  * `tenant export [--out <dir>]` (RFC 0004 D3): everything the tenant keeps, read in one snapshot and
- * stored nowhere: JSON lines on stdout, or one NDJSON file a table in a new or empty directory.
- * Prints what it wrote, and records it in the audit log.
+ * stored nowhere: JSON lines on stdout, or one owner-only NDJSON file a table in a new directory, or
+ * an empty one only this user can write (exportDirectoryProblem). Prints what it wrote, and records
+ * it in the audit log. An entry that appears in the directory under a table's name stops it.
  */
 async function runTenantExport(
   config: SlotlockDatabaseConfig,
@@ -1753,12 +1781,14 @@ async function runTenantExport(
   out: string | undefined,
 ): Promise<number> {
   if (out !== undefined) {
-    await mkdir(out, { recursive: true });
-    if ((await readdir(out)).length > 0) {
-      io.stderr.write(`slotlock: ${out} is not empty: export into a new or empty directory\n`);
+    const problem = await exportDirectoryProblem(out);
+    if (problem) {
+      io.stderr.write(`slotlock: ${out} ${problem}: export into a new directory, or an empty one only you can write\n`);
       return 1;
     }
   }
+  // Each table's file, made at its first part and kept open for the rest.
+  const files = new Map<string, FileHandle>();
   const sql = connect(config.databaseUrl, 1);
   try {
     const store = createSlotlockStore(sql);
@@ -1768,7 +1798,12 @@ async function runTenantExport(
         tenantRef,
         onPart: async ({ table, lines }) => {
           if (out !== undefined) {
-            await appendFile(joinPath(out, `${table}.ndjson`), `${lines.join('\n')}\n`, { mode: 0o600 });
+            let file = files.get(table);
+            if (!file) {
+              file = await open(joinPath(out, `${table}.ndjson`), EXPORT_FILE_FLAGS, 0o600);
+              files.set(table, file);
+            }
+            await file.appendFile(`${lines.join('\n')}\n`);
           } else {
             io.stdout.write(lines.map((line) => `{"table":${JSON.stringify(table)},"row":${line}}\n`).join(''));
           }
@@ -1782,7 +1817,15 @@ async function runTenantExport(
     });
     if (out !== undefined) io.stdout.write(`${JSON.stringify({ directory: out, ...totals })}\n`);
     return 0;
+  } catch (error) {
+    const { code, path } = error as { code?: unknown; path?: unknown };
+    if (out !== undefined && (code === 'EEXIST' || code === 'ELOOP') && typeof path === 'string') {
+      io.stderr.write(`slotlock: ${path} appeared while the export ran, so it stopped: export again into a new directory\n`);
+      return 1;
+    }
+    throw error;
   } finally {
+    for (const file of files.values()) await file.close().catch(() => undefined);
     await sql.end({ timeout: 5 });
   }
 }
@@ -2965,8 +3008,9 @@ Commands:
   tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
   tenant export [--out <dir>]
                            Print everything the tenant keeps, read at one moment, one JSON line a
-                           row ({"table": ..., "row": ...}); with --out, one <table>.ndjson file a
-                           table in that directory (new or empty). Secrets stay out
+                           row ({"table": ..., "row": ...}); with --out, one owner-only
+                           <table>.ndjson file a table in that directory (new, or empty and
+                           writable only by you). Secrets stay out
   tenant erase --confirm <tenant>
                            Delete everything the tenant has, its API keys included, for good;
                            --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is

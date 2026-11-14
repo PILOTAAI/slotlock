@@ -1,8 +1,11 @@
 // Holiday calendars (RFC 0004 B1): an iCalendar file of days off (a public-holiday feed, a
 // company's closures) read as closures. Each all-day VEVENT closes the local days it covers;
 // recurring ones are expanded over a bounded span. Timed events are not days off and are skipped.
+import { isIP } from 'node:net';
 import ICAL from 'ical.js';
 import { SLOTLOCK_MAX_EXCEPTION_DAYS, dayToDate, epochDay } from './hours.js';
+import { type BoundedICalendar, CalendarExpansionLimitError, parseBoundedICalendar } from './sync.js';
+import { isPrivateAddress } from './webhooks.js';
 
 /** The longest holiday calendar Slotlock reads: a megabyte. */
 export const SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES = 1_048_576;
@@ -14,6 +17,12 @@ const MAX_LABEL = 200;
 /** Steps through one recurring event's occurrences, and through all of a calendar's. */
 const MAX_STEPS_PER_EVENT = 5_000;
 const MAX_STEPS_PER_CALENDAR = 20_000;
+const REPEATS_TOO_MUCH = 'The calendar repeats too much to read: give its holidays from a later start';
+/**
+ * Recurring events one calendar may hold. Each costs ical.js work besides the steps the budget
+ * charges (src/sync.ts), so a megabyte of them took about half a second however cheap their rules.
+ */
+const MAX_RECURRING_EVENTS = 1_000;
 /**
  * Repeats a calendar of days off has no use for, refused before they are expanded: ical.js steps a
  * DAILY rule day by day until it finds a day of the month or year that may never come (February
@@ -60,25 +69,46 @@ const dateOf = (time: InstanceType<typeof ICAL.Time>) => `${pad(time.year, 4)}-$
  * The days off an iCalendar text names from `from` to `to` (`YYYY-MM-DD`, inclusive): each all-day
  * VEVENT, from DTSTART to the day before DTEND (one day without DTEND or DURATION), and each
  * occurrence of a recurring one. Refuses (`invalid_holiday_calendar`) text that is not iCalendar,
- * more than SLOTLOCK_MAX_HOLIDAY_DAYS holidays, and one longer than SLOTLOCK_MAX_EXCEPTION_DAYS.
+ * more than SLOTLOCK_MAX_HOLIDAY_DAYS holidays, one longer than SLOTLOCK_MAX_EXCEPTION_DAYS, and a
+ * calendar that takes more work to read than a calendar feed may (src/sync.ts parseBoundedICalendar).
+ * That work is counted in steps, not time, so a calendar is read or refused the same way anywhere,
+ * on the Worker too.
  */
 export function parseHolidayCalendar(text: string, span: { from: string; to: string }): ParsedHolidayCalendar {
+  try {
+    return readHolidayCalendar(text, span);
+  } catch (error) {
+    // Past the parse's budget, wherever ical.js spent it: building an expansion (a YEARLY rule that
+    // never occurs walks every year to 20000 before its first step), stepping one, or reading a
+    // zone the calendar defines. Counting occurrences alone let one 150-byte event hold the server
+    // for seconds, and a megabyte of them for hours.
+    if (error instanceof CalendarExpansionLimitError) throw invalidHolidayCalendar(REPEATS_TOO_MUCH);
+    throw error;
+  }
+}
+
+function readHolidayCalendar(text: string, span: { from: string; to: string }): ParsedHolidayCalendar {
   if (Buffer.byteLength(text) > SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES) {
     throw invalidHolidayCalendar('The calendar is larger than a megabyte');
   }
   const first = epochDay(span.from);
   const last = epochDay(span.to);
   if (first === null || last === null || last < first) throw invalidHolidayCalendar('The span is not a range of days');
-  let root: InstanceType<typeof ICAL.Component>;
+  // Read with a calendar feed's bounds (src/sync.ts), so that ical.js does bounded work on any
+  // text, and every recurring event's expansion, built and stepped, is charged to one budget.
+  let calendar: BoundedICalendar;
   try {
-    root = new ICAL.Component(ICAL.parse(text) as unknown[]);
-  } catch {
+    calendar = parseBoundedICalendar(text);
+  } catch (error) {
+    if (error instanceof CalendarExpansionLimitError) throw invalidHolidayCalendar('The calendar takes too much work to read');
     throw invalidHolidayCalendar('The text is not iCalendar');
   }
+  const root = calendar.root;
   if (root.name !== 'vcalendar') throw invalidHolidayCalendar('The text is not a VCALENDAR');
   const holidays: SlotlockHoliday[] = [];
   let skipped = 0;
   let steps = 0;
+  let recurring = 0;
   const vevents = root.getAllSubcomponents('vevent');
   // Each series' overrides, found once: ical.js otherwise looks through every event for each
   // event, so a calendar of many events took minutes.
@@ -128,17 +158,18 @@ export function parseHolidayCalendar(text: string, span: { from: string; to: str
       occurrence(startDay, uid || `${dateOf(start)}:${label}`);
       continue;
     }
+    if (++recurring > MAX_RECURRING_EVENTS) {
+      throw invalidHolidayCalendar(`The calendar has more than ${MAX_RECURRING_EVENTS} recurring events`);
+    }
     for (const rule of component.getAllProperties('rrule')) {
       const why = unreadableRule(rule.getFirstValue());
       if (why) throw invalidHolidayCalendar(`"${label}" cannot be read: ${why}`);
     }
     try {
-      const iterator = event.iterator();
+      const iterator = calendar.expand(event);
       for (let next = iterator.next(), own = 0; next && own < MAX_STEPS_PER_EVENT; next = iterator.next(), own++) {
         steps += 1;
-        if (steps > MAX_STEPS_PER_CALENDAR) {
-          throw invalidHolidayCalendar('The calendar repeats too much to read: give its holidays from a later start');
-        }
+        if (steps > MAX_STEPS_PER_CALENDAR) throw invalidHolidayCalendar(REPEATS_TOO_MUCH);
         const day = epochDay(dateOf(next)) as number;
         if (day > last) break;
         if (day + length - 1 < first) continue;
@@ -146,6 +177,8 @@ export function parseHolidayCalendar(text: string, span: { from: string; to: str
       }
     } catch (error) {
       if ((error as { code?: unknown }).code === 'invalid_holiday_calendar') throw error;
+      // Past the budget: refused as repeating too much (parseHolidayCalendar).
+      if (error instanceof CalendarExpansionLimitError) throw error;
       // ical.js refusing a rule it cannot follow.
       throw invalidHolidayCalendar(`"${label}" repeats in a way that cannot be read`);
     }
@@ -156,9 +189,20 @@ export function parseHolidayCalendar(text: string, span: { from: string; to: str
 }
 
 /**
+ * Whether a URL's host names this machine or a private network by itself: `localhost`, or an IP
+ * literal isPrivateAddress refuses (loopback, private, link-local and the like).
+ */
+function namesPrivateHost(url: URL): boolean {
+  const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  return isIP(host) !== 0 && isPrivateAddress(host);
+}
+
+/**
  * The text at a holiday calendar's URL: `https` only, through `fetch` (give it the guarded fetch, so
- * a private address is refused), at most SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES, within ten seconds.
- * Refuses `invalid_holiday_calendar` for anything else, and `holiday_calendar_unreachable` when it
+ * a name resolving to a private address is refused too), at most SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES,
+ * within ten seconds. Refuses `invalid_holiday_calendar` for anything else, and for a URL naming
+ * `localhost` or a private IP address whatever `fetch` is; `holiday_calendar_unreachable` when it
  * cannot be read.
  */
 export async function fetchHolidayCalendar(fetcher: typeof fetch, url: string): Promise<string> {
@@ -171,6 +215,9 @@ export async function fetchHolidayCalendar(fetcher: typeof fetch, url: string): 
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
     throw invalidHolidayCalendar('The calendar URL must be https, without credentials');
   }
+  // Refused here, not only by the guarded fetch serve passes, so an embedder whose fetch checks no
+  // address (the dashboard Worker's own) never sends a member's URL to a private network.
+  if (namesPrivateHost(parsed)) throw invalidHolidayCalendar('The calendar URL names a private address');
   const unreachable = (message: string) =>
     Object.assign(new Error(message), { code: 'holiday_calendar_unreachable' as const });
   let response: Response;

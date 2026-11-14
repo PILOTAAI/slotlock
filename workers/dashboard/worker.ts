@@ -470,8 +470,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                 ? { previousSecrets: config.assistantPreviousSecrets }
                 : {}),
               backend: perRequest(() => current().agent),
-              // A Worker's fetch reaches no private network (nor this isolate's loopback), so the
-              // literal URL check is the one that applies; names are not resolved here.
+              // A Worker's fetch reaches no private network (nor this isolate's loopback), and its own
+              // zone only through the zone's front door (global_fetch_strictly_public), so the literal
+              // URL check is the one that applies; names are not resolved here.
               fetch: (input: string | URL | Request, init?: RequestInit) => fetch(input, init),
               resolve: async () => [],
               consumeRateLimit: async (args: {
@@ -711,7 +712,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           agent: agentBackend,
           // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with.
           // Holiday calendars by address (RFC 0004 B1): the Worker's fetch, which reaches only the
-          // public internet; fetchHolidayCalendar takes https only, no redirects, 1 MB, 10 seconds.
+          // public internet, its own zone included through the zone's front door
+          // (global_fetch_strictly_public, wrangler.jsonc); fetchHolidayCalendar refuses localhost
+          // and private IP literals itself, and takes https only, no redirects, 1 MB, 10 seconds.
           resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: (input, init) => fetch(input, init) }),
           state: createSlotlockDashboardState(sql),
           workspaces: createSlotlockDashboardWorkspaces(sql),

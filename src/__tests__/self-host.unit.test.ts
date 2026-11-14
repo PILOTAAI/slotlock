@@ -1,7 +1,19 @@
 // The `slotlock` command's configuration: defaults, every refusal, and that no refusal or usage error
 // echoes a secret. Nothing here connects to a database; a refused configuration never gets that far.
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  chownSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { slotlockAgentOperationScope, slotlockAgentTools } from '../agent-server.js';
 import { SLOTLOCK_CAP_NAMES, SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
@@ -944,5 +956,49 @@ describe('slotlock command line', () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toMatch(/SLOTLOCK_AUTH_TOKEN is too weak/);
     expect(result.stderr).not.toContain(weak);
+  });
+
+  // Whoever else can write in an export's directory can read the export, or link a table's file
+  // elsewhere: only a new directory, or an empty one only this user can write, is taken.
+  it('refuses a tenant export directory someone else could write in, before it connects', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'slotlock-export-dir-'));
+    const env = { DATABASE_URL, SLOTLOCK_TENANT: 'acme' };
+    const refused = async (out: string, why: string) => {
+      const result = await run(['tenant', 'export', '--out', out], env);
+      expect(result).toEqual({
+        code: 1,
+        stdout: '',
+        stderr: `slotlock: ${out} ${why}: export into a new directory, or an empty one only you can write\n`,
+      });
+    };
+    try {
+      const full = join(scratch, 'full');
+      mkdirSync(full, { mode: 0o700 });
+      writeFileSync(join(full, 'notes.txt'), '');
+      await refused(full, 'is not empty');
+      const shared = join(scratch, 'shared');
+      mkdirSync(shared);
+      chmodSync(shared, 0o777);
+      await refused(shared, 'can be written by other users');
+      const group = join(scratch, 'group');
+      mkdirSync(group);
+      chmodSync(group, 0o770);
+      await refused(group, 'can be written by other users');
+      const empty = join(scratch, 'empty');
+      mkdirSync(empty, { mode: 0o700 });
+      symlinkSync(empty, join(scratch, 'link'));
+      await refused(join(scratch, 'link'), 'is a link');
+      writeFileSync(join(scratch, 'file'), '');
+      await refused(join(scratch, 'file'), 'is not a directory');
+      if (process.getuid?.() === 0) {
+        const theirs = join(scratch, 'theirs');
+        mkdirSync(theirs, { mode: 0o700 });
+        chownSync(theirs, 65_534, 65_534);
+        await refused(theirs, 'belongs to another user');
+      }
+      expect(readdirSync(shared)).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

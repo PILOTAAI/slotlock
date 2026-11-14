@@ -1,14 +1,34 @@
 // Exporting a whole tenant (RFC 0004 D3) against real Postgres, over the API: asked for, built in
 // the background, read part by part; every table as kept, without secrets, the tenant or anyone
 // else's rows; a large table split into parts; one at a time and five kept; deleted on request, by
-// expiry, and built by maintenance when its server stopped first. Skipped without DATABASE_URL.
+// expiry, and built by maintenance when its server stopped first. And `slotlock tenant export --out`:
+// owner-only files the export made itself. Skipped without DATABASE_URL.
 import { randomUUID } from 'node:crypto';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type SlotlockAgentPrincipal, createSlotlockAgentServer } from '../agent-server.js';
 import { createSlotlockStoreAgentBackend, createSlotlockStoreApplicationBackend } from '../agent-store-backend.js';
 import { maintainSlotlockTenant } from '../maintenance.js';
+import { runSlotlockCli } from '../self-host.js';
 import { SLOTLOCK_TENANT_EXPORT_PART_ROWS, type SlotlockStore, createSlotlockStore } from '../store.js';
+
+// Another local user acting between the export's check of its directory and its first file: once
+// armed, the next directory listing runs `plant` as it returns.
+const listing = vi.hoisted(() => ({ plant: undefined as ((directory: string) => void) | undefined }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const readdir = async (...args: Parameters<typeof actual.readdir>) => {
+    const listed = await (actual.readdir as (...given: typeof args) => Promise<unknown>)(...args);
+    const plant = listing.plant;
+    listing.plant = undefined;
+    plant?.(String(args[0]));
+    return listed;
+  };
+  return { ...actual, readdir };
+});
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
 const BASE = 'http://localhost/slotlock';
@@ -168,5 +188,78 @@ describe.skipIf(!url)('exporting a tenant (real Postgres)', () => {
     await sql`UPDATE slotlock.tenant_exports SET expires_at = now() - interval '1 minute' WHERE tenant_ref = ${tenantRef}`;
     await maintainSlotlockTenant(store, tenantRef);
     expect((await call('GET', '/v1/tenant/exports')).body.exports).toEqual([]);
+  });
+
+  // `--out` took any existing directory once it was empty, then appended each table to whatever
+  // entry had its name by then: a file another user planted kept its mode and got the rows, and a
+  // link sent them anywhere the operator could write.
+  it('exports with --out into owner-only files it made itself, and stops at an entry someone else made', async () => {
+    const cliRef = `export-cli-${randomUUID()}`;
+    const scratch = mkdtempSync(join(tmpdir(), 'slotlock-export-cli-'));
+    const run = async (...argv: string[]) => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const code = await runSlotlockCli(argv, {
+        env: { DATABASE_URL: url as string, SLOTLOCK_TENANT: cliRef },
+        stdout: { write: (chunk: string) => stdout.push(chunk) },
+        stderr: { write: (chunk: string) => stderr.push(chunk) },
+        signal: new AbortController().signal,
+      });
+      return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+    };
+    const mode = (path: string) => lstatSync(path).mode & 0o777;
+    try {
+      expect((await run('resource', 'add', 'room-1')).code).toBe(0);
+
+      const fresh = join(scratch, 'made', 'export');
+      const made = await run('tenant', 'export', '--out', fresh);
+      expect(made.stderr).toBe('');
+      expect(made.code).toBe(0);
+      expect(mode(fresh)).toBe(0o700);
+      const files = readdirSync(fresh);
+      expect(files).toContain('resources.ndjson');
+      for (const file of files) expect(mode(join(fresh, file))).toBe(0o600);
+      expect(readFileSync(join(fresh, 'resources.ndjson'), 'utf8')).toContain('"room-1"');
+
+      // An empty directory of this user's that no one else may write is taken.
+      const own = join(scratch, 'own');
+      mkdirSync(own, { mode: 0o755 });
+      chmodSync(own, 0o755);
+      expect((await run('tenant', 'export', '--out', own)).code).toBe(0);
+
+      // One anybody may write is refused, before anything is read.
+      const shared = join(scratch, 'shared');
+      mkdirSync(shared);
+      chmodSync(shared, 0o777);
+      const open = await run('tenant', 'export', '--out', shared);
+      expect(open.code).toBe(1);
+      expect(open.stderr).toContain('can be written by other users');
+      expect(readdirSync(shared)).toEqual([]);
+
+      // An entry made after the check, a file or a link, stops the export and gets nothing.
+      const outside = join(scratch, 'outside.txt');
+      writeFileSync(outside, '', { mode: 0o644 });
+      for (const plant of [
+        (directory: string) => symlinkSync(outside, join(directory, 'resources.ndjson')),
+        (directory: string) => writeFileSync(join(directory, 'resources.ndjson'), 'planted\n', { mode: 0o644 }),
+      ]) {
+        const target = mkdtempSync(join(scratch, 'raced-'));
+        chmodSync(target, 0o700);
+        listing.plant = plant;
+        const raced = await run('tenant', 'export', '--out', target);
+        expect(listing.plant).toBeUndefined();
+        expect(raced.code).toBe(1);
+        expect(raced.stderr).toContain('resources.ndjson appeared while the export ran, so it stopped');
+        expect(raced.stdout).toBe('');
+        expect(readFileSync(outside, 'utf8')).toBe('');
+        if (!lstatSync(join(target, 'resources.ndjson')).isSymbolicLink()) {
+          expect(readFileSync(join(target, 'resources.ndjson'), 'utf8')).toBe('planted\n');
+        }
+      }
+    } finally {
+      listing.plant = undefined;
+      rmSync(scratch, { recursive: true, force: true });
+      await sql`SELECT * FROM slotlock.erase_tenant(${cliRef}::text)`;
+    }
   });
 });

@@ -348,6 +348,8 @@ As built:
 - A holiday calendar's all-day events become closures. Recurring ones are expanded over a span of
   at most three years. Timed and cancelled events are skipped. An import keys each closure by the
   event's UID and day, so importing again updates instead of adding.
+- A calendar is read within a feed's expansion budget and limits (sync.ts parseBoundedICalendar),
+  each rule's iterator charged from its construction, with at most 1,000 recurring events.
 - `serve` fetches a URL through the guarded fetch. A library backend fetches none unless given one.
 - The export writes the coming year's closures as EXDATEs on the weekly AVAILABLEs. Special hours
   are AVAILABLEs repeated by RDATE. The import turns EXDATE, RDATE and single AVAILABLEs into the

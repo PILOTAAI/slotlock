@@ -196,7 +196,8 @@ asks for the token again.
 Each deploy (`scripts/deploy-dashboard.mjs`):
 
 - refuses a configuration that keeps the example's values, names a var like a secret (vars are plain
-  text in Cloudflare's dashboard and in the deploy log), or sets `SLOTLOCK_FREE_PLAN_FROM`;
+  text in Cloudflare's dashboard and in the deploy log), sets `SLOTLOCK_FREE_PLAN_FROM`, or lacks
+  the `global_fetch_strictly_public` compatibility flag ([How it runs](#how-it-runs));
 - refuses a Hyperdrive configuration that caches queries, and warns when the token cannot read it;
 - refuses a var that is also one of the Worker's secrets (Cloudflare would refuse the upload), and a
   Worker without `SLOTLOCK_GITHUB_CLIENT_ID`, `SLOTLOCK_GITHUB_CLIENT_SECRET` or
@@ -248,3 +249,11 @@ Each deploy (`scripts/deploy-dashboard.mjs`):
   person from both lists signs them out and stops their keys. A server without it takes every
   person's keys.
 - A missing or weak secret makes the Worker answer 503 and log which variable, never its value.
+- The Worker fetches addresses members give: a holiday calendar's URL, the assistant's model, a
+  team's identity provider. Each refuses `localhost` and private, loopback and link-local IP
+  addresses itself (the assistant's, unless `SLOTLOCK_ASSISTANT_PRIVATE_URLS=on`). The example
+  configuration sets the `global_fetch_strictly_public`
+  [compatibility flag](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public):
+  without it, a fetch to a hostname in the Worker's own zone goes straight to that hostname's origin,
+  past the zone's WAF, Access and IP rules. Keep it in your copy; a deploy refuses a configuration
+  without it.
