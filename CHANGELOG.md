@@ -5,6 +5,10 @@ versioning.
 
 ## Unreleased
 
+### Fixed
+
+- **The dashboard works again on a database the server's release has not migrated yet.** The dashboard deployed from `main` on 14 November answered 500 to signed-in people about half the time: on a schema from 0.10.2 it called two functions the schema lacked (the staff notices and the suspension notice) and caught the failures, but through Hyperdrive a failed query cost the request its connection ("Network connection lost"). It now asks the database, once a minute, which of those functions it has, and calls only those; so does the billing webhook's admin note and the metered-overage read.
+
 ### Added
 
 - **The hosted dashboard deploys itself** (`dashboard-deploy.yml`): each time CI passes on a push to

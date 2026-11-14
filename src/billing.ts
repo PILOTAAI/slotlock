@@ -10,6 +10,7 @@ import {
   setSlotlockTenantPlan,
   setSlotlockTenantPlanOverage,
 } from './plans.js';
+import { createSlotlockSchemaFunctions } from './schema-functions.js';
 import type { SlotlockSql } from './store.js';
 
 export type SlotlockBillingInterval = 'month' | 'year';
@@ -397,6 +398,9 @@ async function noteBillingEvent(
   stripeObject: string,
   detail: Record<string, string | number | null> = {},
 ): Promise<void> {
+  // Asked first: a failed call can cost a Worker request its connection (schema-functions.ts).
+  const signature = 'slotlock.note_billing_event(text,text,text,jsonb)';
+  if (!(await createSlotlockSchemaFunctions(sql, [signature])(signature))) return;
   try {
     await sql`SELECT slotlock.note_billing_event(${happened}, ${tenantRef}, ${stripeObject}, ${sql.json(detail)})`;
   } catch (error) {

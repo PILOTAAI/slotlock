@@ -2,6 +2,7 @@
 // (slotlock.tenant_plans, set from the tenant's Stripe subscription). A tenant with no plan row is on
 // the deployment's default plan once it applies (slotlock.plan_defaults, `slotlock plan default`),
 // and otherwise has no plan limits, so self-hosted Slotlock, which writes neither, is unchanged.
+import { createSlotlockSchemaFunctions } from './schema-functions.js';
 import type { SlotlockSql } from './store.js';
 
 /**
@@ -116,6 +117,9 @@ export async function readSlotlockTenantQuotas(
  * and the tenant stops at its plan's stop, as it did before overage.
  */
 async function readSlotlockTenantPlanOverage(sql: SlotlockSql, tenantRef: string): Promise<boolean> {
+  // Asked first: a failed call can cost a Worker request its connection (schema-functions.ts).
+  const signature = 'slotlock.tenant_plan_overage(text)';
+  if (!(await createSlotlockSchemaFunctions(sql, [signature])(signature))) return false;
   try {
     const [row] = await sql<{ metered: boolean }[]>`SELECT slotlock.tenant_plan_overage(${tenantRef}::text) AS metered`;
     return row?.metered === true;
@@ -185,6 +189,8 @@ export async function setSlotlockTenantPlanOverage(
   sql: SlotlockSql,
   input: { tenantRef: string; stripeSubscription: string; metered: boolean },
 ): Promise<void> {
+  const signature = 'slotlock.set_tenant_plan_overage(text,text,boolean)';
+  if (!(await createSlotlockSchemaFunctions(sql, [signature])(signature))) return;
   try {
     await sql`SELECT slotlock.set_tenant_plan_overage(
       ${input.tenantRef}::text, ${input.stripeSubscription}::text, ${input.metered}::boolean)`;
