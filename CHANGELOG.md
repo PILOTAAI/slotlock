@@ -7,6 +7,10 @@ versioning.
 
 ### Changed
 
+- **The blog is written in the admin console.** The four posts published on 11 November 2026 are
+  gone from the site; their addresses redirect to the docs sections that cover the same ground
+  (Concepts and Use cases), and every link to them now points there. The launch post stays scheduled
+  for 16 November. The blog page says "No posts yet." while none is published.
 - **One GitHub App.** The admin console's Content, Communications > Status page and both Deploys
   panels, and the hourly CMS schedule, use the release app (`pilotaai-slotlock-release`) instead of
   a "Slotlock CMS" App of their own. The release app now holds what its users need between them:

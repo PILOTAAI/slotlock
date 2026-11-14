@@ -21,17 +21,17 @@ Today Slotlock is open to everyone. It is a calendar for AI agents: it books veh
 
 ## Why another calendar
 
-Calendar APIs were built for a person clicking one button at a time. Agents are different: they run in fleets, they retry when a call times out, and they believe what a tool tells them. Put them on an ordinary calendar and the bookings collide ([four ways it happens](/blog/why-ai-agents-double-book/)).
+Calendar APIs were built for a person clicking one button at a time. Agents are different: they run in fleets, they retry when a call times out, and they believe what a tool tells them. Put them on an ordinary calendar and the bookings collide.
 
-We hit this first with [Pylota](/blog/pylota-car-rental-case-study/)'s car rental agents, where a phone agent, a chat agent and a partner's agent could all want the same van in the same second. Slotlock is what we built so that could never end in two customers and one van.
+We hit this first with [Pylota](/docs/use-cases/#car-and-van-rental)'s car rental agents, where a phone agent, a chat agent and a partner's agent could all want the same van in the same second. Slotlock is what we built so that could never end in two customers and one van.
 
 ## What it does
 
 - **Resources own calendars.** A van, a room or a technician has weekly hours and a time zone. Agents ask when it is free, and get times they can book.
-- **PostgreSQL decides overlaps.** An exclusion constraint checks every write inside the transaction, so a race has one winner ([how the constraint works](/blog/postgresql-exclusion-constraint-double-booking/)). The loser gets a refusal it can act on, with a code, not a stack trace.
+- **PostgreSQL decides overlaps.** An exclusion constraint checks every write inside the transaction, so a race has one winner ([how the constraint works](/docs/concepts/#the-exclusion-constraint)). The loser gets a refusal it can act on, with a code, not a stack trace.
 - **Retries are safe.** Writes take an idempotency key and an expected revision: a retried booking answers the first result instead of booking twice.
 - **Unknown is not free.** Busy time imported from a feed that has not synced shows as uncertain, and search never offers it.
-- **Holds keep options while a person decides.** An agent holds up to {{facts.holdSlotsMax}} candidate times as one group; booking one releases the rest, and a hold nobody books lapses on its own ([holds, in detail](/blog/holds-keep-a-slot-while-a-person-decides/)).
+- **Holds keep options while a person decides.** An agent holds up to {{facts.holdSlotsMax}} candidate times as one group; booking one releases the rest, and a hold nobody books lapses on its own ([holds, in detail](/docs/concepts/#holds)).
 
 ## How agents and code reach it
 

@@ -35,7 +35,7 @@ export const aboutPage: MarketingPage = {
             'That store became Slotlock: a calendar per resource, holds that expire on the database clock, time that no feed has proven treated as unknown, and the same operations over MCP, A2A and REST. Pylota still runs it as a library inside its own database, and checks every booking with it.',
           ],
         },
-        { kind: 'links', items: [{ label: 'How Pylota uses Slotlock', href: '/blog/pylota-car-rental-case-study/' }] },
+        { kind: 'links', items: [{ label: 'How Pylota uses Slotlock', href: '/docs/use-cases/#car-and-van-rental' }] },
       ],
     },
     {

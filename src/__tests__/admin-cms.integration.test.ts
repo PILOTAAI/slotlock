@@ -28,7 +28,8 @@ const OWNER_SIGN_OFF = 'Signed-off-by: octo-owner <1001+octo-owner@users.noreply
 
 // The post: a real post's body, which passes the site's checks, under a new address and title.
 const EXISTING = 'why-ai-agents-double-book';
-const existingText = readFileSync(`site/content/blog/${EXISTING}.md`, 'utf8');
+// Copies of two posts the site once published: the fake repository's existing posts.
+const existingText = readFileSync(`src/__tests__/fixtures/blog/${EXISTING}.md`, 'utf8');
 const source = parsePost(existingText, EXISTING);
 const FACTS = Object.fromEntries([...source.body.matchAll(/\{\{facts\.(\w+)\}\}/g)].map((match) => [match[1] as string, 5]));
 const SLUG = 'calendars-for-agents';
@@ -131,7 +132,7 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     repo = createFakeGithubRepo(
       {
         [`site/content/blog/${EXISTING}.md`]: existingText,
-        'site/content/blog/holds-keep-a-slot-while-a-person-decides.md': readFileSync('site/content/blog/holds-keep-a-slot-while-a-person-decides.md', 'utf8'),
+        'site/content/blog/holds-keep-a-slot-while-a-person-decides.md': readFileSync('src/__tests__/fixtures/blog/holds-keep-a-slot-while-a-person-decides.md', 'utf8'),
         'site/src/data/authors.json': readFileSync('site/src/data/authors.json', 'utf8'),
         'site/public/_redirects': readFileSync('site/public/_redirects', 'utf8'),
         'src/index.ts': 'export {};\n',

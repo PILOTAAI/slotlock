@@ -24,6 +24,9 @@ import { BLOG, blogSeo, longDate } from '../../lib/blog';
   </section>
   <section class="band" aria-label="Posts">
     <div class="wrap">
+      {POSTS.length === 0 && <p class="post-meta">No posts yet.</p>}
+      {
+        POSTS.length > 0 && (
       <ul class="posts">
         {
           POSTS.map((post) => (
@@ -39,6 +42,8 @@ import { BLOG, blogSeo, longDate } from '../../lib/blog';
           ))
         }
       </ul>
+        )
+      }
       <p class="post-meta">
         <a href="/blog/rss.xml">RSS feed</a>
       </p>

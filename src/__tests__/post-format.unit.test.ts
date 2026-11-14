@@ -139,10 +139,16 @@ describe('the post format', () => {
 
   it('renders every post in the repository cleanly, and each passes the checks the build does not cover', () => {
     const facts = new Proxy({}, { get: () => 1 }) as Record<string, unknown>;
-    const files = readdirSync('site/content/blog').filter((file) => file.endsWith('.md'));
-    expect(files.length).toBeGreaterThanOrEqual(4);
+    // Posts are written in the admin console now, so the repository may hold few or none: the two
+    // fixture posts (once published here) keep the checks exercised on real writing.
+    const files = ['site/content/blog', 'src/__tests__/fixtures/blog'].flatMap((directory) =>
+      readdirSync(directory)
+        .filter((file) => file.endsWith('.md'))
+        .map((file) => `${directory}/${file}`),
+    );
+    expect(files.length).toBeGreaterThanOrEqual(2);
     const descriptions: Record<string, string> = {};
-    const parsed = files.map((file) => parsePost(readFileSync(`site/content/blog/${file}`, 'utf8'), file.slice(0, -3)));
+    const parsed = files.map((file) => parsePost(readFileSync(file, 'utf8'), (file.split('/').at(-1) as string).slice(0, -3)));
     for (const one of parsed) descriptions[one.slug] = one.front.description;
     for (const one of parsed) {
       const rendered = renderPostBody(one.body, { slug: one.slug, facts });
