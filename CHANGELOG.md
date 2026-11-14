@@ -98,6 +98,11 @@ versioning.
   name an account by reference, an id, a key's prefix or a Stripe customer; a search by name, login
   or email (the console's GitHub lookup included) is kept as a digest keyed with the deployment's
   secret (`slotlock.staff_search_record`). Entries written before this change stay as they were.
+- Accounts' **Paying** and **Past due** views list the plans Home's and Billing's figures count, by
+  the same rule (`slotlock.staff_subscribed_plans`, which `slotlock.admin_accounts` now filters by).
+  Paying listed every active plan but Free, those set to end, trials, partners' and plans with no
+  subscription included, and left out past due ones. Run `slotlock migrate`: until then both views
+  are empty.
 
 ### Security
 

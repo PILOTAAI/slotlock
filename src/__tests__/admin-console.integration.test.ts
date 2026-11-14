@@ -100,8 +100,8 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
       VALUES (${PERSON}, 'booking-agent', 'slk_AbCd1234', ${sha('secret')}, ARRAY['read', 'write'])`;
     await superuser`
       INSERT INTO slotlock.tenant_plans (tenant_ref, plan, status, max_resources, max_api_keys,
-                                         max_webhook_endpoints, stripe_customer)
-      VALUES (${PERSON}, 'developer', 'active', 100, 100, 10, 'cus_TEST123')`;
+                                         max_webhook_endpoints, stripe_customer, stripe_subscription)
+      VALUES (${PERSON}, 'developer', 'active', 100, 100, 10, 'cus_TEST123', 'sub_TEST123')`;
     const today = new Date().toISOString().slice(0, 10);
     await superuser`
       INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, origin, count)

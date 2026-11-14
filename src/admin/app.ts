@@ -787,7 +787,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     plan: string; plan_status: string | null; plan_ends_at?: Date | null; suspended: boolean; stripe_customer?: string | null;
     operations_month: string; bookings_month: string;
   }
-  /** Saved views of the account list; the database filters plan and suspension, the console the rest. */
+  /**
+   * Saved views of the account list. The database filters plan, suspension, and paying and past due
+   * (by the rule Home and Billing count them: staff_subscribed_plans); the console the rest.
+   */
   const ACCOUNT_VIEWS = Object.freeze({
     all: 'All', paying: 'Paying', past_due: 'Past due', suspended: 'Suspended', near_quota: 'Near quota', partners: 'Partners', test: 'Test',
   } as const);
@@ -836,19 +839,17 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
     if (view === 'near_quota') return nearQuota(session, url, q);
     const prefix = q ? null : view === 'partners' ? (KIND_PREFIX.partner ?? null) : kind && kind !== 'person' ? (KIND_PREFIX[kind] ?? null) : null;
-    const status = view === 'suspended' ? 'suspended' : legacy === 'active' ? 'active' : null;
+    const status = view === 'suspended' || view === 'paying' || view === 'past_due' ? view : legacy === 'active' ? 'active' : null;
     const cutoff = (days: number) => now() - days * DAY_MS;
     const keep = (row: AccountRow) =>
-      (view !== 'paying' || (row.plan !== 'free' && row.plan_status === 'active'))
-      && (view !== 'past_due' || row.plan_status === 'past_due')
-      && (view !== 'test' || row.kind === 'test')
+      (view !== 'test' || row.kind === 'test')
       && (view !== 'partners' || row.kind === 'partner')
       && (!kind || row.kind === kind)
       && (!created || (row.created_at !== null && new Date(row.created_at).getTime() >= cutoff(AGE_DAYS[created] ?? 0)))
       && (!active || (active === 'idle'
         ? row.last_active === null || new Date(row.last_active).getTime() < cutoff(30)
         : row.last_active !== null && new Date(row.last_active).getTime() >= cutoff(active === '7d' ? 7 : 30)));
-    const filtering = view === 'paying' || view === 'past_due' || view === 'test' || view === 'partners' || Boolean(kind || created || active);
+    const filtering = view === 'test' || view === 'partners' || Boolean(kind || created || active);
     // A view the console filters reads the largest page the database gives, and shows what matches.
     const scan = filtering ? SLOTLOCK_ADMIN_PAGE_LIMIT : PAGE;
     const find = (query: string | null) =>

@@ -181,6 +181,29 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     expect(stripeCalls).toEqual(['/v1/subscriptions']);
   });
 
+  it("lists on Accounts' Paying and Past due views the plans Home and Billing count, by the same rule", async () => {
+    /** The accounts a list's rows link to, sorted. */
+    const listed = (page: string) => {
+      const rows = page.slice(page.indexOf('<tbody>'), page.indexOf('</tbody>'));
+      return [...new Set([...rows.matchAll(/href="\/accounts\/([^"/?#]+)"/g)].map((match) => decodeURIComponent(match[1] ?? '')))].sort();
+    };
+    const viewCount = (page: string, label: string) => new RegExp(`>${label}<span class="count">([^<]*)</span>`).exec(page)?.[1];
+    const home = await text(staff.owner, '/');
+    const billing = await text(staff.owner, '/billing');
+    const paying = await text(staff.owner, '/accounts?view=paying');
+    // Past due included; never the plan set to end, the trial, a plan with no subscription, a
+    // partner's or a test environment's.
+    expect(listed(paying)).toEqual([ADA, PAST_DUE, PAYING].sort());
+    expect(viewCount(paying, 'Paying')).toBe('3');
+    expect(paying).toContain('1–3 of 3');
+    expect(tile(home, 'Paying').value).toBe('3');
+    expect(tile(billing, 'Paying').value).toBe('3');
+    const pastDue = await text(staff.owner, '/accounts?view=past_due');
+    expect(listed(pastDue)).toEqual([PAST_DUE]);
+    expect(viewCount(pastDue, 'Past due')).toBe('1');
+    expect(tile(billing, 'Past due').value).toBe('1');
+  });
+
   it('says when a plan set to end ends, on Accounts and on its page, from what the webhook kept', async () => {
     const before = stripeCalls.length;
     const accounts = await text(staff.owner, '/accounts');
