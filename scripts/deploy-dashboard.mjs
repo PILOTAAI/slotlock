@@ -23,7 +23,11 @@
 // The configuration is checked for: a name; `main` worker.ts; vars.SLOTLOCK_PUBLIC_URL an https
 // origin (http on loopback only); nothing left from the example (example.com, "set-this-to"); no var named like a secret
 // (…_SECRET, …_SECRETS, …_TOKEN, …_KEY, …_PASSWORD), since vars are plain text in Cloudflare's
-// dashboard and in the deploy log; and no SLOTLOCK_FREE_PLAN_FROM, which makes billing answer 503.
+// dashboard and in the deploy log; no SLOTLOCK_FREE_PLAN_FROM, which makes billing answer 503; and
+// the global_fetch_strictly_public compatibility flag, without which the Worker's fetch of a URL a
+// member gives reaches a hostname in its own zone past that zone's security settings
+// (https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public,
+// read 2026-11-14).
 //
 // Environment:
 //   SLOTLOCK_DASHBOARD_WRANGLER_CONFIG  the production configuration, JSON or JSONC (the dashboard
@@ -124,6 +128,13 @@ export function configProblems(text) {
   }
   if ('SLOTLOCK_FREE_PLAN_FROM' in vars) {
     problems.push('vars.SLOTLOCK_FREE_PLAN_FROM makes billing answer 503: remove it.');
+  }
+  const flags = Array.isArray(config.compatibility_flags) ? config.compatibility_flags : [];
+  if (!flags.includes('global_fetch_strictly_public') || flags.includes('global_fetch_private_origin')) {
+    problems.push(
+      '"compatibility_flags" must include "global_fetch_strictly_public", as wrangler.jsonc does: without it, the ' +
+        'Worker\'s fetch of a URL a member gives reaches a hostname in its own zone past the zone\'s security settings.',
+    );
   }
   return problems;
 }
