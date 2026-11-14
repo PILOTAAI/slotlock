@@ -1618,6 +1618,32 @@ describe.skipIf(!hasJq)('release preparation', () => {
     expect(repo.script('check-release-tag.sh', 'v1.2.4', '--commit', released).status).toBe(0);
   });
 
+  it("records the release's schema functions, which the dashboard Worker may call", () => {
+    const repo = project();
+    mkdirSync(join(repo.cwd, 'src'));
+    mkdirSync(join(repo.cwd, 'workers/dashboard'), { recursive: true });
+    writeFileSync(
+      join(repo.cwd, 'src/ddl.ts'),
+      'CREATE OR REPLACE FUNCTION slotlock.beta(text)\nCREATE FUNCTION slotlock.alpha()\nDROP FUNCTION slotlock.gone(text)\n',
+    );
+    writeFileSync(join(repo.cwd, 'src/ddl-sso.ts'), 'CREATE OR REPLACE FUNCTION slotlock.gamma(uuid)\n');
+    writeFileSync(join(repo.cwd, 'src/store.ts'), 'CREATE OR REPLACE FUNCTION slotlock.not_schema()\n');
+    writeFileSync(
+      join(repo.cwd, 'workers/dashboard/released-schema-functions.json'),
+      `${JSON.stringify({ release: '1.2.3', functions: ['alpha'] }, null, 2)}\n`,
+    );
+    repo.git('add', '.');
+    repo.commit('schema');
+    const result = repo.script('prepare-release.sh', '1.2.4');
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(JSON.parse(contents(repo, 'workers/dashboard/released-schema-functions.json'))).toEqual({
+      release: '1.2.4',
+      functions: ['alpha', 'beta', 'gamma'],
+    });
+    expect(read('scripts/open-release-pr.sh')).toContain('git add workers/dashboard/released-schema-functions.json');
+  });
+
   it.each([
     ['1.2.4', true],
     ['1.3.0', true],
