@@ -8,6 +8,10 @@
 #   scripts/configure-github.sh                  apply
 #   scripts/configure-github.sh --site-secrets   only replace the Cloudflare secrets, after
 #                                                checking them with Cloudflare
+#   scripts/configure-github.sh --dashboard-deploy <wrangler configuration>
+#                                                only set up dashboard-deploy.yml: the dashboard
+#                                                environment, its Cloudflare secrets (checked with
+#                                                Cloudflare) and the production configuration
 #   scripts/configure-github.sh --rotate-tag-key replace the deploy key tag-release.yml pushes
 #                                                release tags with
 #   scripts/configure-github.sh --allow-actions-pull-requests
@@ -24,6 +28,9 @@
 # Environment:
 #   SKIP_SITE_SECRETS=1     do not ask for the Cloudflare secrets now (add them later)
 #   REPLACE_SITE_SECRETS=1  ask for them again even when they are already set
+#   REPLACE_DASHBOARD_SECRETS=1
+#                           with --dashboard-deploy, ask for the dashboard's Cloudflare secrets
+#                           again even when they are already set
 #
 # Every endpoint, field and payload shape was read from the GitHub REST API docs on 2026-10-09.
 # They are for API version 2026-03-10, the newest one (GET https://api.github.com/versions
@@ -102,16 +109,23 @@ TAG_KEY_TITLE='slotlock tag-release (GitHub Actions)'
 TAG_KEY_SECRET=TAG_RELEASE_DEPLOY_KEY
 
 usage() {
-  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^# Needs bash/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN=0
 SITE_SECRETS_ONLY=0
 ROTATE_TAG_KEY=0
 ACTIONS_PULL_REQUESTS=0
+DASHBOARD_DEPLOY_ONLY=0
+DASHBOARD_CONFIG=''
 for arg in "$@"; do
+  if [ "$DASHBOARD_DEPLOY_ONLY" -eq 1 ] && [ -z "$DASHBOARD_CONFIG" ]; then
+    DASHBOARD_CONFIG=$arg
+    continue
+  fi
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --dashboard-deploy) DASHBOARD_DEPLOY_ONLY=1 ;;
     --rotate-tag-key) ROTATE_TAG_KEY=1 ;;
     --allow-actions-pull-requests) ACTIONS_PULL_REQUESTS=1 ;;
     --site-secrets) SITE_SECRETS_ONLY=1 ;;
@@ -126,6 +140,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+if [ "$DASHBOARD_DEPLOY_ONLY" -eq 1 ] && [ -z "$DASHBOARD_CONFIG" ]; then
+  printf '%s\n\n' '--dashboard-deploy needs the production Wrangler configuration file' >&2
+  usage >&2
+  exit 2
+fi
 
 # Dry-run output goes to fd 3, a copy of stdout, so it still shows inside $(...).
 exec 3>&1
@@ -375,6 +394,59 @@ configure_site_secrets() {
   warn 'site: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN left as they were'
 }
 
+# The dashboard environment dashboard-deploy.yml deploys the hosted dashboard Worker from: the
+# production Wrangler configuration, a variable since it holds no secret (the Worker's secrets stay
+# on the Worker), and the Cloudflare account ID and API token. scripts/deploy-dashboard.mjs --check
+# checks the configuration and check-cloudflare-credentials.sh the token, as the workflow does
+# before every deploy, and nothing is stored until both pass. The token is read with echo off and
+# reaches gh on stdin, as the site's does.
+configure_dashboard_deploy() {
+  local config=$1 existing account token attempt dir
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  [ -f "$config" ] || die "no such file: $config"
+  command -v node >/dev/null 2>&1 || die 'node is required to check the configuration'
+  node "$dir/deploy-dashboard.mjs" --check "$config" || die "nothing stored: fix $config and run this again"
+  configure_environment dashboard '[]' branch main
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '\n> unless both are set: read CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (echo off),\n' >&3
+    printf '  check them with scripts/check-cloudflare-credentials.sh, and only if Cloudflare accepts\n' >&3
+    printf '  them, gh secret set <NAME> --env dashboard --repo %s/%s with each value on stdin\n' "$OWNER" "$REPO" >&3
+    printf '> gh variable set SLOTLOCK_DASHBOARD_WRANGLER_CONFIG --env dashboard --repo %s/%s < %s\n' \
+      "$OWNER" "$REPO" "$config" >&3
+    return 0
+  fi
+  existing=$(gh_get "repos/$OWNER/$REPO/environments/dashboard/secrets?per_page=100" '{"secrets":[]}')
+  if [ "${REPLACE_DASHBOARD_SECRETS:-0}" != 1 ] && printf '%s' "$existing" | jq -e '
+      any(.secrets[]; .name == "CLOUDFLARE_API_TOKEN")
+      and any(.secrets[]; .name == "CLOUDFLARE_ACCOUNT_ID")' >/dev/null; then
+    result 'dashboard: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN already set (REPLACE_DASHBOARD_SECRETS=1 replaces them)'
+  else
+    say 'dashboard: a Cloudflare API token that can deploy Workers in the account (the "Edit Cloudflare'
+    say "  Workers\" template). The site's token works too; a token of its own can be revoked alone."
+    for attempt in 1 2 3 4; do
+      [ "$attempt" -lt 4 ] || die 'dashboard: nothing stored. Run this again with a token Cloudflare accepts.'
+      account=''
+      token=''
+      IFS= read -r -p 'dashboard: CLOUDFLARE_ACCOUNT_ID (Cloudflare dashboard, Account home): ' account || true
+      account=$(trim "$account")
+      IFS= read -r -s -p 'dashboard: CLOUDFLARE_API_TOKEN (hidden): ' token || true
+      printf '\n' >&2
+      token=$(trim "$token")
+      if CLOUDFLARE_ACCOUNT_ID=$account CLOUDFLARE_API_TOKEN=$token GITHUB_ACTIONS='' bash "$dir/check-cloudflare-credentials.sh"; then
+        printf '%s' "$account" | gh secret set CLOUDFLARE_ACCOUNT_ID --env dashboard --repo "$OWNER/$REPO"
+        printf '%s' "$token" | gh secret set CLOUDFLARE_API_TOKEN --env dashboard --repo "$OWNER/$REPO"
+        token=''
+        result 'dashboard: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN accepted by Cloudflare and stored'
+        break
+      fi
+      warn "dashboard: nothing stored. Fix what the error names and try again ($attempt of 3)."
+    done
+  fi
+  gh variable set SLOTLOCK_DASHBOARD_WRANGLER_CONFIG --env dashboard --repo "$OWNER/$REPO" <"$config"
+  result "dashboard: SLOTLOCK_DASHBOARD_WRANGLER_CONFIG set from $config"
+  result "dashboard: main now deploys once CI passes. To deploy main now: gh workflow run dashboard-deploy.yml --repo $OWNER/$REPO --ref main"
+}
+
 # 2. Deployment environments. Each one is limited to the refs its workflow runs on.
 configure_environments() {
   local reviewers
@@ -421,6 +493,12 @@ configure_environments() {
   # change already went through a pull request into main.
   configure_environment site '[]' branch main
   configure_site_secrets
+
+  # dashboard: dashboard-deploy.yml's deploy job, after CI passes on a push to main, or a manual run
+  # on main. It holds a Cloudflare token that can replace the dashboard Worker (and so read its
+  # session secret), so only runs on main can read it. No reviewer: the change already went through
+  # a pull request into main and CI passed on that very commit. --dashboard-deploy stores its values.
+  configure_environment dashboard '[]' branch main
 
   # cms: cms-schedule.yml's hourly job, on main, which publishes the blog posts an Owner scheduled
   # in the admin console (RFC 0006, 4.5). It holds the Slotlock CMS App's private key (CMS_APP_KEY,
@@ -761,6 +839,12 @@ EOF
       scripts/configure-github.sh --site-secrets
 EOF
   fi
+  cat <<EOF
+
+[ ] Deploy the hosted dashboard from CI (dashboard-deploy.yml), once: store its production Wrangler
+    configuration and a Cloudflare token that can deploy it. Both are checked before they are stored:
+      scripts/configure-github.sh --dashboard-deploy <your wrangler configuration>
+EOF
   if [ "${ACTIONS_PULL_REQUESTS_SKIPPED:-0}" = 1 ]; then
     cat <<EOF
 
@@ -813,6 +897,11 @@ RULESET_ID=''
 RULESET_ERROR=''
 
 preflight
+if [ "$DASHBOARD_DEPLOY_ONLY" -eq 1 ]; then
+  step 'Dashboard deploy'
+  configure_dashboard_deploy "$DASHBOARD_CONFIG"
+  exit 0
+fi
 if [ "$SITE_SECRETS_ONLY" -eq 1 ]; then
   step 'Site secrets'
   REPLACE_SITE_SECRETS=1

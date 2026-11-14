@@ -10,6 +10,8 @@ site/.astro/
 workers/dashboard/node_modules
 workers/dashboard/.dev.vars
 workers/dashboard/dist/
+# The production configuration scripts/deploy-dashboard.mjs writes from the dashboard environment.
+workers/dashboard/wrangler.deploy.jsonc
 workers/admin/node_modules
 workers/admin/.dev.vars
 workers/admin/dist/

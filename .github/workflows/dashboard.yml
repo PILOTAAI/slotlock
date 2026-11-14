@@ -1,9 +1,10 @@
 # Bundles the dashboard Worker (workers/dashboard) and the admin console Worker (workers/admin) to
-# check they build. It never deploys and holds no Cloudflare credentials: whoever runs them deploys
-# them from their own pipeline, with their own wrangler configuration and token (docs: "Dashboard on
-# Cloudflare Workers"). A Workers deploy token can replace a Worker and so read its session secret,
-# which signs in as any tenant (or, for the console, as staff), so it belongs with the deployment,
-# not in this repository.
+# check they build, on pull requests too. It never deploys and holds no Cloudflare credentials. A
+# Workers deploy token can replace a Worker and so read its session secret, which signs in as any
+# tenant (or, for the console, as staff), so no pull_request job may hold one: Slotlock Cloud's
+# dashboard deploys from dashboard-deploy.yml, once CI passes on main, with a token on the
+# `dashboard` environment that only main can use. Anyone else deploys from their own pipeline, with
+# their own wrangler configuration and token (docs: "Dashboard on Cloudflare Workers").
 #
 # Every action is pinned to the commit SHA site.yml uses (resolved on 2026-10-09). Wrangler is
 # pinned exactly in workers/dashboard/package-lock.json and workers/admin/package-lock.json.
