@@ -336,10 +336,8 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
       expect(await logOf(query), query).toEqual({ query_digest: digest?.ada, query_kind: 'text' });
     }
     for (const query of ['ada@example.com', '@ada', 'octocat', 'Acme Rentals']) {
-      const kept = await logOf(query);
-      expect(kept?.query_kind, query).toBe('text');
-      expect(kept?.query_digest, query).toMatch(/^[0-9a-f]{64}$/);
-      expect(JSON.stringify(kept)).not.toContain(query.slice(1, 4));
+      // The digest and its kind, nothing else: a digest's hex can hold letters of the query ('ada').
+      expect(await logOf(query), query).toEqual({ query_kind: 'text', query_digest: expect.stringMatching(/^[0-9a-f]{64}$/) });
     }
     // The console's own record of a search: the same rule.
     const support2 = await as(SUPPORT);
