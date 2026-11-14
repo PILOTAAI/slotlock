@@ -373,7 +373,10 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Strict-Transport-Security': 'max-age=63072000; includeSubDomains',
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
-  'Referrer-Policy': 'no-referrer',
+  // same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` with a form's POST
+  // (the Fetch standard, "append a request Origin header"), and the console refuses a POST whose Origin
+  // is not its own, so every form was refused. Other sites still get no referrer.
+  'Referrer-Policy': 'same-origin',
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',

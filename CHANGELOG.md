@@ -7,6 +7,13 @@ versioning.
 
 ### Fixed
 
+- The admin console refused every form ("That request did not come from this console"): saving,
+  submitting and publishing a post, signing out, and every support, billing and system action. It
+  sent `Referrer-Policy: no-referrer`, under which a browser sends `Origin: null` with a form's POST,
+  and the console refuses a POST whose Origin is not its own. It now sends `same-origin`, as the
+  customer dashboard does: other sites still get no referrer. The editor's browser test now passes on
+  the Origin Chromium really sends, so it fails if this comes back. Uploads and passkeys use `fetch`,
+  which keeps its Origin, so they worked throughout.
 - The admin console's tabs show Slotlock's mark: it serves the site's own `favicon.svg` and
   `apple-touch-icon.png`, byte for byte, and every page links them.
 - `scripts/check-launch.mjs` fails when a page of the site (home, pricing, the quickstart, the blog)

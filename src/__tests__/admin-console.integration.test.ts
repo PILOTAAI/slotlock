@@ -158,6 +158,8 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
     expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
     expect(page.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    // Not no-referrer: under it a browser's form POST says `Origin: null`, which the console refuses.
+    expect(page.headers.get('referrer-policy')).toBe('same-origin');
     expect(page.headers.get('cache-control')).toBe('no-store');
     expect(page.headers.get('strict-transport-security')).toContain('max-age=');
     // No inline script or style: every script is a file of the console's own, and no element has a
