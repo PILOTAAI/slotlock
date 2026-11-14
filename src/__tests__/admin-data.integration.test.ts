@@ -245,9 +245,13 @@ describe.skipIf(!url)('figures and names in the admin console (real Postgres)', 
     expect(found).toContain(`href="/accounts/${encodeURIComponent(NOBODY)}"`);
     expect(found).toContain(`GitHub account <strong>someone</strong> is id <code>${BASE + 2}</code>`);
     expect(github).toEqual(['/users/someone']);
-    const [lookup] = await superuser<{ target: string }[]>`
-      SELECT target FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY chain_index DESC LIMIT 1`;
-    expect(lookup?.target).toBe('someone');
+    // Recorded, but the login only as a keyed digest (staff_search_record), as a search by name is.
+    const [lookup] = await superuser<{ target: string | null; metadata: Record<string, string> }[]>`
+      SELECT target, metadata FROM slotlock.staff_audit_events WHERE action = 'search.github_lookup' ORDER BY chain_index DESC LIMIT 1`;
+    expect(lookup).toEqual({ target: null, metadata: { query_digest: expect.stringMatching(/^[0-9a-f]{64}$/), query_kind: 'text' } });
+    const searched = await superuser<{ metadata: Record<string, string> }[]>`
+      SELECT metadata FROM slotlock.staff_audit_events WHERE action IN ('accounts.searched', 'search.github_lookup')`;
+    expect(JSON.stringify(searched)).not.toMatch(/someone|lovelace|navy/i);
   });
 
   it('names staff by the login they last signed in with, and the command line as such', async () => {

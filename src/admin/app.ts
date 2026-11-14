@@ -627,6 +627,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (rows.length === 0 && !after && GITHUB_LOGIN.test(q) && !/^[0-9]+$/.test(q) && !/^(slk|cus)_/.test(q)) {
       const profile = await githubProfile(`/users/${encodeURIComponent(q)}`);
       if (profile) {
+        // The login goes as the record's detail; the database keeps only its keyed digest.
         await record(session.t, 'search.github_lookup', null, q);
         githubFor = { login: profile.login, id: profile.id };
         rows = await find(profile.id);

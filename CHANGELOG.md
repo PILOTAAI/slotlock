@@ -29,6 +29,10 @@ versioning.
   the workflows that deploy (`dashboard-deploy.yml`, `site.yml`, `status-worker.yml`, besides the
   image and releases), not `dashboard.yml`, which only bundles the Workers.
 - The sidebar marks only Staff log on the Staff log page, not Staff as well.
+- The staff log, kept six years and past any erasure, keeps an account search's words only when they
+  name an account by reference, an id, a key's prefix or a Stripe customer; a search by name, login
+  or email (the console's GitHub lookup included) is kept as a digest keyed with the deployment's
+  secret (`slotlock.staff_search_record`). Entries written before this change stay as they were.
 
 ### Added
 
