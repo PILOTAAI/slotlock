@@ -22,7 +22,6 @@ import {
 import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from '../ddl.js';
 import { SLOTLOCK_CHANGE_TYPES, type SlotlockChange, type SlotlockWebhookEndpoint } from '../event-feed.js';
 import type { SlotlockTenantPlan } from '../plans.js';
-import type { SlotlockWaitlistEntry } from '../store.js';
 import { createSlotlockMemoryDashboardWorkspaces } from '../workspaces.js';
 import { slotlockDashboardRequestScope } from '../dashboard-scope.js';
 import type { SlotlockAgendaEntry, SlotlockResource, WeeklyAvailabilityRule } from '../types.js';
@@ -2431,7 +2430,7 @@ describe('the overview', () => {
   });
 });
 
-describe('resource detail, webhooks and the waitlist', () => {
+describe('resource detail and webhooks', () => {
   const OWN = '22222222-2222-4222-8222-222222222222';
   const THEIRS = '33333333-3333-4333-8333-333333333333';
 
@@ -2441,24 +2440,6 @@ describe('resource detail, webhooks and the waitlist', () => {
       { id: THEIRS, externalRef: 'van-x', tenantRef: 'github:1', timezone: 'UTC' },
     );
     const endpoints: SlotlockWebhookEndpoint[] = [];
-    const entries: SlotlockWaitlistEntry[] = [
-      {
-        id: '44444444-4444-4444-8444-444444444444',
-        resourceId: OWN,
-        pool: null,
-        start: new Date(now + 3_600_000),
-        end: new Date(now + 7_200_000),
-        holderRef: 'customer-<9>',
-        offerTtlMs: 600_000,
-        status: 'waiting',
-        holdId: null,
-        offeredResourceId: null,
-        offeredAt: null,
-        createdAt: new Date(now - 600_000),
-        durationMs: null,
-        decidedAt: null,
-      },
-    ];
     const store = {
       ...resources.store,
       setRules: vi.fn(async (tenantRef: string, id: string, rules: unknown) => {
@@ -2482,15 +2463,6 @@ describe('resource detail, webhooks and the waitlist', () => {
         else (row as SlotlockResource).pool = pool;
         return row;
       }),
-      waitlist: {
-        list: vi.fn(async (tenantRef: string) => (tenantRef === 'github:4242' ? entries : [])),
-        leave: vi.fn(async (tenantRef: string, id: string) => {
-          const index = entries.findIndex((entry) => entry.id === id);
-          if (tenantRef !== 'github:4242' || index < 0) return false;
-          entries.splice(index, 1);
-          return true;
-        }),
-      },
       webhooks: {
         list: vi.fn(async () => endpoints),
         create: vi.fn(async (_tenantRef: string, url: string, eventTypes: readonly string[] | undefined) => {
@@ -2524,7 +2496,7 @@ describe('resource detail, webhooks and the waitlist', () => {
         }),
       },
     };
-    return { target: dashboard({ resources: store }), store, endpoints, entries };
+    return { target: dashboard({ resources: store }), store, endpoints };
   }
 
   it("shows a resource's rules and pool, saves them, and refuses another tenant's", async () => {
@@ -2915,21 +2887,18 @@ describe('resource detail, webhooks and the waitlist', () => {
     expect((await get(plain, '/base/dashboard/contacts', (await signIn(plain)).session)).status).toBe(404);
   });
 
-  it('lists the waitlist and removes an entry', async () => {
-    const { target, store, entries } = full();
+  it('has no Waitlist page: agents use waitlists through the API', async () => {
+    const { target } = full();
     const { session } = await signIn(target);
-    const page = await (await get(target, '/base/dashboard/waitlist', session)).text();
-    expect(page).toContain('customer-&lt;9&gt;');
-    expect(page).toMatch(/Today 13:00–14:00<\/td>\s*<td data-label="For"><span class="truncate" title="van-1">van-1/);
-    const id = entries[0]?.id as string;
-    const removed = await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session);
-    expect(removed.status).toBe(303);
-    expect(store.waitlist.leave).toHaveBeenCalledWith('github:4242', id, 'github:4242');
-    expect(entries).toHaveLength(0);
-    expect((await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id }, session)).status).toBe(404);
+    expect((await get(target, '/base/dashboard/waitlist', session)).status).toBe(404);
+    const nav = await (await get(target, '/base/dashboard', session)).text();
+    expect(nav).not.toContain('Waitlist');
+    expect(nav).not.toContain('On the waitlist');
+    const left = await post(target, '/base/dashboard/waitlist/leave', { csrf: await csrf(target, session), id: 'x' }, session);
+    expect(left.status).toBe(404);
   });
 
-  it('shows Waitlist and Webhooks only for an adapter that has them', async () => {
+  it('shows Webhooks only for an adapter that has them', async () => {
     const plain = dashboard();
     const first = await signIn(plain);
     const html = await (await get(plain, '/base/dashboard', first.session)).text();
@@ -2939,7 +2908,6 @@ describe('resource detail, webhooks and the waitlist', () => {
     const second = await signIn(target);
     const nav = await (await get(target, '/base/dashboard', second.session)).text();
     expect(nav).toContain('<span>Webhooks</span>');
-    expect(nav).toContain('<span>Waitlist</span>');
   });
 });
 
@@ -2951,7 +2919,6 @@ describe('the dashboard design', () => {
         ...resources.store,
         agenda: vi.fn(async () => []),
         recentChanges: vi.fn(async () => []),
-        waitlist: { list: vi.fn(async () => []), leave: vi.fn(async () => false) },
         webhooks: {
           list: vi.fn(async () => []),
           create: vi.fn(async () => ({ ok: false as const, code: 'invalid_webhook_url' as const })),
@@ -2965,7 +2932,7 @@ describe('the dashboard design', () => {
   it('renders every page for a brand-new tenant, with landmarks and nothing inline or external', async () => {
     const target = emptyEverything();
     const { session } = await signIn(target);
-    const pages = ['', '/resources', '/keys', '/webhooks', '/waitlist', '/settings', '/hours'];
+    const pages = ['', '/resources', '/keys', '/webhooks', '/settings', '/hours'];
     for (const path of pages) {
       const response = await get(target, `/base/dashboard${path}`, session);
       expect(response.status, path).toBe(200);
@@ -2989,7 +2956,6 @@ describe('the dashboard design', () => {
       ['/resources', 'No resources yet.'],
       ['/keys', 'No keys yet.'],
       ['/webhooks', 'No webhooks.'],
-      ['/waitlist', 'Nobody is waiting.'],
     ] as const) {
       const html = await (await get(target, `/base/dashboard${path}`, session)).text();
       expect(html, path).toMatch(new RegExp(`<div class="empty-state"><span class="empty-icon"><svg[^]*?</svg></span><p class="empty">${text}`));
@@ -3167,7 +3133,10 @@ describe('the plan page', () => {
     const html = await response.text();
     expect(html).toContain('href="/base/dashboard/plan"');
     expect(html).toContain('<h1>Usage</h1>');
-    expect(html).toContain('<div class="plan-head"><h2>Free</h2>');
+    expect(html).toContain('<span class="plan-now">Free</span>');
+    // Free is marked as the plan in use, Developer offered beside it.
+    expect(html).toMatch(/<article class="plan-col current" id="free"[\s\S]*Current plan/);
+    expect(html).toContain('<article class="plan-col featured" id="developer"');
     expect(html).toContain('<span class="meta"> of 10</span>');
     expect(html).toContain('action="/base/dashboard/plan/upgrade"');
     expect(html).toContain('Monthly, $10 a month');
@@ -3237,12 +3206,46 @@ describe('the plan page', () => {
     expect(back).toContain('once Stripe confirms the payment');
   });
 
+  it("lands on Usage after signing in from the site's Upgrade, where every plan is offered", async () => {
+    const { target } = billed(null);
+    const start = await get(target, '/base/dashboard/sign-in?then=%2Fplan');
+    const state = new URL(start.headers.get('location') ?? '').searchParams.get('state');
+    const callback = await get(target, `/base/dashboard/callback?code=fake-code&state=${state}`, cookie(start, '__Host-slotlock-oauth')?.pair);
+    expect(callback.headers.get('location')).toBe('/base/dashboard/plan');
+  });
+
+  it("shows the prices Stripe charges over the labels it is configured with, and the labels when Stripe does not answer", async () => {
+    const free: SlotlockTenantPlan = { ...developer, plan: 'free', stripeCustomer: null, stripeSubscription: null, currentPeriodEnd: null };
+    const { billing } = billed(free);
+    const errors: unknown[] = [];
+    let answer: 'stripe' | 'refused' = 'stripe';
+    const shown = {
+      ...billing,
+      shownPrices: vi.fn(async () => {
+        if (answer === 'refused') throw new Error('The provided key does not have the required permissions');
+        return { prices: { month: '£5', year: '£50' } };
+      }),
+    };
+    const target = dashboard({ billing: shown, onError: (error) => void errors.push(error) });
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(html).toContain('Monthly, £5 a month');
+    expect(html).not.toContain('$10');
+    // Refused (a key without Read on Prices): the labels, and the error reported once in ten minutes.
+    answer = 'refused';
+    for (let i = 0; i < 3; i += 1) {
+      expect(await (await get(target, '/base/dashboard/plan', session)).text()).toContain('Monthly, $10 a month');
+    }
+    expect(errors).toHaveLength(1);
+  });
+
   it('shows a Developer tenant its renewal and Manage billing, which opens the portal', async () => {
     const { target, calls } = billed(developer);
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard/plan', session)).text();
-    expect(html).toContain('<div class="plan-head"><h2>Developer</h2>');
-    expect(html).toContain('Renews 2026-12-10 12:00 UTC');
+    expect(html).toContain('<span class="plan-now">Developer</span><span class="pill active">Active</span>');
+    expect(html).toContain('<span class="summary-label">Renews</span><span class="summary-value">10 Dec 2026</span><span class="summary-note">2026-12-10 12:00 UTC</span>');
+    expect(html).toContain('<article class="plan-col current featured" id="developer"');
     expect(html).not.toContain('Upgrade to Developer');
     const manage = await post(target, '/base/dashboard/plan/manage', { csrf: await csrf(target, session) }, session);
     expect(manage.headers.get('location')).toBe('https://billing.stripe.com/p/session/test_1');
@@ -3321,7 +3324,7 @@ describe('the plan page', () => {
     expect(html).toContain('<span>Operations</span><span class="meter-value">45</span>');
     expect(html).toContain('<span>Bookings</span><span class="meter-value">3</span>');
     expect(html).toContain('<span>Holds</span><span class="meter-value">2</span>');
-    expect(html).toContain('Since 2026-10-01 (UTC)');
+    expect(html).toContain('Since 2026-10-01, UTC');
     expect(html).toContain('<td data-label="Key">Booking agent</td><td data-label="Operations">40</td>');
     expect(html).toContain('<td data-label="Key">The dashboard and its assistant</td>');
     expect(html).toContain('<td data-label="Key">A deleted key</td>');
@@ -3350,7 +3353,7 @@ describe('the plan page', () => {
     );
     expect(html).toContain('<span class="meter-value">10<span class="meta"> of 1,000</span>');
     expect(html).toContain("You have used 81% of this month&#39;s operations. They start again on 2026-11-01 00:00 UTC.");
-    expect(html).toContain('with 500,000 operations and 25,000 bookings a month');
+    expect(html).toContain('<li>500,000 operations a month</li><li>25,000 bookings a month</li>');
     operations = 25_000;
     bookings = 1_000;
     html = await page();
@@ -3534,7 +3537,7 @@ describe('usage and plans without Stripe', () => {
     // Nothing redirects to Stripe, so forms still go nowhere but here.
     expect(response.headers.get('content-security-policy')).toContain("form-action 'self';");
     const html = await response.text();
-    expect(html).toContain('<div class="plan-head"><h2>Free</h2>');
+    expect(html).toContain('<span class="plan-now">Free</span>');
     expect(html).toContain('<span>Resources</span><span class="meter-value">0<span class="meta"> of 10</span>');
     expect(html).toContain('This server does not count use yet.');
     expect(html).not.toContain('action="/base/dashboard/plan/upgrade"');
@@ -3549,7 +3552,8 @@ describe('usage and plans without Stripe', () => {
     const target = dashboard({ plans, resources: store });
     const { session } = await signIn(target);
     const html = await (await get(target, '/base/dashboard/plan', session)).text();
-    expect(html).toContain('<div class="plan-head"><h2>Free from 9 Dec 2026</h2>');
+    expect(html).toContain('<span class="plan-now">Free from 9 Dec 2026</span>');
+    expect(html).toContain('<p class="plan-hint">Your plan from 9 Dec 2026.</p>');
     expect(html).toContain(
       'From 2026-12-09 00:00 UTC, this workspace is on Free: 10 resources, 10 API keys and 2 webhooks. You have 14 of 10 resources: nothing is removed, but from then, adding another is refused. Upgrade for more.',
     );
@@ -3566,7 +3570,7 @@ describe('usage and plans without Stripe', () => {
     expect(usage).toContain(
       '<li class="attention warn"><span class="attention-text">On Free, you have 10 of 10 resources: adding another is refused. Upgrade for more.</span><a class="attention-action" href="#upgrade">Upgrade</a></li>',
     );
-    expect(usage).toContain('<section class="panel" id="upgrade">');
+    expect(usage).toContain('<section class="plans" id="upgrade"');
     const overview = await (await get(target, '/base/dashboard', session)).text();
     const attention = /<ul class="attention-list"[^>]*>([\s\S]*?)<\/ul>/.exec(overview)?.[1] ?? '';
     expect(attention).toContain('On Free, you have 10 of 10 resources');

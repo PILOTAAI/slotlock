@@ -41,7 +41,7 @@ the server, see [Dashboard on Cloudflare Workers](/docs/dashboard-workers/).
   with Get started until an agent has used a key, the plan's use beside it, and the MCP and A2A
   endpoints;
   Resources, each with its own page for bookable hours, booking rules, profile, pool, location and
-  groups, coming bookings and activity; Locations and groups, to add, move and delete them; Waitlist, to see who waits and remove an entry; API keys, with the MCP and A2A
+  groups, coming bookings and activity; Locations and groups, to add, move and delete them; API keys, with the MCP and A2A
   endpoints; Webhooks, to add, delete and re-enable endpoints and see which are failing; and
   Settings. Everything on them is read from the tenant's own data. `SLOTLOCK_DASHBOARD_NAME` sets
   what the dashboard calls the deployment (Slotlock by default).
@@ -76,7 +76,7 @@ refused.
 | Owner | Everything: billing, and the workspace itself |
 | Admin | All but billing and the workspace itself: Full-access keys, webhooks, anyone's keys, contacts, the assistant's model, Privacy |
 | Developer | Resources, booking rules, hours, the test environment, and read-only or read-write keys of their own |
-| Member | Bookings, approvals, the waitlist, hours and closures, and the assistant |
+| Member | Bookings, approvals, hours and closures, and the assistant |
 | Viewer | Reads everything, changes nothing; their assistant only reads |
 | Billing | The plan, usage and billing |
 
@@ -147,7 +147,7 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
   (RFC 0003 G6): the database's `resource_scope_v1` policies keep each transaction to the resources
   at those locations (and the locations in them) or in those groups, their bookings, holds, history
   and waitlist, and Approvals shows only what asks for theirs alone. Their assistant is limited the
-  same way. Whatever their role, they keep only reading, the desk (approvals, the waitlist) and the
+  same way. Whatever their role, they keep only reading, the desk (approvals) and the
   assistant: keys, webhooks, contacts, hours, closures, locations, usage, the audit log, Privacy,
   the test environment's sample and changing people are refused (`authz.denied`, "limited to
   locations and groups"). Keys they created reached the whole workspace, so limiting them revokes
@@ -404,8 +404,13 @@ its own model.
 
 ## Usage
 
-On hosted Slotlock, **Usage** shows the workspace's plan (or the plan it moves to, and when) against
-its limits, this month's operations, bookings and holds against its quotas, and which key used what.
+On hosted Slotlock, **Usage** opens with the plan at a glance: the plan (or the plan it moves to,
+and when), when it renews, and whose workspace it is. Below are its limits and this month's
+operations, bookings and holds against its quotas, the plans side by side (Free, Developer, Team
+and Custom, at the prices Stripe charges, the current one marked), and which key used what.
+A person's own workspace is offered Developer, and Team by way of a team workspace: **Upgrade** for
+one they own or bill for opens its Usage page, else **Create a team workspace**. A team workspace
+or organization is offered Team, never Developer.
 It says what needs doing first: a failed payment, a quota at 80%, at 100% or used up, or as many
 resources, keys or webhooks as the plan (or the coming plan) allows, or more (nothing is removed;
 adding another is refused). Each of these, and an add refused at a limit, offers an owner the

@@ -29,7 +29,8 @@
 // (one new version, so billing never runs half set up; secrets, so a deploy keeps them), with:
 //   - the webhook endpoint's signing secret, when Stripe has just made the endpoint;
 //   - SLOTLOCK_WORKER_STRIPE_KEY as STRIPE_SECRET_KEY: the dashboard's restricted key (rk_…), with
-//     Write on Checkout Sessions and Customer portal and Read on Subscriptions. It is checked
+//     Write on Checkout Sessions and Customer portal and Read on Subscriptions and Prices (the
+//     Usage page shows Stripe's own amounts; without Prices, its labels). It is checked
 //     first: it reads a subscription and the portal, and opens a Checkout Session with Managed
 //     Payments and expires it at once (nothing is charged), which also shows Managed Payments is
 //     on. It is stored only if the Worker has, or is given, STRIPE_WEBHOOK_SECRET: without one the
@@ -505,6 +506,13 @@ async function checkWorkerKey(workerKey, price) {
     metadata: { slotlock_check: 'configure-stripe' },
   });
   await need('expire the Checkout Session it opened', 'POST', `checkout/sessions/${session.id}/expire`);
+  // The Usage page shows Stripe's own amounts when the key may read them; else its configured labels.
+  const prices = await probe(workerKey, 'GET', `prices/${encodeURIComponent(price)}`);
+  if (prices.status !== 200) {
+    console.log(
+      "\nnote: the dashboard's key cannot read Prices, so its Usage page shows the labels it is configured with (SLOTLOCK_PLAN_PRICE_*, else £5 and £50), not Stripe's amounts. Give the key Read on Prices.",
+    );
+  }
   console.log('\nThe dashboard\'s key reads subscriptions and the portal, and opened (then expired) a Checkout Session with Managed Payments.');
 }
 

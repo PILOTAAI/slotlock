@@ -155,7 +155,7 @@ export const heroLog: LogLine[] = [
 export const heroWindow = {
   title: 'Slotlock · Today',
   now: 'now 09:41',
-  nav: ['Overview', 'Resources', 'Waitlist', 'API keys'],
+  nav: ['Overview', 'Resources', 'Approvals', 'API keys'],
   agents: 'Agent activity',
 };
 
@@ -299,7 +299,7 @@ export const dashboard = {
     path: 'app.slotlock.pylota.io/dashboard',
     brand: 'Slotlock',
     workspace: 'acme-rentals',
-    nav: ['Overview', 'Resources', 'Waitlist', 'API keys', ...(facts.assistant ? ['Assistant'] : []), 'Settings'],
+    nav: ['Overview', 'Resources', 'Approvals', 'API keys', ...(facts.assistant ? ['Assistant'] : []), 'Settings'],
     title: 'Overview',
     stats: [
       { label: `Booked, next ${facts.dashboardAgendaDays} days`, value: '18' },
@@ -533,7 +533,9 @@ const allows = (plan: HostedPlan) => [
 const freePlan = hostedPlan('free');
 const developerPlan = hostedPlan('developer');
 const teamPlan = hostedPlan('team');
-const upgrade = { label: 'Upgrade', href: `${SIGN_IN_URL}/plan` };
+// Signs in (a moment, when already signed in) and lands on the dashboard's Usage page, which offers
+// every plan: Developer for the person, and Team for a team workspace they make or bill for.
+const upgrade = { label: 'Upgrade', href: `${SIGN_IN_URL}/sign-in?then=%2Fplan` };
 const paid = (plan: HostedPlan) => ({ price: `${plan.symbol}${plan.monthly}`, per: `a month, or ${plan.symbol}${plan.yearly} a year` });
 /** The plans' currency sign, for Free and self-hosting at no charge. */
 const money = (developerPlan ?? freePlan)?.symbol ?? '$';

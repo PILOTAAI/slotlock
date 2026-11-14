@@ -75,7 +75,7 @@ Create restricted key):
 | Key | Permissions | Where it goes |
 | --- | --- | --- |
 | Setup (`STRIPE_SECRET_KEY` for the script) | Write: Products, Prices, Webhook Endpoints, Customer portal. Read: Balance | Your terminal only; delete it after |
-| Dashboard (`SLOTLOCK_WORKER_STRIPE_KEY`) | Write: Checkout Sessions, Customer portal. Read: Subscriptions | The Worker's `STRIPE_SECRET_KEY` |
+| Dashboard (`SLOTLOCK_WORKER_STRIPE_KEY`) | Write: Checkout Sessions, Customer portal. Read: Subscriptions, Prices | The Worker's `STRIPE_SECRET_KEY` |
 | Launch check (`SLOTLOCK_CHECK_STRIPE_KEY`) | Read: Products, Prices, Webhook Endpoints, Events | The repository's Actions secret |
 
 ```sh
@@ -131,10 +131,10 @@ an organization (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`). It has 500 
 and 25 webhook endpoints, and monthly quotas its members share (2,000,000 operations and 100,000
 bookings, stopping at 110%), for £15 a month or £150 a year whatever the number of members. It is
 sold once `SLOTLOCK_STRIPE_PRICE_TEAM_MONTHLY` and `SLOTLOCK_STRIPE_PRICE_TEAM_YEARLY` (its price
-ids) are set; `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and `SLOTLOCK_PLAN_PRICE_TEAM_YEARLY` change the
-prices shown (£15 and £150 by default). A shared workspace is offered Team only, never Developer,
-whose limits are a person's: without the Team prices its owners are asked to get in touch, and a
-checkout is refused. A subscription gives Team when its price is one of those ids, or says it is
+ids) are set. A shared workspace is offered Team only, never Developer, whose limits are a
+person's: without the Team prices its owners are asked to get in touch, and a checkout is refused.
+A person's own Usage page shows Team too, with the way to it: **Upgrade** for a team workspace
+they own or bill for, which opens that workspace's Usage page, or **Create a team workspace**. A subscription gives Team when its price is one of those ids, or says it is
 Team's (a lookup key starting `slotlock_team_`, or `slotlock_plan: team` in its or its product's
 metadata, as the script sets), so a Team price made later still gives Team. Only Team lifts a team
 workspace's limit of 3 people, and a person's limit of one team workspace.
@@ -142,10 +142,15 @@ workspace's limit of 3 people, and a person's limit of one team workspace.
 Without Stripe, **Usage** still shows each tenant's plan, limits and use (with `SLOTLOCK_USAGE` and
 `SLOTLOCK_QUOTAS`, as on the server), and an owner asks for another plan at `SLOTLOCK_PLAN_CONTACT`.
 
+**Usage** shows the prices Stripe holds for the configured price ids, read with the Worker's key
+(Read on Prices) and kept for ten minutes, so the page never shows one price and charges another.
+Only when Stripe does not answer does it show the labels `SLOTLOCK_PLAN_PRICE_MONTHLY`,
+`SLOTLOCK_PLAN_PRICE_YEARLY`, `SLOTLOCK_PLAN_PRICE_TEAM_MONTHLY` and `SLOTLOCK_PLAN_PRICE_TEAM_YEARLY`
+(`£5`, `£50`, `£15` and `£150` by default), and it reports why at most once in ten minutes.
+
 Optional variables: `SLOTLOCK_PLAN_CONTACT` (where plan and Custom enquiries go, an https or mailto URL),
-`SLOTLOCK_PLAN_PRICE_MONTHLY` and `SLOTLOCK_PLAN_PRICE_YEARLY` (the prices as shown, `£5` and `£50`
-by default) and `STRIPE_API_VERSION` (default `2026-04-22.dahlia`, a version that has Managed
-Payments).
+those price labels, and `STRIPE_API_VERSION` (default `2026-04-22.dahlia`, a version that has
+Managed Payments).
 
 The plan a tenant without one of its own is on is kept in the database, so `slotlock serve` and the
 Worker enforce the same limits whichever one a write comes through. Set it once, as the schema owner:

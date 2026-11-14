@@ -169,7 +169,6 @@ import {
   type SlotlockSubjectExport,
   type SlotlockTenantExport,
   type SlotlockTenantExportPartResult,
-  type SlotlockWaitlistEntry,
   buildSlotlockTenantExport,
 } from './store.js';
 import type {
@@ -260,7 +259,6 @@ const POST_ROUTES: ReadonlySet<string> = new Set([
   '/webhooks',
   '/webhooks/delete',
   '/webhooks/enable',
-  '/waitlist/leave',
   '/approvals/decide',
   '/sandbox/seed',
   '/sandbox/reset',
@@ -856,11 +854,6 @@ export interface SlotlockDashboardResources {
     reset(tenantRef: string): Promise<void>;
     fastForward(tenantRef: string, minutes: number): Promise<{ holds: number; approvals: number }>;
   };
-  /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
-  waitlist?: {
-    list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
-    leave(tenantRef: string, id: string, actor?: string): Promise<boolean>;
-  };
   /** The tenant's assistant settings and its members' conversations (assistant.ts). */
   assistant?: SlotlockAssistantStore;
   /**
@@ -1030,8 +1023,16 @@ export interface SlotlockDashboardBilling {
   }): Promise<string>;
   /** A billing portal URL for the tenant's customer, in the portal configuration of its kind of plan. */
   portal(input: { customer: string; returnUrl: string; plan?: 'developer' | 'team' }): Promise<string>;
-  /** The Developer plan's prices as shown, such as `£5`. */
+  /**
+   * The Developer plan's prices as shown, such as `£5`: what the page shows when `shownPrices` is
+   * not given or does not answer.
+   */
   prices: { month: string; year: string };
+  /**
+   * The plans' prices as the payment provider holds them (billing.ts), shown in place of `prices`
+   * and `teamPrices` whenever it answers, so the page never shows a price it does not charge.
+   */
+  shownPrices?(): Promise<{ prices: { month: string; year: string }; teamPrices?: { month: string; year: string } }>;
   /**
    * The Team plan's prices as shown (Teams on Cloud). A shared workspace (an organization's or a
    * team's) is offered Team only, never Developer: without them it is offered Team by asking.
@@ -1472,26 +1473,6 @@ export function createSlotlockDashboardResources(
           by(actor),
         ),
     },
-    waitlist: {
-      list: (tenantRef, limit) =>
-        store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
-      async leave(tenantRef, id, actor) {
-        const left = await store.withTenant(
-          tenantRef,
-          (tenant) => tenant.leaveWaitlist({ tenantRef, id }),
-          by(actor),
-        );
-        // An offered entry's hold went with it: offer that time to the next, as the API does.
-        if (left) {
-          await store
-            .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
-              origin: 'maintenance',
-            })
-            .catch(() => undefined);
-        }
-        return left;
-      },
-    },
     webhooks: {
       list: (tenantRef) =>
         store.withTenant(tenantRef, (tenant) => tenant.listWebhookEndpoints({ tenantRef })),
@@ -1748,7 +1729,6 @@ const AGENDA_DAYS = 7;
 const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
-const WAITLIST_SHOWN = 200;
 /** Approvals the dashboard lists, pending and recent decided together, newest first. */
 const APPROVALS_SHOWN = 100;
 const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
@@ -1866,7 +1846,6 @@ const ICONS = Object.freeze({
   overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
   resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
   keys: icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>'),
-  waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
   plan: icon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>'),
@@ -2721,7 +2700,6 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   type Section =
     | 'overview'
     | 'resources'
-    | 'waitlist'
     | 'approvals'
     | 'keys'
     | 'webhooks'
@@ -2729,14 +2707,11 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     | 'plan'
     | 'teams'
     | 'settings';
-  // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
+  // Pages for what the adapter offers, so a custom one without approvals shows none. Read per
   // request: on Workers the adapter exists only inside one.
   const nav = (session: Session): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
     { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
-    ...(options.resources.waitlist
-      ? [{ section: 'waitlist' as const, label: 'Waitlist', path: '/waitlist', icon: ICONS.waitlist }]
-      : []),
     ...(options.resources.approvals
       ? [{ section: 'approvals' as const, label: 'Approvals', path: '/approvals', icon: ICONS.approvals }]
       : []),
@@ -3121,13 +3096,12 @@ ${
     const assistant = assistantStore(session);
     // A member limited to some resources sees theirs: no keys, plan or setup, which are the workspace's.
     const limited = scopes.has(session);
-    const [keys, resources, agenda, changes, approvals, waitlist, model] = await Promise.all([
+    const [keys, resources, agenda, changes, approvals, model] = await Promise.all([
       limited ? Promise.resolve([]) : options.keys.list({ tenantRef }),
       options.resources.list(tenantRef),
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, ACTIVITY_LIMIT),
       options.resources.approvals?.list(tenantRef, APPROVALS_SHOWN),
-      options.resources.waitlist?.list(tenantRef, WAITLIST_SHOWN),
       assistant?.getSettings(tenantRef),
     ]);
     // The plan is Live's: the test environment has none of its own.
@@ -3193,7 +3167,6 @@ ${
     const tiles: Html[] = [
       ...(agenda ? [stat(`Bookings, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`), stat('Live holds', counted(held), `${root}#upcoming`)] : []),
       ...(approvals ? [stat('Waiting for approval', String(waiting), `${root}/approvals`, waiting > 0 ? ' attention-stat' : '')] : []),
-      ...(waitlist ? [stat('On the waitlist', String(waitlist.filter((entry) => entry.status !== 'expired').length), `${root}/waitlist`)] : []),
       stat('Resources', String(resources.length), `${root}/resources`),
       ...(limited ? [] : [stat('Active keys', String(active.length), `${root}/keys`)]),
     ].slice(0, 4);
@@ -4173,62 +4146,6 @@ ${
       );
     }
     return redirect(303, `${root}/webhooks`);
-  }
-
-  async function waitlistPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const waitlist = options.resources.waitlist;
-    if (!waitlist) return notFound(session);
-    const tenantRef = tenantOf(session);
-    const [entries, resources] = await Promise.all([
-      waitlist.list(tenantRef, WAITLIST_SHOWN),
-      options.resources.list(tenantRef),
-    ]);
-    const byId = new Map(resources.map((resource) => [resource.id, resource]));
-    const token = csrfToken(session);
-    const rows = entries.map((entry) => {
-      const resource = entry.resourceId ? byId.get(entry.resourceId) : undefined;
-      const zone = resource?.timezone ?? 'UTC';
-      const day = dayLabel(entry.start, zone, now());
-      const what = entry.resourceId
-        ? resourceName(resource, entry.resourceId)
-        : `Pool ${entry.pool ?? ''}`;
-      const offered = entry.offeredResourceId
-        ? resourceName(byId.get(entry.offeredResourceId), entry.offeredResourceId)
-        : null;
-      const tone = entry.status === 'offered' ? 'active' : entry.status === 'expired' ? 'revoked' : 'held';
-      return html`<tr>
-<td data-label="When" class="strong">${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}</td>
-<td data-label="For"><span class="truncate" title="${what}">${what}</span></td>
-<td data-label="Holder"><code class="truncate" title="${entry.holderRef}">${entry.holderRef}</code></td>
-<td data-label="Status"><span class="cell"><span class="pill ${tone}">${entry.status === 'offered' ? 'Offered' : entry.status === 'expired' ? 'Expired' : 'Waiting'}</span>${offered && entry.offeredAt ? html`<span class="meta" title="${offered}">${offered}, ${ago(entry.offeredAt, now())}</span>` : html``}</span></td>
-<td data-label="Joined">${ago(entry.createdAt, now())}</td>
-<td class="actions"><details class="act danger"><summary>Remove</summary><div class="pop"><p>${entry.status === 'offered' ? 'Its offered hold is released and offered to the next.' : 'It stops waiting.'}</p>
-<form method="post" action="${root}/waitlist/leave"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button class="danger" type="submit">Remove entry</button></form></div></details></td>
-</tr>`;
-    });
-    const waiting = entries.filter((entry) => entry.status === 'waiting').length;
-    const offered = entries.filter((entry) => entry.status === 'offered').length;
-    const content = html`${noticeOf(notice, status)}
-${pageHead('Waitlist')}
-<div class="stats">
-<div class="stat"><span class="stat-label">Waiting</span><span class="stat-value">${String(waiting)}</span></div>
-<div class="stat"><span class="stat-label">Offered</span><span class="stat-value">${String(offered)}</span></div>
-</div>
-${
-  entries.length === 0
-    ? emptyState(ICONS.waitlist, 'Nobody is waiting. Agents add entries when the time they want is taken.')
-    : html`<div class="table"><table><thead><tr><th>When</th><th>For</th><th>Holder</th><th>Status</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>${entries.length >= WAITLIST_SHOWN ? html`<p class="fine">Showing the first ${String(WAITLIST_SHOWN)}.</p>` : html``}`
-}`;
-    return respond(status, layout('Waitlist', content, session, 'waitlist'));
-  }
-
-  async function leaveWaitlist(session: Session, form: URLSearchParams): Promise<Response> {
-    const waitlist = options.resources.waitlist;
-    if (!waitlist) return notFound(session);
-    if (!(await waitlist.leave(tenantOf(session), form.get('id') ?? '', personOf(session)))) {
-      return waitlistPage(session, 404, 'That entry is not on your waitlist.');
-    }
-    return redirect(303, `${root}/waitlist`);
   }
 
   // ---- Approvals (RFC 0004 A4) ----
@@ -5817,6 +5734,9 @@ ${
   const attentionList = (items: readonly Html[]) =>
     items.length > 0 ? html`<ul class="attention-list" aria-label="Needs attention">${items}</ul>` : html``;
 
+  /** When a failed read of Stripe's prices was last reported: at most once in ten minutes. */
+  let shownPricesWarnedAt = Number.NEGATIVE_INFINITY;
+
   async function planPage(
     session: Session,
     status = 200,
@@ -5850,29 +5770,66 @@ ${
       );
     }
     const standing = await planStanding(session, 'usage');
-    const { plan, paying, admin, used, month, resets, keys } = standing;
+    const { plan, paying, admin, used, resets, keys } = standing;
     const token = csrfToken(session);
+    const hidden = () => html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
     const keyName = new Map(keys.map((key) => [key.id, key.name]));
     // A shared workspace is offered Team (where billing sells it, else by asking), never Developer,
-    // whose limits are a person's; a person is offered Developer.
-    const offered: 'developer' | 'team' = sharedWorkspace(session) ? 'team' : 'developer';
-    const sells = billing !== undefined && (offered === 'developer' || billing.teamPrices !== undefined);
+    // whose limits are a person's; a person is offered Developer, and shown the way to Team.
+    const shared = sharedWorkspace(session);
+    const offered: 'developer' | 'team' = shared ? 'team' : 'developer';
+    // The prices Stripe charges, read from it; the configured labels only when it does not answer.
+    const shown = billing?.shownPrices
+      ? await billing.shownPrices().catch((error: unknown) => {
+          if (now() - shownPricesWarnedAt > 600_000) {
+            shownPricesWarnedAt = now();
+            ignoreRejection(options.onError?.(error));
+          }
+          return null;
+        })
+      : null;
+    const prices = billing ? (shown?.prices ?? billing.prices) : undefined;
+    const teamPrices = billing?.teamPrices ? (shown?.teamPrices ?? billing.teamPrices) : undefined;
     const contact = plans.contact ?? billing?.contact;
+    const current: SlotlockPlan | null = plan?.plan ?? null;
     const manage =
       billing && plan?.stripeCustomer && admin
-        ? html`<form class="inline" method="post" action="${root}/plan/manage"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Manage billing</button></form>`
+        ? html`<form class="inline" method="post" action="${root}/plan/manage">${hidden()}<button type="submit">Manage billing</button></form>`
         : html``;
-    const renews =
-      paying && plan?.currentPeriodEnd
-        ? html`<span class="meta">${plan.status === 'past_due' ? 'Payment due since' : 'Renews'} ${formatDate(plan.currentPeriodEnd)}</span>`
-        : html``;
-    const planCard = html`<section class="panel plan-card" id="plan"><div class="plan-head"><h2>${standing.name}</h2>${renews}</div><div class="meters">${standing.limitMeters}</div>${
-      used ? html`` : html`<p class="fine">This server does not count use yet.</p>`
-    }</section>${
+
+    // The plan at a glance: what it is, when it renews, whose it is.
+    const end = paying ? (plan?.currentPeriodEnd ?? null) : null;
+    const due = paying && plan?.status === 'past_due';
+    const standingPill = paying
+      ? due
+        ? html`<span class="pill held">Payment due</span>`
+        : html`<span class="pill active">Active</span>`
+      : html``;
+    const workspaceName =
+      currentTeam(session)?.name ?? session.orgs?.find((org) => org.id === session.org)?.login ?? shownAs(session);
+    const workspaceKind = session.team !== undefined ? 'Team workspace' : session.org !== undefined ? 'GitHub organization' : 'Personal workspace';
+    const cell = (label: string, value: Html | string, note?: Html | string) =>
+      html`<div class="summary-cell"><span class="summary-label">${label}</span><span class="summary-value">${value}</span>${
+        note ? html`<span class="summary-note">${note}</span>` : html``
+      }</div>`;
+    const summary = html`<section class="plan-summary" id="plan" aria-label="Your plan">${cell(
+      'Plan',
+      html`<span class="plan-now">${standing.name}</span>${standingPill}`,
+    )}${
+      paying
+        ? cell(due ? 'Payment due since' : 'Renews', end ? dayOf(end) : '—', end ? formatDate(end) : undefined)
+        : cell('Billing', 'Nothing to pay', 'No card on file')
+    }${cell('Workspace', html`<span class="truncate" title="${workspaceName}">${workspaceName}</span>`, workspaceKind)}${
+      used ? cell('Month resets', resets.replace(/ 00:00 UTC$/, ''), 'At 00:00 UTC') : html``
+    }</section>`;
+
+    // What it holds against its limits, and this month's use against its allowances.
+    const usage = html`<div class="usage-grid${used ? '' : ' single'}"><section class="panel" aria-labelledby="limits-title"><div class="usage-head"><h2 id="limits-title">Limits</h2><span class="meta">What this workspace holds</span></div><div class="meters stacked">${standing.limitMeters}</div></section>${
       used
-        ? html`<section class="panel" id="month"><h2>This month</h2><div class="meters">${standing.monthMeters('')}</div><p class="fine">Since ${month.from} (UTC); the month starts again on ${resets}. An operation is a call that reached Slotlock, whatever it answered.</p></section>`
+        ? html`<section class="panel" id="month" aria-labelledby="month-title"><div class="usage-head"><h2 id="month-title">This month</h2><span class="meta">Since ${standing.month.from}, UTC</span></div><div class="meters stacked">${standing.monthMeters('')}</div><p class="fine">An operation is a call that reached Slotlock, whatever it answered. The month starts again on ${resets}.</p></section>`
         : html``
-    }`;
+    }</div>${used ? html`` : html`<p class="fine">This server does not count use yet.</p>`}`;
+
     const byKey =
       used && used.keys.length > 0
         ? html`<section class="panel" id="usage"><h2>Used by</h2><div class="table"><table><thead><tr><th>Key</th><th>Operations</th><th>Bookings</th><th>Holds</th></tr></thead><tbody>${used.keys.map(
@@ -5880,52 +5837,147 @@ ${
               html`<tr><td data-label="Key">${row.keyId === null ? 'The dashboard and its assistant' : (keyName.get(row.keyId) ?? 'A deleted key')}</td><td data-label="Operations">${counted(row.operations)}</td><td data-label="Bookings">${counted(row.bookings)}</td><td data-label="Holds">${counted(row.holds)}</td></tr>`,
           )}</tbody></table></div><p class="fine">Webhook deliveries ${counted(used.totals.webhook_deliveries)} · assistant messages ${counted(used.totals.assistant_messages)}.</p></section>`
         : html``;
-    const offeredLimits = SLOTLOCK_PLAN_LIMITS[offered];
-    const offeredText = html`${String(offeredLimits.resources)} resources, ${String(offeredLimits.apiKeys)} API keys and ${String(offeredLimits.webhookEndpoints)} webhook endpoints${
-      options.quotas
-        ? html`, with ${counted(SLOTLOCK_PLAN_QUOTAS[offered].operations)} operations and ${counted(SLOTLOCK_PLAN_QUOTAS[offered].bookings)} bookings a month${offered === 'team' ? ' shared by the organization' : ''}`
-        : html``
-    }.`;
-    let upgrade: Html = html``;
-    if (!paying) {
-      if (!admin) {
-        upgrade = html`<p class="fine">An owner of this organization can change its plan.</p>`;
-      } else if (billing && sells) {
-        const offeredPrices = offered === 'team' ? (billing.teamPrices as { month: string; year: string }) : billing.prices;
-        upgrade = html`<section class="panel" id="upgrade">
-<h2>${PLAN_NAMES[offered]}</h2>
-<p>${offeredText}${
-          offered === 'developer' && billing.overage && options.quotas
-            ? ` Operations past them are billed at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}% of them.`
-            : ''
-        }</p>
-<form method="post" action="${root}/plan/upgrade">
-<input type="hidden" name="csrf" value="${token}">
-<input type="hidden" name="once" value="${formNonce(session)}">
-<fieldset class="modes"><legend>Billed</legend>
-<label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${offeredPrices.month} a month</label>
-<label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${offeredPrices.year} a year</label>
-</fieldset>
-<button class="primary" type="submit">Upgrade to ${PLAN_NAMES[offered]}</button>
-</form>
-<p class="fine">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p>
-</section>`;
-      } else if (contact) {
-        // No payment here yet: the plan is arranged by asking.
-        upgrade = html`<section class="panel" id="upgrade"><h2>${PLAN_NAMES[offered]}</h2><p>${offeredText}</p><a class="button primary" href="${contact}">Talk to us about ${PLAN_NAMES[offered]}</a></section>`;
-      }
+
+    // ---- The plans, side by side, each with the way to it from here ----
+    const allows = (name: SlotlockPlan): string[] => {
+      const limits = SLOTLOCK_PLAN_LIMITS[name];
+      const quota = SLOTLOCK_PLAN_QUOTAS[name];
+      const shares = name === 'team' ? ', shared' : '';
+      return [
+        `${counted(limits.resources)} resources`,
+        `${counted(limits.apiKeys)} active API keys`,
+        `${counted(limits.webhookEndpoints)} webhook endpoints`,
+        ...(options.quotas ? [`${counted(quota.operations)} operations a month${shares}`, `${counted(quota.bookings)} bookings a month${shares}`] : []),
+        name === 'team' ? 'Any number of people' : `Team workspaces of up to ${String(FREE_TEAM_MEMBERS)} people`,
+      ];
+    };
+    const price = (amount: string, per: string, alternative?: string) =>
+      html`<p class="plan-price"><span class="price-amount${/\d/.test(amount) ? '' : ' words'}">${amount}</span><span class="price-per">${per}</span></p>${
+        alternative ? html`<p class="price-alt">${alternative}</p>` : html`<p class="price-alt" aria-hidden="true"> </p>`
+      }`;
+    const inUse = html`<button type="button" class="plan-current" disabled>Current plan</button>`;
+    const note = (text: Html | string) => html`<p class="plan-hint">${text}</p>`;
+    const upgradeForm = (name: 'developer' | 'team', amounts: { month: string; year: string }) =>
+      html`<form class="plan-upgrade" method="post" action="${root}/plan/upgrade">${hidden()}<fieldset class="interval"><legend class="visually-hidden">Billed</legend><label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${amounts.month} a month</label><label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${amounts.year} a year</label></fieldset><button class="primary" type="submit">Upgrade to ${PLAN_NAMES[name]}</button></form>`;
+    const ask = (name: 'developer' | 'team') =>
+      contact ? html`<a class="button primary" href="${contact}">Talk to us about ${PLAN_NAMES[name]}</a>` : html``;
+    // Switching workspace and opening its Usage page in one step.
+    const switchTo = (organization: string, label: string, primary = false) =>
+      html`<form class="plan-switch" method="post" action="${root}/organization">${hidden()}<input type="hidden" name="organization" value="${organization}"><input type="hidden" name="then" value="/plan"><button${primary ? html` class="primary"` : html``} type="submit">${label}</button></form>`;
+    const notOwner = !paying && !admin ? note(shared ? 'An owner of this organization can change its plan.' : 'An owner can change this plan.') : html``;
+
+    const freeAction =
+      current === 'free'
+        ? inUse
+        : standing.upcoming?.plan === 'free'
+          ? note(`Your plan from ${dayOf(standing.upcoming.appliesFrom)}.`)
+          : paying
+            ? note('Where a paid plan returns when it is cancelled.')
+            : html``;
+
+    let developerAction: Html;
+    if (shared) {
+      developerAction = html`${note("For one person's own workspace.")}${
+        session.sc === undefined && session.idp !== 'sso' ? switchTo('', 'Go to your workspace') : html``
+      }`;
+    } else if (current === 'developer') {
+      developerAction = inUse;
+    } else if (paying) {
+      developerAction = html``;
+    } else if (!admin) {
+      developerAction = notOwner;
+    } else if (billing && prices) {
+      developerAction = upgradeForm('developer', prices);
+    } else {
+      developerAction = ask('developer');
     }
+
+    let teamAction: Html;
+    if (shared) {
+      if (current === 'team') teamAction = inUse;
+      else if (paying) teamAction = html``;
+      else if (!admin) teamAction = notOwner;
+      else if (billing && teamPrices) teamAction = upgradeForm('team', teamPrices);
+      else teamAction = ask('team');
+    } else {
+      // Team is a team workspace's: upgrade one the person bills for, or make one.
+      const billable = (teamListOf.get(session) ?? []).filter((ws) => slotlockRoleCan(ws.role, 'billing.manage'));
+      const mayCreate = teamStore ? await teamCreationOn(session) : false;
+      const sold = billing ? teamPrices !== undefined : Boolean(contact);
+      const choose =
+        billable.length === 1
+          ? switchTo(billable[0]?.tenantRef ?? '', `Upgrade ${billable[0]?.name ?? 'your team'}`, true)
+          : billable.length > 1
+            ? html`<form class="plan-switch" method="post" action="${root}/organization">${hidden()}<input type="hidden" name="then" value="/plan"><label class="visually-hidden" for="team-to-upgrade">Team workspace</label><select id="team-to-upgrade" name="organization">${billable.map(
+                (ws) => html`<option value="${ws.tenantRef}">${ws.name}</option>`,
+              )}</select><button class="primary" type="submit">Upgrade it</button></form>`
+            : html``;
+      teamAction = !sold
+        ? html``
+        : billable.length > 0
+          ? html`${choose}${note('Team is bought for a team workspace, by its Owners and Billing managers.')}`
+          : mayCreate
+            ? html`<a class="button primary" href="${root}/teams#team-name">Create a team workspace</a>${note('Team is bought for a team workspace: make one, then upgrade it here.')}`
+            : teams
+              ? html`<a class="button" href="${root}/teams">Choose an organization</a>${note('Turn Slotlock on for a GitHub organization, then upgrade it here.')}`
+              : ask('team');
+    }
+
+    const featured: SlotlockPlan | 'custom' = paying && current ? current : offered;
+    const column = (
+      id: SlotlockPlan | 'custom',
+      tagline: string,
+      shownPrice: Html,
+      action: Html,
+      features: readonly string[],
+    ) =>
+      html`<article class="plan-col${current === id ? ' current' : ''}${featured === id ? ' featured' : ''}" id="${id}" aria-labelledby="${id}-name"><div class="plan-col-head"><h3 class="plan-name" id="${id}-name">${id === 'custom' ? 'Custom' : PLAN_NAMES[id]}</h3>${
+        current === id ? html`<span class="pill active">Current</span>` : html``
+      }</div><p class="plan-tagline">${tagline}</p>${shownPrice}<div class="plan-action">${action}</div><ul class="plan-features">${features.map(
+        (feature) => html`<li>${feature}</li>`,
+      )}</ul></article>`;
+    const zero = prices?.month.replace(/[\d.,\s]+/g, '') ?? '';
+    const plansGrid = html`<section class="plans" id="upgrade" aria-labelledby="plans-title"><div class="plans-head"><h2 id="plans-title">Plans</h2><p class="meta">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p></div><div class="plan-grid">${column(
+      'free',
+      'Connect an agent today.',
+      price(`${zero || '£'}0`, 'a month', 'No card'),
+      freeAction,
+      allows('free'),
+    )}${column(
+      'developer',
+      "For one person's agents in production.",
+      prices ? price(prices.month, 'a month', `or ${prices.year} a year`) : price('Ask us', ''),
+      developerAction,
+      [
+        ...allows('developer'),
+        ...(billing?.overage && options.quotas ? [`Operations past them at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}%`] : []),
+      ],
+    )}${
+      teamPrices || contact
+        ? column(
+            'team',
+            'One price for the whole team.',
+            teamPrices ? price(teamPrices.month, 'a month', `or ${teamPrices.year} a year`) : price('Ask us', ''),
+            teamAction,
+            allows('team'),
+          )
+        : html``
+    }${
+      contact
+        ? column('custom', 'Slotlock on your own servers, with support from the people who build it.', price("Let's talk", ''), html`<a class="button" href="${contact}">Talk to the founder</a>`, [
+            'Your servers, your PostgreSQL',
+            'Support from the people who build it',
+            'Terms agreed in writing',
+          ])
+        : html``
+    }</div></section>`;
     const content = html`${thanks ? html`<p class="notice done" role="status">${notice ?? ''}</p>` : noticeOf(notice, status)}
 ${pageHead('Usage', manage)}
 ${attentionList(standing.attention)}
-${planCard}
-${byKey}
-${upgrade}
-${
-  contact
-    ? html`<section class="panel" id="custom"><h2>Custom</h2><p>Slotlock on your own servers, with support from the people who build it.</p><a class="button" href="${contact}">Talk to the founder</a></section>`
-    : html``
-}`;
+${summary}
+${usage}
+${billing || contact ? plansGrid : html``}
+${byKey}`;
     return respond(status, layout('Usage', content, session, 'plan'));
   }
 
@@ -6174,7 +6226,6 @@ ${
   function pageEntryFor(route: string): { path: string; page: FormAnswerPage } {
     if (route.startsWith('/keys')) return { path: '/keys', page: keysPage };
     if (route.startsWith('/webhooks') && options.resources.webhooks) return { path: '/webhooks', page: webhooksPage };
-    if (route.startsWith('/waitlist') && options.resources.waitlist) return { path: '/waitlist', page: waitlistPage };
     if (route.startsWith('/approvals') && options.resources.approvals) return { path: '/approvals', page: approvalsPage };
     if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
       return { path: '/locations', page: locationsPage };
@@ -8819,6 +8870,9 @@ ${
 
   async function switchOrganization(session: Session, form: URLSearchParams): Promise<Response> {
     const wanted = form.get('organization') ?? '';
+    // Where to land: the workspace's Usage page when asked from a plan (upgrading a team), else its
+    // Overview. Only these, never an address the form names.
+    const then = form.get('then') === '/plan' ? '/plan' : '';
     const teamId = /^team:(.+)$/.exec(wanted)?.[1];
     if (teamStore && (teamId !== undefined || (wanted === '' && !teams))) {
       // Their own tenant, or a team workspace they are a member of now.
@@ -8832,7 +8886,7 @@ ${
           return respond(400, layout('Refused', html`<p class="notice">You are not a member of that team.</p>`, session));
         }
       }
-      return moveTo(session, teamId, '');
+      return moveTo(session, teamId, then);
     }
     if (teams) {
       // Their own tenant, or an organization of theirs that is turned on now.
@@ -8846,7 +8900,7 @@ ${
       const { org: _, team: _team, ...personal } = session;
       const sealed = seal('slotlock-dashboard-session-v1', wanted === '' ? personal : { ...personal, org: wanted });
       const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
-      return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+      return redirect(303, `${root}${then}`, [setCookie(SESSION_COOKIE, sealed, left)]);
     }
     const org = session.orgs?.find(
       (candidate) => candidate.id === wanted && served?.has(candidate.id),
@@ -8859,7 +8913,7 @@ ${
     }
     const sealed = seal('slotlock-dashboard-session-v1', { ...session, org: org.id });
     const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
-    return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+    return redirect(303, `${root}${then}`, [setCookie(SESSION_COOKIE, sealed, left)]);
   }
 
   async function startSignIn(then?: string, emails = false): Promise<Response> {
@@ -9668,8 +9722,6 @@ ${
         return changeWebhook(session, form, 'remove');
       case '/webhooks/enable':
         return changeWebhook(session, form, 'enable');
-      case '/waitlist/leave':
-        return leaveWaitlist(session, form);
       case '/approvals/decide':
         return decideApproval(session, form);
       case '/sandbox/seed':
@@ -9816,7 +9868,6 @@ ${
           case '/keys':
           case '/resources':
           case '/webhooks':
-          case '/waitlist':
           case '/approvals':
           case '/assistant':
           case '/assistant/chats':
@@ -9853,7 +9904,6 @@ ${
               return await resourcesPage(session, 200, undefined, url.searchParams.get('hours') === 'own');
             }
             if (route === '/webhooks') return await webhooksPage(session);
-            if (route === '/waitlist') return await waitlistPage(session);
             if (route === '/approvals') return await approvalsPage(session);
             if (route === '/assistant') return await assistantPage(session, 200, undefined, url.searchParams.get('c') ?? undefined);
             if (route === '/assistant/chats') return await chatsPage(session);
@@ -10213,6 +10263,45 @@ a.stat:focus-visible { outline-offset: -2px; border-radius: 0; }
 .setup-row .segments { width: 96px; flex: none; }
 .plan-card .panel-head h2 { font-size: var(--text-lg); }
 .meters.stacked { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); margin: 0 0 var(--space-4); }
+.plan-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; }
+.summary-cell { display: grid; gap: 4px; align-content: start; padding: var(--space-4) var(--space-5) 18px; box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); min-width: 0; }
+.summary-label { font-size: var(--text-sm); color: var(--ink-3); }
+.summary-value { display: flex; align-items: center; gap: var(--space-2); min-width: 0; font-size: var(--text-lg); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+.summary-note { font-size: var(--text-sm); color: var(--ink-3); }
+.usage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); align-items: stretch; }
+.usage-grid.single { grid-template-columns: minmax(0, 1fr); }
+.usage-grid .meters.stacked { margin-bottom: 0; }
+.usage-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
+.usage-head h2 { margin: 0; }
+.usage-head .meta { flex: none; }
+.plans { display: grid; gap: var(--space-4); scroll-margin-top: var(--space-6); }
+.plans-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2) var(--space-4); flex-wrap: wrap; }
+.plans-head h2 { margin: 0; }
+.plans-head .meta { white-space: normal; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-2); overflow: hidden; }
+.plan-col { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-6); box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); min-width: 0; scroll-margin-top: var(--space-6); }
+.plan-col.featured { background: var(--surface); box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line), inset 0 2px 0 var(--ink); }
+.plan-col:target { box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line), inset 0 0 0 2px var(--accent); }
+.plan-col-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 22px; }
+h3.plan-name { font: 600 var(--text-lg)/1.3 var(--font); color: var(--ink); text-transform: none; letter-spacing: -0.01em; }
+.plan-tagline { margin: 0; min-height: 2.9em; font-size: var(--text-md); color: var(--ink-3); }
+.plan-price { display: flex; align-items: baseline; gap: 6px; margin: var(--space-2) 0 0; }
+.price-amount { font-size: 34px; line-height: 1; font-weight: 500; letter-spacing: -0.035em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.price-amount.words { font-size: 26px; letter-spacing: -0.025em; }
+.price-per { font-size: var(--text-md); color: var(--ink-3); }
+.price-alt { min-height: 1.5em; margin: 0; font-size: var(--text-sm); color: var(--ink-3); }
+.plan-action { display: grid; gap: var(--space-2); margin: var(--space-1) 0 var(--space-2); }
+.plan-action form { display: grid; gap: var(--space-2); margin: 0; }
+.plan-action .button, .plan-action button, .plan-action select { width: 100%; }
+.plan-hint { margin: 0; font-size: var(--text-sm); color: var(--ink-3); }
+button.plan-current { border-style: dashed; background: transparent; color: var(--ink-3); cursor: default; }
+button.plan-current:hover { border-color: var(--line-strong); background: transparent; }
+.interval { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.interval .choice { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); font-size: var(--text-md); }
+.interval .choice:has(input:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.plan-features { display: grid; gap: 8px; margin: auto 0 0; padding: var(--space-4) 0 0; border-top: 1px solid var(--line); list-style: none; font-size: var(--text-md); color: var(--ink-3); }
+.plan-features li:first-child { color: var(--ink); }
+@media (max-width: 760px) { .usage-grid { grid-template-columns: minmax(0, 1fr); } .plan-col { padding: var(--space-5); } .summary-cell { padding: var(--space-3) var(--space-4) var(--space-4); } }
 .plan-card > .button { width: 100%; justify-content: center; }
 details.command { margin-top: var(--space-4); }
 details.command > summary { cursor: pointer; font-size: var(--text-md); color: var(--ink-2); }

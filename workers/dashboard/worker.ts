@@ -528,6 +528,12 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               portal: (input) => billing.stripe.portal(input),
               prices: billing.prices,
               ...(billing.teamPrices ? { teamPrices: billing.teamPrices } : {}),
+              // Stripe's own amounts, read with the dashboard's key (Read on Prices); the configured
+              // labels above only when Stripe does not answer.
+              async shownPrices() {
+                const shown = await (billing.stripe.shownPrices?.() ?? Promise.reject(new Error('no shown prices')));
+                return { prices: shown.developer, ...(shown.team ? { teamPrices: shown.team } : {}) };
+              },
               ...(billing.overage ? { overage: billing.overage } : {}),
               contact: billing.contact,
               formOrigins: ['https://checkout.stripe.com', 'https://billing.stripe.com'],

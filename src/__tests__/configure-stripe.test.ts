@@ -20,7 +20,8 @@ const KEY = 'sk_test_configure';
 const WORKER_KEY = 'rk_live_worker';
 const CHECK_KEY = 'rk_live_check';
 const ALLOWED: Record<string, string[]> = {
-  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions'],
+  [WORKER_KEY]: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions', 'GET prices'],
+  rk_live_noprices: ['GET subscriptions', 'GET billing_portal/configurations', 'POST checkout/sessions'],
   rk_live_nocheckout: ['GET subscriptions', 'GET billing_portal/configurations'],
   [CHECK_KEY]: ['GET products', 'GET prices', 'GET webhook_endpoints', 'GET events'],
   rk_live_noevents: ['GET products', 'GET prices', 'GET webhook_endpoints'],
@@ -456,12 +457,13 @@ describe('configure-stripe.mjs', () => {
     expect(bundle).toMatchObject({ STRIPE_SECRET_KEY: WORKER_KEY, SLOTLOCK_STRIPE_PRICE_MONTHLY: 'price_4', SLOTLOCK_STRIPE_PORTAL_TEAM: 'bpc_3' });
     expect(Object.keys(bundle)).toHaveLength(7);
     expect(result.output).toContain('The dashboard sells now');
+    expect(result.output).not.toContain('cannot read Prices');
     // The check's key went to GitHub, on stdin.
     expect(gh.calls()).toEqual([{ args: ['secret', 'set', 'SLOTLOCK_CHECK_STRIPE_KEY', '--repo', 'PILOTAAI/slotlock'], input: CHECK_KEY }]);
     for (const secret of [KEY, WORKER_KEY, CHECK_KEY]) expect(result.output).not.toContain(secret);
   });
 
-  it('stores no key that cannot do its job, nor one the Worker could not use', async () => {
+  it('stores no key that cannot do its job, nor one the Worker could not use, and notes one that cannot read Prices', async () => {
     livemode = true;
     endpoints = [{ id: 'we_1', url: `${base}/stripe/webhook`, status: 'enabled', enabled_events: ['*'] }];
     const attempt = async (env: Record<string, string>, secrets = ['STRIPE_WEBHOOK_SECRET']) => {
@@ -485,6 +487,11 @@ describe('configure-stripe.mjs', () => {
     // A dashboard that answers 503 once the key is on: said, and the run fails.
     dashboardAnswer = 503;
     expect(await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: WORKER_KEY })).toMatchObject({ code: 1, output: expect.stringContaining('answers 503') });
+    // A key that cannot read Prices is stored, with a note: the page then shows its labels.
+    dashboardAnswer = 400;
+    const noPrices = await attempt({ SLOTLOCK_WORKER_STRIPE_KEY: 'rk_live_noprices' });
+    expect(noPrices).toMatchObject({ code: 0, stored: 1 });
+    expect(noPrices.output).toContain("note: the dashboard's key cannot read Prices");
     // A check key that cannot read events stays off GitHub.
     dashboardAnswer = 400;
     expect(await attempt({ SLOTLOCK_CHECK_STRIPE_KEY: 'rk_live_noevents' })).toMatchObject({ code: 1, output: expect.stringContaining('cannot read Events') });

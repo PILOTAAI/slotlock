@@ -12,6 +12,7 @@ import {
   handleSlotlockStripeWebhook,
   slotlockPlanOfSubscription,
   slotlockPriceIsTeam,
+  formatSlotlockPrice,
   verifySlotlockStripeSignature,
 } from '../billing.js';
 import { readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../plans.js';
@@ -27,13 +28,20 @@ function sign(body: string, at = NOW, secret = SECRET) {
   return `t=${String(t)},v1=${v1}`;
 }
 
-function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>) {
+function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>, refusePrices = false) {
   const calls: Array<{ url: string; body: string | null; headers: Headers }> = [];
   const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const target = String(input);
     calls.push({ url: target, body: (init.body as string) ?? null, headers: new Headers(init.headers) });
     if (target.endsWith('/v1/checkout/sessions')) return Response.json({ url: 'https://checkout.stripe.com/c/pay/cs_1' });
     if (target.endsWith('/v1/billing_portal/sessions')) return Response.json({ url: 'https://billing.stripe.com/p/session/1' });
+    // Prices as Stripe holds them: pence, and the currency.
+    const amounts: Record<string, number> = { price_month: 500, price_year: 5000, price_team_month: 1500, price_team_year: 15000 };
+    const priceId = /\/v1\/prices\/(\w+)$/.exec(target)?.[1];
+    if (priceId !== undefined) {
+      if (refusePrices) return Response.json({ error: { type: 'invalid_request_error', code: 'secret_key_required' } }, { status: 403 });
+      return Response.json({ id: priceId, unit_amount: amounts[priceId], currency: 'gbp' });
+    }
     const query = new URL(target).searchParams;
     // A customer's subscriptions that are not canceled, as Stripe lists them without a status.
     if (new URL(target).pathname === '/v1/subscriptions') {
@@ -66,6 +74,34 @@ function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>) {
   });
   return { stripe, calls };
 }
+
+describe('prices as Stripe holds them', () => {
+  it('formats amounts as people read them', () => {
+    expect(formatSlotlockPrice(500, 'gbp')).toBe('£5');
+    expect(formatSlotlockPrice(15000, 'GBP')).toBe('£150');
+    expect(formatSlotlockPrice(1250, 'usd')).toBe('US$12.50');
+    expect(formatSlotlockPrice(899, 'eur')).toBe('€8.99');
+    // Yen are counted whole.
+    expect(formatSlotlockPrice(1000, 'jpy')).toBe('JP¥1,000');
+  });
+
+  it('reads each plan price from Stripe once in ten minutes, and a refusal as long', async () => {
+    const { stripe, calls } = fakeStripe(new Map());
+    expect(await stripe.shownPrices?.()).toEqual({ developer: { month: '£5', year: '£50' }, team: { month: '£15', year: '£150' } });
+    await stripe.shownPrices?.();
+    expect(calls.filter((call) => call.url.includes('/v1/prices/')).map((call) => new URL(call.url).pathname).sort()).toEqual([
+      '/v1/prices/price_month',
+      '/v1/prices/price_team_month',
+      '/v1/prices/price_team_year',
+      '/v1/prices/price_year',
+    ]);
+    // A key without Read on Prices: refused once, and not asked again on every page.
+    const refused = fakeStripe(new Map(), true);
+    await expect(refused.stripe.shownPrices?.()).rejects.toMatchObject({ name: 'SlotlockBillingError' });
+    await expect(refused.stripe.shownPrices?.()).rejects.toMatchObject({ name: 'SlotlockBillingError' });
+    expect(refused.calls.filter((call) => call.url.includes('/v1/prices/'))).toHaveLength(4);
+  });
+});
 
 describe('Stripe signatures and plans', () => {
   it('accepts only a fresh signature made with the endpoint secret', () => {
