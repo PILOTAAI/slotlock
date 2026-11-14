@@ -70,6 +70,10 @@ export interface SlotlockStripeSubscription {
   metadata?: Record<string, string>;
   current_period_end?: number | null;
   items?: { data?: Array<{ current_period_end?: number | null; price?: SlotlockStripePrice | string | null }> };
+  /** Cancelled at the end of the period, as Stripe's customer portal cancels: it renews no more. */
+  cancel_at_period_end?: boolean | null;
+  /** When it is set to end, if it is (Unix seconds). */
+  cancel_at?: number | null;
 }
 
 /** The parts of a subscription item's price the plan is read from. */
@@ -161,6 +165,19 @@ const REVIVABLE = new Set(['unpaid', 'incomplete']);
 /** Whether the subscription gives its tenant a plan. */
 export function slotlockSubscriptionIsLive(subscription: SlotlockStripeSubscription): boolean {
   return LIVE.has(subscription.status);
+}
+
+/**
+ * When a subscription that still gives its plan is set to end: its cancellation date, or the end of
+ * the period it was cancelled at the end of. Null when it renews, or has already ended (then the
+ * webhook has set the plan to Free).
+ */
+export function slotlockSubscriptionEnding(subscription: SlotlockStripeSubscription): Date | null {
+  if (!slotlockSubscriptionIsLive(subscription)) return null;
+  if (typeof subscription.cancel_at === 'number') return new Date(subscription.cancel_at * 1000);
+  if (subscription.cancel_at_period_end !== true) return null;
+  const end = subscription.items?.data?.[0]?.current_period_end ?? subscription.current_period_end ?? null;
+  return typeof end === 'number' ? new Date(end * 1000) : null;
 }
 
 /** Whether any of the subscription's items is at this price. */

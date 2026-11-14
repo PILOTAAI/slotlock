@@ -38,6 +38,7 @@ import {
 import {
   createSlotlockStripe,
   handleSlotlockStripeWebhook,
+  slotlockSubscriptionEnding,
   type SlotlockStripe,
 } from '../../src/billing.js';
 import { enrolSlotlockTenantPlan, readSlotlockPlanDefault,
@@ -532,6 +533,8 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               },
               checkout: (input) => billing.stripe.checkout(input),
               portal: (input) => billing.stripe.portal(input),
+              // A plan cancelled at the end of its period says when it ends, from Stripe itself.
+              ending: async (subscription: string) => slotlockSubscriptionEnding(await billing.stripe.subscription(subscription)),
               prices: billing.prices,
               ...(billing.teamPrices ? { teamPrices: billing.teamPrices } : {}),
               // Stripe's own amounts, read with the dashboard's key (Read on Prices); the configured

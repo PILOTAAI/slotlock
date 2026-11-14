@@ -15,6 +15,7 @@ import {
   slotlockPriceIsTeam,
   formatSlotlockPrice,
   verifySlotlockStripeSignature,
+  slotlockSubscriptionEnding,
 } from '../billing.js';
 import { readSlotlockTenantPlan, readSlotlockTenantQuotas, setSlotlockTenantPlan } from '../plans.js';
 import { createSlotlockStore } from '../store.js';
@@ -119,6 +120,19 @@ describe('Stripe signatures and plans', () => {
     expect(verifySlotlockStripeSignature(body, sign(body, NOW - 301_000), SECRET, NOW)).toBe(false);
     expect(verifySlotlockStripeSignature(body, null, SECRET, NOW)).toBe(false);
     expect(verifySlotlockStripeSignature(body, 't=1,v0=abc', SECRET, NOW)).toBe(false);
+  });
+
+  it('says when a subscription that still gives its plan is set to end', () => {
+    const base = { id: 'sub_1', customer: 'cus_1', items: { data: [{ current_period_end: 1_797_206_640 }] } };
+    // Cancelled at the end of the period, as the billing portal cancels: the period's end.
+    expect(slotlockSubscriptionEnding({ ...base, status: 'active', cancel_at_period_end: true })).toEqual(new Date(1_797_206_640_000));
+    // A cancellation date of its own wins.
+    expect(slotlockSubscriptionEnding({ ...base, status: 'active', cancel_at_period_end: true, cancel_at: 1_797_000_000 })).toEqual(
+      new Date(1_797_000_000_000),
+    );
+    // Renewing, or already ended (the webhook has set Free): nothing ends.
+    expect(slotlockSubscriptionEnding({ ...base, status: 'active', cancel_at_period_end: false })).toBeNull();
+    expect(slotlockSubscriptionEnding({ ...base, status: 'canceled', cancel_at_period_end: true })).toBeNull();
   });
 
   it('keeps the plan while Stripe retries a payment, and ends it after', () => {

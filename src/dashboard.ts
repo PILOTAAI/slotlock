@@ -1036,6 +1036,12 @@ export interface SlotlockDashboardBilling {
    */
   shownPrices?(): Promise<{ prices: { month: string; year: string }; teamPrices?: { month: string; year: string } }>;
   /**
+   * When the plan's subscription is set to end (cancelled at the end of the period, as the billing
+   * portal cancels), or null when it renews: the Usage page then says when the plan ends, not that
+   * it renews. Read from the payment provider, so it needs no column of the database's.
+   */
+  ending?(subscription: string): Promise<Date | null>;
+  /**
    * The Team plan's prices as shown (Teams on Cloud). A shared workspace (an organization's or a
    * team's) is offered Team only, never Developer: without them it is offered Team by asking.
    */
@@ -5802,6 +5808,15 @@ ${
     // whose limits are a person's; a person is offered Developer, and shown the way to Team.
     const shared = sharedWorkspace(session);
     const offered: 'developer' | 'team' = shared ? 'team' : 'developer';
+    // Whether the subscription is set to end, asked while the prices are: a plan cancelled at the end
+    // of its period still gives its limits until then, and must not say it renews.
+    const ending =
+      billing?.ending && paying && plan?.stripeSubscription
+        ? billing.ending(plan.stripeSubscription).catch((error: unknown) => {
+            ignoreRejection(options.onError?.(error));
+            return null;
+          })
+        : Promise.resolve(null);
     // The prices Stripe charges, read from it; the configured labels only when it does not answer.
     const shown = billing?.shownPrices
       ? await billing.shownPrices().catch((error: unknown) => {
@@ -5822,12 +5837,15 @@ ${
         : html``;
 
     // The plan at a glance: what it is, when it renews, whose it is.
-    const end = paying ? (plan?.currentPeriodEnd ?? null) : null;
+    const ends = await ending;
+    const end = paying ? (ends ?? plan?.currentPeriodEnd ?? null) : null;
     const due = paying && plan?.status === 'past_due';
     const standingPill = paying
       ? due
         ? html`<span class="pill held">Payment due</span>`
-        : html`<span class="pill active">Active</span>`
+        : ends
+          ? html`<span class="pill held">Ending</span>`
+          : html`<span class="pill active">Active</span>`
       : html``;
     const workspaceName =
       currentTeam(session)?.name ?? session.orgs?.find((org) => org.id === session.org)?.login ?? shownAs(session);
@@ -5841,7 +5859,7 @@ ${
       html`<span class="plan-now">${standing.name}</span>${standingPill}`,
     )}${
       paying
-        ? cell(due ? 'Payment due since' : 'Renews', end ? dayOf(end) : '—', end ? formatDate(end) : undefined)
+        ? cell(due ? 'Payment due since' : ends ? 'Ends' : 'Renews', end ? dayOf(end) : '—', end ? formatDate(end) : undefined)
         : cell('Billing', 'Nothing to pay', 'No card on file')
     }${cell('Workspace', html`<span class="truncate" title="${workspaceName}">${workspaceName}</span>`, workspaceKind)}${
       used ? cell('Month resets', resets.replace(/ 00:00 UTC$/, ''), 'At 00:00 UTC') : html``
