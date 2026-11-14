@@ -48,7 +48,7 @@ const DIY: Comparison = {
   chooseThem: [
     'Only one process ever writes bookings, and nothing books concurrently.',
     'Your needs are a single resource type with no holds, no imports and no time zones.',
-    'You want the technique, not the product: an exclusion constraint on a `tstzrange` is a few lines of SQL ([how it works](/docs/concepts/#the-exclusion-constraint)).',
+    'You want the technique, not the product: an exclusion constraint on a `tstzrange` is a few lines of SQL ([how it works](/blog/postgresql-exclusion-constraint-double-booking/)).',
   ],
   chooseUs: [
     'Agents, your site and other channels book the same resources at once.',

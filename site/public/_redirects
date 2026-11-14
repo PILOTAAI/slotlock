@@ -1,15 +1,2 @@
 # Redirects for the site (Cloudflare Workers static assets): one "from to status" per line.
 # The admin console adds a line when a post's slug changes, so its old address keeps working.
-# Posts removed on 14 November 2026: each address goes to the docs section that covers it.
-/blog/postgresql-exclusion-constraint-double-booking/ /docs/concepts/ 301
-/blog/postgresql-exclusion-constraint-double-booking /docs/concepts/ 301
-/blog/postgresql-exclusion-constraint-double-booking.md /docs/concepts/ 301
-/blog/holds-keep-a-slot-while-a-person-decides/ /docs/concepts/ 301
-/blog/holds-keep-a-slot-while-a-person-decides /docs/concepts/ 301
-/blog/holds-keep-a-slot-while-a-person-decides.md /docs/concepts/ 301
-/blog/pylota-car-rental-case-study/ /docs/use-cases/ 301
-/blog/pylota-car-rental-case-study /docs/use-cases/ 301
-/blog/pylota-car-rental-case-study.md /docs/use-cases/ 301
-/blog/why-ai-agents-double-book/ /docs/concepts/ 301
-/blog/why-ai-agents-double-book /docs/concepts/ 301
-/blog/why-ai-agents-double-book.md /docs/concepts/ 301

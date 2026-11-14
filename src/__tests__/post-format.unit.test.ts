@@ -139,8 +139,8 @@ describe('the post format', () => {
 
   it('renders every post in the repository cleanly, and each passes the checks the build does not cover', () => {
     const facts = new Proxy({}, { get: () => 1 }) as Record<string, unknown>;
-    // Posts are written in the admin console now, so the repository may hold few or none: the two
-    // fixture posts (once published here) keep the checks exercised on real writing.
+    // Staff add and delete posts in the admin console, so the repository may hold few or none: the
+    // two fixture posts (copies of published ones) keep the checks exercised on real writing.
     const files = ['site/content/blog', 'src/__tests__/fixtures/blog'].flatMap((directory) =>
       readdirSync(directory)
         .filter((file) => file.endsWith('.md'))

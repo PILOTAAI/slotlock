@@ -59,7 +59,7 @@ export const openSourcePage: MarketingPage = {
           kind: 'links',
           items: [
             { label: 'Read the race test', href: RACE_TEST_URL },
-            { label: 'The constraint, explained', href: '/docs/concepts/#the-exclusion-constraint' },
+            { label: 'The constraint, explained', href: '/blog/postgresql-exclusion-constraint-double-booking/' },
             { label: 'Concepts', href: '/docs/concepts/#the-exclusion-constraint' },
           ],
         },

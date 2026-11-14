@@ -671,7 +671,7 @@ export const faq = {
     },
     {
       q: 'How does it stop double bookings?',
-      a: 'A PostgreSQL exclusion constraint checks every booking, hold and event as it is written. When two agents race for one slot, one write wins and the other is refused with `overlap`, as data the agent can act on ([how it works](/docs/concepts/#the-exclusion-constraint)).',
+      a: 'A PostgreSQL exclusion constraint checks every booking, hold and event as it is written. When two agents race for one slot, one write wins and the other is refused with `overlap`, as data the agent can act on ([how it works](/blog/postgresql-exclusion-constraint-double-booking/)).',
     },
     {
       q: 'Which agents can use it?',
@@ -687,7 +687,7 @@ export const faq = {
     },
     {
       q: 'Does it replace my booking system?',
-      a: 'No, it sits behind it. Your site, your phone agents and your AI agents all write through Slotlock, so each slot is sold once whichever channel sells it. [Pylota](/docs/use-cases/#car-and-van-rental) runs it as a library inside its own database.',
+      a: 'No, it sits behind it. Your site, your phone agents and your AI agents all write through Slotlock, so each slot is sold once whichever channel sells it. [Pylota](/blog/pylota-car-rental-case-study/) runs it as a library inside its own database.',
     },
     {
       q: 'Does it sync with Google Calendar or Outlook?',

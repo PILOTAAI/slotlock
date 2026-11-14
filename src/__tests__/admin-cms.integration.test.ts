@@ -28,7 +28,8 @@ const OWNER_SIGN_OFF = 'Signed-off-by: octo-owner <1001+octo-owner@users.noreply
 
 // The post: a real post's body, which passes the site's checks, under a new address and title.
 const EXISTING = 'why-ai-agents-double-book';
-// Copies of two posts the site once published: the fake repository's existing posts.
+// Copies of two published posts as the fake repository's existing ones, so this suite does not
+// depend on what the blog holds: staff add and delete posts in the console.
 const existingText = readFileSync(`src/__tests__/fixtures/blog/${EXISTING}.md`, 'utf8');
 const source = parsePost(existingText, EXISTING);
 const FACTS = Object.fromEntries([...source.body.matchAll(/\{\{facts\.(\w+)\}\}/g)].map((match) => [match[1] as string, 5]));

@@ -119,7 +119,7 @@ export const mcpServerPage: MarketingPage = {
             'Self-hosted, each write can wait for a person to confirm it in the client (MCP 2026-07-28 with form elicitation).',
           ],
         },
-        { kind: 'links', items: [{ label: 'How overlaps are refused', href: '/docs/concepts/#the-exclusion-constraint' }, { label: 'Security model', href: '/docs/security/' }] },
+        { kind: 'links', items: [{ label: 'Why agents double-book', href: '/blog/why-ai-agents-double-book/' }, { label: 'Security model', href: '/docs/security/' }] },
       ],
     },
     {
