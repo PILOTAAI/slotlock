@@ -3,6 +3,14 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- `scripts/check-launch.mjs` fails when a page of the site (home, pricing, the quickstart, the blog)
+  tells search engines not to index it, by an `X-Robots-Tag` header or its robots meta tag. A zone rule
+  outside this repository was sending `X-Robots-Tag: noindex` from every page, and nothing noticed.
+
 ## 0.12.0 - 2026-11-14
 
 ### Added
