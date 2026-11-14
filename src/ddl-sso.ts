@@ -45,6 +45,15 @@ export const SLOTLOCK_SSO_FUNCTIONS = Object.freeze([
   'slotlock.prune_sso()',
 ] as const);
 
+/**
+ * Functions added since 0.10.2 that the dashboard asks for before it calls them
+ * (schema-functions.ts), so a dashboard Worker or server ahead of its database's migration keeps
+ * working the earlier way. Granted with the rest (ddl.ts), but `serve` does not need them to start.
+ */
+export const SLOTLOCK_SSO_ASKED_FUNCTIONS = Object.freeze([
+  'slotlock.sso_session_started(text, bytea, timestamptz, text, text, uuid, integer)',
+] as const);
+
 /** How long a proof from a team's provider lasts by default, and the range an Owner may set. */
 export const SLOTLOCK_SSO_MAX_AGE_HOURS = Object.freeze({ default: 24, min: 1, max: 168 });
 /** How fresh a proof must be to turn "require single sign-on" on. */
@@ -934,6 +943,48 @@ BEGIN
 END
 $slotlock_record_sso_proof$;
 REVOKE ALL ON FUNCTION ${fn[11]} FROM PUBLIC;
+
+-- A session begun through a connection's provider alone, recorded with its proof in one step and
+-- scoped to the connection from the start. So it never counts among the sessions the person began,
+-- whose 50 newest dashboard_session_started keeps, not even while its proof is being recorded, and
+-- a refused proof leaves no record. Whether it was recorded. (Before this, the dashboard called
+-- dashboard_session_started and then record_sso_proof, and still does on a schema without this.)
+CREATE OR REPLACE FUNCTION slotlock.sso_session_started(
+  requested_person text, requested_sid bytea, requested_expires timestamptz, requested_agent text,
+  requested_address text, requested_connection uuid, requested_version integer)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_sso_session_started$
+BEGIN
+  -- As record_sso_proof: only from a connection on now, configured as it was when it vouched.
+  PERFORM 1 FROM slotlock.sso_connections linked
+   WHERE linked.id = requested_connection AND linked.status = 'active' AND linked.config_version = requested_version
+     FOR SHARE;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  INSERT INTO slotlock.dashboard_sessions (sid_sha256, person_ref, expires_at, user_agent, ip_address, sso_connection_id)
+  VALUES (requested_sid, requested_person, requested_expires,
+          NULLIF(left(requested_agent, 256), ''), NULLIF(left(requested_address, 64), ''), requested_connection)
+  ON CONFLICT ON CONSTRAINT dashboard_sessions_pkey DO NOTHING;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  -- The person's checks and the 50 kept, as for any session; this one, already the provider's,
+  -- goes before any the person began.
+  PERFORM slotlock.dashboard_session_started(requested_person, requested_sid, requested_expires, requested_agent, requested_address);
+  -- Scoped already, so recorded as a proof for a session that is.
+  IF NOT slotlock.record_sso_proof(requested_sid, requested_person, requested_connection, false, requested_version) THEN
+    DELETE FROM slotlock.dashboard_sessions refused WHERE refused.sid_sha256 = requested_sid;
+    RETURN false;
+  END IF;
+  RETURN true;
+END
+$slotlock_sso_session_started$;
+REVOKE ALL ON FUNCTION ${SLOTLOCK_SSO_ASKED_FUNCTIONS[0]} FROM PUBLIC;
 
 -- Require single sign-on, or stop, by an Owner: turning it on needs the team's connection active,
 -- a proof from it in this session in the last ${SLOTLOCK_SSO_ENABLE_PROOF_MINUTES} minutes, and an Owner who signs in with

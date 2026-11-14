@@ -3,7 +3,9 @@
 // provider's sign-in is. Tokens are checked before (oidc.ts); secrets are sealed before (oidc.ts
 // createSlotlockSecretBox), so only a sealed secret ever reaches the database.
 import { createHash } from 'node:crypto';
+import { SLOTLOCK_SSO_ASKED_FUNCTIONS } from './ddl-sso.js';
 import type { SlotlockOidcAlgorithm } from './oidc.js';
+import { createSlotlockSchemaFunctions } from './schema-functions.js';
 import type { SlotlockSql } from './store.js';
 import { type SlotlockWorkspaceRole, isSlotlockWorkspaceRole } from './workspace-roles.js';
 
@@ -151,6 +153,20 @@ export interface SlotlockWorkspaceSso {
   /** A session's proof from the connection, now; `scoped` for a session begun through it alone. */
   /** `configVersion`: the connection's configuration the sign-in went through, where known. */
   recordProof(sid: string, person: string, connectionId: string, scoped: boolean, configVersion?: number): Promise<boolean>;
+  /**
+   * A session begun through the connection alone, recorded scoped to it with its proof in one step,
+   * so it never counts among the person's own sessions: true when recorded, false when the proof is
+   * refused (nothing is kept). Null, recording nothing, on a schema from before this (0.10.2's):
+   * then sessions.started and recordProof, as before.
+   */
+  startScoped(
+    sid: string,
+    person: string,
+    connectionId: string,
+    configVersion: number,
+    expiresAt: Date,
+    from: { userAgent?: string; ipAddress?: string },
+  ): Promise<boolean | null>;
   requireSso(tenantRef: string, actor: string, sid: string, on: boolean, maxAgeHours: number): Promise<SlotlockSsoRefusal | null>;
   bypass(tenantRef: string, person: string, sid: string): Promise<SlotlockSsoRefusal | null>;
   prune(): Promise<number>;
@@ -181,8 +197,13 @@ interface ConnectionRow {
   sso_max_age_hours: number;
 }
 
+const SSO_SESSION_STARTED = SLOTLOCK_SSO_ASKED_FUNCTIONS[0];
+
 /** Through the functions of ddl-sso.ts. */
 export function createSlotlockWorkspaceSso(sql: SlotlockSql): SlotlockWorkspaceSso {
+  // Asked for before it is called: a schema from before it lacks it, and through Hyperdrive a
+  // failed call can cost the dashboard Worker's request its connection (schema-functions.ts).
+  const has = createSlotlockSchemaFunctions(sql, SLOTLOCK_SSO_ASKED_FUNCTIONS);
   return {
     async connection(tenantRef) {
       if (!TEAM.test(tenantRef)) return null;
@@ -348,6 +369,15 @@ export function createSlotlockWorkspaceSso(sql: SlotlockSql): SlotlockWorkspaceS
       const [row] = await sql<{ recorded: boolean }[]>`
         SELECT slotlock.record_sso_proof(${sessionDigest(sid)}::bytea, ${person}::text, ${connectionId}::uuid, ${scoped}::boolean,
           ${configVersion ?? null}::integer) AS recorded`;
+      return row?.recorded === true;
+    },
+    async startScoped(sid, person, connectionId, configVersion, expiresAt, from) {
+      if (!(await has(SSO_SESSION_STARTED))) return null;
+      if (!UUID.test(connectionId)) return false;
+      const [row] = await sql<{ recorded: boolean }[]>`
+        SELECT slotlock.sso_session_started(${person}::text, ${sessionDigest(sid)}::bytea, ${expiresAt}::timestamptz,
+          ${from.userAgent?.slice(0, 256) ?? null}::text, ${from.ipAddress?.slice(0, 64) ?? null}::text, ${connectionId}::uuid,
+          ${configVersion}::integer) AS recorded`;
       return row?.recorded === true;
     },
     async requireSso(tenantRef, actor, sid, on, maxAgeHours) {

@@ -52,6 +52,17 @@ describe('functions a schema from an earlier release lacks', () => {
     expect(calls(statements, 'tenant_dashboard_notices')).toBe(1);
   });
 
+  it('include the one step a sign-in through a team provider alone is recorded in: without it, nothing is called', async () => {
+    const connection = '00000000-0000-4000-8000-000000000001';
+    const without = fakeSql([]);
+    const earlier = createSlotlockDashboardWorkspaces(without.sql).sso;
+    await expect(earlier?.startScoped('sid', 'github:1', connection, 1, new Date(), {})).resolves.toBeNull();
+    expect(calls(without.statements, 'sso_session_started')).toBe(0);
+    const present = fakeSql(['slotlock.sso_session_started(text, bytea, timestamptz, text, text, uuid, integer)']);
+    await createSlotlockDashboardWorkspaces(present.sql).sso?.startScoped('sid', 'github:1', connection, 1, new Date(), {});
+    expect(calls(present.statements, 'sso_session_started')).toBe(1);
+  });
+
   it('are taken as missing when the question itself fails, and asked again after a minute', async () => {
     let clock = 0;
     const failing = fakeSql([], true);

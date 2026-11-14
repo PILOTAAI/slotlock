@@ -8464,10 +8464,18 @@ ${
     if (teamStore && idp === 'sso') await teamStore.setDisplay(person, login === 'SSO account' ? null : login);
     const sid = randomBytes(24).toString('base64url');
     const expires = now() + SESSION_TTL_MS;
-    await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
     // Scoped to this team for the session's life: the provider reaches nothing else of the person's.
-    if (!(await ssoStore.recordProof(sid, person, connection.id, true, connection.configVersion))) {
-      await workspaces?.sessions?.end(person, workspaces.sessions.idOf(sid));
+    // Recorded scoped, with its proof, in one step, so it never counts among the sessions the person
+    // began (50 of which are kept), not even while its proof is recorded; a refused one is not kept.
+    const recorded = await ssoStore.startScoped(sid, person, connection.id, connection.configVersion, new Date(expires), requestOrigin(request));
+    if (recorded === null) {
+      // A schema from before that step (0.10.2's): recorded, then scoped by its proof, as it was.
+      await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
+      if (!(await ssoStore.recordProof(sid, person, connection.id, true, connection.configVersion))) {
+        await workspaces?.sessions?.end(person, workspaces.sessions.idOf(sid));
+        return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+      }
+    } else if (!recorded) {
       return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
     }
     const sealedSession = seal('slotlock-dashboard-session-v1', {
