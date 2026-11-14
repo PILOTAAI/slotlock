@@ -156,8 +156,9 @@ export const SLOTLOCK_DASHBOARD_POST_CAPABILITIES: Readonly<Record<string, Slotl
   '/teams/restore': 'workspace.own',
   '/invite/accept': 'account.use',
   '/members/leave': 'account.use',
-  // Inviting or changing someone also needs the power the role given carries (dashboard.ts
-  // capabilitiesOf): an Owner `workspace.own`, a Billing manager `billing.manage`.
+  // Inviting, changing, limiting or removing someone, or inviting them again, also needs the powers
+  // the role given and the role they hold carry (dashboard.ts capabilitiesOf): an Owner's
+  // `workspace.own`, and every fresh one, so an Admin's Full-access keys ask for a recent sign-in.
   '/members/invite': 'members.manage',
   '/members/resend': 'members.manage',
   '/members/revoke': 'members.manage',

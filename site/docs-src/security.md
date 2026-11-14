@@ -60,7 +60,8 @@ threat model, including what the role check does not read.
 - A callback works once, a signed-out cookie stays out, and a reloaded form does not create or
   rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, kept until its cookie or
   form expires (12 hours at most), so this holds on every server sharing the database, behind any
-  load balancer; a form record also carries a digest of the GitHub user id that sent it. The server
+  load balancer; a form record also carries a digest of the person who sent it (and of the team's
+  provider, for a session its single sign-on began alone), so each has its own limit. The server
   role reaches them only through two SECURITY DEFINER functions, and `serve` refuses to start the
   dashboard until `migrate` has granted them.
 - The database's clock decides when a sign-in or session has expired, so servers whose clocks drift

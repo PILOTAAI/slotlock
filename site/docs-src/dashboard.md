@@ -126,8 +126,8 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
   creator is its Owner and lands on Settings, Members. The workspace menu lists each team a person
   is in beside their own workspace.
 - **Invite by email**, with a role, on Members. An Owner gives any role; an Admin any up to Admin;
-  nobody else invites. Making an Owner or a Billing manager also needs the inviter's own sign-in
-  in the last 15 minutes.
+  nobody else invites. Making an Owner, an Admin or a Billing manager, or sending their invitation
+  again, also needs the inviter's own sign-in in the last 15 minutes.
 - **The link** is shown once to the person who invited, and sent by email where a sender is set:
   `SLOTLOCK_INVITATION_EMAIL` (`resend` or `postmark`), `SLOTLOCK_INVITATION_EMAIL_KEY` (Resend's
   API key or Postmark's server token) and `SLOTLOCK_INVITATION_EMAIL_FROM` (the sender the provider
@@ -141,6 +141,8 @@ runs there) for workspaces people make and share, apart from GitHub: each is a t
 - **Change a role, remove someone, or leave** on Members. A team always keeps an Owner: the last
   one makes another Owner first, then may step down or leave. Removing someone revokes the keys
   they created, Live and Test, unless the form keeps them. Their next request is refused.
+  Changing, limiting or removing an Owner, an Admin or a Billing manager needs a sign-in in the
+  last 15 minutes, as making one does.
 - **Limit someone to locations or groups** (Members, **Limit**; RFC 0004 D1): an Owner, or an Admin
   not limited themselves, picks up to 20 locations and 20 groups for anyone but an Owner, in Live
   and Test alike. From their next request the dashboard reads for them as a key limited to those
@@ -223,8 +225,9 @@ it up on Settings, Identity. A provider that speaks only SAML cannot be connecte
 - **Who someone is**: the provider's subject (and Entra's tenant and object id), never an email.
   A first sign-in through the provider alone makes a new person, with no workspace of their own,
   who acts in this team only: a session through the provider alone sees no other team the person
-  is in, nor their other sessions. An email counts only at a domain the team verified (with Entra,
-  only when Entra says the domain's owner verified it; never when the provider marks it unverified).
+  is in, nor their other sessions, and its forms count apart from theirs. An email counts only at
+  a domain the team verified (with Entra, only when Entra says the domain's owner verified it;
+  never when the provider marks it unverified).
   With Google Workspace, only an account of the team's verified domain signs in at all.
 - **Who joins**: someone the team invited by that address joins as invited (an Owner's invitation
   excepted); otherwise, by default, anyone at the verified domains joins at their first sign-in as a
@@ -429,7 +432,9 @@ and 10. In Test, it shows Test's own use. A self-hosted dashboard has no Usage p
   clock in sync with it all the same: a server more than 12 hours ahead of the database cannot sign
   anyone in.
 - A person may have 1,000 forms recorded at once (12 hours' worth); past that the dashboard answers
-  429 until the oldest expire. Signing out always works.
+  429 until the oldest expire. Signing out, and signing out everywhere, always works. A session a
+  team's single sign-on began alone has 1,000 of its own, so the team's provider cannot use up the
+  person's.
 
 [Security model](/docs/security/#dashboard-sign-in) says how sign-in, sessions and forms are
 protected.

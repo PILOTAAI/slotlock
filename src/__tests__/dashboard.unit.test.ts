@@ -1993,6 +1993,38 @@ describe('organizations', () => {
     expect((await post(plain, '/base/dashboard/sign-out-everywhere', { csrf: await csrf(plain, own) }, own)).status).toBe(404);
   });
 
+  it('signs a person out, and out everywhere, once their forms are spent, each form still once', async () => {
+    const state = createSlotlockMemoryDashboardState(() => now);
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const target = dashboard({ state, workspaces });
+    const laptop = (await signIn(target)).session;
+    const phone = (await signIn(target)).session;
+    for (let index = 0; index < SLOTLOCK_DASHBOARD_FORM_LIMIT; index += 1) {
+      await state.use('form', `spent-${index}`, now + 3_600_000, String(GITHUB_USER.id));
+    }
+    const token = await csrf(target, laptop);
+    expect((await post(target, '/base/dashboard/environment', { csrf: token, environment: 'test' }, laptop)).status).toBe(429);
+    // Its Origin, CSRF token and single-use value are checked as any form's.
+    expect((await post(target, '/base/dashboard/sign-out-everywhere', { csrf: token }, laptop, 'https://evil.example')).status).toBe(403);
+    expect((await post(target, '/base/dashboard/sign-out-everywhere', { csrf: 'wrong' }, laptop)).status).toBe(403);
+    expect((await post(target, '/base/dashboard/sign-out-everywhere', { csrf: token }, laptop, ORIGIN, 'none')).status).toBe(400);
+    const page = await (await get(target, '/base/dashboard/settings/account', laptop)).text();
+    const once = /name="once" value="([^"]+)"/.exec(page)?.[1] as string;
+    await state.use('form', once, now + 3_600_000, 'used-elsewhere');
+    expect((await post(target, '/base/dashboard/sign-out-everywhere', { csrf: token, once }, laptop)).status).toBe(409);
+    const out = await post(target, '/base/dashboard/sign-out-everywhere', { csrf: token }, laptop);
+    expect(out.status).toBe(303);
+    expect((await get(target, '/base/dashboard/keys', phone)).headers.get('location')).toBe('/base/dashboard');
+    // Signing out of one session, with a single-use value or without.
+    const tablet = (await signIn(target)).session;
+    expect((await post(target, '/base/dashboard/sign-out', { csrf: await csrf(target, tablet), once: 'x' }, tablet)).status).toBe(409);
+    expect((await post(target, '/base/dashboard/sign-out', { csrf: await csrf(target, tablet) }, tablet)).status).toBe(303);
+    const desk = (await signIn(target)).session;
+    const fresh = /name="once" value="([^"]+)"/.exec(await (await get(target, '/base/dashboard/keys', desk)).text())?.[1] as string;
+    expect((await post(target, '/base/dashboard/sign-out', { csrf: await csrf(target, desk), once: fresh }, desk)).status).toBe(303);
+    expect((await get(target, '/base/dashboard/keys', desk)).headers.get('location')).toBe('/base/dashboard');
+  });
+
   it("answers a form sent twice with the page it renders only where the role reads that page", async () => {
     // Without the Teams or Plans stores, their forms fall back to the overview, which Billing does not read.
     const workspaces = createSlotlockMemoryDashboardWorkspaces();
@@ -2121,6 +2153,71 @@ describe('a member limited to locations and groups (RFC 0004 D1)', () => {
     workspaces.setRole(tenantRef, person, 'owner');
     workspaces.limit(tenantRef, person, { locations: ['north'], groups: [] });
     expect((await get(target, '/base/dashboard/keys', session)).status).toBe(200);
+  });
+
+  it('is never answered about a form with a page that is the whole workspace’s', async () => {
+    const workspaces = createSlotlockMemoryDashboardWorkspaces();
+    const tenantRef = `github-org:${ACME_ORG.id}`;
+    const person = `github:${GITHUB_USER.id}`;
+    const contacts = {
+      list: vi.fn(async () => [
+        {
+          ref: 'south-customer-1',
+          name: 'Sam Southside',
+          email: 'sam.southside@example.test',
+          phone: '+15550123',
+          whatsapp: null,
+          consent: { email: true, sms: true },
+          consentAt: {},
+          locale: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ]),
+      forget: vi.fn(async () => ({ deleted: true, bookings: 0 })),
+    };
+    const endpoint: SlotlockWebhookEndpoint = {
+      id: randomUUID(),
+      url: 'https://hooks.example.test/south-secret-path',
+      eventTypes: null,
+      createdAt: new Date(now),
+      attempts: 0,
+      failingSince: null,
+      lastStatus: null,
+      lastError: null,
+      disabledAt: null,
+      disabledReason: null,
+    };
+    const webhooks = {
+      list: vi.fn(async () => [endpoint]),
+      create: vi.fn(async () => ({ ok: false as const, code: 'invalid_webhook_url' as const })),
+      remove: vi.fn(async () => true),
+      enable: vi.fn(async () => null),
+    };
+    const { target, session } = await signInTo(workspaces, { keepsToScope: true, contacts, webhooks });
+    await keys.store.create({ tenantRef, name: 'ADA-SOUTH-INTEGRATION', scopes: ['read'], createdBy: 'github:1' });
+    workspaces.setRole(tenantRef, person, 'admin');
+    workspaces.limit(tenantRef, person, { locations: ['north'], groups: [] });
+    const token = await csrf(target, session);
+    // An unusable single-use value is answered before the role is checked: with the notice alone.
+    for (const route of ['/contacts/forget', '/keys/revoke', '/webhooks/delete']) {
+      const answered = await post(target, `/base/dashboard${route}`, { csrf: token, once: 'x', ref: 'south-customer-1', id: endpoint.id }, session);
+      expect(answered.status, route).toBe(409);
+      const text = await answered.text();
+      expect(text, route).toContain('That form was already sent.');
+      for (const secret of ['Sam Southside', 'sam.southside@example.test', '+15550123', 'ADA-SOUTH-INTEGRATION', 'south-secret-path']) {
+        expect(text, `${route} ${secret}`).not.toContain(secret);
+      }
+    }
+    expect(contacts.list).not.toHaveBeenCalled();
+    expect(webhooks.list).not.toHaveBeenCalled();
+    expect(contacts.forget).not.toHaveBeenCalled();
+    expect(webhooks.remove).not.toHaveBeenCalled();
+    // Given all of it again, the same answer shows the page.
+    workspaces.limit(tenantRef, person, null);
+    const whole = await post(target, '/base/dashboard/keys/revoke', { csrf: token, once: 'x', id: randomUUID() }, session);
+    expect(whole.status).toBe(409);
+    expect(await whole.text()).toContain('ADA-SOUTH-INTEGRATION');
   });
 
   it('reaches only its own account where the resources cannot keep to a scope', async () => {
