@@ -2603,6 +2603,44 @@ describe('required checks', () => {
   });
 });
 
+describe('the admin console in a browser', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const job = ci.slice(ci.indexOf('\n  browser:\n'), ci.indexOf('\n  image:\n'));
+
+  it('runs in CI with Chromium for the pinned Playwright, against the job\'s PostgreSQL, keeping the screenshots of a failure', () => {
+    expect(job, 'canary: the browser job was found').toContain('name: Admin console in a browser');
+    expect(job).toContain('DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock');
+    const step = (text: string) => job.indexOf(text);
+    // The browser the installed playwright drives, after npm ci installs that version.
+    expect(step('- run: npm ci')).toBeGreaterThan(-1);
+    expect(step('run: npx playwright install --with-deps chromium')).toBeGreaterThan(step('- run: npm ci'));
+    // Required here: a browser that does not start fails the job instead of skipping the file.
+    const run = job.slice(step('- name: Every console page in Chromium'));
+    expect(run).toMatch(/SLOTLOCK_BROWSER_TESTS: required\n\s+SLOTLOCK_ADMIN_SHOTS: \$\{\{ runner\.temp \}\}\/admin-shots\n\s+run: npx vitest run src\/__tests__\/admin-console-visual\.integration\.test\.ts\n/);
+    expect(step('- name: Every console page in Chromium')).toBeGreaterThan(step('npx playwright install'));
+    const keep = job.slice(step('- name: Keep the screenshots'));
+    expect(keep).toMatch(/^- name: Keep the screenshots\n\s+if: failure\(\)\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+\n/);
+    expect(keep).toContain('path: ${{ runner.temp }}/admin-shots');
+  });
+
+  it('pins playwright exactly, at a version whose engines take every Node.js CI runs', () => {
+    const manifest = JSON.parse(read('package.json')) as { devDependencies: Record<string, string> };
+    const pinned = manifest.devDependencies.playwright;
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(read('package-lock.json')) as { packages: Record<string, { version?: string; engines?: { node?: string } }> };
+    for (const name of ['playwright', 'playwright-core']) {
+      const entry = lock.packages[`node_modules/${name}`];
+      expect(entry?.version, name).toBe(pinned);
+      const least = /^>=\s*(\d+)(?:\.\d+){0,2}$/.exec(entry?.engines?.node ?? '')?.[1];
+      expect(least, `${name}'s engines`).toBeDefined();
+      const nodes = [...ci.matchAll(/node-version: '(\d+)'|node: \[([^\]]+)\]/g)]
+        .flatMap(([, one, many]) => (one ? [one] : (many ?? '').split(',').map((value) => value.trim().replace(/'/g, ''))));
+      expect(nodes.length).toBeGreaterThan(0);
+      for (const node of nodes) expect(Number(node), `Node.js ${node}`).toBeGreaterThanOrEqual(Number(least));
+    }
+  });
+});
+
 describe('dependency updates', () => {
   const config = read('.github/dependabot.yml');
   const watched = new Set<string>();

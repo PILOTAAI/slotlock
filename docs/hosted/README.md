@@ -148,6 +148,28 @@ an error code that names it. Each plan's [monthly allowances](#monthly-allowance
 - [Terms of Service](/TERMS.md) and [Acceptable Use Policy](/ACCEPTABLE-USE.md).
 - [Privacy notice](/PRIVACY.md): what is stored, for how long, and how to have it erased.
 
+## Admin console: Site and search
+
+For the people who run Slotlock Cloud. The admin console's **Site and search** page reads the
+website's last 28 days from three providers, at most once an hour. Each is turned on by settings of
+the console's Worker (`workers/admin/wrangler.jsonc`), the keys as Worker secrets; until all of a
+provider's are set, its part of the page shows **Connect**, which leads here.
+
+- **Search Console:** add a Google service account to the property as a restricted user. Set
+  `SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY` to the service account's JSON key, and
+  `SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY` to the property: `sc-domain:slotlock.pylota.io`, or the
+  `https://` address it was added as.
+- **Bing Webmaster Tools:** set `SLOTLOCK_ADMIN_BING_KEY` to an API key from Bing Webmaster Tools'
+  Settings (API access), and `SLOTLOCK_ADMIN_BING_SITE` to the site as Bing has it,
+  `https://slotlock.pylota.io/`.
+- **Cloudflare Web Analytics:** set `SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN` to an API token with Account
+  Analytics Read and nothing else, `SLOTLOCK_ADMIN_CLOUDFLARE_ACCOUNT` to the Cloudflare account id,
+  and `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE` to the site tag (each 32 hex characters).
+  `scripts/configure-admin-console.mjs prepare`, given `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE`, sets
+  the last two, and `go-live` asks for the token.
+- **Deploys** come from the release app, as Content does: `SLOTLOCK_ADMIN_CMS_APP_ID` and
+  `SLOTLOCK_ADMIN_CMS_APP_KEY`, with Actions (read).
+
 ## Help
 
 | For | Contact |

@@ -41,6 +41,7 @@ import {
 } from './ddl-identity.js';
 import { SLOTLOCK_SSO_ASKED_FUNCTIONS, SLOTLOCK_SSO_DDL, SLOTLOCK_SSO_FUNCTIONS, SLOTLOCK_SSO_TABLES } from './ddl-sso.js';
 import { SLOTLOCK_SCIM_DDL, SLOTLOCK_SCIM_FUNCTIONS, SLOTLOCK_SCIM_TABLES } from './ddl-scim.js';
+import { SLOTLOCK_QUOTA_NOTICE_PERCENTS } from './plans.js';
 import { SLOTLOCK_MAX_AVAILABILITY_RULES } from './weekly-hours.js';
 
 const CALLER_SEARCH_PATH_SETTING = 'slotlock.caller_search_path';
@@ -470,8 +471,7 @@ export const SLOTLOCK_ASSISTANT_MAX_CHATS = 100;
 /** How a conversation with the assistant is named: 16 URL-safe characters. */
 export const SLOTLOCK_ASSISTANT_CHAT_ID = /^[A-Za-z0-9_-]{16}$/;
 
-/** The shares of a quota, in percent, at which a tenant is told once a month (usage.threshold_reached). */
-export const SLOTLOCK_QUOTA_NOTICE_PERCENTS = Object.freeze([80, 100] as const);
+export { SLOTLOCK_QUOTA_NOTICE_PERCENTS };
 
 /** The most bookings past the roll-up cursor one quota read counts: more than any plan allows. */
 export const SLOTLOCK_QUOTA_UNROLLED_LIMIT = 100_000;

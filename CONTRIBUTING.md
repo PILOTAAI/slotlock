@@ -30,6 +30,11 @@ role named `slotlock` is the package's schema, which `"$user"` puts first on the
 command-line tool redacts the database password from everything it prints, so a short or
 product-like password rewrites the output the tests read.
 
+The browser suites (the admin console's pages, and the dashboard assistant end to end) also need
+Chromium for the Playwright version `package.json` pins, `npx playwright install chromium`, and skip
+without it; CI's "Admin console in a browser" job runs the console's, and keeps its screenshots when
+it fails.
+
 Property suites (`*.property.test.ts`) check the engine, time zones, iCalendar parsing and API
 keys on input [fast-check](https://fast-check.dev/) generates, with a new seed each run. A failure
 prints the seed and the shrunk counterexample; add `{ seed, path }` from it to that `fc.assert` to

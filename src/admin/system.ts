@@ -30,7 +30,6 @@ import {
   lastDays,
   menu,
   pill,
-  popover,
   reasonField,
   section,
   stats,
@@ -53,6 +52,9 @@ export interface SlotlockPageParts {
 /** Where connecting a provider is written down (RFC 0006, Phase 0 and the console's setup). */
 export const SLOTLOCK_ADMIN_SETUP_DOCS = 'https://github.com/PILOTAAI/slotlock/blob/main/docs/rfc/0006-admin-console.md';
 
+/** Where the Site and search page's providers are set up: the hosted docs' section (docs/hosted/README.md). */
+export const SLOTLOCK_ADMIN_SITE_SETUP_DOCS = 'https://slotlock.pylota.io/docs/hosted/#admin-console-site-and-search';
+
 /** What an announcement is about, as the console names it. */
 export const SLOTLOCK_ANNOUNCEMENT_KIND_NAMES: Readonly<Record<SlotlockAnnouncementKind, string>> = Object.freeze({
   maintenance: 'Planned maintenance',
@@ -73,10 +75,10 @@ const hidden = (csrf: string) => html`<input type="hidden" name="csrf" value="${
 /** A path on the site, from a full URL a search engine gave; the URL itself when it is another site's. */
 const pathOf = (url: string, siteUrl: string) => (url.startsWith(siteUrl) ? url.slice(siteUrl.length) || '/' : url);
 
-/** A provider's part: one compact card to connect it, one line when it failed, else what it read. */
-function providerPart<T>(name: string, read: SlotlockProviderRead<T>, off: Html, render: (value: T) => Html): Html {
+/** A provider's part: one compact card to connect it (`docs` says how), one line when it failed, else what it read. */
+function providerPart<T>(name: string, read: SlotlockProviderRead<T>, off: Html, render: (value: T) => Html, docs = SLOTLOCK_ADMIN_SETUP_DOCS): Html {
   if (read.state === 'off') {
-    return html`<div class="connect"><span class="grow">${name} is not connected.</span>${info(`Connecting ${name}`, off)}<a class="btn sm" href="${SLOTLOCK_ADMIN_SETUP_DOCS}" rel="noreferrer">Connect</a></div>`;
+    return html`<div class="connect"><span class="grow">${name} is not connected.</span>${info(`Connecting ${name}`, off)}<a class="btn sm" href="${docs}" rel="noreferrer">Connect</a></div>`;
   }
   if (read.state === 'failed') return html`<div class="connect"><span class="grow">${name} could not be read just now.</span><span class="muted">Tried again on the next visit.</span></div>`;
   return render(read.value);
@@ -158,7 +160,7 @@ export function slotlockSitePage(data: SlotlockSitePageData): SlotlockPageParts 
                 ]), 'No sitemaps.'), { level: 3 })
               : ''}`
           : ''}`;
-    });
+    }, SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const googlePart = searchPart('Search Console', data.google,
     html`Add a service account to the property as a restricted user, and set <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY</code> and <code>SLOTLOCK_ADMIN_SEARCH_CONSOLE_PROPERTY</code>.`, true);
   const bingPart = searchPart('Bing Webmaster Tools', data.bing,
@@ -187,10 +189,10 @@ export function slotlockSitePage(data: SlotlockSitePageData): SlotlockPageParts 
                 html`${row.host}`, html`${count(row.count)}`,
               ]), 'No visits came from another site in this period.'), { level: 3 })}</div>
         </div>`;
-    });
+    }, SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const deployPart = providerPart('GitHub', data.deploys,
     html`The site's deploys come from Slotlock's GitHub App, with Actions (read).`,
-    (runs) => runsTable('Site workflow runs on main', runs, 'No runs of the site workflow on main yet.'));
+    (runs) => runsTable('Site workflow runs on main', runs, 'No runs of the site workflow on main yet.'), SLOTLOCK_ADMIN_SITE_SETUP_DOCS);
   const body = html`
     ${section('Visitors', visitsPart)}
     ${section('Search', hashTabs('Source', [
@@ -315,34 +317,41 @@ export function slotlockCommunicationsPage(data: SlotlockCommunicationsPageData,
       { label: 'All', href: '/communications?ended=1', current: data.endedToo },
     ], 'views'),
   });
-  const incidents = providerPart('The status page', data.incidents,
-    html`It needs Slotlock's GitHub App with Issues (read and write).`,
-    ({ open, closed }) => html`
-      ${open.length === 0
-        ? html`<div class="callout good"><p>No open incident. The status page shows hosted Slotlock as up.</p></div>`
-        : html`<div class="incidents">${open.map((issue) => html`<div class="incident">
-            <p><a href="${issue.url}" rel="noreferrer"><strong>#${issue.number} ${issue.title}</strong></a> <span class="muted">Opened ${when(issue.createdAt)} · ${count(issue.comments)} ${issue.comments === 1 ? 'update' : 'updates'}</span></p>
-            ${data.mayAct
-              ? html`<form class="form" method="post" action="/communications/status/update">${csrf}<input type="hidden" name="issue" value="${issue.number}">
-                  ${field({ id: `update-${issue.number}`, label: 'Update', public: true, control: html`<textarea id="update-${issue.number}" name="body" rows="2" maxlength="2000" required></textarea>` })}
-                  <label class="check"><input type="checkbox" name="close" value="1"> Resolved: close the incident with this update</label>
-                  <div class="form-actions"><button class="btn sm" type="submit">Post update</button></div></form>`
-              : ''}
-          </div>`)}</div>`}
-      ${closed.length
-        ? section('Recently resolved', table('Resolved incidents', ['Incident', 'Opened', 'Resolved'], closed.map((issue) => [
-            html`<a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a>`, html`${when(issue.createdAt)}`, html`${when(issue.closedAt)}`,
-          ]), ''), { level: 3 })
-        : ''}`);
-  const statusPanel = html`${section('Incidents', incidents, {
-    info: info('The status page', html`Incidents are issues labelled <code>status</code> (docs/hosted/status.md); the probe opens and closes its own. Read from GitHub as the page opens.`),
-    aside: html`${data.mayAct && data.incidents.state === 'ok'
-      ? popover('Open an incident', html`<form class="form" method="post" action="/communications/status">${csrf}
-          ${field({ id: 'incident-title', label: 'Title', public: true, control: html`<input id="incident-title" name="title" required maxlength="120" autocomplete="off">` })}
-          ${field({ id: 'incident-body', label: 'What is happening', public: true, control: html`<textarea id="incident-body" name="body" rows="3" maxlength="2000" required></textarea>` })}
-          <div class="form-actions"><button class="btn danger" type="submit">Open incident</button></div></form>`, { tone: 'danger', size: 'sm' })
-      : ''}`,
-  })}`;
+  // The open incidents as the status page lists them (open `status` issues), each with its update form.
+  const openIncidents = (open: readonly SlotlockStatusIssue[]) => open.length === 0
+    ? html`<div class="callout good"><p>No open incident. The status page shows hosted Slotlock as up.</p></div>`
+    : html`<div class="incidents">${open.map((issue) => html`<div class="incident">
+        <p><a href="${issue.url}" rel="noreferrer"><strong>#${issue.number} ${issue.title}</strong></a> <span class="muted">Opened ${when(issue.createdAt)} · ${count(issue.comments)} ${issue.comments === 1 ? 'update' : 'updates'}</span></p>
+        ${data.mayAct
+          ? html`<form class="form" method="post" action="/communications/status/update">${csrf}<input type="hidden" name="issue" value="${issue.number}">
+              ${field({ id: `update-${issue.number}`, label: 'Update', public: true, control: html`<textarea id="update-${issue.number}" name="body" rows="2" maxlength="2000" required></textarea>` })}
+              <label class="check"><input type="checkbox" name="close" value="1"> Resolved: close the incident with this update</label>
+              <div class="form-actions"><button class="btn sm" type="submit">Post update</button></div></form>`
+          : ''}
+      </div>`)}</div>`;
+  const statusInfo = info('The status page', html`Incidents are issues labelled <code>status</code> (docs/hosted/status.md); the probe opens and closes its own. Read from GitHub as the page opens.`);
+  const resolved = (closed: readonly SlotlockStatusIssue[]) => closed.length
+    ? section('Recently resolved', table('Resolved incidents', ['Incident', 'Opened', 'Resolved'], closed.map((issue) => [
+        html`<a href="${issue.url}" rel="noreferrer">#${issue.number} ${issue.title}</a>`, html`${when(issue.createdAt)}`, html`${when(issue.closedAt)}`,
+      ]), ''), { level: 3 })
+    : '';
+  // As Announcements: the form on the left, and on the right what the status page shows now.
+  const statusPanel = data.mayAct && data.incidents.state === 'ok'
+    ? html`<section class="section" aria-labelledby="incident-compose-title">
+        <header class="section-head"><h2 id="incident-compose-title">New incident</h2>${statusInfo}</header>
+        <div class="composer">
+          <form class="form" method="post" action="/communications/status">${csrf}
+            ${field({ id: 'incident-title', label: 'Title', public: true, control: html`<input id="incident-title" name="title" required maxlength="120" autocomplete="off">` })}
+            ${field({ id: 'incident-body', label: 'What is happening', public: true, control: html`<textarea id="incident-body" name="body" rows="4" maxlength="2000" required></textarea>` })}
+            <div class="form-actions"><button class="btn danger" type="submit">Open incident</button></div>
+          </form>
+          <div class="composer-preview"><div class="box"><header class="section-head"><h3>On the status page now</h3></header>${openIncidents(data.incidents.value.open)}</div></div>
+        </div>
+        ${resolved(data.incidents.value.closed)}
+      </section>`
+    : section('Incidents', providerPart('The status page', data.incidents,
+        html`It needs Slotlock's GitHub App with Issues (read and write).`,
+        ({ open, closed }) => html`${openIncidents(open)}${resolved(closed)}`), { info: statusInfo });
   const openCount = data.incidents.state === 'ok' ? data.incidents.value.open.length : 0;
   const body = hashTabs('Communications', [
     { id: 'announcements', label: 'Announcements', body: html`${composer}${list}` },
@@ -405,6 +414,15 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
   const last = system.rounds[0];
   const hourSince = last ? data.now - new Date(last.finished_at).getTime() : null;
   const down = data.hosts.filter((host) => !host.up);
+  // The headline: hosts down, then accounts whose maintenance fails, or no maintenance recorded lately.
+  const failingTotal = Number(system.failing_total);
+  const lateHours = hourSince !== null && hourSince > 3 * 3_600_000 ? Math.floor(hourSince / 3_600_000) : null;
+  const problems = [
+    ...(down.length ? [`${count(down.length)} ${down.length === 1 ? 'host is' : 'hosts are'} down`] : []),
+    ...(failingTotal > 0 ? [`Maintenance failing for ${count(failingTotal)} ${failingTotal === 1 ? 'account' : 'accounts'}`] : []),
+    ...(lateHours !== null ? [`No maintenance recorded for ${count(lateHours)} hours`] : []),
+  ];
+  const tone = down.length ? 'bad' : problems.length ? 'warn' : 'good';
   const flagName = (flag: string) => SLOTLOCK_FEATURE_FLAG_NAMES[flag as SlotlockFeatureFlag]?.name ?? flag;
   const editing = data.panel?.kind === 'flag' && data.mayAct ? (data.flags.flags.find((flag) => flag.id === data.panel?.id) ?? null) : null;
   const option = (value: string, label: string, current: string | null | undefined) => html`<option value="${value}"${current === value ? html` selected` : ''}>${label}</option>`;
@@ -427,7 +445,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
     : null;
   const body = html`
     <nav class="anchors" aria-label="On this page"><a href="#hosts">Hosts</a><a href="#maintenance">Maintenance</a><a href="#webhooks">Webhooks</a><a href="#deploys">Deploys</a><a href="#flags">Flags</a><a href="#configuration">Configuration</a></nav>
-    <div class="headline">${down.length ? html`<span class="pill bad dot-only" aria-hidden="true"></span>` : html`<span class="pill good dot-only" aria-hidden="true"></span>`}<span class="headline-text">${down.length ? `${down.length} ${down.length === 1 ? 'host is' : 'hosts are'} down` : 'All systems operational'}</span></div>
+    <div class="headline"><span class="pill ${tone} dot-only" aria-hidden="true"></span><span class="headline-text">${problems.length ? problems.join(' · ') : 'All systems operational'}</span></div>
     ${section('Hosts', table('Hosts', ['Host', 'State', 'Version', { label: 'Latency', num: true }], data.hosts.map((host) => [
       html`${host.name}<span class="sub mono">${host.url}</span>`,
       host.up ? pill('Up', 'good') : html`${pill('Down', 'bad')}<span class="sub">${host.answer}</span>`,
@@ -440,7 +458,7 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
         { label: 'Accounts failing', value: count(system.failing_total) },
         { label: 'Last hour recorded', value: last ? `${when(last.finished_at).slice(11)} UTC` : 'Never', note: last ? `${when(last.finished_at).slice(0, 10)} · ${count(last.summary.passes ?? 0)} passes, ${count(last.summary.failed ?? 0)} failed` : null },
       ])}
-      ${hourSince !== null && hourSince > 3 * 3_600_000 ? html`<div class="callout warn section"><p>No server has recorded maintenance for ${Math.floor(hourSince / 3_600_000)} hours. Check that <code>slotlock serve</code> is running.</p></div>` : ''}
+      ${lateHours !== null ? html`<div class="callout warn section"><p>No server has recorded maintenance for ${count(lateHours)} hours. Check that <code>slotlock serve</code> is running.</p></div>` : ''}
       ${section('Accounts whose maintenance is failing', table('Accounts whose maintenance is failing', ['Account', 'Failing since', 'Last failed', { label: 'Failures', num: true }, 'Error'], system.failing.map((row) => [
         namedCell(row, accountHref),
         html`${when(row.first_failed_at)}`,
@@ -501,7 +519,9 @@ export function slotlockSystemPage(data: SlotlockSystemPageData, accountHref: (r
     ${section('Configuration', facts(data.configuration.map((entry) => [entry.name, html`<span class="mono">${entry.value}</span>`])), { id: 'configuration', info: info('Configuration', 'What this console runs with. Secrets are never shown: only whether each is set.') })}`;
   return {
     body,
-    pills: down.length ? pill(`${down.length} down`, 'bad') : pill('Operational', 'good'),
+    pills: down.length
+      ? pill(`${count(down.length)} down`, 'bad')
+      : failingTotal > 0 ? pill('Maintenance failing', 'warn') : lateHours !== null ? pill('Maintenance late', 'warn') : pill('Operational', 'good'),
     drawer: flagDrawer,
   };
 }

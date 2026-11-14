@@ -46,6 +46,12 @@ export interface SlotlockPlanQuotas {
   stopPercent: number;
 }
 
+/**
+ * The shares of a quota, in percent, at which a tenant is told once a month (usage.threshold_reached).
+ * The first is where the staff console counts an account as near its quota.
+ */
+export const SLOTLOCK_QUOTA_NOTICE_PERCENTS = Object.freeze([80, 100] as const);
+
 export const SLOTLOCK_PLAN_QUOTAS: Readonly<Record<SlotlockPlan, Readonly<SlotlockPlanQuotas>>> =
   Object.freeze({
     free: Object.freeze({ operations: 25_000, bookings: 1_000, stopPercent: 100 }),

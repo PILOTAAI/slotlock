@@ -407,7 +407,13 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
   });
 
   it('puts a maintenance failure on Home and the System page, without the account’s data, and clears it when a pass runs', async () => {
+    /** The System page's headline: its tone, its words, and the top bar's pill. */
+    const headline = (page: string) => ({
+      tone: /<div class="headline"><span class="pill (\w+) dot-only"/.exec(page)?.[1],
+      text: /<span class="headline-text">([^<]*)<\/span>/.exec(page)?.[1],
+    });
     expect(await text(staff.owner, '/')).not.toContain('Maintenance is failing');
+    expect(headline(await text(staff.owner, '/system'))).toEqual({ tone: 'good', text: 'All systems operational' });
     // A pass for Ada fails, as a server's scheduler runs it, with a value in its message.
     const failing = Object.assign(Object.create(store) as SlotlockStore, {
       withTenant: async () => {
@@ -436,10 +442,15 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     expect(billingHome).toContain('Maintenance is failing for 1 account');
     expect(billingHome).not.toContain('href="/system#maintenance"');
     const system = await text(staff.support, '/system');
-    expect(system).toContain(`href="/accounts/${encodeURIComponent(ADA)}" class="mono">${ADA}</a>`);
+    // The shared account cell: Ada by her login, linked to her page, her reference beneath.
+    expect(system).toContain(`<a href="/accounts/${encodeURIComponent(ADA)}">@ada</a><span class="sub">${ADA}</span>`);
     expect(system).toContain('<code>Error XX000</code>');
     expect(system).toContain('Could not extend …');
     expect(system).not.toContain('Weekly standup');
+    // Every host is up, but one account's maintenance is failing: the headline says so, as a warning.
+    expect(headline(system)).toEqual({ tone: 'warn', text: 'Maintenance failing for 1 account' });
+    expect(system).toContain('<span class="pill warn">Maintenance failing</span>');
+    expect(system).not.toContain('All systems operational');
 
     // The next pass runs: the failure clears, and Home has nothing to say about it.
     const fixed = startSlotlockMaintenance({ store, sql: application, tenants: [ADA], intervalMs: 3_600_000, record });
@@ -449,7 +460,9 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     await fixed.close();
     expect(await superuser`SELECT 1 FROM slotlock.maintenance_failures`).toHaveLength(0);
     expect(await text(staff.owner, '/')).not.toContain('Maintenance is failing');
-    expect(await text(staff.owner, '/system')).toContain('Every account’s last pass ran.');
+    const cleared = await text(staff.owner, '/system');
+    expect(cleared).toContain('Every account’s last pass ran.');
+    expect(headline(cleared)).toEqual({ tone: 'good', text: 'All systems operational' });
     expect(await superuser`SELECT 1 FROM slotlock.maintenance_runs WHERE job = 'maintenance'`).toHaveLength(2);
   });
 
@@ -504,6 +517,17 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     const page = await text(staff.owner, '/communications');
     expect(page).toContain(`#${probe?.number} Hosted Slotlock API is down`);
     expect(page).not.toContain('The docs search misses a page');
+    // The Status page tab is laid out as Announcements is: the form on the left, and on the right
+    // the open incidents as the status page lists them, each with its update form.
+    const status = page.slice(page.indexOf('id="status"'));
+    const composer = status.slice(status.indexOf('<div class="composer">'));
+    expect(status).toContain('<div class="composer">');
+    expect(composer.indexOf('action="/communications/status"')).toBeGreaterThan(-1);
+    expect(composer.indexOf('action="/communications/status"')).toBeLessThan(composer.indexOf('<div class="composer-preview">'));
+    const preview = composer.slice(composer.indexOf('<div class="composer-preview">'));
+    expect(preview).toContain(`#${probe?.number} Hosted Slotlock API is down`);
+    expect(preview).toContain('action="/communications/status/update"');
+    expect(status.slice(0, status.indexOf('<div class="composer">'))).not.toContain('<details class="popover"');
 
     expect((await form(staff.owner, '/communications/status', { title: 'Slow bookings in Europe', body: 'Booking calls take up to five seconds. We are looking into it.' }, '/communications')).headers.get('location'))
       .toBe('/communications?done=incident_opened');
@@ -603,6 +627,7 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     const down = await text(staff.owner, '/system');
     const downRow = down.slice(down.indexOf('https://dashboard.slotlock.test/dashboard'));
     expect(downRow.slice(0, downRow.indexOf('</tr>'))).toContain('<span class="pill bad">Down</span><span class="sub">HTTP 503</span>');
+    expect(down).toMatch(/<div class="headline"><span class="pill bad dot-only" aria-hidden="true"><\/span><span class="headline-text">1 host is down<\/span>/);
     dashboardDown = false;
     expect(system).toMatch(/<span class="stat-label">Failing<\/span>\s*<strong class="stat-value">1<\/strong>/);
     expect(system).toContain('connected to sc-domain:slotlock.pylota.io');

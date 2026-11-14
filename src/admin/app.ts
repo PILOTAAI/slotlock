@@ -11,7 +11,7 @@
 // console's role can read no table (staff-ddl.ts).
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
-import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan } from '../plans.js';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, SLOTLOCK_QUOTA_NOTICE_PERCENTS, type SlotlockPlan } from '../plans.js';
 import {
   SLOTLOCK_CASE_ACTIONS,
   SLOTLOCK_OVERRIDE_SOLO_DAYS,
@@ -66,7 +66,6 @@ import {
   slotlockMoneyByCurrency,
   slotlockPlanLabel,
   slotlockPlanName,
-  slotlockShortDate,
   slotlockStripeLink,
 } from './billing-figures.js';
 import { slotlockShownPerson } from './people.js';
@@ -615,7 +614,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     chip({ person: 'Person', team: 'Team', organization: 'Organization', partner: 'Partner', test: 'Test' }[kind] ?? kind, kind === 'test' ? 'warn' : 'plain');
   /** A plan, with the day it ends when its subscription is set to end (the webhook keeps it). */
   const planPill = (plan: string | null, endsAt?: Date | string | null) =>
-    chip(slotlockPlanLabel(plan, endsAt, now()), endsAt ? 'warn' : plan === 'team' || plan === 'developer' ? 'info' : 'plain');
+    chip(slotlockPlanLabel(plan, endsAt), endsAt ? 'warn' : plan === 'team' || plan === 'developer' ? 'info' : 'plain');
   const statusPill = (suspended: boolean, planStatus: string | null) =>
     suspended ? pill('Suspended', 'bad') : planStatus === 'past_due' ? pill('Past due', 'warn') : pill('Active', 'good');
   const accountHref = (ref: string) => `/accounts/${encodeURIComponent(ref)}`;
@@ -787,7 +786,10 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     plan: string; plan_status: string | null; plan_ends_at?: Date | null; suspended: boolean; stripe_customer?: string | null;
     operations_month: string; bookings_month: string;
   }
-  /** Saved views of the account list; the database filters plan and suspension, the console the rest. */
+  /**
+   * Saved views of the account list. The database filters plan, suspension, and paying and past due
+   * (by the rule Home and Billing count them: staff_subscribed_plans); the console the rest.
+   */
   const ACCOUNT_VIEWS = Object.freeze({
     all: 'All', paying: 'Paying', past_due: 'Past due', suspended: 'Suspended', near_quota: 'Near quota', partners: 'Partners', test: 'Test',
   } as const);
@@ -836,19 +838,17 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
     if (view === 'near_quota') return nearQuota(session, url, q);
     const prefix = q ? null : view === 'partners' ? (KIND_PREFIX.partner ?? null) : kind && kind !== 'person' ? (KIND_PREFIX[kind] ?? null) : null;
-    const status = view === 'suspended' ? 'suspended' : legacy === 'active' ? 'active' : null;
+    const status = view === 'suspended' || view === 'paying' || view === 'past_due' ? view : legacy === 'active' ? 'active' : null;
     const cutoff = (days: number) => now() - days * DAY_MS;
     const keep = (row: AccountRow) =>
-      (view !== 'paying' || (row.plan !== 'free' && row.plan_status === 'active'))
-      && (view !== 'past_due' || row.plan_status === 'past_due')
-      && (view !== 'test' || row.kind === 'test')
+      (view !== 'test' || row.kind === 'test')
       && (view !== 'partners' || row.kind === 'partner')
       && (!kind || row.kind === kind)
       && (!created || (row.created_at !== null && new Date(row.created_at).getTime() >= cutoff(AGE_DAYS[created] ?? 0)))
       && (!active || (active === 'idle'
         ? row.last_active === null || new Date(row.last_active).getTime() < cutoff(30)
         : row.last_active !== null && new Date(row.last_active).getTime() >= cutoff(active === '7d' ? 7 : 30)));
-    const filtering = view === 'paying' || view === 'past_due' || view === 'test' || view === 'partners' || Boolean(kind || created || active);
+    const filtering = view === 'test' || view === 'partners' || Boolean(kind || created || active);
     // A view the console filters reads the largest page the database gives, and shows what matches.
     const scan = filtering ? SLOTLOCK_ADMIN_PAGE_LIMIT : PAGE;
     const find = (query: string | null) =>
@@ -897,7 +897,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ${filterChip('Last active', [option('active', '7d', 'Last 7 days', active), option('active', '30d', 'Last 30 days', active), option('active', 'idle', 'Not for 30 days', active)], withParams(url, { active: null, from: null }))}`;
     const kept_ = (name: string, value: string | null) => (value ? html`<input type="hidden" name="${name}" value="${value}">` : '');
     const toolbar = html`<div class="toolbar">
-      <form class="find" method="get" action="/accounts" role="search">${icon('search')}<label class="sr-only" for="accounts-q">Search accounts</label><input id="accounts-q" name="q" type="search" value="${q}" placeholder="Search accounts" autocomplete="off" spellcheck="false">${kept_('view', view === 'all' ? null : view)}${kept_('plan', plan)}${kept_('kind', kind)}${kept_('created', created)}${kept_('active', active)}</form>
+      <form class="find" method="get" action="/accounts" role="search" aria-label="Search accounts">${icon('search')}<label class="sr-only" for="accounts-q">Search accounts</label><input id="accounts-q" name="q" type="search" value="${q}" placeholder="Search accounts" autocomplete="off" spellcheck="false">${kept_('view', view === 'all' ? null : view)}${kept_('plan', plan)}${kept_('kind', kind)}${kept_('created', created)}${kept_('active', active)}</form>
       ${chips}
       <span class="grow"></span>
       <a class="btn sm" href="${withParams(url, { format: 'csv' })}" download>${icon('download')}Export</a>
@@ -937,15 +937,14 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     return page(session, 'Accounts', '/accounts', body, q);
   }
 
-  /** Accounts at 80% or more of a monthly quota this month: the usage table's leaders. */
+  /** Accounts near a monthly quota this month (Usage's Near quota, all of them). */
   async function nearQuota(session: Session, url: URL, q: string): Promise<Response> {
-    const leaders = await quotaLeaders(session);
-    const near = leaders.filter((item) => item.worst >= 80);
+    const near = await nearQuotaLeaders(session);
     const body = html`
       ${tabs('Views', (Object.keys(ACCOUNT_VIEWS) as AccountView[]).map((value) => ({
         label: ACCOUNT_VIEWS[value], href: withParams(url, { view: value === 'all' ? null : value, status: null }), current: value === 'near_quota', count: value === 'near_quota' ? near.length : null,
       })), 'views')}
-      ${quotaTable(session, near, 'No account is at 80% of a quota this month.')}`;
+      ${quotaTable(session, near, NOT_NEAR_QUOTA)}`;
     return page(session, 'Accounts', '/accounts', body, q);
   }
 
@@ -1318,7 +1317,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     if (days <= 7) return pill(days === 0 ? 'Due today' : `${days} ${days === 1 ? 'day' : 'days'}`, 'warn');
     return pill(`${days} days`, 'muted');
   }
-  const receiptLookup = html`<form class="form" method="get" action="/privacy/receipts" role="search">
+  const receiptLookup = html`<form class="form" method="get" action="/privacy/receipts" role="search" aria-label="Find a receipt">
     ${formField({ id: 'receipt-account', label: 'Account', control: html`<input id="receipt-account" name="account" required maxlength="500" autocomplete="off" spellcheck="false">` })}
     <div class="form-actions"><button class="btn" type="submit">Find receipt</button></div></form>`;
 
@@ -1933,7 +1932,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       accountOf(session, row.account, endingNames.get(row.account) ?? {}),
       html`${row.plan ? slotlockPlanName(row.plan) : '–'}`,
       html`${row.monthly === null ? '–' : slotlockMoney(row.monthly, row.currency)}`,
-      html`${slotlockShortDate(row.endsAt, now())}`,
+      html`${day(new Date(row.endsAt))}`,
     ]), 'No paying plan is set to end.', { hrefs: may('accounts.read') ? ending.map((row) => accountHref(row.account)) : [] }), { id: 'ending' })}`;
     const alertsPanel = html`
       <div class="toolbar">${tabs('Alerts', [
@@ -2024,6 +2023,15 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       return { row, worst: Math.max(operations ?? 0, bookings ?? 0), operations, bookings, opsQuota, bookingsQuota };
     }).sort((a, b) => b.worst - a.worst);
   }
+  /**
+   * Near a quota: at or past the first share of it the account's owner is told of (80%), on either
+   * metric. Usage's Near quota and Accounts' view of that name count by this alone.
+   */
+  const NEAR_QUOTA_PERCENT = SLOTLOCK_QUOTA_NOTICE_PERCENTS[0];
+  const NOT_NEAR_QUOTA = `No account is at ${NEAR_QUOTA_PERCENT}% of a quota this month.`;
+  async function nearQuotaLeaders(session: Session) {
+    return (await quotaLeaders(session)).filter((item) => item.worst >= NEAR_QUOTA_PERCENT);
+  }
   function quotaTable(session: Session, rows: Awaited<ReturnType<typeof quotaLeaders>>, empty: string): Html {
     const used = (value: string, quota: number | null, percent: number | null) =>
       quota
@@ -2044,7 +2052,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const range: Range = rangeOf(url.searchParams.get('range'), '30d');
     const asked = url.searchParams.get('metric') ?? '';
     const metric: UsageMetric = Object.hasOwn(USAGE_METRICS, asked) ? (asked as UsageMetric) : 'operations';
-    const [usage, leaders] = await Promise.all([platformUsage(session, Math.max(RANGE_DAYS[range], 62)), quotaLeaders(session)]);
+    const [usage, near] = await Promise.all([platformUsage(session, Math.max(RANGE_DAYS[range], 62)), nearQuotaLeaders(session)]);
     const monthStart = new Date(now()).toISOString().slice(0, 7);
     const sums = (key: string, month: string) => usage.filter((row) => row.metric === key && day(row.day).slice(0, 7) === month).reduce((sum, row) => sum + Number(row.count), 0);
     const bySurface = new Map<string, { operations: number; bookings: number }>();
@@ -2086,7 +2094,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
           html`<code>${origin}</code>`, html`${count(totals.operations)}`, html`${count(totals.bookings)}`,
           sparkline(lastDays(30, now()).map((key) => usage.filter((row) => row.metric === 'operations' && row.origin === origin && day(row.day) === key).reduce((sum, row) => sum + Number(row.count), 0))),
         ]), 'No use this month yet.'), { id: 'surfaces' })}</div>
-        <div class="c6">${section('Near quota', quotaTable(session, leaders.slice(0, 20), 'No use this month yet.'), { aside: html`<a href="/accounts?view=near_quota">All</a>` })}</div>
+        <div class="c6">${section('Near quota', quotaTable(session, near.slice(0, 20), NOT_NEAR_QUOTA), { aside: html`<a href="/accounts?view=near_quota">All</a>` })}</div>
       </div>`;
     return page(session, 'Usage', '/usage', body);
   }

@@ -3047,7 +3047,8 @@ $slotlock_admin_home$;
 -- reference (or the start of one), a GitHub account id, an API key (only its prefix is read or
 -- recorded, never the rest), a Stripe customer, the name of a team, organization or partner
 -- account, or a person's name or display (their login or email, a leading @ or not). Without a
--- query, test environments are left out. With each, when its subscription is set to end.
+-- query, test environments are left out. With each, when its subscription is set to end. A status
+-- of paying or past_due lists the plans Home and Billing count as such (staff_subscribed_plans).
 ${reshaped('slotlock.admin_accounts(text, text, text, text, text, integer)', 'plan_ends_at')}
 CREATE OR REPLACE FUNCTION slotlock.admin_accounts(actor text, query text, plan_filter text, status_filter text, after text, page_size integer)
 RETURNS TABLE (account_ref text, kind text, name text, display text, created_at timestamptz, last_active date,
@@ -3111,10 +3112,13 @@ BEGIN
     LEFT JOIN slotlock.tenant_plans planned ON planned.tenant_ref = found.account_ref
     LEFT JOIN slotlock.partner_accounts partner ON partner.tenant_ref = found.account_ref
     LEFT JOIN slotlock.tenant_suspensions held ON held.tenant_ref = found.account_ref
+    LEFT JOIN slotlock.staff_subscribed_plans() subscribed ON subscribed.tenant_ref = found.account_ref
    WHERE (plan_filter IS NULL OR coalesce(planned.plan, partner.plan, 'free') = plan_filter)
      AND (status_filter IS NULL
           OR (status_filter = 'suspended' AND held.tenant_ref IS NOT NULL)
-          OR (status_filter = 'active' AND held.tenant_ref IS NULL))
+          OR (status_filter = 'active' AND held.tenant_ref IS NULL)
+          OR (status_filter = 'paying' AND subscribed.paying)
+          OR (status_filter = 'past_due' AND subscribed.status = 'past_due'))
    ORDER BY found.account_ref
    LIMIT shown;
 END

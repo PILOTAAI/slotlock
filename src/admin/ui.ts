@@ -186,7 +186,7 @@ ${shell.script ? html`<script src="${shell.script}" defer></script>` : ''}
         <h1>${crumbs.map((crumb) => html`${crumb.href ? html`<a href="${crumb.href}">${crumb.label}</a>` : html`<span class="crumb">${crumb.label}</span>`}<span class="sep" aria-hidden="true">/</span>`)}<span class="here">${shell.title}</span></h1>
         ${shell.pills ? html`<span class="title-pills">${shell.pills}</span>` : ''}
       </div>
-      <form class="search" method="get" action="/search" role="search">
+      <form class="search" method="get" action="/search" role="search" aria-label="Find an account">
         ${icon('search')}
         <label class="sr-only" for="q">Find an account</label>
         <input id="q" name="q" type="search" value="${shell.query ?? ''}" placeholder="Find an account" autocomplete="off" spellcheck="false">
@@ -345,11 +345,14 @@ export function popover(summary: Html | string, body: Html, options: { tone?: 'd
   return html`<details class="popover${options.align === 'left' ? ' left' : ''}"><summary class="btn${tone}${options.size === 'sm' ? ' sm' : ''}">${summary}</summary><div class="pop">${body}</div></details>`;
 }
 
-/** A drawer over the page, from ?panel=…: closing it is a link back. */
+/**
+ * A drawer over the page, from ?panel=…: closing it is a link back. Its head is a div: a header in a
+ * dialog would be a second banner landmark beside the page's top bar.
+ */
 export function drawer(title: string, body: Html, closeHref: string): Html {
   return html`<a class="scrim" href="${closeHref}" tabindex="-1" aria-hidden="true"></a>
 <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" data-close="${closeHref}">
-  <header class="drawer-head"><h2 id="drawer-title">${title}</h2><a class="icon-btn ghost" href="${closeHref}">${icon('close', 'Close')}</a></header>
+  <div class="drawer-head"><h2 id="drawer-title">${title}</h2><a class="icon-btn ghost" href="${closeHref}">${icon('close', 'Close')}</a></div>
   <div class="drawer-body">${body}</div>
 </aside>`;
 }
@@ -632,14 +635,8 @@ const niceMax = (value: number) => {
   const step = [1, 2, 2.5, 5, 10].find((candidate) => candidate * power >= value) ?? 10;
   return step * power;
 };
-/** A point's label: 14 Nov for a day, Nov 2026 for a month (a label of YYYY-MM). */
-const labelOf = (value: string) => {
-  const date = new Date(`${value.length === 7 ? `${value}-01` : value}T00:00:00Z`);
-  if (Number.isNaN(date.getTime())) return value;
-  return value.length === 7
-    ? date.toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
-    : date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
-};
+/** A point's label, as every date in the console reads: 2026-11-14 for a day, 2026-11 for a month. */
+const labelOf = (value: string) => value;
 
 /**
  * A chart 240px tall: the title and total, the range control, then an area (one series) or stacked
@@ -655,6 +652,8 @@ export function chart(input: ChartInput): Html {
   const y = (value: number) => H - (value / top) * H;
   const ticks = [top, top / 2, 0];
   const xIndexes = n <= 1 ? [0] : [...new Set([0, Math.round((n - 1) / 4), Math.round((n - 1) / 2), Math.round((3 * (n - 1)) / 4), n - 1])];
+  // The quarter dates give way on a phone, where five full dates do not fit on one line.
+  const ends = new Set([0, Math.round((n - 1) / 2), n - 1]);
   const pointTitle = (index: number) =>
     `${labelOf(input.labels[index] ?? '')}: ${input.series.map((series) => `${input.series.length > 1 ? `${series.name} ` : ''}${format(series.values[index] ?? 0)}`).join(', ')}`;
   let marks: Html;
@@ -691,7 +690,7 @@ export function chart(input: ChartInput): Html {
         <line class="grid-line" vector-effect="non-scaling-stroke" x1="0" x2="${W}" y1="0.5" y2="0.5"/><line class="grid-line" vector-effect="non-scaling-stroke" x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}"/><line class="base-line" vector-effect="non-scaling-stroke" x1="0" x2="${W}" y1="${H - 0.5}" y2="${H - 0.5}"/>
         ${marks}${hits}
       </svg>
-      <div class="x-axis" aria-hidden="true">${xIndexes.map((index) => html`<span>${labelOf(input.labels[index] ?? '')}</span>`)}</div>
+      <div class="x-axis" aria-hidden="true">${xIndexes.map((index) => html`<span${ends.has(index) ? '' : new Html(' class="quarter"')}>${labelOf(input.labels[index] ?? '')}</span>`)}</div>
     </div>
     ${input.series.length > 1 ? html`<ul class="legend">${input.series.map((series, s) => html`<li><i class="sw s${String((s % 5) + 1)}"></i>${series.name}<span>${format(series.values.reduce((a, b) => a + b, 0))}</span></li>`)}</ul>` : ''}
   </figure>`;
@@ -1040,7 +1039,7 @@ form:has(input[name=audience][value=plan]:checked) .if-plan,form:has(input[name=
 .plot{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:180px auto;column-gap:10px}
 .y-axis{display:flex;flex-direction:column;justify-content:space-between;margin:-6px 0;font:11px/12px var(--mono);color:var(--ink-2);text-align:right;font-variant-numeric:tabular-nums}
 .plot svg{display:block;width:100%;height:180px;overflow:visible}
-.x-axis{grid-column:2;display:flex;justify-content:space-between;padding-top:8px;font:11px/12px var(--mono);color:var(--ink-2)}
+.x-axis{grid-column:2;display:flex;justify-content:space-between;gap:8px;padding-top:8px;font:11px/12px var(--mono);color:var(--ink-2);white-space:nowrap}
 .grid-line{stroke:var(--line-2);stroke-width:1}
 .base-line{stroke:var(--line);stroke-width:1}
 .area{fill:var(--accent-tint)}
@@ -1268,6 +1267,7 @@ th{position:static}
 
 /* Phones: the sidebar becomes a bar with the sections in a row; the card is the page */
 @media (max-width:759px){
+.x-axis .quarter{display:none}
 .app{display:block;height:auto;overflow:visible}
 .side{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 12px 6px;overflow:visible}
 .brand{padding:0 4px}
@@ -1411,7 +1411,9 @@ export const SLOTLOCK_ADMIN_JS = `(() => {
       if (!input.value) { out.textContent = empty; return; }
       const at = new Date(input.value + ':00Z');
       if (Number.isNaN(at.getTime())) { out.textContent = ''; return; }
-      out.textContent = at.toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' in ' + zone;
+      // As every date in the console reads (2026-11-14 09:21), in the viewer's zone.
+      const two = (n) => String(n).padStart(2, '0');
+      out.textContent = at.getFullYear() + '-' + two(at.getMonth() + 1) + '-' + two(at.getDate()) + ' ' + two(at.getHours()) + ':' + two(at.getMinutes()) + ' in ' + zone;
     };
     input.addEventListener('input', update);
     update();

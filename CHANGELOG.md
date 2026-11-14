@@ -127,6 +127,42 @@ versioning.
   name an account by reference, an id, a key's prefix or a Stripe customer; a search by name, login
   or email (the console's GitHub lookup included) is kept as a digest keyed with the deployment's
   secret (`slotlock.staff_search_record`). Entries written before this change stay as they were.
+- Accounts' **Paying** and **Past due** views list the plans Home's and Billing's figures count, by
+  the same rule (`slotlock.staff_subscribed_plans`, which `slotlock.admin_accounts` now filters by).
+  Paying listed every active plan but Free, those set to end, trials, partners' and plans with no
+  subscription included, and left out past due ones. Run `slotlock migrate`: until then both views
+  are empty.
+- A payment refunded in full for a plan set to end now needs a person too: the customer has their
+  money back and keeps the plan until it ends, so Billing's alerts say "Refunded in full, plan ends
+  14 Dec" (the alert keeps the end date, `ends_at`). Part of a payment refunded on such a plan still
+  raises nothing, and on a plan that renews still reads "Partly refunded".
+- The System page's headline no longer says "All systems operational" while maintenance is failing:
+  it names hosts that are down, then "Maintenance failing for 1 account" (or that no server has
+  recorded maintenance for some hours) as a warning, and the top bar's pill says the same.
+- **Near quota** means at 80% of a monthly quota or more, the first share the account's owner is
+  told of, on Usage as on Accounts' view of that name and its count. Usage listed the twenty
+  busiest accounts whatever their share, so accounts at 1 to 4% of their quota were "near" it.
+- Communications' **Status page** tab is laid out as Announcements is: the new incident's form on
+  the left (no longer behind a button), and on the right what the status page shows now, each open
+  incident with its update form. It left the right half of the page empty.
+- Each **Connect** on the console's Site and search page leads to a new section of the hosted page,
+  [Admin console: Site and search](https://slotlock.pylota.io/docs/hosted/#admin-console-site-and-search),
+  which names every setting (`SLOTLOCK_ADMIN_SEARCH_CONSOLE_KEY` and `_PROPERTY`,
+  `SLOTLOCK_ADMIN_BING_KEY` and `_SITE`, `SLOTLOCK_ADMIN_CLOUDFLARE_TOKEN` and `_ACCOUNT`, and
+  `SLOTLOCK_ADMIN_WEB_ANALYTICS_SITE`), not to the top of RFC 0006.
+- The console shows every date one way, as most of it already did: `2026-11-14`, with `09:21` after
+  it for a time. A plan set to end ("Developer · ends 2026-12-14"), Billing's Ending, the refund
+  alert, the charts' dates and an announcement's time in the viewer's zone read "14 Dec" or
+  "Sun, Nov 15" before. On a phone a chart shows three dates under it instead of five.
+- The console's landmarks are unique: each search is named ("Find an account", "Search accounts",
+  "Find a receipt"), and a drawer's head is no longer a second banner beside the top bar. The browser
+  test now fails on a moderate axe finding about landmarks too, not only on serious and critical
+  ones.
+- CI runs the admin console's browser test (every page at three widths, in both themes, under its
+  CSP and axe-core), which no job ran before: a new job, **Admin console in a browser**, installs
+  Chromium for the pinned `playwright` (now a dev dependency, 1.63.0) and keeps the screenshots as
+  an artifact when it fails. "CI passed" waits for it. Elsewhere the browser suites skip, quickly,
+  when Chromium is not installed.
 
 ### Security
 

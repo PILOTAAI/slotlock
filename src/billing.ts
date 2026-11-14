@@ -518,7 +518,9 @@ function refundedChargeOf(
 
 /**
  * A refund is for the people who run the service when it left a plan running: the customer got
- * their money back and still has the plan, so a person ends it or says why not (RFC 0006, M4). Only
+ * their money back and still has the plan, so a person ends it or says why not (RFC 0006, M4). A
+ * plan set to end is noted only when all of the payment was refunded, with the day it ends: the
+ * customer keeps it until then for nothing. Only
  * the account the refunded payment paid for is told: the subscriptions whose invoices it paid, each
  * of an account whose plan names this customer. Stripe's word on each subscription decides, not the
  * database's: a cancellation made with the refund may arrive after it. True when an alert was
@@ -546,8 +548,14 @@ async function noteRefund(
     const subscription = await deps.stripe.subscription(id);
     const tenantRef = subscription.metadata?.tenant_ref;
     if (!tenantRef || !plans.some((plan) => plan.tenantRef === tenantRef)) continue;
-    if (!slotlockSubscriptionIsLive(subscription) || slotlockSubscriptionEnding(subscription)) continue;
-    await noteBillingEvent(deps.sql, 'refunded_plan_active', tenantRef, charge.id, { ...charge.detail, subscription: subscription.id });
+    if (!slotlockSubscriptionIsLive(subscription)) continue;
+    const ending = slotlockSubscriptionEnding(subscription);
+    if (ending && charge.detail.refunded !== true) continue;
+    await noteBillingEvent(deps.sql, 'refunded_plan_active', tenantRef, charge.id, {
+      ...charge.detail,
+      subscription: subscription.id,
+      ...(ending ? { ends_at: ending.toISOString() } : {}),
+    });
     noted = true;
   }
   return noted;

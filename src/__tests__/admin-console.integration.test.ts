@@ -100,8 +100,8 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
       VALUES (${PERSON}, 'booking-agent', 'slk_AbCd1234', ${sha('secret')}, ARRAY['read', 'write'])`;
     await superuser`
       INSERT INTO slotlock.tenant_plans (tenant_ref, plan, status, max_resources, max_api_keys,
-                                         max_webhook_endpoints, stripe_customer)
-      VALUES (${PERSON}, 'developer', 'active', 100, 100, 10, 'cus_TEST123')`;
+                                         max_webhook_endpoints, stripe_customer, stripe_subscription)
+      VALUES (${PERSON}, 'developer', 'active', 100, 100, 10, 'cus_TEST123', 'sub_TEST123')`;
     const today = new Date().toISOString().slice(0, 10);
     await superuser`
       INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, origin, count)
@@ -665,7 +665,9 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
 
     const usage = await (await browser.request('/usage')).text();
     expect(usage).toContain('<code>mcp</code>');
-    expect(usage).toContain(`href="${accountPath}"`);
+    // 40 of Developer's 500,000 operations is not near its quota.
+    expect(usage).not.toContain(`href="${accountPath}"`);
+    expect(usage).toContain('No account is at 80% of a quota this month.');
   });
 
   it('opens Billing to a Viewer to read, and nothing else of it', async () => {
@@ -783,6 +785,10 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     expect(csv).toContain('accounts.searched');
     const entry = await (await browser.request('/staff/log?entry=1')).text();
     expect(entry).toContain('role="dialog"');
+    // One banner, the top bar: a drawer's head is no second one. Each search is named apart.
+    expect(entry.match(/<header class="top">|<header(?! class="(?:section|chart)-head")[ >]/g)).toEqual(['<header class="top">']);
+    const accountsPage = await (await browser.request('/accounts')).text();
+    expect([...accountsPage.matchAll(/role="search"(?: aria-label="([^"]*)")?/g)].map((match) => match[1] ?? null)).toEqual(['Find an account', 'Search accounts']);
     expect(entry).toContain('Hash chain');
   });
 
