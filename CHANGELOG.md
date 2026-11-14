@@ -40,6 +40,8 @@ From the pre-launch security audit (Cloudflare's security-audit skill, deep prof
 
 - **The dashboard works again on a database the server's release has not migrated yet.** The dashboard deployed from `main` on 14 November answered 500 to signed-in people about half the time: on a schema from 0.10.2 it called two functions the schema lacked (the staff notices and the suspension notice) and caught the failures, but through Hyperdrive a failed query cost the request its connection ("Network connection lost"). It now asks the database, once a minute, which of those functions it has, and calls only those; so does the billing webhook's admin note and the metered-overage read.
 - CI now refuses dashboard Worker code that calls a database function the latest release's schema lacks, unless the code asks for it first (`SLOTLOCK_OPTIONAL_SCHEMA_FUNCTIONS`, `src/schema-functions.ts`): the hosted dashboard deploys from `main` before its database is migrated, which is how the outage above happened. Each release records its schema's functions in `workers/dashboard/released-schema-functions.json` (`scripts/prepare-release.sh`).
+- The Usage page says when a plan cancelled at the end of its period ends ("Ending", "Ends 13 Dec 2026"), read from Stripe, instead of saying it renews. The plan keeps its limits until then, as before.
+- The hosted dashboard's deploy refuses a configuration without a placement near the database (`"placement": { "region": "gcp:europe-west2" }` for London): without one the Worker runs at the edge nearest each visitor, and each of a page's dozens of queries crosses to the database, so pages took seconds. A configuration listing a compatibility flag twice, which Cloudflare refuses at upload, is refused before it is stored.
 
 ### Added
 
