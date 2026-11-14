@@ -436,7 +436,8 @@ describe.skipIf(!url)('site, communications and system in the admin console (rea
     expect(billingHome).toContain('Maintenance is failing for 1 account');
     expect(billingHome).not.toContain('href="/system#maintenance"');
     const system = await text(staff.support, '/system');
-    expect(system).toContain(`href="/accounts/${encodeURIComponent(ADA)}" class="mono">${ADA}</a>`);
+    // The shared account cell: Ada by her login, linked to her page, her reference beneath.
+    expect(system).toContain(`<a href="/accounts/${encodeURIComponent(ADA)}">@ada</a><span class="sub">${ADA}</span>`);
     expect(system).toContain('<code>Error XX000</code>');
     expect(system).toContain('Could not extend …');
     expect(system).not.toContain('Weekly standup');
