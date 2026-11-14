@@ -10,7 +10,7 @@ tags:
   - double booking
 image: blog-why-ai-agents-double-book
 imageAlt: Why AI agents double-book, and what the calendar has to do about it.
-status: draft
+status: published
 related:
   - Booking MCP server | /mcp-server/
   - Free/busy certainty | /docs/concepts/#freebusy-certainty
