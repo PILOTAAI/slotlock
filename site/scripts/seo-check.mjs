@@ -4,7 +4,7 @@
 //   npm run check:seo        exits 1 on any finding
 //
 // Every HTML page except the 404 page:
-//   - one <title>, at most 65 characters, unique; one description of 70 to 160, unique;
+//   - one <title>, at most 65 characters, unique; one description of 70 to 160, unique, never cut off;
 //   - <html lang="en-GB">, exactly one <h1>, no noindex;
 //   - a canonical that is absolute, on https://slotlock.pylota.io, ends in a slash, is the page's
 //     own address, and is in the sitemap with a lastmod;
@@ -126,6 +126,8 @@ for await (const file of html(DIST)) {
   if (description.length < 70 || description.length > 160) {
     fail(page, `description is ${description.length} characters (70 to 160): "${description}"`);
   }
+  // A description cut off mid-sentence reads badly in results, and Bing flags it as too long.
+  if (/(…|\.\.\.)$/.test(description)) fail(page, `description is cut off: "${description}" (write a whole one, seoDescription)`);
   if (descriptions.has(description)) fail(page, `description is also ${descriptions.get(description)}'s`);
   descriptions.set(description, page);
 

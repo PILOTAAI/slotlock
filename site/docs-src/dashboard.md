@@ -2,6 +2,7 @@
 title: Dashboard
 seoTitle: 'Slotlock dashboard: resources, hours, API keys and teams'
 description: Let people sign in with GitHub or Google and manage their own resources, bookable hours and API keys, alone or as an organization, with an optional assistant.
+seoDescription: "Let people sign in with GitHub or Google to manage their resources, bookable hours and API keys, alone or as an organization, with an optional assistant."
 sidebar:
   label: Dashboard
 ---
