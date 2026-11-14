@@ -548,7 +548,7 @@ const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text
   handle_taken: { status: 409, text: 'That name is taken. Try another.' },
   team_limit: {
     status: 403,
-    text: `Each person may create ${String(FREE_TEAMS_PER_PERSON)} team on the Free plan. Upgrade yours to create another.`,
+    text: `Each person may create ${String(FREE_TEAMS_PER_PERSON)} team on the Free plan. A team being deleted counts until it goes. Upgrade yours to create another.`,
   },
   not_found: { status: 404, text: 'That is no longer here.' },
   not_allowed: { status: 403, text: 'Your role can’t give that role, or change that member.' },

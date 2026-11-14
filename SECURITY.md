@@ -268,8 +268,9 @@ holder by a key they name with a word staff send back, made after the request, a
 a team or an organization, as one of its Owners). An export made for one waits on the holder's own
 dashboard, behind their sign-in; staff see its counts by table, never its rows, and no link to it
 is ever emailed. An erasure goes in fixed steps, each checked by the database: the Stripe
-subscription cancelled, a second Owner's approval (the one who asked cannot give it), then the
-erasure and its receipt in one transaction. The queue keeps no email address: the database refuses
+subscription cancelled (an unpaid one too, since paying it renews it), a second Owner's approval
+(the one who asked cannot give it), then the erasure and its receipt in one transaction. A Stripe
+event that arrives after it writes nothing of the account again. The queue keeps no email address: the database refuses
 an `@` in a request's text.
 
 Only an Owner writes what customers are told and turns features on or off. An announcement is one

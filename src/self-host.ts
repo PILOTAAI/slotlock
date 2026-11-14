@@ -2636,7 +2636,8 @@ async function runPlanCommand(
               resources: own.limits.resources,
               api_keys: own.limits.apiKeys,
               webhook_endpoints: own.limits.webhookEndpoints,
-              paid: own.stripeSubscription !== null,
+              // An unpaid subscription stays named on a cancelled plan, which it does not pay for.
+              paid: own.stripeSubscription !== null && own.status !== 'canceled',
               current_period_end: own.currentPeriodEnd?.toISOString() ?? null,
             }
           : null,
@@ -2940,8 +2941,9 @@ Commands:
   overage report [--month <YYYY-MM>] [--event <name>]
                            With SLOTLOCK_OVERAGE: send Stripe each paying Developer tenant's
                            operations above its quota this month (or --month) not yet sent, as
-                           Billing Meter events (--event, default slotlock_operations), once
-                           (as the schema owner, with STRIPE_SECRET_KEY)
+                           Billing Meter events (--event, default slotlock_operations), once,
+                           where its subscription carries the metered price (as the schema
+                           owner, with STRIPE_SECRET_KEY)
   partner close <id> [--month <YYYY-MM>]
                            Close an ended month (default: last month): price its accounts' use
                            with the contract, record the lines once, send usage.period_closed,
@@ -3027,9 +3029,10 @@ Environment:
                                  operations or bookings this month (quota_exceeded, 429); off
                                  (default): no quota
   SLOTLOCK_OVERAGE               off (default), or on (300) or a percent (111-1000): a paying
-                                 Developer tenant is refused only past that share of its
-                                 operations, and the rest above its quota is billed (overage
-                                 report); needs SLOTLOCK_QUOTAS=on
+                                 Developer tenant whose subscription carries the metered price
+                                 is refused only past that share of its operations, and the rest
+                                 above its quota is billed (overage report); needs
+                                 SLOTLOCK_QUOTAS=on
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own

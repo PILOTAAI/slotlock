@@ -416,6 +416,10 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.erase_subject_changes(text, text, text, text)',
   'slotlock.tenant_suspension_notice(text)',
   'slotlock.note_billing_event(text, text, text, jsonb)',
+  // Whether a tenant's subscription carries the metered overage price (overage.ts): the webhook
+  // records it, and quotas read it.
+  'slotlock.set_tenant_plan_overage(text, text, boolean)',
+  'slotlock.tenant_plan_overage(text)',
   // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
   // 0006, M10 and M11; staff-ddl.ts).
   ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
@@ -1539,7 +1543,8 @@ $slotlock_dashboard_display$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[9]} FROM PUBLIC;
 
 -- A new team workspace, its creator its Owner. With requested_cap, a person may have created at
--- most that many active team workspaces that are not on a paid plan.
+-- most that many team workspaces that are not on a paid plan. One being deleted counts until it is
+-- erased: any Owner can keep it until then, which would otherwise make one more.
 CREATE OR REPLACE FUNCTION slotlock.create_team(
   requested_person text, requested_name text, requested_handle text, requested_cap integer)
 RETURNS TABLE (tenant_ref text, refusal text)
@@ -1580,7 +1585,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:create-team:' || requested_person, 0));
   IF requested_cap IS NOT NULL THEN
     SELECT count(*) INTO free_count FROM slotlock.workspaces ws
-     WHERE ws.created_by = requested_person AND ws.status = 'active'
+     WHERE ws.created_by = requested_person AND ws.status IN ('active', 'deleting')
        AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans paid
                         WHERE paid.tenant_ref = ws.tenant_ref AND paid.plan = 'team' AND paid.status <> 'canceled');
     IF free_count >= requested_cap THEN
@@ -2856,6 +2861,11 @@ BEGIN
   END IF;
 END
 $slotlock_tenant_plans_source$;
+-- Whether the subscription the plan names carries the metered overage price (overage.ts), as the
+-- webhook last read it from Stripe: only then is use past the quota billed, so only then may a
+-- Developer tenant run past its plan's stop. False until the webhook says so, as for a plan written
+-- before this column, so such a tenant stops at its plan's stop as the Terms say.
+ALTER TABLE slotlock.tenant_plans ADD COLUMN IF NOT EXISTS overage_metered boolean NOT NULL DEFAULT false;
 REVOKE ALL ON slotlock.tenant_plans FROM PUBLIC;
 
 -- The plan a hosted deployment puts every tenant without a row of its own on, from applies_from:
@@ -3096,7 +3106,11 @@ $slotlock_set_plan_default$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[2]} FROM PUBLIC;
 
 -- Sets the tenant's plan as its billing says it is now (the dashboard's Stripe webhook). Under the
--- key lock, so a key being issued counts against the plan before or after, never between.
+-- key lock, so a key being issued counts against the plan before or after, never between. An
+-- account of the dashboard's (a person, a team workspace, an organization) that no longer exists
+-- gets no plan: erasure took its plan under the same lock, and a row made by a later event would
+-- keep its Stripe ids after it (PRIVACY.md). Refused (tenant_erased), so the webhook reports it.
+-- Whether the subscription carries the metered overage price is kept only while it is the same one.
 CREATE OR REPLACE FUNCTION slotlock.set_tenant_plan(
   requested_tenant_ref text,
   requested_plan text,
@@ -3114,8 +3128,24 @@ VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_set_tenant_plan$
+DECLARE
+  live text := regexp_replace(requested_tenant_ref, '~test$', '');
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  -- In parentheses: PL/pgSQL would end the IF's condition at the CASE's first THEN.
+  IF NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current WHERE current.tenant_ref = requested_tenant_ref)
+     AND (CASE
+            WHEN live ~ '^team:' THEN
+              NOT EXISTS (SELECT 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = live)
+            WHEN live ~ '^github-org:' THEN
+              NOT EXISTS (SELECT 1 FROM slotlock.dashboard_organizations org WHERE org.org_id = substr(live, 12))
+            WHEN live ~ '^(github|google|sso):' THEN
+              NOT EXISTS (SELECT 1 FROM slotlock.dashboard_people person WHERE person.person_ref = live)
+            ELSE false
+          END) THEN
+    RAISE EXCEPTION 'Slotlock tenant no longer exists: its plan is not written again'
+      USING ERRCODE = 'no_data_found', HINT = 'tenant_erased';
+  END IF;
   INSERT INTO slotlock.tenant_plans AS current (
     tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints,
     stripe_customer, stripe_subscription, current_period_end, updated_at
@@ -3134,10 +3164,50 @@ BEGIN
       stripe_customer = COALESCE(EXCLUDED.stripe_customer, current.stripe_customer),
       stripe_subscription = EXCLUDED.stripe_subscription,
       current_period_end = EXCLUDED.current_period_end,
+      overage_metered = current.overage_metered
+        AND current.stripe_subscription IS NOT DISTINCT FROM EXCLUDED.stripe_subscription,
       updated_at = EXCLUDED.updated_at;
 END
 $slotlock_set_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[11]} FROM PUBLIC;
+
+-- Records whether the subscription the plan names carries the metered overage price (the
+-- dashboard's Stripe webhook, from the subscription it read): for that subscription only, so a
+-- late answer about another one changes nothing.
+CREATE OR REPLACE FUNCTION slotlock.set_tenant_plan_overage(
+  requested_tenant_ref text, requested_stripe_subscription text, requested_metered boolean)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_tenant_plan_overage$
+BEGIN
+  UPDATE slotlock.tenant_plans current
+     SET overage_metered = coalesce(requested_metered, false)
+   WHERE current.tenant_ref = requested_tenant_ref
+     AND current.stripe_subscription = requested_stripe_subscription
+     AND current.overage_metered IS DISTINCT FROM coalesce(requested_metered, false);
+END
+$slotlock_set_tenant_plan_overage$;
+REVOKE ALL ON FUNCTION slotlock.set_tenant_plan_overage(text, text, boolean) FROM PUBLIC;
+
+-- Whether the tenant's use past its quota is billed (overage.ts): its own plan names a subscription
+-- that is not cancelled and carries the metered overage price. A test environment's never is.
+CREATE OR REPLACE FUNCTION slotlock.tenant_plan_overage(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_plan_overage$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.tenant_plans own
+     WHERE own.tenant_ref = requested_tenant_ref AND requested_tenant_ref !~ '~test$'
+       AND own.source = 'direct' AND own.overage_metered
+       AND own.stripe_subscription IS NOT NULL AND own.status <> 'canceled');
+$slotlock_tenant_plan_overage$;
+REVOKE ALL ON FUNCTION slotlock.tenant_plan_overage(text) FROM PUBLIC;
 
 -- A tenant's use of the service (usage.ts), by UTC day: operations its keys and the assistant ran
 -- (recorded by the servers), and the bookings and holds it committed (rolled up from its feed). By

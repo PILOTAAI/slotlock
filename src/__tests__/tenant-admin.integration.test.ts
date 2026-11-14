@@ -612,6 +612,8 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         tenantRef,
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
       });
+      // A plan is written only for a person the dashboard holds (one never erased, or signed in again).
+      await superuser`SELECT slotlock.dashboard_sign_in(${tenantRef}, NULL)`;
       await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
       // A plan override staff gave it (RFC 0006, M5), and a billing alert the Stripe webhook noted.
       await superuser`
@@ -702,7 +704,9 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       const erased = await app.eraseTenant({ tenantRef });
       for (const table of owned) expect(erased.rows[table], table).toBe(before[table]);
       expect(erased.rows.dashboard_tokens).toBe(1);
-      expect(erased.total).toBe(Object.values(before).reduce((sum, count) => sum + count, 0) + 1);
+      // The person's dashboard record, which their plan needed (populate).
+      expect(erased.rows.dashboard_people).toBe(1);
+      expect(erased.total).toBe(Object.values(before).reduce((sum, count) => sum + count, 0) + 2);
       const after = await counts(tenantRef, owned);
       for (const table of owned) expect(after[table], table).toBe(0);
       expect((await ownerDigest(uid))[0]?.count).toBe(0);

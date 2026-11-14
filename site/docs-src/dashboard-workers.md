@@ -96,7 +96,12 @@ makes the Worker read the subscription from Stripe and set the tenant's plan: `a
 `trialing` gives the plan, `past_due` keeps it while Stripe retries (a failed payment is shown to
 the people who run the service, and closed when it is paid), anything else returns the tenant to
 Free. A customer with a subscription that is live or `unpaid` cannot start a second one. Nothing is
-deleted when a plan ends; the tenant cannot add more until it is under the Free limits.
+deleted when a plan ends; the tenant cannot add more until it is under the Free limits. An `unpaid`
+or `incomplete` subscription stays named on the plan, because paying it renews it: until it is
+cancelled in Stripe, the account is not erased and its team is not deleted. An event about an
+account that was erased writes nothing of it again; if its subscription could still bill, the
+Worker logs `slotlock billing subscription of an erased account` with the subscription's id, for
+you to cancel it in Stripe.
 
 `SLOTLOCK_STRIPE_PORTAL_DEVELOPER` and `SLOTLOCK_STRIPE_PORTAL_TEAM` (portal configuration ids,
 `bpc_…`) open **Manage billing** in the plan's own configuration. It switches between that plan's
@@ -110,11 +115,13 @@ Payments on and its own parameter checks passed, and a meter event in Slotlock's
 (checked 2026-11-10). It stays off until the owner pays one test checkout (card 4242 4242 4242
 4242), sends a meter event and sees it on the subscription's upcoming invoice, and the Terms say
 what overage costs. With `SLOTLOCK_OVERAGE=on` (or a percent,
-111-1000; `on` is 300) on the server and the Worker, beside `SLOTLOCK_QUOTAS=on`, a paying Developer
-tenant is refused only past that share of its monthly operations; the Worker adds the metered price
-`SLOTLOCK_STRIPE_PRICE_OVERAGE` (on a Stripe Billing Meter) to a Developer checkout and shows
-`SLOTLOCK_PLAN_PRICE_OVERAGE` on the Usage page. The schema owner then runs, daily and on the 1st for
-the month before:
+111-1000; `on` is 300) on the server and the Worker, beside `SLOTLOCK_QUOTAS=on`, the Worker adds
+the metered price `SLOTLOCK_STRIPE_PRICE_OVERAGE` (on a Stripe Billing Meter) to a Developer
+checkout and shows `SLOTLOCK_PLAN_PRICE_OVERAGE` on the Usage page, and the webhook records whether
+each subscription carries that price. A paying Developer tenant whose subscription does is refused
+only past that share of its monthly operations; one whose subscription does not (bought before
+overage was on) still stops at 110%, and none of its use is billed. The schema owner then runs,
+daily and on the 1st for the month before:
 
 ```sh
 STRIPE_SECRET_KEY=sk_live_… slotlock overage report                 # this month so far
@@ -122,10 +129,19 @@ STRIPE_SECRET_KEY=sk_live_… slotlock overage report --month 2026-10 --event sl
 ```
 
 It sends Stripe a meter event for each paying Developer tenant's operations above its quota that
-have not been sent, and records the total in `slotlock.overage_reports` first, so an operation is
-never billed twice (a run that stops halfway bills too little, and the next run does not catch up
-on it). An event Stripe already took, whose answer was lost, counts as sent when it is sent again.
-It exits 1 while an event was not taken; run it again.
+have not been sent, where its subscription carries the metered price, and records the total in
+`slotlock.overage_reports` first, so an operation is never billed twice (a run that stops halfway
+bills too little, and the next run does not catch up on it). An event Stripe already took, whose
+answer was lost, counts as sent when it is sent again. It exits 1 while an event was not taken; run
+it again.
+
+Before turning overage on, run `slotlock migrate` with this release, deploy the Worker, and check in
+Stripe that `SLOTLOCK_STRIPE_PRICE_OVERAGE` is a metered price on the Billing Meter whose event name
+`overage report` sends (`slotlock_operations` unless `--event` says), with the customer read from
+`stripe_customer_id` and the amount from `value`. List the live Developer subscriptions without that
+price: they stay at 110%, and are not reported, until it is added to them, which Stripe tells the
+webhook as `customer.subscription.updated`. A subscription is recorded when the webhook next reads
+it, so one that already carries the price runs past 110% only from its next event.
 
 The Team plan is a shared workspace's: a team workspace (`SLOTLOCK_DASHBOARD_TEAM_WORKSPACES`) or
 an organization (Teams on Cloud, `SLOTLOCK_DASHBOARD_ORGS=enabled`). It has 500 resources, 100 keys
