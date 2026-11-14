@@ -474,7 +474,7 @@ export function searchTitle(operation) {
   return named.length <= 65 ? named : `${operation.summary} | Slotlock`;
 }
 
-export function searchDescription(text) {
+export function searchDescription(text, operation = {}) {
   const flat = text.replace(/\s+/g, ' ').replace(/`/g, '').trim();
   let out = '';
   for (const sentence of flat.match(/[^.!?]+[.!?]+(?=\s|$)/g) ?? [flat]) {
@@ -482,12 +482,20 @@ export function searchDescription(text) {
     out += sentence;
   }
   out = out.trim();
-  if (out.length < 70) {
-    const cut = flat.length <= 155 ? flat : `${flat.slice(0, 154).replace(/\s+\S*$/, '').replace(/[,;:(]$/, '')}…`;
-    out = cut;
+  if (out.length >= 70) return out;
+  // Never a sentence cut off with "…" (results show it, and Bing flags it): the opening sentences
+  // that fit, or the summary, then what the page is, as whole sentences of 70 to 155 characters.
+  const where = operation.method && operation.path ? `${operation.method.toUpperCase()} ${operation.path}` : '';
+  const lead = out || (operation.summary ? `${operation.summary}.` : '');
+  for (const candidate of [
+    `${lead} ${where ? `${where} in` : 'In'} the Slotlock REST API, with its fields, errors and a curl example.`,
+    `${lead} ${where ? `${where} in the` : 'The'} Slotlock REST API.`,
+    `${operation.summary ?? lead}: ${where ? `${where}, ` : ''}fields, errors and a curl example for the Slotlock REST API.`,
+  ]) {
+    const whole = candidate.replace(/\s+/g, ' ').trim();
+    if (whole.length >= 70 && whole.length <= 155) return whole;
   }
-  if (out.length < 70) out = `${out} Fields, errors and a curl example for the Slotlock REST API.`;
-  return out;
+  return `${operation.summary ?? 'An operation'} in the Slotlock REST API, with its fields, errors and a curl example.`;
 }
 
 const methodBadge = (method) =>
@@ -517,7 +525,7 @@ function renderPage(operation, { order, group, toolNames }) {
     `title: ${JSON.stringify(operation.summary)}`,
     `description: ${JSON.stringify(operation.description)}`,
     `seoTitle: ${JSON.stringify(searchTitle(operation))}`,
-    `seoDescription: ${JSON.stringify(searchDescription(operation.description))}`,
+    `seoDescription: ${JSON.stringify(searchDescription(operation.description, operation))}`,
     'sidebar:',
     `  order: ${order}`,
     `  label: ${JSON.stringify(operation.summary)}`,

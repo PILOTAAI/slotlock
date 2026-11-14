@@ -10,6 +10,9 @@ versioning.
 - `scripts/check-launch.mjs` fails when a page of the site (home, pricing, the quickstart, the blog)
   tells search engines not to index it, by an `X-Robots-Tag` header or its robots meta tag. A zone rule
   outside this repository was sending `X-Robots-Tag: noindex` from every page, and nothing noticed.
+- No page's search description is cut off with "…" any more (Bing flagged `/docs/` for it): the API
+  reference writes a whole one from the operation's summary, method and path when its opening
+  sentences don't fit, four docs pages have their own, and the site's SEO check fails on a cut-off one.
 
 ## 0.12.0 - 2026-11-14
 
