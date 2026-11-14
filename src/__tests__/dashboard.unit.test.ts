@@ -3353,6 +3353,31 @@ describe('the plan page', () => {
     expect(again.status).toBe(409);
   });
 
+  it('says when a plan cancelled at the end of its period ends, not that it renews', async () => {
+    const { billing } = billed(developer);
+    const errors: unknown[] = [];
+    let ends: Date | null | 'refused' = new Date('2026-12-13T23:44:00Z');
+    const ending = vi.fn(async () => {
+      if (ends === 'refused') throw new Error('Stripe did not answer');
+      return ends;
+    });
+    const target = dashboard({ billing: { ...billing, ending }, onError: (error) => void errors.push(error) });
+    const { session } = await signIn(target);
+    const html = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(ending).toHaveBeenCalledWith(developer.stripeSubscription);
+    expect(html).toContain('<span class="plan-now">Developer</span><span class="pill held">Ending</span>');
+    expect(html).toContain('<span class="summary-label">Ends</span><span class="summary-value">13 Dec 2026</span><span class="summary-note">2026-12-13 23:44 UTC</span>');
+    expect(html).not.toContain('Renews');
+    // Renewing again, or Stripe not answering: as before, and the error reported.
+    ends = null;
+    expect(await (await get(target, '/base/dashboard/plan', session)).text()).toContain('<span class="summary-label">Renews</span>');
+    ends = 'refused';
+    const fallback = await (await get(target, '/base/dashboard/plan', session)).text();
+    expect(fallback).toContain('<span class="pill active">Active</span>');
+    expect(fallback).toContain('<span class="summary-label">Renews</span>');
+    expect(errors).toHaveLength(1);
+  });
+
   it('warns a tenant whose payment failed, and says so when Stripe does not answer', async () => {
     const { target, billing } = billed({ ...developer, status: 'past_due' });
     const { session } = await signIn(target);
