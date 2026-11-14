@@ -1434,6 +1434,58 @@ describe('security review fixes', () => {
     expect(toolResultsSent('openai', model.requests[1])).toEqual([JSON.stringify({ error: { code: 'change_too_large_to_show' } })]);
   });
 
+  it('never runs a proposal, dry or not: one sent with dry_run is refused before the backend', async () => {
+    const admitted: string[] = [];
+    const consulted: string[] = [];
+    const target = dashboard({
+      admit: async (args) => {
+        admitted.push(args.operation);
+      },
+      consumeRateLimit: async (args) => {
+        consulted.push(args.operation);
+        return true;
+      },
+    });
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script(
+      {
+        calls: [
+          {
+            name: 'slotlock_create_event',
+            input: {
+              resource_id: RESOURCE.id,
+              starts_at: '2027-03-02T10:00:00Z',
+              ends_at: '2027-03-02T11:00:00Z',
+              timezone: 'Europe/London',
+              recurrence_rule: 'FREQ=DAILY;COUNT=30',
+              dry_run: true,
+            },
+          },
+          { name: 'slotlock_update_event', input: { event_id: 'agent:abc', expected_revision: 1, title: 'x', dry_run: true } },
+          { name: 'slotlock_cancel', input: { event_id: 'agent:abc', expected_revision: 1, dry_run: false } },
+        ],
+      },
+      { text: 'Checked.' },
+    );
+    await chat(target, bob, 'Dry-run these');
+    for (const method of Object.values(backend)) expect(method).not.toHaveBeenCalled();
+    expect(admitted).toEqual([]);
+    expect(consulted).toEqual([]);
+    expect(toolResultsSent('openai', model.requests[1])).toEqual(
+      Array.from({ length: 3 }, () => JSON.stringify({ error: { code: 'invalid_arguments' } })),
+    );
+    expect(await page(target, bob)).not.toContain('name="action"');
+  });
+
+  it('offers the model no dry_run on a write it proposes', () => {
+    const proposed = slotlockAssistantTools().filter((tool) => tool.use === 'propose');
+    expect(proposed.length).toBeGreaterThan(0);
+    for (const tool of proposed) {
+      expect(Object.keys(tool.inputSchema.properties as object), tool.name).not.toContain('dry_run');
+    }
+  });
+
   it("M2: lets another tenant's update_event through while a proposed one waits in a running turn", async () => {
     const limits = createSlotlockRequestLimits({
       limits: SLOTLOCK_DEFAULT_LIMITS,

@@ -5282,6 +5282,11 @@ ${
           : { ok: false, code: outcome.code, ...(outcome.details ? { details: outcome.details } : {}) };
       },
       propose: async (operation, input) => {
+        // A dry run skips the halt below and would reach the backend from here, past admission,
+        // the rate limit and the turn's read budget. A proposal never runs, dry or not.
+        if (isRecord(input) && Object.hasOwn(input, 'dry_run')) {
+          return { ok: false, code: 'invalid_arguments' };
+        }
         if (pendingBefore + Object.keys(proposed).length >= SLOTLOCK_ASSISTANT_MAX_PENDING) {
           return { ok: false, code: 'too_many_pending_changes' };
         }

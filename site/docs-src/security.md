@@ -13,6 +13,10 @@ With `confirmation`, a listed write first asks the person a yes/no question that
 will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
 handover".` Only an explicit yes runs the write.
 
+- Listing a write guards every tool that performs it, whichever name is listed: `slotlock_cancel`
+  waits with `slotlock_delete_event` and is asked as the same deletion, `slotlock_reschedule` with
+  `slotlock_update_event`, and `slotlock_confirm_slot` with `slotlock_create_event`, asked as
+  booking the time its hold holds. Holds never wait: they book nothing and lapse within minutes.
 - A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
   the other fields it sets (`also description, attendees`) without quoting them.
 - Facts come first: the resource by its own reference, times in its own zone, and an event as it
