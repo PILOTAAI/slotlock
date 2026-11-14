@@ -167,13 +167,14 @@ From the pre-launch security audit (Cloudflare's security-audit skill, deep prof
   creates the console's database role and runs `slotlock migrate`, then a Hyperdrive configuration
   as that role, an Access application with a policy for the given addresses, and the Worker's
   config, with Cloudflare Web Analytics for the Site and search page when given its site tag.
-  `go-live`, refused before 12 December 2026, deploys the Worker, sets the secrets it lacks on
+  `go-live`, refused before 14 November 2026, deploys the Worker, sets the secrets it lacks on
   stdin (Web Analytics' read-only token among them), creates the Slotlock CMS GitHub App and stores
   its key, and adds the first Owners. Each is safe to run again, and `--dry-run` changes nothing.
   The release app and the CMS App share one manifest flow (`scripts/github-app-manifest.mjs`).
 
 ### Changed
 
+- The staff console goes live on 14 November 2026, not 12 December: the privacy notice's sections about it ("What we hold", "How our staff see your account", "Why we use it, and our lawful basis" and "Your rights") take effect that day, and `scripts/configure-admin-console.mjs go-live` runs from then.
 - **A new Usage page.** It opens with the plan at a glance (plan, renewal, workspace), then the
   limits and this month's use side by side, then the plans side by side: Free, Developer, Team and
   Custom, each with its price, what it allows and the way to it from here, the current one

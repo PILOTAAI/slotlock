@@ -14,7 +14,7 @@
 //     - workers/admin/wrangler.deploy.jsonc: wrangler.jsonc with those values. It holds no secret.
 //
 //   node scripts/configure-admin-console.mjs go-live [--dry-run] [--no-open]
-//     From 12 December 2026, when PRIVACY.md's staff sections take effect; refused before then.
+//     From 14 November 2026, when PRIVACY.md's staff sections take effect; refused before then.
 //     - Deploys the Worker, which answers 503 until its secrets are set.
 //     - Sets the secrets it lacks with `wrangler secret bulk`, on stdin: a new session secret; the
 //       console's GitHub OAuth app's client ID and secret; the console's key, from
@@ -86,7 +86,7 @@ import {
 const OWNER = 'PILOTAAI';
 const REPO = 'slotlock';
 /** PRIVACY.md's staff sections take effect on this day; the console serves no one before it. */
-const GO_LIVE = '2026-12-12';
+const GO_LIVE = '2026-11-14';
 const HYPERDRIVE_NAME = 'slotlock-admin';
 const ACCESS_APP_NAME = 'Slotlock admin console';
 const ACCESS_POLICY_NAME = 'Slotlock staff (admin console)';

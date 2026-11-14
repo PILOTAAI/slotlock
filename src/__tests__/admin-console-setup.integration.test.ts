@@ -473,16 +473,16 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
     expect(existsSync(analytics.config)).toBe(false);
   });
 
-  it('refuses go-live before 12 December 2026, touching nothing', async () => {
-    const run = await setup({ SLOTLOCK_ADMIN_SETUP_TODAY: '2026-12-11', SLOTLOCK_ADMIN_OWNERS: 'ada' });
+  it('refuses go-live before 14 November 2026, touching nothing', async () => {
+    const run = await setup({ SLOTLOCK_ADMIN_SETUP_TODAY: '2026-11-13', SLOTLOCK_ADMIN_OWNERS: 'ada' });
     writePrepared(run.config);
     const refused = await runScript(['go-live'], run.env);
     expect(refused.code).toBe(1);
-    expect(refused.output).toContain('go-live is refused until 2026-12-12');
+    expect(refused.output).toContain('go-live is refused until 2026-11-14');
     expect([run.read('gh.log'), run.read('cli.log'), run.read('wrangler.log')]).toEqual([null, null, null]);
     const dry = await runScript(['go-live', '--dry-run'], run.env);
     expect(dry.code).toBe(0);
-    expect(dry.output).toContain('go-live is refused until 2026-12-12 (today is 2026-12-11). From then it would:');
+    expect(dry.output).toContain('go-live is refused until 2026-11-14 (today is 2026-11-13). From then it would:');
     // What to have ready, and what each step does, as a real run would do it.
     expect(dry.output).toContain(`${WEB}/organizations/PILOTAAI/settings/applications/new,\n  with the callback https://${HOSTNAME}/callback.`);
     expect(dry.output).toContain('It answers 503 to everyone until step 2 is done.');
@@ -502,7 +502,7 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
 
   it('goes live: deploys, sets the missing secrets on stdin, and adds only new Owners', async () => {
     const run = await setup({
-      SLOTLOCK_ADMIN_SETUP_TODAY: '2026-12-12',
+      SLOTLOCK_ADMIN_SETUP_TODAY: '2026-11-14',
       SLOTLOCK_ADMIN_OWNERS: 'ada,grace',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_ID: 'Ov23liConsoleTest',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET: CLIENT_SECRET,
@@ -563,7 +563,7 @@ describe.skipIf(!url)('configure-admin-console.mjs', () => {
   it('creates the CMS App, and stores its key in the Worker and the cms environment only', async () => {
     const github = await githubApi();
     const run = await setup({
-      SLOTLOCK_ADMIN_SETUP_TODAY: '2026-12-12',
+      SLOTLOCK_ADMIN_SETUP_TODAY: '2026-11-14',
       SLOTLOCK_ADMIN_OWNERS: 'grace',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_ID: 'Ov23liConsoleTest',
       SLOTLOCK_ADMIN_GITHUB_CLIENT_SECRET: CLIENT_SECRET,
