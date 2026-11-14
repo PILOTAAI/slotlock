@@ -385,7 +385,7 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
   }
 
   const AXE = chromium ? readFileSync(require_.resolve('axe-core/axe.min.js'), 'utf8') : '';
-  type Check = { violations: { id: string; impact: string | null; nodes: { target: string[] }[] }[]; refused: string[]; overflow: number; inter: boolean };
+  type Check = { violations: { id: string; impact: string | null; nodes: { target: string[] }[] }[]; refused: string[]; overflow: number; inter: boolean; chartGap: number | null };
   async function check(tab: PwPage): Promise<Check> {
     await tab.evaluate(AXE);
     // In the page, as a string: this repository compiles without the DOM's types.
@@ -396,6 +396,12 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
         refused: window.__refused,
         overflow: document.documentElement.scrollWidth - window.innerWidth,
         inter: document.fonts.check('13px Inter'),
+        // Home's New accounts chart, and the space before the figures under it.
+        chartGap: (() => {
+          const chart = document.querySelector('[aria-labelledby="new-title"] svg.spark');
+          const below = chart && chart.closest('section').querySelector('.kv');
+          return chart && below ? below.getBoundingClientRect().top - chart.getBoundingClientRect().bottom : null;
+        })(),
       };
     })()`);
     return result as Check;
@@ -446,6 +452,7 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
           if (found.refused.length) problems.push(`${where}: the CSP refused ${found.refused.join(', ')}`);
           if (found.overflow > 0) problems.push(`${where}: ${found.overflow}px wider than the screen`);
           if (!found.inter) problems.push(`${where}: Inter did not load`);
+          if (found.chartGap !== null && found.chartGap < 12) problems.push(`${where}: the New accounts chart is ${found.chartGap}px from the figures under it`);
           await tab.screenshot({ path: join(SHOTS, 'all', `${item.name}-${width}-${theme}.png`), fullPage: width < 760 });
         }
         await browserContext.close();

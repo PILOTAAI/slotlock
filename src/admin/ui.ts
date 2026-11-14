@@ -963,6 +963,8 @@ details.info>.pop{left:-8px;right:auto;font-size:12.5px;line-height:19px;color:v
 .stat-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .spark{display:block;width:100%;height:28px;margin-top:8px;overflow:visible}
 .spark-area{fill:var(--accent-tint)}.spark-line{fill:none;stroke:var(--accent);stroke-width:1.5}
+.spark-row{margin:4px 0 20px;padding:2px 0}
+.spark-row .spark{height:56px;margin:0}
 .stats .meter{margin-top:8px}
 .stats.vertical{grid-template-columns:minmax(0,1fr)!important}
 .stats.vertical>li>a,.stats.vertical>li>div{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"label value" "foot value";align-items:center;gap:2px 12px;padding:12px 16px}

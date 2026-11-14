@@ -741,7 +741,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       <div class="grid">
         <section class="box c4" aria-labelledby="new-title">
           <header class="section-head"><h2 id="new-title">New accounts</h2><span class="section-aside muted tnum">${count(signupDays.reduce((a, b) => a + b, 0))} in 30 days</span></header>
-          ${sparkline(signupDays)}
+          <div class="spark-row">${sparkline(signupDays)}</div>
           ${facts([
             ['People', count(n('people'))],
             ['Teams', count(n('teams'))],
