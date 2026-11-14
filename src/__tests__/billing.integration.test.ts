@@ -491,6 +491,156 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
     }
   });
 
+  it('keeps when a cancelled subscription ends, and whether it is in a trial, while it is the one the plan names', async () => {
+    const ending = `billing-ending-${randomUUID()}`;
+    const term = async () =>
+      (await sql<{ ends_at: Date | null; trialing: boolean }[]>`
+        SELECT ends_at, trialing FROM slotlock.tenant_plans WHERE tenant_ref = ${ending}`)[0];
+    const theirs = (id: string, status: string, extra: Partial<SlotlockStripeSubscription> = {}): SlotlockStripeSubscription => ({
+      ...subscription(id, status),
+      metadata: { tenant_ref: ending },
+      ...extra,
+    });
+    try {
+      subscriptions.set('sub_E1', theirs('sub_E1', 'active'));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_E1' } } });
+      expect(await term()).toEqual({ ends_at: null, trialing: false });
+      // Cancelled in the portal: active until the end of the period it was paid for.
+      subscriptions.set('sub_E1', theirs('sub_E1', 'active', { cancel_at_period_end: true }));
+      await deliver({ type: 'customer.subscription.updated', data: { object: { object: 'subscription', id: 'sub_E1' } } });
+      expect(await term()).toEqual({ ends_at: new Date(Date.UTC(2026, 11, 9)), trialing: false });
+      expect(await readSlotlockTenantPlan(sql, ending)).toMatchObject({ plan: 'developer', status: 'active' });
+      // A date to cancel at, which Stripe sets apart from the period.
+      subscriptions.set('sub_E1', theirs('sub_E1', 'active', { cancel_at: Math.floor(Date.UTC(2026, 11, 1) / 1000) }));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_E1' } } });
+      expect(await term()).toEqual({ ends_at: new Date(Date.UTC(2026, 11, 1)), trialing: false });
+      // Renewing again.
+      subscriptions.set('sub_E1', theirs('sub_E1', 'active'));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_E1' } } });
+      expect(await term()).toEqual({ ends_at: null, trialing: false });
+      subscriptions.set('sub_E1', theirs('sub_E1', 'trialing', { cancel_at_period_end: true }));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_E1' } } });
+      expect(await term()).toEqual({ ends_at: new Date(Date.UTC(2026, 11, 9)), trialing: true });
+      // The plan names another subscription (a Worker from before this release writes it so): what
+      // was kept about the last one goes with it.
+      await setSlotlockTenantPlan(sql, { tenantRef: ending, plan: 'developer', status: 'active', stripeCustomer: 'cus_Paid1', stripeSubscription: 'sub_E2' });
+      expect(await term()).toEqual({ ends_at: null, trialing: false });
+      // On a schema from before this release, the plan is set as before, and nothing else.
+      subscriptions.set('sub_E2', theirs('sub_E2', 'active', { cancel_at_period_end: true }));
+      const rolledBack = new Error('rolled back');
+      const seen = await sql
+        .begin(async (tx) => {
+          await tx`DROP FUNCTION slotlock.set_tenant_plan_renewal(text, text, timestamptz, boolean)`;
+          const body = JSON.stringify({ data: { object: { object: 'subscription', id: 'sub_E2' } } });
+          const response = await handleSlotlockStripeWebhook(
+            new Request('https://app.example.com/stripe/webhook', { method: 'POST', headers: { 'stripe-signature': sign(body) }, body }),
+            { secret: SECRET, stripe, sql: tx as unknown as typeof sql, now: () => NOW },
+          );
+          const [row] = await tx<{ ends_at: Date | null }[]>`SELECT ends_at FROM slotlock.tenant_plans WHERE tenant_ref = ${ending}`;
+          throw Object.assign(rolledBack, { seen: { status: response.status, endsAt: row?.ends_at ?? null } });
+        })
+        .catch((error: unknown) => (error === rolledBack ? (error as { seen?: unknown }).seen : Promise.reject(error)));
+      expect(seen).toEqual({ status: 200, endsAt: null });
+      // Ended, with no other subscription live: the plan is Free, and nothing says it ends.
+      subscriptions.set('sub_E1', theirs('sub_E1', 'canceled'));
+      subscriptions.set('sub_E2', theirs('sub_E2', 'canceled'));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_E2' } } });
+      expect(await term()).toEqual({ ends_at: null, trialing: false });
+    } finally {
+      subscriptions.delete('sub_E1');
+      subscriptions.delete('sub_E2');
+      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${ending}`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${ending}::text)`;
+    }
+  });
+
+  it('notes a refund that left the plan running, once, from what Stripe holds now', async () => {
+    const refunded = `billing-refunded-${randomUUID()}`;
+    const customer = `cus_Refund${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+    const charge = (id: string, extra: Record<string, unknown> = {}) => ({
+      id: `evt_${id}`,
+      type: 'charge.refunded',
+      // A Charge as Stripe's API reference describes it (read 2026-11-14); the billing details and
+      // card are never kept.
+      data: {
+        object: {
+          object: 'charge', id, customer, amount: 500, amount_refunded: 500, refunded: true, currency: 'gbp',
+          billing_details: { email: 'ada@example.com', name: 'Ada Lovelace' }, payment_method_details: { card: { last4: '4242' } },
+          ...extra,
+        },
+      },
+    });
+    const alerts = async () =>
+      sql<{ kind: string; stripe_ref: string; detail: Record<string, unknown> }[]>`
+        SELECT kind, stripe_ref, detail FROM slotlock.billing_alerts WHERE tenant_ref = ${refunded} ORDER BY id`;
+    const theirs = (status: string, extra: Partial<SlotlockStripeSubscription> = {}): SlotlockStripeSubscription => ({
+      ...subscription('sub_R1', status),
+      customer,
+      metadata: { tenant_ref: refunded },
+      ...extra,
+    });
+    try {
+      // Not a customer of any plan: nothing to note.
+      expect(await (await deliver(charge('ch_R0'))).text()).toBe('Ignored.');
+      subscriptions.set('sub_R1', theirs('active'));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_R1' } } });
+      // Refunded in full, and the plan still renews: a person ends it, or says why not.
+      expect((await deliver(charge('ch_R1'))).status).toBe(200);
+      expect((await deliver(charge('ch_R1'))).status).toBe(200);
+      expect(await alerts()).toEqual([
+        {
+          kind: 'refunded_plan_active',
+          stripe_ref: 'ch_R1',
+          detail: { amount: 500, amount_refunded: 500, currency: 'gbp', refunded: true, subscription: 'sub_R1' },
+        },
+      ]);
+      expect(JSON.stringify(await alerts())).not.toMatch(/ada@|Lovelace|4242/);
+      // Part of a charge refunded: noted too, saying how much.
+      await deliver(charge('ch_R2', { amount_refunded: 200, refunded: false }));
+      expect((await alerts()).at(-1)).toMatchObject({ stripe_ref: 'ch_R2', detail: { amount_refunded: 200, refunded: false } });
+      // Cancelled in Stripe as it was refunded, before that event arrived: Stripe's word, not the
+      // database's, decides, so nothing needs a person.
+      subscriptions.set('sub_R1', theirs('active', { cancel_at_period_end: true }));
+      await deliver(charge('ch_R3'));
+      subscriptions.set('sub_R1', theirs('canceled'));
+      await deliver(charge('ch_R4'));
+      expect((await alerts()).map((alert) => alert.stripe_ref)).toEqual(['ch_R1', 'ch_R2']);
+      // Set to end, as the database knows: nothing either.
+      subscriptions.set('sub_R1', theirs('active', { cancel_at_period_end: true }));
+      await deliver({ data: { object: { object: 'subscription', id: 'sub_R1' } } });
+      subscriptions.set('sub_R1', theirs('active'));
+      await deliver(charge('ch_R5'));
+      expect((await alerts()).map((alert) => alert.stripe_ref)).toEqual(['ch_R1', 'ch_R2']);
+      // Not a charge, or not one Stripe could have sent: ignored.
+      expect(await (await deliver({ type: 'charge.refunded', data: { object: { object: 'charge', id: "ch_'; DROP", customer } } })).text()).toBe('Ignored.');
+      expect(await (await deliver({ type: 'charge.refunded', data: { object: { object: 'refund', id: 're_1', customer } } })).text()).toBe('Ignored.');
+      // Unsigned: refused.
+      expect((await deliver(charge('ch_R6'), 't=1,v1=00')).status).toBe(400);
+      expect((await alerts()).map((alert) => alert.stripe_ref)).toEqual(['ch_R1', 'ch_R2']);
+    } finally {
+      subscriptions.delete('sub_R1');
+      await sql`DELETE FROM slotlock.billing_alerts WHERE tenant_ref = ${refunded}`;
+      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${refunded}`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${refunded}::text)`;
+    }
+  });
+
+  it('notes no refund on a schema from before this release, which cannot say whose customer it is', async () => {
+    const rolledBack = new Error('rolled back');
+    const seen = await sql
+      .begin(async (tx) => {
+        await tx`DROP FUNCTION slotlock.tenant_plans_of_customer(text)`;
+        const body = JSON.stringify({ type: 'charge.refunded', data: { object: { object: 'charge', id: 'ch_Old1', customer: 'cus_Paid1', amount: 500, amount_refunded: 500 } } });
+        const response = await handleSlotlockStripeWebhook(
+          new Request('https://app.example.com/stripe/webhook', { method: 'POST', headers: { 'stripe-signature': sign(body) }, body }),
+          { secret: SECRET, stripe, sql: tx as unknown as typeof sql, now: () => NOW },
+        );
+        throw Object.assign(rolledBack, { seen: { status: response.status, text: await response.text() } });
+      })
+      .catch((error: unknown) => (error === rolledBack ? (error as { seen?: unknown }).seen : Promise.reject(error)));
+    expect(seen).toEqual({ status: 200, text: 'Ignored.' });
+  });
+
   it('ignores events about nothing of ours, and asks Stripe to retry when it cannot read one', async () => {
     expect((await deliver({ data: { object: { object: 'customer', id: 'cus_1' } } })).status).toBe(200);
     expect((await deliver({ data: { object: { object: 'subscription', id: 'sub_Missing' } } })).status).toBe(500);

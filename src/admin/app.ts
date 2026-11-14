@@ -58,6 +58,15 @@ import {
   slotlockMoney,
 } from './stripe.js';
 import {
+  slotlockBillingAlertWords,
+  slotlockEndingRows,
+  slotlockMoneyByCurrency,
+  slotlockPlanLabel,
+  slotlockPlanName,
+  slotlockShortDate,
+  slotlockStripeLink,
+} from './billing-figures.js';
+import {
   Html,
   SLOTLOCK_ADMIN_CSS,
   SLOTLOCK_ADMIN_JS,
@@ -497,8 +506,9 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
   };
 
   const kindPill = (kind: string) => pill(kind, kind === 'test' ? 'warn' : 'muted');
-  const planPill = (plan: string | null) =>
-    pill(plan ?? 'free', plan === 'team' ? 'good' : plan === 'developer' ? 'info' : 'muted');
+  /** A plan, with the day it ends when its subscription is set to end (the webhook keeps it). */
+  const planPill = (plan: string | null, endsAt?: Date | string | null) =>
+    pill(slotlockPlanLabel(plan, endsAt, now()), endsAt ? 'warn' : plan === 'team' ? 'good' : plan === 'developer' ? 'info' : 'muted');
   const statusPill = (suspended: boolean, planStatus: string | null) =>
     suspended ? pill('Suspended', 'bad') : planStatus === 'past_due' ? pill('Past due', 'warn') : pill('Active', 'good');
   const accountHref = (ref: string) => `/accounts/${encodeURIComponent(ref)}`;
@@ -541,7 +551,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ...(n('suspended') > 0 ? [html`<li><a href="/accounts?status=suspended">${count(n('suspended'))} suspended ${n('suspended') === 1 ? 'account' : 'accounts'}</a> <span class="sub">Check each has a case and a reason.</span></li>`] : []),
       ...(n('past_due') > 0 ? [html`<li>${count(n('past_due'))} ${n('past_due') === 1 ? 'payment' : 'payments'} past due <span class="sub">Stripe retries; the plan ends if it fails.</span></li>`] : []),
       ...(n('billing_alerts_open') > 0 && slotlockStaffMay(session.r, 'billing.read')
-        ? [html`<li><a href="/billing#alerts">${count(n('billing_alerts_open'))} billing ${n('billing_alerts_open') === 1 ? 'alert' : 'alerts'}</a> <span class="sub">Failed payments and duplicate subscriptions, from Stripe.</span></li>`]
+        ? [html`<li><a href="/billing#alerts">${count(n('billing_alerts_open'))} billing ${n('billing_alerts_open') === 1 ? 'alert' : 'alerts'}</a> <span class="sub">Failed payments, second subscriptions and refunds, from Stripe.</span></li>`]
         : []),
       ...(n('overrides_pending') > 0 && slotlockStaffMay(session.r, 'plans.approve')
         ? [html`<li><a href="/billing#overrides">${count(n('overrides_pending'))} ${n('overrides_pending') === 1 ? 'override waits' : 'overrides wait'} for a second Owner</a></li>`]
@@ -563,7 +573,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       <h2>This month</h2>
       ${stats([
         { label: 'Accounts', value: count(n('accounts')), note: `${count(n('people'))} people, ${count(n('teams'))} teams, ${count(n('organizations'))} organizations`, ...(read ? { href: '/accounts' } : {}) },
-        { label: 'Paying', value: count(n('paying')), note: 'Developer and Team, active' },
+        { label: 'Paying', value: count(n('paying')), note: `${count(n('trialing'))} in a trial, ${count(n('ending'))} ending` },
         { label: 'Active in 7 days', value: count(n('active_7_days')), note: 'Accounts with any use' },
         { label: 'Operations', value: count(n('operations_month')), note: change(n('operations_month'), n('operations_last_month')) },
         { label: 'Bookings', value: count(n('bookings_month')), note: change(n('bookings_month'), n('bookings_last_month')) },
@@ -589,7 +599,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const sql = options.sql();
     const rows = await sql<{
       account_ref: string; kind: string; name: string | null; created_at: Date | null; last_active: Date | null;
-      plan: string; plan_status: string | null; suspended: boolean; operations_month: string; bookings_month: string;
+      plan: string; plan_status: string | null; plan_ends_at?: Date | null; suspended: boolean; operations_month: string; bookings_month: string;
     }[]>`SELECT * FROM slotlock.admin_accounts(${session.t}, ${q || null}, ${plan}, ${status}, ${after}, ${PAGE})`;
     const named = await Promise.all(
       rows.map(async (row) => row.name ?? (row.kind === 'person' && row.account_ref.startsWith('github:') && rows.length <= 10 ? await loginOf(row.account_ref) : null)),
@@ -614,7 +624,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
         ['Account', 'Plan', 'Status', 'This month', 'Last active', 'Created'],
         rows.map((row, index) => [
           html`<a href="${accountHref(row.account_ref)}">${named[index] ?? row.account_ref}</a><span class="sub mono">${named[index] ? row.account_ref : ''} ${kindPill(row.kind)}</span>`,
-          planPill(row.plan),
+          planPill(row.plan, row.plan_ends_at),
           statusPill(row.suspended, row.plan_status),
           html`${count(row.operations_month)} operations<span class="sub">${count(row.bookings_month)} bookings</span>`,
           html`${day(row.last_active)}`,
@@ -667,6 +677,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const series = (metric: string) =>
       usage.filter((point) => point.metric === metric).map((point) => ({ day: day(point.day), count: Number(point.count) }));
     const title = String(data.name ?? login ?? ref);
+    const endsAt = typeof data.plan_ends_at === 'string' ? data.plan_ends_at : null;
     const stripe = typeof data.stripe_customer === 'string' ? data.stripe_customer : null;
     const base = accountHref(ref);
     const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}">`;
@@ -678,7 +689,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const activeKey = (key: { revoked_at: Date | null; expires_at: Date | null }) =>
       !key.revoked_at && !(key.expires_at && new Date(key.expires_at).getTime() < now_);
     const body = html`
-      ${pageHead(`Account · ${String(data.kind)}`, title, html`<code>${ref}</code> <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan))} ${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
+      ${pageHead(`Account · ${String(data.kind)}`, title, html`<code>${ref}</code> <button class="link" type="button" data-copy="${ref}" hidden>Copy</button> ${planPill(String(data.plan), endsAt)} ${statusPill(suspended, (data.plan_status as string | null) ?? null)}`,
         html`${stripe ? html`<a class="btn" href="https://dashboard.stripe.com/customers/${encodeURIComponent(stripe)}" rel="noreferrer">Open in Stripe</a>` : ''}${slotlockStaffMay(session.r, 'system.act') && data.kind !== 'test' ? html`<a class="btn" href="/communications?${new URLSearchParams({ account: ref }).toString()}">Send a notice</a>` : ''}${safety ? html`<a class="btn ${suspended ? '' : 'danger'}" href="#danger">${suspended ? 'Lift suspension' : 'Suspend'}</a>` : ''}`)}
       <div class="grid-2">
         <div>
@@ -757,7 +768,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
             <div><dt>Last active</dt><dd>${day(data.last_active as string)}</dd></div>
             <div><dt>Members</dt><dd>${count(Number(data.members ?? 0))}</dd></div>
             ${stripe ? html`<div><dt>Stripe customer</dt><dd><code>${stripe}</code></dd></div>` : ''}
-            ${data.current_period_end ? html`<div><dt>Paid until</dt><dd>${day(data.current_period_end as string)}</dd></div>` : ''}
+            ${endsAt ? html`<div><dt>Ends</dt><dd>${day(endsAt)}</dd></div>` : data.current_period_end ? html`<div><dt>Paid until</dt><dd>${day(data.current_period_end as string)}</dd></div>` : ''}
             ${data.partner ? html`<div><dt>Partner</dt><dd><code>${String(data.partner)}</code></dd></div>` : ''}
           </dl>
           ${safety
@@ -1371,10 +1382,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     }
   }
 
-  const stripeLink = (ref: string) =>
-    ref.startsWith('in_')
-      ? `https://dashboard.stripe.com/invoices/${encodeURIComponent(ref)}`
-      : `https://dashboard.stripe.com/subscriptions/${encodeURIComponent(ref)}`;
+  const stripeLink = slotlockStripeLink;
   const OVERRIDE_STATE: Record<string, Html> = {
     in_force: pill('In force', 'good'),
     pending: pill('Waiting for approval', 'warn'),
@@ -1400,30 +1408,42 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
     const billing = summaryRow?.billing ?? {};
     const paying = (billing.paying ?? {}) as Record<string, number>;
     const runs = (billing.runs ?? {}) as Record<string, { started_at: string; finished_at: string; attention: boolean; actor: string; summary: { lines?: unknown[] } & Record<string, unknown> }>;
-    const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:summary', () => stripe.revenue()) : null;
+    // Slotlock's subscriptions only, by the rule the database counts paying plans by (stripe.ts).
+    const revenue = stripe ? await cached<SlotlockStripeRevenue>(session, 'revenue:slotlock', () => stripe.revenue()) : null;
+    const ending = slotlockEndingRows((billing.ending ?? []) as { account_ref: string; plan: string | null; ends_at: string }[], revenue);
     const askers = await staffNames(overrides.map((item) => item.created_by));
     const may = (capability: SlotlockStaffCapability) => slotlockStaffMay(session.r, capability);
     const csrf = html`<input type="hidden" name="csrf" value="${csrfOf(session)}"><input type="hidden" name="back" value="/billing">`;
     const openAlerts = alerts.filter((alert) => !alert.resolved_at);
     const pending = overrides.filter((item) => item.state === 'pending');
     const approvable = pending.filter((item) => item.created_by !== session.s);
-    const mrr = revenue ? Object.entries(revenue.mrr).map(([currency, minor]) => slotlockMoney(minor, currency)).join(' + ') || slotlockMoney(0, 'eur') : null;
+    const alertWords = (alert: { kind: string; detail: Record<string, unknown> }) => slotlockBillingAlertWords(alert.kind, alert.detail);
     const body = html`
       ${pageHead('Slotlock Cloud', 'Billing', 'Revenue, what Stripe told us needs a person, plan overrides, the billing jobs and partners.')}
       ${stats([
-        { label: 'Monthly recurring revenue', value: mrr ?? '–', note: revenue ? `${count(revenue.live)} live subscriptions` : stripe ? 'Stripe could not be read' : 'Stripe not connected' },
+        { label: 'Monthly recurring revenue', value: revenue ? slotlockMoneyByCurrency(revenue.mrr) : '–', note: revenue ? `${count(revenue.paying)} paying ${revenue.paying === 1 ? 'subscription' : 'subscriptions'} in Stripe` : stripe ? 'Stripe could not be read' : 'Stripe not connected' },
         { label: 'Paying', value: count(Object.values(paying).reduce((sum, value) => sum + Number(value), 0)), note: `${count(paying.developer ?? 0)} Developer, ${count(paying.team ?? 0)} Team` },
         { label: 'Past due', value: count(Number(billing.past_due ?? 0)), note: 'Stripe is retrying' },
-        { label: 'New this month', value: revenue ? count(revenue.newThisMonth) : '–', note: 'Subscriptions, from Stripe' },
-        { label: 'Cancelled this month', value: revenue ? count(revenue.cancelledThisMonth) : count(Number(billing.canceled_month ?? 0)), note: revenue ? 'Subscriptions, from Stripe' : 'Plans ended' },
+        { label: 'In a trial', value: count(revenue ? revenue.trialing : Number(billing.trialing ?? 0)) },
+        { label: 'Ending', value: count(revenue ? revenue.ending.count : Number(billing.ending_total ?? 0)), note: revenue ? `${slotlockMoneyByCurrency(revenue.ending.atRisk)} a month` : null, href: '#ending' },
+        { label: 'New this month', value: revenue ? count(revenue.newThisMonth) : '–', note: 'Paid for at least once' },
+        { label: 'Cancelled this month', value: revenue ? count(revenue.cancelledThisMonth) : count(Number(billing.canceled_month ?? 0)), note: revenue ? 'Ended, in Stripe' : 'Plans ended' },
         { label: 'Open alerts', value: count(Number(billing.alerts_open ?? 0)) },
       ])}
       <p class="fine">${revenue ? html`Read from Stripe ${when(new Date(revenue.readAt))}, and kept for an hour.${revenue.truncated ? ' Only the first 1,000 subscriptions were read.' : ''}` : stripe ? 'Stripe could not be read just now; the numbers from Stripe are missing.' : html`Revenue needs a restricted Stripe key that reads subscriptions and invoices (<code>SLOTLOCK_ADMIN_STRIPE_KEY</code>).`}</p>
 
+      <h2 id="ending">Ending</h2>
+      ${table('Ending', ['Account', 'Plan', 'A month', 'Ends'], ending.map((row) => [
+        may('accounts.read') ? html`<a class="mono" href="${accountHref(row.account)}">${row.account}</a>` : html`<span class="mono">${row.account}</span>`,
+        html`${row.plan ? slotlockPlanName(row.plan) : '–'}`,
+        html`${row.monthly === null ? '–' : slotlockMoney(row.monthly, row.currency)}`,
+        html`${slotlockShortDate(row.endsAt, now())}`,
+      ]), 'No paying plan is set to end.')}
+
       <h2 id="alerts">Needs a person</h2>
-      <p class="fine">Payments that failed and second subscriptions, as the Stripe webhook saw them. A failed payment clears itself when the subscription is paid again. ${showAll ? html`<a href="/billing#alerts">Open ones only</a>` : html`<a href="/billing?alerts=all#alerts">Show resolved too</a>`}</p>
+      <p class="fine">Payments that failed, second subscriptions, and refunds that left a plan running, as the Stripe webhook saw them. A failed payment clears itself when the subscription is paid again. ${showAll ? html`<a href="/billing#alerts">Open ones only</a>` : html`<a href="/billing?alerts=all#alerts">Show resolved too</a>`}</p>
       ${table('Billing alerts', ['Alert', 'Account', 'In Stripe', 'When', 'State'], alerts.map((alert) => [
-        html`${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'}${alert.kind === 'payment_failed' && typeof alert.detail.amount_due === 'number' ? html`<span class="sub">${slotlockMoney(alert.detail.amount_due, typeof alert.detail.currency === 'string' ? alert.detail.currency : null)}, attempt ${String(alert.detail.attempt_count ?? '?')}</span>` : alert.detail.first ? html`<span class="sub mono">besides ${String(alert.detail.first)}: refund one</span>` : ''}`,
+        html`${alertWords(alert).title}${alertWords(alert).detail ? html`<span class="sub">${alertWords(alert).detail}</span>` : ''}`,
         may('accounts.read') ? html`<a class="mono" href="${accountHref(alert.account_ref)}">${alert.account_ref}</a>` : html`<span class="mono">${alert.account_ref}</span>`,
         html`<a class="mono" href="${stripeLink(alert.stripe_ref)}" rel="noreferrer">${alert.stripe_ref}</a>`,
         html`${when(alert.created_at)}`,
@@ -1431,7 +1451,7 @@ export function createSlotlockAdmin(options: SlotlockAdminOptions): SlotlockAdmi
       ]), showAll ? 'No billing alerts yet.' : 'Nothing needs a person.')}
       ${may('billing.act') && openAlerts.length
         ? html`<details class="act wide"><summary>Resolve an alert</summary><form class="pop form" method="post" action="/billing/alerts/resolve">${csrf}
-            <label for="alert-id">Alert</label><select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alert.kind === 'payment_failed' ? 'Payment failed' : 'Second subscription'} · ${alert.account_ref} · ${alert.stripe_ref}</option>`)}</select>
+            <label for="alert-id">Alert</label><select id="alert-id" name="alert">${openAlerts.map((alert) => html`<option value="${alert.id}">${alertWords(alert).title} · ${alert.account_ref} · ${alert.stripe_ref}</option>`)}</select>
             <label for="alert-reason">What was done <span class="hint">for the staff log</span></label><input id="alert-reason" name="reason" required maxlength="200" autocomplete="off">
             <button class="btn" type="submit">Resolve</button></form></details>`
         : ''}

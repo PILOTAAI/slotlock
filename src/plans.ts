@@ -201,6 +201,56 @@ export async function setSlotlockTenantPlanOverage(
   }
 }
 
+/**
+ * Records when the subscription the tenant's plan names ends (null: it renews) and whether it is in
+ * a trial, for that subscription only, so the staff console counts paying plans and shows an end
+ * date without asking Stripe. A schema or grants from before this release record nothing.
+ */
+export async function setSlotlockTenantPlanRenewal(
+  sql: SlotlockSql,
+  input: { tenantRef: string; stripeSubscription: string; endsAt: Date | null; trialing: boolean },
+): Promise<void> {
+  // Asked first: a failed call can cost a Worker request its connection (schema-functions.ts).
+  const signature = 'slotlock.set_tenant_plan_renewal(text,text,timestamptz,boolean)';
+  if (!(await createSlotlockSchemaFunctions(sql, [signature])(signature))) return;
+  try {
+    await sql`SELECT slotlock.set_tenant_plan_renewal(
+      ${input.tenantRef}::text, ${input.stripeSubscription}::text, ${input.endsAt}::timestamptz, ${input.trialing}::boolean)`;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === '42883' || code === '42501') return;
+    throw error;
+  }
+}
+
+/** A plan a Stripe customer pays for, as the webhook last set it. */
+export interface SlotlockCustomerPlan {
+  tenantRef: string;
+  plan: string;
+  status: SlotlockPlanStatus;
+  stripeSubscription: string | null;
+  endsAt: Date | null;
+}
+
+/**
+ * The plans a Stripe customer pays for (a refund names the customer, not the account), or null on
+ * a schema or grants from before this release, which cannot say.
+ */
+export async function readSlotlockPlansOfCustomer(sql: SlotlockSql, customer: string): Promise<SlotlockCustomerPlan[] | null> {
+  const signature = 'slotlock.tenant_plans_of_customer(text)';
+  if (!(await createSlotlockSchemaFunctions(sql, [signature])(signature))) return null;
+  const rows = await sql<
+    { tenant_ref: string; plan: string; status: SlotlockPlanStatus; stripe_subscription: string | null; ends_at: Date | null }[]
+  >`SELECT * FROM slotlock.tenant_plans_of_customer(${customer}::text)`;
+  return rows.map((row) => ({
+    tenantRef: row.tenant_ref,
+    plan: row.plan,
+    status: row.status,
+    stripeSubscription: row.stripe_subscription,
+    endsAt: row.ends_at,
+  }));
+}
+
 /** The plan every tenant without one of its own is on, from `appliesFrom`. */
 export interface SlotlockPlanDefault {
   plan: SlotlockPlan;

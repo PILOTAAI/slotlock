@@ -289,7 +289,9 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     await expect(adminSql`SELECT slotlock.admin_home(${STRANGER})`).rejects.toMatchObject({ code: '42501' });
     // A viewer sees the home numbers.
     const [home] = await adminSql<{ home: Record<string, unknown> }[]>`SELECT slotlock.admin_home(${await as(VIEWER)}) AS home`;
-    expect(home?.home).toMatchObject({ accounts: 2, people: 2, paying: 1, suspended: 1, operations_month: 40, bookings_month: 3 });
+    // The person's Developer plan names no subscription (as the default plan, or an override, gives
+    // one), so it is not paying (staff_subscribed_plans).
+    expect(home?.home).toMatchObject({ accounts: 2, people: 2, paying: 0, suspended: 1, operations_month: 40, bookings_month: 3 });
   });
 
   it('finds accounts by key, Stripe customer, GitHub id and reference, recording only a key prefix', async () => {

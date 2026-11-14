@@ -631,10 +631,12 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
       const price = (amount: number, interval: string, usage = 'licensed') => ({ unit_amount: amount, currency: 'eur', recurring: { interval, interval_count: 1, usage_type: usage } });
       return new Response(JSON.stringify({
         has_more: false,
+        // Each tagged with its account, as Checkout tags Slotlock's (another product's is not counted).
         data: [
-          { id: 'sub_m', status: 'active', created: month, items: { data: [{ price: price(1900, 'month'), quantity: 1 }, { price: price(1, 'month', 'metered') }] } },
-          { id: 'sub_y', status: 'past_due', created: 1, items: { data: [{ price: price(19000, 'year'), quantity: 1 }] } },
-          { id: 'sub_c', status: 'canceled', created: 1, canceled_at: month, items: { data: [{ price: price(1900, 'month') }] } },
+          { id: 'sub_m', status: 'active', created: month, metadata: { tenant_ref: PERSON }, items: { data: [{ price: price(1900, 'month'), quantity: 1 }, { price: price(1, 'month', 'metered') }] } },
+          { id: 'sub_y', status: 'past_due', created: 1, metadata: { tenant_ref: 'github:1' }, items: { data: [{ price: price(19000, 'year'), quantity: 1 }] } },
+          { id: 'sub_c', status: 'canceled', created: 1, canceled_at: month, ended_at: month, metadata: { tenant_ref: 'github:2' }, items: { data: [{ price: price(1900, 'month') }] } },
+          { id: 'sub_x', status: 'active', created: month, metadata: {}, items: { data: [{ price: price(9900, 'month'), quantity: 1 }] } },
         ],
       }), { headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
@@ -650,12 +652,13 @@ describe.skipIf(!url)('admin console (real Postgres)', () => {
     const first = await (await browser.request('/billing')).text();
     // €19 a month, plus €190 a year (€15.83 a month); the metered overage price has no fixed amount.
     expect(first).toContain('€34.83');
-    expect(first).toContain('2 live subscriptions');
+    expect(first).toContain('2 paying subscriptions in Stripe');
+    expect(first).toMatch(/Cancelled this month<\/span>\s*<strong class="stat-value">1</);
     expect(first).toMatch(/New this month<\/span>\s*<strong class="stat-value">1</);
     // The second page is from the hour's cache: the same numbers, no second read of Stripe.
     expect(await (await browser.request('/billing')).text()).toContain('€34.83');
     expect(calls).toHaveLength(1);
-    const [kept] = await superuser<{ type: string }[]>`SELECT jsonb_typeof(value) AS type FROM slotlock.admin_cache WHERE key = 'revenue:summary'`;
+    const [kept] = await superuser<{ type: string }[]>`SELECT jsonb_typeof(value) AS type FROM slotlock.admin_cache WHERE key = 'revenue:slotlock'`;
     expect(kept?.type).toBe('object');
 
     const usage = await (await browser.request('/usage')).text();

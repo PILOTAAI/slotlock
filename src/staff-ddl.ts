@@ -262,6 +262,7 @@ const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_challenge_spend(bytea, text, bytea)',
   'slotlock.staff_session_raise(bytea)',
   'slotlock.staff_directory()',
+  'slotlock.staff_subscribed_plans()',
   'slotlock.staff_account_known(text)',
   'slotlock.staff_reason_valid(text)',
   'slotlock.staff_customer_audit(text, text, text, text, text, text)',
@@ -270,6 +271,23 @@ const STAFF_HELPER_FUNCTIONS = [
   'slotlock.staff_audit_chain_check(integer)',
   'slotlock.privacy_digest(text)',
 ] as const;
+
+/**
+ * Drops a function whose result columns this release changes while the schema still has the shape
+ * from before (no `column` among them): CREATE OR REPLACE cannot change what a function returns.
+ * The console's grants come back with `slotlock migrate`, which reruns them after the schema.
+ */
+const reshaped = (signature: string, column: string) => `DO $slotlock_reshape$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc fn
+     WHERE fn.oid = pg_catalog.to_regprocedure('${signature}')
+       AND NOT ('${column}' = ANY (coalesce(fn.proargnames, ARRAY[]::text[])))
+  ) THEN
+    DROP FUNCTION ${signature};
+  END IF;
+END
+$slotlock_reshape$;`;
 
 const roleList = SLOTLOCK_STAFF_ROLES.map((role) => `'${role}'`).join(', ');
 const capabilityCase = SLOTLOCK_STAFF_ROLES.map(
@@ -1007,8 +1025,9 @@ BEGIN
 END
 $slotlock_admin_overrides$;
 
--- Billing at a glance: paying accounts by plan, past due, cancelled this month, open alerts,
--- overrides in force and waiting, and each billing job's last run. Test environments left out.
+-- Billing at a glance: paying accounts by plan (staff_subscribed_plans), those in a trial, those set
+-- to end and when, past due, cancelled this month, open alerts, overrides in force and waiting, and
+-- each billing job's last run. Test environments left out.
 CREATE OR REPLACE FUNCTION slotlock.admin_billing(actor text)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1022,12 +1041,18 @@ BEGIN
   actor := slotlock.staff_session(actor, 'billing.read', false);
   SELECT jsonb_build_object(
     'paying', (SELECT coalesce(jsonb_object_agg(paid.plan, paid.total), '{}'::jsonb) FROM (
-                 SELECT planned.plan, count(*) AS total FROM slotlock.tenant_plans planned
-                  WHERE planned.stripe_subscription IS NOT NULL AND planned.status IN ('active', 'past_due')
-                    AND planned.tenant_ref !~ '~test$'
-                  GROUP BY planned.plan) paid),
-    'past_due', (SELECT count(*) FROM slotlock.tenant_plans planned
-                  WHERE planned.status = 'past_due' AND planned.tenant_ref !~ '~test$'),
+                 SELECT held.plan, count(*) AS total FROM slotlock.staff_subscribed_plans() held
+                  WHERE held.paying GROUP BY held.plan) paid),
+    'trialing', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.trialing),
+    'ending', (SELECT coalesce(jsonb_agg(jsonb_build_object('account_ref', ends.tenant_ref, 'plan', ends.plan,
+                                                            'ends_at', ends.ends_at) ORDER BY ends.ends_at, ends.tenant_ref),
+                               '[]'::jsonb)
+                 FROM (SELECT held.tenant_ref, held.plan, held.ends_at FROM slotlock.staff_subscribed_plans() held
+                        WHERE NOT held.trialing AND held.ends_at IS NOT NULL
+                        ORDER BY held.ends_at, held.tenant_ref LIMIT ${SLOTLOCK_ADMIN_PAGE_LIMIT}) ends),
+    'ending_total', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held
+                      WHERE NOT held.trialing AND held.ends_at IS NOT NULL),
+    'past_due', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.status = 'past_due'),
     'canceled_month', (SELECT count(*) FROM slotlock.tenant_plans planned
                         WHERE planned.status = 'canceled' AND planned.updated_at >= month_start
                           AND planned.tenant_ref !~ '~test$'),
@@ -2683,6 +2708,24 @@ AS $slotlock_staff_directory$
     LEFT JOIN slotlock.partner_accounts partner ON partner.tenant_ref = refs.ref;
 $slotlock_staff_directory$;
 
+-- The plans Stripe sells that accounts hold now, and where each stands: the one rule Home and
+-- Billing count by (the console's Stripe figures apply the same, src/admin/stripe.ts). Paying:
+-- active or past due, out of any trial, and not set to end. A plan in a trial, or set to end, is
+-- counted apart; Free, a cancelled plan, a partner's and a test environment's are none of these.
+CREATE OR REPLACE FUNCTION slotlock.staff_subscribed_plans()
+RETURNS TABLE (tenant_ref text, plan text, status text, trialing boolean, ends_at timestamptz, paying boolean)
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_staff_subscribed_plans$
+  SELECT planned.tenant_ref, planned.plan, planned.status, planned.trialing, planned.ends_at,
+         NOT planned.trialing AND planned.ends_at IS NULL
+    FROM slotlock.tenant_plans planned
+   WHERE planned.source = 'direct' AND planned.stripe_subscription IS NOT NULL
+     AND planned.plan IN ('developer', 'team') AND planned.status IN ('active', 'past_due')
+     AND planned.tenant_ref !~ '~test$';
+$slotlock_staff_subscribed_plans$;
+
 -- Signing in to the console, once GitHub named the member: with the console's key, a session at
 -- the 'github' stage (enough for the passkey step, for 15 minutes) and the member's role, as
 -- {"role", "session"}; NULL for anyone who is not active staff. Both are recorded. Without the
@@ -2860,10 +2903,11 @@ BEGIN
     'teams', (SELECT count(*) FROM accounts WHERE kind = 'team'),
     'organizations', (SELECT count(*) FROM accounts WHERE kind = 'organization'),
     'partner_accounts', (SELECT count(*) FROM accounts WHERE kind = 'partner'),
-    'paying', (SELECT count(*) FROM slotlock.tenant_plans planned
-                WHERE planned.plan <> 'free' AND planned.status = 'active' AND planned.tenant_ref !~ '~test$'),
-    'past_due', (SELECT count(*) FROM slotlock.tenant_plans planned
-                  WHERE planned.status = 'past_due' AND planned.tenant_ref !~ '~test$'),
+    'paying', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.paying),
+    'trialing', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.trialing),
+    'ending', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held
+                WHERE NOT held.trialing AND held.ends_at IS NOT NULL),
+    'past_due', (SELECT count(*) FROM slotlock.staff_subscribed_plans() held WHERE held.status = 'past_due'),
     'suspended', (SELECT count(*) FROM slotlock.tenant_suspensions held WHERE held.tenant_ref !~ '~test$'),
     'active_7_days', (SELECT count(DISTINCT tenant_ref) FROM usage WHERE day > ${today} - 7),
     'operations_month', (SELECT coalesce(sum(count), 0) FROM usage WHERE day >= month_start AND metric = 'operations'),
@@ -2901,10 +2945,12 @@ $slotlock_admin_home$;
 -- The account directory, a page at a time, by account reference. A query finds an account by its
 -- reference (or the start of one), a GitHub account id, an API key (only its prefix is read or
 -- recorded, never the rest), a Stripe customer, or the name of a team, organization or partner
--- account. Without a query, test environments are left out.
+-- account. Without a query, test environments are left out. With each, when its subscription is
+-- set to end.
+${reshaped('slotlock.admin_accounts(text, text, text, text, text, integer)', 'plan_ends_at')}
 CREATE OR REPLACE FUNCTION slotlock.admin_accounts(actor text, query text, plan_filter text, status_filter text, after text, page_size integer)
 RETURNS TABLE (account_ref text, kind text, name text, created_at timestamptz, last_active date,
-               plan text, plan_status text, suspended boolean, stripe_customer text,
+               plan text, plan_status text, plan_ends_at timestamptz, suspended boolean, stripe_customer text,
                operations_month bigint, bookings_month bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2949,6 +2995,7 @@ BEGIN
          (SELECT max(used.day) FROM slotlock.usage_daily used WHERE used.tenant_ref = found.account_ref),
          coalesce(planned.plan, partner.plan, 'free'),
          planned.status,
+         CASE WHEN planned.status <> 'canceled' AND planned.stripe_subscription IS NOT NULL THEN planned.ends_at END,
          held.tenant_ref IS NOT NULL,
          planned.stripe_customer,
          coalesce((SELECT sum(used.count) FROM slotlock.usage_daily used
@@ -2992,6 +3039,9 @@ BEGIN
     'account_ref', listed.account_ref, 'kind', listed.kind, 'name', listed.name,
     'created_at', listed.created_at,
     'plan', coalesce(planned.plan, partner.plan, 'free'), 'plan_status', planned.status,
+    'plan_ends_at', CASE WHEN planned.status <> 'canceled' AND planned.stripe_subscription IS NOT NULL
+                         THEN planned.ends_at END,
+    'plan_trialing', coalesce(planned.trialing, false),
     'stripe_customer', planned.stripe_customer, 'stripe_subscription', planned.stripe_subscription,
     'current_period_end', planned.current_period_end,
     'limits', CASE WHEN planned.tenant_ref IS NULL THEN NULL ELSE jsonb_build_object(

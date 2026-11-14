@@ -178,7 +178,14 @@ beforeAll(async () => {
       endpoints.push(endpoint);
       return send(200, { ...endpoint, secret: SIGNING_SECRET });
     }
-    if (path.startsWith('webhook_endpoints/')) return send(200, {});
+    if (path.startsWith('webhook_endpoints/')) {
+      // As Stripe: enabled_events replaces the list.
+      const endpoint = endpoints.find((item) => item.id === path.split('/')[1]);
+      const events = Object.entries(fields).filter(([name]) => name.startsWith('enabled_events')).map(([, value]) => value);
+      if (endpoint && events.length) endpoint.enabled_events = events;
+      if (endpoint && fields.disabled === 'false') endpoint.status = 'enabled';
+      return send(200, endpoint ?? {});
+    }
     if (path === 'billing_portal/configurations') {
       // Made through the API, a configuration is never the default.
       const portal: Portal = { id: `bpc_${portals.length + 1}`, is_default: false, ...nested(fields) };
@@ -304,6 +311,7 @@ describe('configure-stripe.mjs', () => {
           'customer.subscription.deleted',
           'invoice.paid',
           'invoice.payment_failed',
+          'charge.refunded',
         ],
       },
     ]);
@@ -419,6 +427,26 @@ describe('configure-stripe.mjs', () => {
     const real = await run([]);
     expect(real.output).toContain('Signing secret. Set it as the dashboard Worker\'s STRIPE_WEBHOOK_SECRET');
     expect(real.output).not.toContain(SIGNING_SECRET);
+  });
+
+  it('adds charge.refunded to an endpoint made before it, keeping its other events, once', async () => {
+    const before = [
+      'checkout.session.completed',
+      'customer.subscription.created',
+      'customer.subscription.updated',
+      'customer.subscription.deleted',
+      'invoice.paid',
+      'invoice.payment_failed',
+      'customer.updated',
+    ];
+    endpoints = [{ id: 'we_7', url: 'https://app.slotlock.pylota.io/stripe/webhook', status: 'enabled', enabled_events: [...before] }];
+    const first = await run([]);
+    expect(first.code).toBe(0);
+    expect(first.output).toContain('update the webhook endpoint https://app.slotlock.pylota.io/stripe/webhook (we_7): add charge.refunded');
+    expect(endpoints[0]?.enabled_events).toEqual([...before, 'charge.refunded']);
+    const second = await run([]);
+    expect(second.output).toContain('kept the webhook endpoint https://app.slotlock.pylota.io/stripe/webhook (we_7)');
+    expect(writes.filter((write) => write.path === 'webhook_endpoints/we_7')).toHaveLength(1);
   });
 
   it('adds missing events to a webhook endpoint that exists, and refuses to start without a key', async () => {

@@ -91,11 +91,13 @@ plans: **Upgrade** (a Stripe Checkout with Managed Payments, Stripe as merchant 
 but without `STRIPE_WEBHOOK_SECRET`, since a buyer would then be charged and stay on Free. The
 webhook endpoint is `<SLOTLOCK_PUBLIC_URL>/stripe/webhook`, with the events
 `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`,
-`customer.subscription.deleted`, `invoice.paid` and `invoice.payment_failed`. Each signed event
-makes the Worker read the subscription from Stripe and set the tenant's plan: `active` or
-`trialing` gives the plan, `past_due` keeps it while Stripe retries (a failed payment is shown to
-the people who run the service, and closed when it is paid), anything else returns the tenant to
-Free. A customer with a subscription that is live or `unpaid` cannot start a second one. Nothing is
+`customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed` and `charge.refunded`.
+Each signed subscription event makes the Worker read the subscription from Stripe and set the
+tenant's plan, with the date it ends when it is cancelled: `active` or `trialing` gives the plan,
+`past_due` keeps it while Stripe retries (a failed payment is shown to the people who run the
+service, and closed when it is paid), anything else returns the tenant to Free. A refund whose
+customer's plan Stripe still renews is shown to the people who run the service, to end the plan or
+say why not. A customer with a subscription that is live or `unpaid` cannot start a second one. Nothing is
 deleted when a plan ends; the tenant cannot add more until it is under the Free limits. An `unpaid`
 or `incomplete` subscription stays named on the plan, because paying it renews it: until it is
 cancelled in Stripe, the account is not erased and its team is not deleted. An event about an
