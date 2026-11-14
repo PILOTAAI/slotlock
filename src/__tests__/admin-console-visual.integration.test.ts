@@ -6,8 +6,9 @@
 // SLOTLOCK_ADMIN_SHOTS (a temporary directory otherwise), and the owner's review set (Home to the
 // staff log at 1440 and 1920, dark, at twice the pixels) beside them as <page>-<width>-dark@2x.png.
 //
-// Needs DATABASE_URL and Playwright with its Chromium (require('playwright')); skipped without
-// either. Playwright is not a dependency of this repository: CI runs this file where it is installed.
+// Needs DATABASE_URL and Playwright's Chromium (playwright is a dev dependency; `npx playwright
+// install chromium` fetches the browser its version drives). Skipped without either, unless
+// SLOTLOCK_BROWSER_TESTS=required, as CI's browser job sets it: then a missing browser fails the run.
 import { generateKeyPairSync, randomBytes, randomUUID, verify } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -44,6 +45,8 @@ interface PwBrowser {
   newContext(options: { viewport: { width: number; height: number }; colorScheme: 'dark' | 'light'; deviceScaleFactor: number; reducedMotion?: 'reduce' }): Promise<PwContext>;
   close(): Promise<void>;
 }
+/** CI's browser job: a browser that cannot start fails the run rather than skipping it. */
+const REQUIRED = process.env.SLOTLOCK_BROWSER_TESTS === 'required';
 let chromium: { launch(): Promise<PwBrowser> } | null = null;
 try {
   chromium = (require_('playwright') as { chromium: { launch(): Promise<PwBrowser> } }).chromium;
@@ -75,7 +78,7 @@ const TEAMS = [
   { ref: `team:${randomUUID()}`, handle: `harbour-${BASE}`, name: 'Harbour Yoga Studio' },
 ];
 
-describe.skipIf(!url || !chromium)('the admin console in a browser: every page, three widths, two themes (real Postgres)', () => {
+describe.skipIf(!url || (!chromium && !REQUIRED))('the admin console in a browser: every page, three widths, two themes (real Postgres)', () => {
   const suffix = randomBytes(6).toString('hex');
   const database = `slotlock_visual_${suffix}`;
   const owner = `slotlock_owner_${suffix}`;
@@ -194,6 +197,15 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
   }
 
   beforeAll(async () => {
+    // The browser first: without one there is nothing to check, and no fixture to build.
+    try {
+      if (!chromium) throw new Error('playwright is not installed: run npm ci');
+      browser = await chromium.launch();
+    } catch (error) {
+      if (REQUIRED) throw error;
+      console.warn('Chromium did not start; the browser checks are skipped:', (error as Error).message);
+      return;
+    }
     root = postgres(url as string, { max: 1, onnotice: () => undefined });
     await root.unsafe(`CREATE ROLE ${owner} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`);
     await root.unsafe(`CREATE ROLE ${adminRole} LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`);
@@ -347,12 +359,6 @@ describe.skipIf(!url || !chromium)('the admin console in a browser: every page, 
     expect(saved.status).toBe(303);
 
     mkdirSync(SHOTS, { recursive: true });
-    try {
-      browser = await (chromium as { launch(): Promise<PwBrowser> }).launch();
-    } catch (error) {
-      console.warn('Chromium did not start; the browser checks are skipped:', (error as Error).message);
-      browser = null;
-    }
   }, 240_000);
 
   afterAll(async () => {
