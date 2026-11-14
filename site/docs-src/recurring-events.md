@@ -43,6 +43,11 @@ length may be a century at most. A calendar that needs more, such as a rule that
 (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`), is refused: `invalid_event` on a write, `invalid_icalendar`
 from a feed.
 
+A holiday calendar ([closures import](/docs/booking-rules/)) is read within the same 500,000 steps,
+building each rule's expansion included, under the same limits on its time zones, dates, lengths and
+property heads, and with at most 1,000 recurring events. Past them it is refused
+`invalid_holiday_calendar`.
+
 ## Where an expansion starts
 
 A feed's rules are expanded from their start, and each series may pass 4,000 occurrences on the way

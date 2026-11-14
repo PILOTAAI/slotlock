@@ -6,6 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockAdmin } from '../admin/app.js';
+import { putSlotlockPartner } from '../partners.js';
 import { runSlotlockCli } from '../self-host.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
 import { CONSOLE_KEY, staffSession } from './helpers/admin-browser.js';
@@ -461,6 +462,73 @@ describe.skipIf(!url)('admin console database layer (real Postgres)', () => {
     await app.eraseTenant({ tenantRef: gone });
     expect(await superuser`SELECT 1 FROM slotlock.account_notes WHERE account_ref = ${gone}`).toHaveLength(0);
     expect((await superuser<{ account_ref: string | null }[]>`SELECT account_ref FROM slotlock.abuse_cases WHERE id = ${linked?.id ?? '0'}`)[0]?.account_ref).toBeNull();
+  });
+
+  it("takes over a partner's suspension, as staff or the operator, and the partner cannot lift it then", async () => {
+    const partner = `held-${suffix}`;
+    await asOwner((tx) => putSlotlockPartner(tx as unknown as postgres.Sql, {
+      id: partner,
+      name: 'Held',
+      contract: { plans: { basic: { resources: 5, api_keys: 2, webhook_endpoints: 1, operations: 1000, bookings: 100 } } },
+    }));
+    const byStaff = `partner:${partner}:by-staff`;
+    const byOperator = `partner:${partner}:by-operator`;
+    /** What the partner API does to one of its accounts: true when it changed something. */
+    const asPartner = async (account: string, suspended: boolean) => {
+      const [row] = await application<{ changed: boolean }[]>`
+        SELECT slotlock.set_partner_account_suspended(${partner}, ${account}, ${suspended}, 'unpaid') AS changed`;
+      return row?.changed;
+    };
+    const held = async (tenantRef: string) =>
+      (await superuser<{ source: string; reason: string; customer_message: string | null; suspended_by: string | null }[]>`
+        SELECT source, reason, customer_message, suspended_by FROM slotlock.tenant_suspensions WHERE tenant_ref = ${tenantRef}`)[0];
+    try {
+      for (const account of ['by-staff', 'by-operator']) {
+        await application`SELECT * FROM slotlock.put_partner_account(${partner}, ${account}, 'basic')`;
+        expect(await asPartner(account, true)).toBe(true);
+      }
+      expect(await held(byStaff)).toMatchObject({ source: 'partner', reason: 'partner: unpaid', suspended_by: null });
+
+      // Staff: theirs now, in the staff log and the customer's audit log as any suspension.
+      const support = await as(SUPPORT);
+      const suspend = async () =>
+        (await adminSql<{ ok: boolean }[]>`
+          SELECT slotlock.admin_suspend(${support}, ${byStaff}, 'Card testing', 'Write to support.', NULL) AS ok`)[0]?.ok;
+      expect(await suspend()).toBe(true);
+      expect(await held(byStaff)).toEqual({
+        source: 'staff',
+        reason: 'Card testing',
+        customer_message: 'Write to support.',
+        suspended_by: SUPPORT,
+      });
+      expect(await superuser`
+        SELECT action, metadata FROM slotlock.staff_audit_events WHERE account_ref = ${byStaff}`).toEqual([
+        { action: 'account.suspended', metadata: { message: true, took_over: 'partner' } },
+      ]);
+      expect(await superuser`SELECT action, reason FROM slotlock.audit_events WHERE tenant_ref = ${byStaff}`).toEqual([
+        { action: 'staff.account_suspended', reason: 'Card testing' },
+      ]);
+      expect(await suspend()).toBe(false);
+      expect(await asPartner('by-staff', false)).toBe(false);
+      expect(await app.isTenantSuspended({ tenantRef: byStaff })).toBe(true);
+
+      // The operator (slotlock tenant suspend): the same, recorded by cli:<user>.
+      const command = await cli(['tenant', 'suspend', '--reason', 'Chargeback review'], false, { SLOTLOCK_TENANT: byOperator });
+      expect(command.lines[0]).toMatchObject({ suspended: true, changed: true });
+      expect(await held(byOperator)).toMatchObject({ source: 'operator', reason: 'Chargeback review', suspended_by: expect.stringMatching(/^cli:/) });
+      expect(await superuser`
+        SELECT action, reason FROM slotlock.staff_audit_events WHERE account_ref = ${byOperator}`).toEqual([
+        { action: 'account.suspended', reason: 'Chargeback review' },
+      ]);
+      expect(await asPartner('by-operator', false)).toBe(false);
+      expect(await app.isTenantSuspended({ tenantRef: byOperator })).toBe(true);
+    } finally {
+      // Left out of the billing run a later test makes.
+      for (const tenantRef of [byStaff, byOperator]) await app.eraseTenant({ tenantRef });
+      await superuser`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref IN ${superuser([byStaff, byOperator])}`;
+      await superuser`DELETE FROM slotlock.partner_erased_usage WHERE partner_id = ${partner}`;
+      await superuser`DELETE FROM slotlock.partners WHERE id = ${partner}`;
+    }
   });
 
   /** Run `slotlock …` against this database, as the schema owner unless `serving`. */

@@ -470,8 +470,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
                 ? { previousSecrets: config.assistantPreviousSecrets }
                 : {}),
               backend: perRequest(() => current().agent),
-              // A Worker's fetch reaches no private network (nor this isolate's loopback), so the
-              // literal URL check is the one that applies; names are not resolved here.
+              // A Worker's fetch reaches no private network (nor this isolate's loopback), and its own
+              // zone only through the zone's front door (global_fetch_strictly_public), so the literal
+              // URL check is the one that applies; names are not resolved here.
               fetch: (input: string | URL | Request, init?: RequestInit) => fetch(input, init),
               resolve: async () => [],
               consumeRateLimit: async (args: {
@@ -621,6 +622,12 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
               console.error(
                 JSON.stringify({ message: 'slotlock billing duplicate subscription', subscriptions }),
               ),
+            // Its account was erased, so the database keeps nothing of it: the owner cancels it in
+            // Stripe, by this id.
+            onErased: (subscription) =>
+              console.error(
+                JSON.stringify({ message: 'slotlock billing subscription of an erased account', subscription }),
+              ),
           });
         } finally {
           ctx.waitUntil(sql.end({ timeout: 5 }));
@@ -711,7 +718,9 @@ export function createSlotlockDashboardWorker(options: SlotlockDashboardWorkerOp
           agent: agentBackend,
           // Approvals (RFC 0004 A4) are granted through the same backend the assistant books with.
           // Holiday calendars by address (RFC 0004 B1): the Worker's fetch, which reaches only the
-          // public internet; fetchHolidayCalendar takes https only, no redirects, 1 MB, 10 seconds.
+          // public internet, its own zone included through the zone's front door
+          // (global_fetch_strictly_public, wrangler.jsonc); fetchHolidayCalendar refuses localhost
+          // and private IP literals itself, and takes https only, no redirects, 1 MB, 10 seconds.
           resources: createSlotlockDashboardResources(store, { agentBackend, holidayFetch: (input, init) => fetch(input, init) }),
           state: createSlotlockDashboardState(sql),
           workspaces: createSlotlockDashboardWorkspaces(sql),

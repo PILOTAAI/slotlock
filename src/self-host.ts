@@ -109,8 +109,9 @@ import {
   createSlotlockOtlpMetricsExporter,
   readSlotlockOtlpConfig,
 } from './otel.js';
-import { appendFile, mkdir, readdir, readFile } from 'node:fs/promises';
-import { join as joinPath } from 'node:path';
+import { constants as fsConstants } from 'node:fs';
+import { type FileHandle, lstat, mkdir, open, readdir, readFile } from 'node:fs/promises';
+import { dirname, join as joinPath } from 'node:path';
 import type { SlotlockAvailabilityException } from './hours.js';
 import type { SlotlockOverrideResources } from './availability-store.js';
 import { readSlotlockHolidayCalendar } from './holiday-import.js';
@@ -236,12 +237,20 @@ const SERVE_MAX_TENANT_RESOURCES = 10_000;
 const SERVE_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 /** Passes `slotlock maintain` runs at most, each as big as `serve`'s, until nothing is left. */
 const MAINTAIN_MAX_PASSES = 100;
+/**
+ * The writes SLOTLOCK_CONFIRM_WRITES may name, and all of them for `all`: every tool that books,
+ * moves or cancels, the named booking tools included. The agent server also guards the tool that
+ * performs the same write as a listed one.
+ */
 const WRITE_OPERATIONS: readonly SlotlockAgentWriteOperation[] = [
   'slotlock_create_event',
   'slotlock_book_together',
   'slotlock_book_pool',
   'slotlock_update_event',
   'slotlock_delete_event',
+  'slotlock_confirm_slot',
+  'slotlock_reschedule',
+  'slotlock_cancel',
 ];
 /**
  * What `serve` lets the token holder call. An allow-list, so an operation a later release adds stays
@@ -1735,9 +1744,36 @@ function hoursLine(resource: SlotlockResource): string {
 }
 
 /**
+ * Why `out` cannot take an export, or null once it can: made now with mode 0700, or already an empty
+ * directory (as lstat sees it, so not a link) of this user's that no one else may write. Whoever
+ * else can write in it could read the export, or turn a table's file into a link elsewhere.
+ */
+async function exportDirectoryProblem(out: string): Promise<string | null> {
+  await mkdir(dirname(out), { recursive: true });
+  try {
+    await mkdir(out, { mode: 0o700 });
+    return null;
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 'EEXIST') throw error;
+  }
+  const found = await lstat(out);
+  if (found.isSymbolicLink()) return 'is a link';
+  if (!found.isDirectory()) return 'is not a directory';
+  if (found.uid !== process.getuid?.()) return 'belongs to another user';
+  if ((found.mode & 0o022) !== 0) return 'can be written by other users';
+  if ((await readdir(out)).length > 0) return 'is not empty';
+  return null;
+}
+
+/** A table's file, made by the export itself: never an entry that was there, nor through a link. */
+const EXPORT_FILE_FLAGS =
+  fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW | fsConstants.O_APPEND;
+
+/**
  * `tenant export [--out <dir>]` (RFC 0004 D3): everything the tenant keeps, read in one snapshot and
- * stored nowhere: JSON lines on stdout, or one NDJSON file a table in a new or empty directory.
- * Prints what it wrote, and records it in the audit log.
+ * stored nowhere: JSON lines on stdout, or one owner-only NDJSON file a table in a new directory, or
+ * an empty one only this user can write (exportDirectoryProblem). Prints what it wrote, and records
+ * it in the audit log. An entry that appears in the directory under a table's name stops it.
  */
 async function runTenantExport(
   config: SlotlockDatabaseConfig,
@@ -1745,12 +1781,14 @@ async function runTenantExport(
   out: string | undefined,
 ): Promise<number> {
   if (out !== undefined) {
-    await mkdir(out, { recursive: true });
-    if ((await readdir(out)).length > 0) {
-      io.stderr.write(`slotlock: ${out} is not empty: export into a new or empty directory\n`);
+    const problem = await exportDirectoryProblem(out);
+    if (problem) {
+      io.stderr.write(`slotlock: ${out} ${problem}: export into a new directory, or an empty one only you can write\n`);
       return 1;
     }
   }
+  // Each table's file, made at its first part and kept open for the rest.
+  const files = new Map<string, FileHandle>();
   const sql = connect(config.databaseUrl, 1);
   try {
     const store = createSlotlockStore(sql);
@@ -1760,7 +1798,12 @@ async function runTenantExport(
         tenantRef,
         onPart: async ({ table, lines }) => {
           if (out !== undefined) {
-            await appendFile(joinPath(out, `${table}.ndjson`), `${lines.join('\n')}\n`, { mode: 0o600 });
+            let file = files.get(table);
+            if (!file) {
+              file = await open(joinPath(out, `${table}.ndjson`), EXPORT_FILE_FLAGS, 0o600);
+              files.set(table, file);
+            }
+            await file.appendFile(`${lines.join('\n')}\n`);
           } else {
             io.stdout.write(lines.map((line) => `{"table":${JSON.stringify(table)},"row":${line}}\n`).join(''));
           }
@@ -1774,7 +1817,15 @@ async function runTenantExport(
     });
     if (out !== undefined) io.stdout.write(`${JSON.stringify({ directory: out, ...totals })}\n`);
     return 0;
+  } catch (error) {
+    const { code, path } = error as { code?: unknown; path?: unknown };
+    if (out !== undefined && (code === 'EEXIST' || code === 'ELOOP') && typeof path === 'string') {
+      io.stderr.write(`slotlock: ${path} appeared while the export ran, so it stopped: export again into a new directory\n`);
+      return 1;
+    }
+    throw error;
   } finally {
+    for (const file of files.values()) await file.close().catch(() => undefined);
     await sql.end({ timeout: 5 });
   }
 }
@@ -2636,7 +2687,8 @@ async function runPlanCommand(
               resources: own.limits.resources,
               api_keys: own.limits.apiKeys,
               webhook_endpoints: own.limits.webhookEndpoints,
-              paid: own.stripeSubscription !== null,
+              // An unpaid subscription stays named on a cancelled plan, which it does not pay for.
+              paid: own.stripeSubscription !== null && own.status !== 'canceled',
               current_period_end: own.currentPeriodEnd?.toISOString() ?? null,
             }
           : null,
@@ -2940,8 +2992,9 @@ Commands:
   overage report [--month <YYYY-MM>] [--event <name>]
                            With SLOTLOCK_OVERAGE: send Stripe each paying Developer tenant's
                            operations above its quota this month (or --month) not yet sent, as
-                           Billing Meter events (--event, default slotlock_operations), once
-                           (as the schema owner, with STRIPE_SECRET_KEY)
+                           Billing Meter events (--event, default slotlock_operations), once,
+                           where its subscription carries the metered price (as the schema
+                           owner, with STRIPE_SECRET_KEY)
   partner close <id> [--month <YYYY-MM>]
                            Close an ended month (default: last month): price its accounts' use
                            with the contract, record the lines once, send usage.period_closed,
@@ -2949,14 +3002,17 @@ Commands:
                            invoice; safe to run again
   tenant status            Print whether the tenant is suspended
   tenant suspend [--reason <text>]
-                           Suspend the tenant: it may read, and writes nothing; its keys get
-                           no new secret (as SLOTLOCK_MIGRATE_DATABASE_URL's role when set:
-                           only the schema owner suspends)
+                           Suspend the tenant: it writes nothing, and its API keys are refused
+                           and get no new secret; its dashboard still reads. One its partner
+                           suspended becomes yours, which the partner cannot lift (as
+                           SLOTLOCK_MIGRATE_DATABASE_URL's role when set: only the schema owner
+                           suspends)
   tenant unsuspend         Lift the tenant's suspension (as the schema owner, likewise)
   tenant export [--out <dir>]
                            Print everything the tenant keeps, read at one moment, one JSON line a
-                           row ({"table": ..., "row": ...}); with --out, one <table>.ndjson file a
-                           table in that directory (new or empty). Secrets stay out
+                           row ({"table": ..., "row": ...}); with --out, one owner-only
+                           <table>.ndjson file a table in that directory (new, or empty and
+                           writable only by you). Secrets stay out
   tenant erase --confirm <tenant>
                            Delete everything the tenant has, its API keys included, for good;
                            --confirm repeats SLOTLOCK_TENANT; refused while its hosted plan is
@@ -3027,9 +3083,10 @@ Environment:
                                  operations or bookings this month (quota_exceeded, 429); off
                                  (default): no quota
   SLOTLOCK_OVERAGE               off (default), or on (300) or a percent (111-1000): a paying
-                                 Developer tenant is refused only past that share of its
-                                 operations, and the rest above its quota is billed (overage
-                                 report); needs SLOTLOCK_QUOTAS=on
+                                 Developer tenant whose subscription carries the metered price
+                                 is refused only past that share of its operations, and the rest
+                                 above its quota is billed (overage report); needs
+                                 SLOTLOCK_QUOTAS=on
   SLOTLOCK_SHARED_LIMITS         on: tenant request budgets are shared by every server through the
                                  database, so N servers allow a tenant its rate once; off (default):
                                  each server keeps its own

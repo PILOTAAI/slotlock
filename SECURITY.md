@@ -182,6 +182,13 @@ never offered to agents over MCP or A2A. Every application operation checks the 
 only through row-level security: another tenant's resource or hold is not found even on a connection
 that bypasses RLS.
 
+A suspended account's keys authenticate as nothing from the next request until the suspension is
+lifted: the database's key lookup reads the suspension (the account's own, its live tenant's for a
+test key, or its partner's), so no server path can skip it. Its dashboard still shows its data. A
+partner lifts only a suspension it made: one the operator or staff made, before the partner's or
+after, takes the partner's over and stays, and a suspended account cannot be erased through the
+partner API.
+
 ## Admin console
 
 The people who run Slotlock Cloud use an admin console ([RFC 0006](docs/rfc/0006-admin-console.md),
@@ -268,8 +275,9 @@ holder by a key they name with a word staff send back, made after the request, a
 a team or an organization, as one of its Owners). An export made for one waits on the holder's own
 dashboard, behind their sign-in; staff see its counts by table, never its rows, and no link to it
 is ever emailed. An erasure goes in fixed steps, each checked by the database: the Stripe
-subscription cancelled, a second Owner's approval (the one who asked cannot give it), then the
-erasure and its receipt in one transaction. The queue keeps no email address: the database refuses
+subscription cancelled (an unpaid one too, since paying it renews it), a second Owner's approval
+(the one who asked cannot give it), then the erasure and its receipt in one transaction. A Stripe
+event that arrives after it writes nothing of the account again. The queue keeps no email address: the database refuses
 an `@` in a request's text.
 
 Only an Owner writes what customers are told and turns features on or off. An announcement is one
@@ -300,6 +308,39 @@ replaces a console key or session secret, nor re-adds a staff member, that is al
 
 Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
 anyone who is not staff.
+
+## Releases
+
+A release comes only from a protected `v<version>` tag (GOVERNANCE.md, Releases). Only an admin or
+the release deploy key can create a `v*` tag, or a Go client version's `clients/go/v*` tag, and only
+an admin can move or delete one. The key lives in two GitHub environments: `release-tag`, which only
+runs on `main` can read, and `go-module`, which a release's run can read once a maintainer approves
+it. A workflow's `GITHUB_TOKEN`, the Slotlock CMS App and any other token that can write to the
+repository cannot create either tag.
+
+Before you run a server image, check that `image.yml` built it, in the run for that version's tag,
+on a GitHub-hosted runner:
+
+```sh
+gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock \
+  --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml \
+  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+```
+
+`--signer-workflow` alone is not enough: it accepts `image.yml` run from any branch, which the
+`ghcr` environment's reviewer never saw.
+
+The MCP Registry entry `io.github.PILOTAAI/slotlock` is published by `mcp-registry.yml` once a
+maintainer approves it. The registry, though, decides who may publish to `io.github.PILOTAAI` by
+GitHub organization, not by repository or workflow: a workflow in any PILOTAAI repository that can
+request an OIDC token, and the organization's members (`mcp-publisher login github`), could publish
+a version of it. Nothing in this repository can narrow that, and we accept it. A domain namespace
+(`io.pylota/slotlock`, proven by a key published in pylota.io's DNS) would tie publishing to that
+key and to whoever runs that DNS, but it is another server's name: every client would have to move
+to it, and this name would stay open to the organization. Instead, the organization keeps its members and repositories to those
+who need them, `launch-check.yml` fails when the registry's latest version is not the release's, and
+an entry is only as good as its image: install one whose package is
+`ghcr.io/pilotaai/slotlock:<version>`, and verify that image as above.
 
 ## Dependencies
 

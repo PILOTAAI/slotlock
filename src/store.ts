@@ -2335,6 +2335,26 @@ function cancellationStart(start: Date, anchor: Date | null | undefined): Date {
   return anchor && anchor.getTime() < start.getTime() ? anchor : start;
 }
 
+/**
+ * The start an event's cutoffs are judged from (RFC 0004 B5): a one-off's own; a series' next
+ * occurrence not yet started or, with none left, the one under way, as a one-off under way is
+ * judged; `null` for a series with neither. A series is held to the cutoffs as a one-off is, so
+ * booking one as a series, or making a late one-off a series, never makes cancelling it free.
+ */
+async function eventCutoffStart(
+  tx: StoreSql,
+  event: { id: string; starts_at: Date; recurring: boolean },
+  now: Date,
+): Promise<Date | null> {
+  if (!event.recurring) return event.starts_at;
+  const [next] = await tx<{ starts_at: Date }[]>`
+    SELECT starts_at FROM slotlock.calendar_event_occurrences
+     WHERE event_id = ${event.id} AND ends_at > ${now}
+     ORDER BY starts_at > ${now} DESC, starts_at
+     LIMIT 1`;
+  return next?.starts_at ?? null;
+}
+
 async function noteEnding(
   tx: StoreSql,
   fee: { amount_minor: number; currency: string } | null,
@@ -2346,23 +2366,26 @@ async function noteEnding(
 }
 
 /**
- * Whether a one-off event may be cancelled now under its resource's cancel cutoff (RFC 0004 B5),
- * and the fee a late cancellation records, marked for the feed. A series is not held to the cutoff:
- * cancelling it cancels what is still to come.
+ * Whether an event may be cancelled now under its resource's cancel cutoff (RFC 0004 B5), and the
+ * fee a late cancellation records, marked for the feed. A series, whose cancellation cancels what
+ * is still to come, is judged by its next occurrence (eventCutoffStart).
  */
 async function eventEnding(
   tx: StoreSql,
-  event: { resource_id: string; starts_at: Date; recurring: boolean; cutoff_anchor?: Date | null },
+  event: { id: string; resource_id: string; starts_at: Date; recurring: boolean; cutoff_anchor?: Date | null },
   enforce: boolean,
   overrideReason: string | undefined,
 ): Promise<
   | { ok: true; fee: { amountMinor: number; currency: string } | null }
   | { ok: false; refusal: { ok: false; code: 'booking_rule_violated'; rule: 'cancel_cutoff' } }
 > {
-  if (event.recurring) return { ok: true, fee: null };
   const judged = await rulesNow(tx, event.resource_id);
-  // From the start it had when a late move kept it, if one did.
-  const start = cancellationStart(event.starts_at, event.cutoff_anchor);
+  // From the start it had when a late move kept it, if one did. A late booking cannot leave the
+  // resource whose rules it is late under (putCalendarEvent), so those rules are its resource's.
+  const next = await eventCutoffStart(tx, event, judged.now);
+  const start = next ? cancellationStart(next, event.cutoff_anchor) : (event.cutoff_anchor ?? null);
+  // A series with nothing still to come, and no late move behind it, has nothing late to cancel.
+  if (!start) return { ok: true, fee: null };
   let note: string | null = null;
   if (enforce && cutoffRuleBroken(judged.rules, 'cancel', start, judged.now)) {
     if (overrideReason === undefined) {
@@ -3193,6 +3216,57 @@ async function holdsEveryOccurrence(
   return occurrences.every((occurrence) =>
     held.some(({ start, end }) => start <= occurrence.start && occurrence.end <= end),
   );
+}
+
+/**
+ * Whether a write changes when an event happens: its start or end, whether and how it repeats, and
+ * for a series its zone (its occurrences keep their wall time) and its exceptions.
+ */
+function eventTimesChanged(found: CalendarEventRow, event: CalendarEventContent): boolean {
+  if (
+    found.starts_at.getTime() !== event.start.getTime() ||
+    found.ends_at.getTime() !== event.end.getTime() ||
+    found.recurrence_rule !== (event.recurrence?.rrule ?? null)
+  ) {
+    return true;
+  }
+  if (found.recurrence_rule === null) return false;
+  // The stored order is as written; compared in the order of the occurrences they change.
+  const exceptionsKey = (exceptions: readonly CalendarRecurrenceException[]) =>
+    JSON.stringify(
+      [...exceptions]
+        .sort((left, right) => left.recurrenceId.getTime() - right.recurrenceId.getTime())
+        .map((exception) => [
+          exception.recurrenceId.getTime(),
+          exception.cancelled === true,
+          exception.start?.getTime() ?? null,
+          exception.end?.getTime() ?? null,
+        ]),
+    );
+  return (
+    found.timezone !== event.timezone ||
+    exceptionsKey(eventExceptionsFromJson(found.recurrence_exceptions)) !==
+      exceptionsKey(event.recurrence?.exceptions ?? [])
+  );
+}
+
+/**
+ * Whether a write occupies time on `resourceId` that its stored event does not (RFC 0004 C3): a new
+ * event, one moved there or made opaque, an occurrence it does not hold now (moved, longer, or a
+ * series grown), or, with its times changed, the later occurrences of a series that `goesOn` past
+ * those written now, which its roll would add. With its times unchanged, it adds none.
+ */
+async function addsOccupiedTime(
+  tx: TransactionSql,
+  found: CalendarEventRow | undefined,
+  resourceId: string,
+  event: CalendarEventContent,
+  occurrences: readonly CalendarEventOccurrence[],
+  goesOn: boolean,
+): Promise<boolean> {
+  if (!found || found.resource_id !== resourceId || found.transparency === 'transparent') return true;
+  if (!eventTimesChanged(found, event)) return false;
+  return goesOn || !(await holdsEveryOccurrence(tx, found.id, resourceId, occurrences));
 }
 
 function occurrenceSpan(occurrences: readonly CalendarEventOccurrence[]): Interval | null {
@@ -4054,7 +4128,10 @@ export interface SlotlockStore extends SlotlockEventFeed {
      * another, checked under the event's lock.
      */
     expectedResourceId?: string;
-    /** Hold a one-off event to its resource's cancel cutoff (RFC 0004 B5), as agents' cancels are. */
+    /**
+     * Hold the event to its resource's cancel cutoff (RFC 0004 B5), as agents' cancels are: a series
+     * by its next occurrence.
+     */
     enforceBookingRules?: boolean;
   }): Promise<CancelCalendarEventResult>;
   /**
@@ -4072,8 +4149,8 @@ export interface SlotlockStore extends SlotlockEventFeed {
     /** As for cancelCalendarEvent: `event_not_found` when the event is on another resource. */
     expectedResourceId?: string;
     /**
-     * An admin's reason for cancelling a one-off event past its cancel cutoff (RFC 0004 B5), kept on
-     * the feed; without it, that cancellation is refused.
+     * An admin's reason for cancelling an event past its cancel cutoff (RFC 0004 B5), a series by its
+     * next occurrence, kept on the feed; without it, that cancellation is refused.
      */
     overrideReason?: string;
   }): Promise<CancelCalendarEventResult>;
@@ -4389,16 +4466,21 @@ export interface SlotlockStore extends SlotlockEventFeed {
   }): Promise<BookingRetentionResult>;
   /**
    * Suspend a tenant: from when this returns, its withTenant transactions may read but writes are
-   * refused (`tenant_suspended`); one in flight is waited for. Its keys still authenticate but it
-   * gets no new key. Maintenance and erasure go on. True when it was not suspended already.
-   * Deployment role only (`tenant_suspension_not_permitted`).
+   * refused (`tenant_suspended`); one in flight is waited for. Its API keys, its test environment's
+   * too, authenticate as nothing until the suspension is lifted, and it gets no new key; its
+   * dashboard, by session, still reads. Maintenance and erasure go on. True when it was not
+   * suspended already, or suspended only by its partner, whose suspension this takes over so the
+   * partner cannot lift it. Deployment role only (`tenant_suspension_not_permitted`).
    */
   suspendTenant(params: {
     tenantRef: string;
     /** Why, for the operator: 1-500 characters without control characters. */
     reason?: string;
   }): Promise<{ suspended: boolean }>;
-  /** Lift a suspension; true when the tenant was suspended. The deployment role only. */
+  /**
+   * Lift a suspension, whoever made it; true when the tenant was suspended. Its keys work again
+   * from the next request. The deployment role only.
+   */
   unsuspendTenant(params: { tenantRef: string }): Promise<{ unsuspended: boolean }>;
   /** Whether the tenant is suspended. */
   isTenantSuspended(params: { tenantRef: string }): Promise<boolean>;
@@ -8631,34 +8713,41 @@ function buildSlotlockStore(
             if (params.expectedRevision !== currentRevision) {
               return { ok: false, code: 'revision_conflict', currentRevision };
             }
-            // A one-off event changed past its cutoffs (RFC 0004 B5) is refused to a writer held to
-            // the booking rules: moved in time or to another resource, or made a series (whose
-            // cancellation no cutoff holds), past its reschedule cutoff; made transparent, letting its
-            // time go, past its cancel cutoff or once a cancellation fee is due, as a cancellation
-            // would be (cancelling records the fee).
+            // An event changed past its cutoffs (RFC 0004 B5) is refused to a writer held to the
+            // booking rules, judged from its start or a series' next occurrence: moved in time, to
+            // another resource, or made a series or a one-off, past its reschedule cutoff; made
+            // transparent, letting its time go, past its cancel cutoff or once a cancellation fee is
+            // due, as a cancellation would be (cancelling records the fee).
             let movedAnchor: Date | null = null;
-            if (found && params.enforceBookingRules === true && found.recurrence_rule === null) {
-              const moved =
-                found.starts_at.getTime() !== event.start.getTime() ||
-                found.ends_at.getTime() !== event.end.getTime() ||
-                found.resource_id !== params.resourceId ||
-                (event.recurrence?.rrule ?? null) !== null;
+            if (found && params.enforceBookingRules === true) {
+              const elsewhere = found.resource_id !== params.resourceId;
+              const moved = elsewhere || eventTimesChanged(found, event);
               const letGo = found.transparency !== 'transparent' && (event.transparency ?? 'opaque') === 'transparent';
               if (moved || letGo) {
                 const judged = await rulesNow(tx, found.resource_id);
-                if (moved && cutoffRuleBroken(judged.rules, 'reschedule', found.starts_at, judged.now)) {
+                const next = await eventCutoffStart(
+                  tx,
+                  { id: found.id, starts_at: found.starts_at, recurring: found.recurrence_rule !== null },
+                  judged.now,
+                );
+                if (moved && next && cutoffRuleBroken(judged.rules, 'reschedule', next, judged.now)) {
                   return { ok: false, code: 'booking_rule_violated', rule: 'reschedule_cutoff' };
                 }
-                const from = cancellationStart(found.starts_at, found.cutoff_anchor);
+                const from = next ? cancellationStart(next, found.cutoff_anchor) : (found.cutoff_anchor ?? null);
                 if (
+                  from &&
                   letGo &&
                   (cutoffRuleBroken(judged.rules, 'cancel', from, judged.now) ||
                     cancellationFeeDue(judged.rules, from, judged.now) !== null)
                 ) {
                   return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
                 }
-                // Moved when cancelling would already be late: it stays as late as it was.
-                if (moved && cancellationLate(judged.rules, from, judged.now)) movedAnchor = from;
+                // Moved when cancelling would already be late: it stays as late as it was. Moved to
+                // another resource, it would leave the rules that make it late, so it stays where it is.
+                if (from && moved && cancellationLate(judged.rules, from, judged.now)) {
+                  if (elsewhere) return { ok: false, code: 'booking_rule_violated', rule: 'cancel_cutoff' };
+                  movedAnchor = from;
+                }
               }
             }
             const series = expanded ?? resumeStoredSeries(event, materializationWindow, found);
@@ -8758,8 +8847,17 @@ function buildSlotlockStore(
                 ? await bookingJudge(tx, params.resourceId, defaultHours)
                 : null;
             // A resource with a hold price (RFC 0004 C3) is booked by an agent only from its own
-            // hold, once paid: new time on it, or time moved onto it from another resource.
-            if (judge && (!found || found.resource_id !== params.resourceId) && !heldPaid && judge.holdPrice !== undefined) {
+            // hold, once paid: any time a write adds on it, not only a new event's. A transparent
+            // write adds none, and is judged when it is made opaque.
+            const goesOn =
+              recurrenceEndsBy !== null &&
+              (recurrenceEndsBy === 'infinity' || new Date(recurrenceEndsBy) > materializationWindow.end);
+            if (
+              judge &&
+              judge.holdPrice !== undefined &&
+              !heldPaid &&
+              (await addsOccupiedTime(tx, found, params.resourceId, event, occurrences, goesOn))
+            ) {
               return { ok: false, code: 'payment_required' };
             }
             if (judge) {

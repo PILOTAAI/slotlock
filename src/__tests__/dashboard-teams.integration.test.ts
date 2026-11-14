@@ -78,6 +78,7 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     ['hal', { id: base + 7, login: 'hal', emails: [] }],
     ['ivy', { id: base + 8, login: 'ivy', emails: [] }],
     ['kim', { id: base + 9, login: 'kim', emails: [] }],
+    ['lou', { id: base + 10, login: 'lou', emails: [] }],
   ]);
   const googleSubject = `${base}777`;
   const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -334,6 +335,77 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     // Nothing was made: no invitation to either address, and Cy is still a Member.
     expect(await (await ada.get('/dashboard/settings/members')).text()).not.toContain('y@acme.example');
     expect((await createSlotlockDashboardWorkspaces(application).standing(team, `github:${base + 2}`, null)).role).toBe('member');
+  });
+
+  it('asks for a recent sign-in to change, limit, remove or invite anyone whose role holds a fresh power', async () => {
+    let clock = Date.now();
+    const target = build({ now: () => clock });
+    const ada = new Browser(target);
+    await signIn(ada, 'ada');
+    await ada.post('/dashboard/teams', '/teams/create', { name: 'Step-up' });
+    const team = await teamOf(ada);
+    tenants.push(team);
+    // While Ada's sign-in is fresh: Bea joins as an Owner and Dee as an Admin, and an Admin's
+    // invitation waits.
+    for (const [code, email, roleName] of [['bea', 'bea@acme.example', 'owner'], ['dee', 'dee@elsewhere.example', 'admin']] as const) {
+      const link = await linkOf(await ada.post('/dashboard/settings/members', '/members/invite', { email, role: roleName }));
+      const browser = new Browser(target);
+      await browser.get(link);
+      await signIn(browser, code, '?then=%2Finvite&email=1');
+      expect((await browser.post('/dashboard/invite', '/invite/accept', {})).status).toBe(303);
+    }
+    expect((await ada.post('/dashboard/settings/members', '/members/invite', { email: 'waiting@elsewhere.example', role: 'admin' })).status).toBe(200);
+    const teams = createSlotlockDashboardWorkspaces(application);
+    const waiting = (await teams.teams?.invitations(team))?.find((invitation) => invitation.email === 'waiting@elsewhere.example');
+    expect(waiting).toBeDefined();
+    const [bea, dee] = [`github:${base + 1}`, `github:${base + 3}`];
+    /** Ada sends `action` with a CSRF token and single-use value from Members. */
+    const send = async (action: string, fields: Record<string, string>) => {
+      const page = await (await ada.get('/dashboard/settings/members')).text();
+      return ada.send(
+        action,
+        new URLSearchParams({
+          csrf: /name="csrf" value="([^"]+)"/.exec(page)?.[1] as string,
+          once: /name="once" value="([^"]+)"/.exec(page)?.[1] as string,
+          ...fields,
+        }),
+      );
+    };
+
+    // Twenty minutes later the same session changes no Owner or Admin, and makes none.
+    clock += 20 * 60_000;
+    const owns = 'To change who owns this workspace, sign in again';
+    const manages = 'To manage members, sign in again';
+    const stale: [string, Record<string, string>, string][] = [
+      ['/members/role', { person: bea, role: 'viewer' }, owns],
+      ['/members/remove', { person: bea, keys: 'keep' }, owns],
+      ['/members/role', { person: dee, role: 'developer' }, manages],
+      ['/members/remove', { person: dee, keys: 'keep' }, manages],
+      ['/members/scope', { person: dee, access: 'limited', locations: 'north' }, manages],
+      ['/members/invite', { email: 'mal@elsewhere.example', role: 'admin' }, manages],
+      ['/members/resend', { id: waiting?.id as string }, manages],
+    ];
+    for (const [action, fields, said] of stale) {
+      const answered = await send(action, fields);
+      expect(answered.status, action).toBe(403);
+      const text = await answered.text();
+      expect(text, action).toContain('Confirm it’s you');
+      expect(text, action).toContain(said);
+    }
+    expect((await teams.standing(team, bea, null)).role).toBe('owner');
+    expect((await teams.standing(team, dee, null)).role).toBe('admin');
+    expect((await teams.teams?.invitations(team))?.map((invitation) => invitation.email)).not.toContain('mal@elsewhere.example');
+    const [resent] = await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM slotlock.audit_events WHERE tenant_ref = ${team} AND action = 'invitation.resent'`;
+    expect(resent?.count).toBe(0);
+    // A role with no fresh power is given as before.
+    expect((await send('/members/invite', { email: 'desk@elsewhere.example', role: 'member' })).status).toBe(200);
+
+    // Signed in again, Ada may.
+    await signIn(ada, 'ada');
+    await ada.post('/dashboard/teams', '/organization', { organization: team });
+    expect((await send('/members/role', { person: bea, role: 'viewer' })).status).toBe(200);
+    expect((await teams.standing(team, bea, null)).role).toBe('viewer');
   });
 
   it("keeps each team's people and forms to itself", async () => {
@@ -796,6 +868,26 @@ describe.skipIf(!url)('team workspaces in the dashboard (real Postgres)', () => 
     const audited = await (await hal.get('/dashboard/settings/audit')).text();
     expect(audited).toContain('asked for the team to be deleted');
     expect(audited).toContain('kept the team');
+  });
+
+  it('counts a team being deleted against the Free limit, so keeping it never makes a second free team', async () => {
+    const lou = new Browser(build({ plans: { plan: async () => null } }));
+    await signIn(lou, 'lou');
+    await lou.post('/dashboard/teams', '/teams/create', { name: 'First Try' });
+    const first = await teamOf(lou);
+    tenants.push(first);
+    expect((await lou.post('/dashboard/settings/team', '/teams/delete', { confirm: 'first-try' })).status).toBe(303);
+    // Until it goes, any Owner can keep it: it is still the one free team its creator may hold.
+    const second = await lou.post('/dashboard/teams', '/teams/create', { name: 'Second Try' });
+    expect(second.status).toBe(403);
+    expect(await second.text()).toContain(
+      'Each person may create 1 team on the Free plan. A team being deleted counts until it goes.',
+    );
+    expect((await lou.post('/dashboard/settings/team', '/teams/restore', {})).status).toBe(303);
+    const person = `github:${String(github.get('lou')?.id)}`;
+    expect(await admin`SELECT tenant_ref, status FROM slotlock.workspaces WHERE created_by = ${person}`).toEqual([
+      { tenant_ref: first, status: 'active' },
+    ]);
   });
 
   it("serves a team's keys only with team workspaces on", () => {

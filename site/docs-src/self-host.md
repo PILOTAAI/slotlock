@@ -55,6 +55,15 @@ docker run -d -p 127.0.0.1:8080:8080 \
   ghcr.io/pilotaai/slotlock:{{version}}
 ```
 
+To check that the release workflow built the image, from that version's tag, on a GitHub-hosted
+runner:
+
+```sh
+gh attestation verify oci://ghcr.io/pilotaai/slotlock:{{version}} --repo PILOTAAI/slotlock \
+  --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml \
+  --source-ref refs/tags/v{{version}} --deny-self-hosted-runners
+```
+
 ## Without Docker
 
 ```sh
@@ -133,7 +142,7 @@ slotlock resource restore vehicle-42
 slotlock resource delete vehicle-42       # with its history; refused while anything on it is live
 slotlock hours set '[{"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR","startMinutes":540,"durationMinutes":480}]' --all
 slotlock tenant status
-slotlock tenant suspend --reason "unpaid" # reads only; needs the owner's URL
+slotlock tenant suspend --reason "unpaid" # no writes, keys refused; needs the owner's URL
 slotlock tenant unsuspend
 slotlock tenant erase --confirm default   # everything, keys included, for good
 slotlock tenant export --out ./export      # everything, one NDJSON file a table, secrets left out
@@ -144,9 +153,11 @@ slotlock audit verify                     # check the audit log's hash chain
 
 - The resource commands take a reference or an id, and act in `SLOTLOCK_TENANT`. Hours and
   booking rules are on [their own page](/docs/booking-rules/).
-- A suspended tenant may read and writes nothing; its keys still authenticate, but it gets no new
-  key or secret. Only the schema owner suspends or lifts a suspension, so `suspend` and `unsuspend`
-  connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role when it is set.
+- A suspended tenant writes nothing, and its API keys, its test environment's included, are refused
+  (`401`) from the next request until the suspension is lifted; it gets no new key or secret. Its
+  dashboard still shows its data. Only the schema owner suspends or lifts a suspension, so `suspend`
+  and `unsuspend` connect as `SLOTLOCK_MIGRATE_DATABASE_URL`'s role when it is set. Suspending a
+  partner's account the partner suspended makes the suspension yours: the partner cannot lift it.
 - `erase` deletes everything the tenant has, its API keys included, at once and for good;
   `--confirm` must repeat the tenant. A suspension outlives it.
 - `suspend`, `unsuspend`, `erase` and `plan default` are recorded in the staff log by

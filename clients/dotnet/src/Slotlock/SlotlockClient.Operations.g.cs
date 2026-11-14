@@ -3406,9 +3406,10 @@ public sealed partial class SlotlockClient
 
     /// <summary>Get the tenant.</summary>
     /// <remarks>
-    /// The key's tenant: its reference, and whether it is suspended. A suspended tenant may read
-    /// and writes nothing (403 tenant_suspended); only the server's operator suspends a tenant or
-    /// lifts a suspension (slotlock tenant suspend).
+    /// The key's tenant: its reference, and whether it is suspended. A suspended tenant writes
+    /// nothing (403 tenant_suspended), and its API keys are refused (401) until the suspension is
+    /// lifted; only the server's operator suspends a tenant or lifts a suspension (slotlock
+    /// tenant suspend).
     /// </remarks>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The response body.</returns>
@@ -4298,8 +4299,9 @@ public sealed partial class SlotlockClient
 
     /// <summary>Suspend an account.</summary>
     /// <remarks>
-    /// Suspend the account, as slotlock tenant suspend: it may read, and writes nothing; its keys
-    /// get no new secret. suspended says whether it was not suspended already.
+    /// Suspend the account, as slotlock tenant suspend: it writes nothing, and its keys are
+    /// refused (401) and get no new secret until the suspension is lifted. suspended says whether
+    /// it was not suspended already.
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="reason">reason</param>
@@ -4319,8 +4321,9 @@ public sealed partial class SlotlockClient
 
     /// <summary>Lift a suspension.</summary>
     /// <remarks>
-    /// Lift a suspension the partner made. One Pylota made stays: unsuspended is false then, as
-    /// when the account was not suspended.
+    /// Lift a suspension the partner made. One Pylota made stays, whether before the partner's or
+    /// after (it takes the partner's over): unsuspended is false then, as when the account was
+    /// not suspended.
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="cancellationToken">Cancels the request.</param>
@@ -4338,7 +4341,9 @@ public sealed partial class SlotlockClient
     /// <summary>Erase an account.</summary>
     /// <remarks>
     /// Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the partner's
-    /// record of it. confirm repeats the account. Cannot be undone.
+    /// record of it. confirm repeats the account. Cannot be undone. A suspended account is not
+    /// erased (403 tenant_suspended), whoever suspended it: the partner lifts its own suspension
+    /// first, and one Pylota made keeps the data for Pylota.
     /// </remarks>
     /// <param name="account">account</param>
     /// <param name="confirm">confirm</param>

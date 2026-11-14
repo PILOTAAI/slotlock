@@ -6,7 +6,9 @@ import {
   SLOTLOCK_MCP_PROTOCOL_VERSION,
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentServerEvent,
+  type SlotlockAgentWriteOperation,
   createSlotlockAgentServer,
+  describeSlotlockAgentWrite,
 } from '../agent-server.js';
 import { canonicalRecurrenceRule, isBookableRecurrenceRule } from '../sync.js';
 
@@ -1316,5 +1318,162 @@ describe('a confirmation question a person can trust', () => {
     expect(accepted.status).toBe(200);
     expect(createEvent).toHaveBeenCalledTimes(1);
     expect(describeResource).not.toHaveBeenCalled();
+  });
+});
+
+describe('the named booking tools wait as the writes they perform do', () => {
+  const confirmHold = vi.fn();
+  const HOLD_ID = '7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d';
+  const CANCEL = { event_id: EVENT.id, expected_revision: 1 };
+  const MOVE = {
+    event_id: EVENT.id,
+    expected_revision: 1,
+    starts_at: '2027-03-02T10:00:00Z',
+    ends_at: '2027-03-02T11:00:00Z',
+  };
+  const CONFIRM = { hold_id: HOLD_ID, title: 'Handover with Ana' };
+  // Each named tool, the write it performs, and arguments for both.
+  const PAIRS = [
+    ['slotlock_delete_event', 'slotlock_cancel', CANCEL, { ...CANCEL, idempotency_key: 'delete-1' }],
+    ['slotlock_update_event', 'slotlock_reschedule', MOVE, { ...MOVE, idempotency_key: 'move-1' }],
+    ['slotlock_create_event', 'slotlock_confirm_slot', CONFIRM, BOOKING],
+  ] as const;
+  const guarding = (operations: readonly SlotlockAgentWriteOperation[]) =>
+    buildServer({
+      backend: { ...backend, describeResource, confirmHold } as SlotlockAgentCalendarBackend,
+      confirmation: { operations, secrets: [SECRET] },
+    });
+  const legacyCall = (name: string, args: Record<string, unknown>) =>
+    new Request('http://localhost/slotlock/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer valid',
+        'Content-Type': 'application/json',
+        'MCP-Protocol-Version': '2025-11-25',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'legacy',
+        method: 'tools/call',
+        params: { name, arguments: args },
+      }),
+    });
+  const a2aCall = (skill: string, args: Record<string, unknown>) =>
+    new Request('http://localhost/slotlock/a2a', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer valid',
+        'Content-Type': 'application/json',
+        'A2A-Version': SLOTLOCK_A2A_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'a2a',
+        method: 'SendMessage',
+        params: {
+          message: {
+            messageId: 'message-1',
+            role: 'ROLE_USER',
+            parts: [{ data: { skill, arguments: args }, mediaType: 'application/json' }],
+          },
+        },
+      }),
+    });
+  const written = () =>
+    createEvent.mock.calls.length +
+    updateEvent.mock.calls.length +
+    deleteEvent.mock.calls.length +
+    confirmHold.mock.calls.length;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    subject = 'principal-1';
+    authorize.mockResolvedValue(true);
+    getEvent.mockResolvedValue({ event: EVENT });
+    createEvent.mockResolvedValue({ event: EVENT, replayed: false });
+    updateEvent.mockResolvedValue({ event: { ...EVENT, revision: 2 }, replayed: false });
+    deleteEvent.mockResolvedValue({ event_id: EVENT.id, revision: 2, deleted: true, replayed: false });
+    confirmHold.mockResolvedValue({ event: EVENT, replayed: false });
+    describeResource.mockImplementation(
+      async (_context: unknown, id: string) =>
+        ({ 'vehicle-1': { name: 'vehicle-42', timezone: 'Europe/London' } })[id] ?? null,
+    );
+  });
+
+  it.each(PAIRS)(
+    'guards %s and %s together, whichever of them is listed, on every protocol',
+    async (canonical, named, namedArgs, canonicalArgs) => {
+      for (const listed of [[canonical], [named]]) {
+        const server = guarding(listed);
+        for (const [name, args] of [
+          [named, namedArgs],
+          [canonical, canonicalArgs],
+        ] as const) {
+          await prompt(server, name, args);
+          expect(await toolError(await server.fetch(legacyCall(name, args))), name).toBe(
+            'confirmation_required',
+          );
+          expect(await (await server.fetch(a2aCall(name, args))).json()).toMatchObject({
+            result: { message: { parts: [{ data: { error: { code: 'confirmation_required' } } }] } },
+          });
+        }
+      }
+      expect(written()).toBe(0);
+    },
+  );
+
+  it('describes a cancellation as the deletion it is, and a move as the change it is', async () => {
+    const server = guarding(['slotlock_cancel', 'slotlock_reschedule']);
+    const cancelled = await prompt(server, 'slotlock_cancel', CANCEL);
+    expect(cancelled.inputRequests.slotlock_confirm?.params.message).toBe(
+      'Delete the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London). It is titled "Vehicle handover".',
+    );
+    const moved = await prompt(server, 'slotlock_reschedule', MOVE);
+    expect(moved.inputRequests.slotlock_confirm?.params.message).toBe(
+      'Change the booking on vehicle-42, 2027-03-02 09:00–10:00 (Europe/London): time to 2027-03-02 10:00–11:00 (Europe/London). It is titled "Vehicle handover".',
+    );
+    // Unread, a cancellation still says it deletes.
+    getEvent.mockRejectedValue(new Error('no such event'));
+    const unread = await prompt(server, 'slotlock_cancel', CANCEL);
+    expect(unread.inputRequests.slotlock_confirm?.params.message).toBe(
+      `Delete event ${EVENT.id} and every time it repeats, if it does.`,
+    );
+    expect(written()).toBe(0);
+  });
+
+  it('describes confirming a hold as booking the time it holds, and books it once accepted', async () => {
+    const server = guarding(['slotlock_confirm_slot']);
+    const { inputRequests, requestState } = await prompt(server, 'slotlock_confirm_slot', CONFIRM);
+    expect(inputRequests.slotlock_confirm?.params.message).toBe(
+      `Book the resource and time of hold ${HOLD_ID}, and release the other holds made with it: "Handover with Ana".`,
+    );
+    const detailed = await prompt(server, 'slotlock_confirm_slot', {
+      hold_id: HOLD_ID,
+      description: 'Bring the keys',
+      location: 'Depot',
+    });
+    expect(detailed.inputRequests.slotlock_confirm?.params.message).toBe(
+      `Book the resource and time of hold ${HOLD_ID}, and release the other holds made with it (also description, location).`,
+    );
+    expect(written()).toBe(0);
+    const accepted = await server.fetch(
+      toolCall('slotlock_confirm_slot', CONFIRM, answer(requestState, 'accept', { confirm: true })),
+    );
+    expect(await accepted.json()).toMatchObject({ result: { resultType: 'complete' } });
+    expect(confirmHold).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to word a write it has no sentence for, rather than call it a change', async () => {
+    await expect(
+      describeSlotlockAgentWrite({
+        backend,
+        authorize: async () => true,
+        principal: { subject: 'principal-1', tenantRef: 'tenant-a' },
+        // A caller outside TypeScript can name any operation.
+        operation: 'slotlock_hold_slots' as never,
+        input: { event_id: EVENT.id },
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/no confirmation question/);
   });
 });

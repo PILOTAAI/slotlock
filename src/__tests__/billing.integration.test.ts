@@ -6,6 +6,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   SLOTLOCK_STRIPE_API_VERSION,
+  type SlotlockStripeOptions,
   type SlotlockStripePrice,
   type SlotlockStripeSubscription,
   createSlotlockStripe,
@@ -15,7 +16,7 @@ import {
   formatSlotlockPrice,
   verifySlotlockStripeSignature,
 } from '../billing.js';
-import { readSlotlockTenantPlan, readSlotlockTenantQuotas } from '../plans.js';
+import { readSlotlockTenantPlan, readSlotlockTenantQuotas, setSlotlockTenantPlan } from '../plans.js';
 import { createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -28,7 +29,11 @@ function sign(body: string, at = NOW, secret = SECRET) {
   return `t=${String(t)},v1=${v1}`;
 }
 
-function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>, refusePrices = false) {
+function fakeStripe(
+  subscriptions: Map<string, SlotlockStripeSubscription>,
+  refusePrices = false,
+  extra: Partial<SlotlockStripeOptions> = {},
+) {
   const calls: Array<{ url: string; body: string | null; headers: Headers }> = [];
   const fetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const target = String(input);
@@ -71,6 +76,7 @@ function fakeStripe(subscriptions: Map<string, SlotlockStripeSubscription>, refu
     teamPrices: { month: 'price_team_month', year: 'price_team_year' },
     portalConfigurations: { developer: 'bpc_Developer1', team: 'bpc_Team1' },
     fetch: fetch as typeof globalThis.fetch,
+    ...extra,
   });
   return { stripe, calls };
 }
@@ -350,13 +356,20 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
     expect(await readSlotlockTenantPlan(sql, tenant)).toMatchObject({ plan: 'developer', stripeSubscription: 'sub_B2' });
     subscriptions.set('sub_B2', subscription('sub_B2', 'unpaid'));
     await deliver({ data: { object: { object: 'invoice', subscription: 'sub_B2' } } });
+    // Free, but still named: paying its invoice makes it live again, so the tenant is not erased
+    // under it (erase_tenant and team deletion read the name).
     expect(await readSlotlockTenantPlan(sql, tenant)).toMatchObject({
       plan: 'free',
       status: 'canceled',
       stripeCustomer: 'cus_Paid1',
-      stripeSubscription: null,
+      stripeSubscription: 'sub_B2',
+      currentPeriodEnd: null,
       limits: { resources: 10 },
     });
+    expect(await readSlotlockTenantQuotas(sql, tenant, { overageStopPercent: 300 })).toMatchObject({ stopPercent: 100 });
+    subscriptions.set('sub_B2', subscription('sub_B2', 'canceled'));
+    await deliver({ data: { object: { object: 'subscription', id: 'sub_B2' } } });
+    expect(await readSlotlockTenantPlan(sql, tenant)).toMatchObject({ plan: 'free', stripeCustomer: 'cus_Paid1', stripeSubscription: null });
   });
 
   it('keeps Developer while a second purchase still renews, and reports it', async () => {
@@ -467,5 +480,172 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
   it('ignores events about nothing of ours, and asks Stripe to retry when it cannot read one', async () => {
     expect((await deliver({ data: { object: { object: 'customer', id: 'cus_1' } } })).status).toBe(200);
     expect((await deliver({ data: { object: { object: 'subscription', id: 'sub_Missing' } } })).status).toBe(500);
+  });
+
+  /** Delivers `event` as Stripe would, with what the webhook reports kept in `reported`. */
+  const deliverTo = (
+    event: unknown,
+    reported: { erased: string[] },
+    using: typeof stripe = stripe,
+  ) => {
+    const body = JSON.stringify(event);
+    return handleSlotlockStripeWebhook(
+      new Request('https://app.example.com/stripe/webhook', { method: 'POST', headers: { 'stripe-signature': sign(body) }, body }),
+      { secret: SECRET, stripe: using, sql, now: () => NOW, onErased: (id) => reported.erased.push(id) },
+    );
+  };
+  const aboutInvoice = (subscriptionId: string) => ({
+    type: 'invoice.paid',
+    data: { object: { object: 'invoice', id: 'in_Late1', parent: { subscription_details: { subscription: subscriptionId } } } },
+  });
+
+  it('keeps a subscription Stripe can still revive on the plan, so its team is neither deleted nor erased under it', async () => {
+    const person = `github:${String(800_000_000 + Math.floor(Math.random() * 90_000_000))}`;
+    const handle = `owes-${randomUUID().slice(0, 8)}`;
+    await sql`SELECT slotlock.dashboard_sign_in(${person}, NULL)`;
+    const [made] = await sql<{ tenant_ref: string }[]>`SELECT tenant_ref FROM slotlock.create_team(${person}, 'Owes', ${handle}, NULL)`;
+    const team = made?.tenant_ref as string;
+    const reported = { erased: [] as string[] };
+    const owed = (status: string): SlotlockStripeSubscription => ({
+      id: 'sub_Owe1',
+      status,
+      customer: 'cus_Owe1',
+      metadata: { tenant_ref: team },
+      items: { data: [{ current_period_end: Math.floor(Date.UTC(2026, 11, 9) / 1000), price: { id: 'price_team_month' } }] },
+    });
+    const scheduled = async () =>
+      (await sql<{ refusal: string | null }[]>`SELECT slotlock.schedule_team_deletion(${team}, ${person}, ${handle}) AS refusal`)[0]?.refusal;
+    try {
+      subscriptions.set('sub_Owe1', owed('active'));
+      await deliverTo({ data: { object: { object: 'subscription', id: 'sub_Owe1' } } }, reported);
+      expect(await readSlotlockTenantPlan(sql, team)).toMatchObject({ plan: 'team', stripeSubscription: 'sub_Owe1' });
+      for (const status of ['unpaid', 'incomplete']) {
+        subscriptions.set('sub_Owe1', owed(status));
+        expect((await deliverTo({ data: { object: { object: 'invoice', id: 'in_Owe1', subscription: 'sub_Owe1' } } }, reported)).status).toBe(200);
+        // Free limits, as the Terms say; but paying the invoice makes it live again, so it stays named.
+        expect(await readSlotlockTenantPlan(sql, team), status).toMatchObject({
+          plan: 'free',
+          status: 'canceled',
+          stripeSubscription: 'sub_Owe1',
+          limits: { resources: 10 },
+        });
+        expect(await scheduled(), status).toBe('subscription_live');
+        await expect(sql`SELECT * FROM slotlock.erase_tenant(${team}::text)`, status).rejects.toMatchObject({
+          code: '55006',
+          hint: 'billing_active',
+        });
+      }
+      // Cancelled in Stripe, nothing can bill it again: the team is deleted, and erased when due.
+      subscriptions.set('sub_Owe1', owed('canceled'));
+      await deliverTo({ data: { object: { object: 'subscription', id: 'sub_Owe1' } } }, reported);
+      expect(await readSlotlockTenantPlan(sql, team)).toMatchObject({ plan: 'free', stripeSubscription: null });
+      expect(await scheduled()).toBeNull();
+      await sql`UPDATE slotlock.workspaces SET delete_after = statement_timestamp() - interval '1 minute' WHERE tenant_ref = ${team}`;
+      await sql`SELECT slotlock.erase_deleted_teams()`;
+      expect(await sql`SELECT 1 FROM slotlock.workspaces WHERE tenant_ref = ${team}`).toHaveLength(0);
+      expect(await sql`SELECT 1 FROM slotlock.tenant_plans WHERE tenant_ref = ${team}`).toHaveLength(0);
+
+      // Whatever Stripe sends about it later writes nothing of the erased team back. One that can
+      // still bill is reported (by its id only), for staff to cancel in Stripe.
+      expect((await deliverTo(aboutInvoice('sub_Owe1'), reported)).status).toBe(200);
+      subscriptions.set('sub_Owe1', owed('active'));
+      expect((await deliverTo(aboutInvoice('sub_Owe1'), reported)).status).toBe(200);
+      expect(await sql`SELECT 1 FROM slotlock.tenant_plans WHERE tenant_ref = ${team}`).toHaveLength(0);
+      expect(await sql`SELECT 1 FROM slotlock.billing_alerts WHERE tenant_ref = ${team}`).toHaveLength(0);
+      expect(reported.erased).toEqual(['sub_Owe1']);
+    } finally {
+      subscriptions.delete('sub_Owe1');
+      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${team}`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${team}::text)`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${person}::text)`;
+    }
+  });
+
+  it("writes nothing back for an erased person, and reports a subscription of theirs that could still bill", async () => {
+    const person = `github:${String(800_000_000 + Math.floor(Math.random() * 90_000_000))}`;
+    const reported = { erased: [] as string[] };
+    const theirs = (id: string, status: string): SlotlockStripeSubscription => ({
+      id,
+      status,
+      customer: 'cus_Gone1',
+      metadata: { tenant_ref: person },
+      items: { data: [{ current_period_end: Math.floor(Date.UTC(2026, 11, 9) / 1000) }] },
+    });
+    try {
+      await sql`SELECT slotlock.dashboard_sign_in(${person}, NULL)`;
+      subscriptions.set('sub_Gone1', theirs('sub_Gone1', 'canceled'));
+      await deliverTo({ data: { object: { object: 'subscription', id: 'sub_Gone1' } } }, reported);
+      expect(await readSlotlockTenantPlan(sql, person)).toMatchObject({ plan: 'free', stripeCustomer: 'cus_Gone1', stripeSubscription: null });
+      await sql`SELECT * FROM slotlock.erase_tenant(${person}::text)`;
+      // A late event about the cancelled subscription: nothing to write, nothing to report.
+      expect((await deliverTo(aboutInvoice('sub_Gone1'), reported)).status).toBe(200);
+      // One bought just before the erasure, whose first event arrives after it: refused, and reported.
+      subscriptions.set('sub_Gone2', theirs('sub_Gone2', 'active'));
+      expect((await deliverTo({ data: { object: { object: 'subscription', id: 'sub_Gone2' } } }, reported)).status).toBe(200);
+      expect(await readSlotlockTenantPlan(sql, person)).toBeNull();
+      expect(await sql`SELECT 1 FROM slotlock.tenant_plans WHERE tenant_ref = ${person}`).toHaveLength(0);
+      expect(reported.erased).toEqual(['sub_Gone2']);
+      // Signed in again, the person is someone the service holds once more, and may buy a plan.
+      await sql`SELECT slotlock.dashboard_sign_in(${person}, NULL)`;
+      await deliverTo({ data: { object: { object: 'subscription', id: 'sub_Gone2' } } }, reported);
+      expect(await readSlotlockTenantPlan(sql, person)).toMatchObject({ plan: 'developer', stripeSubscription: 'sub_Gone2' });
+    } finally {
+      subscriptions.delete('sub_Gone1');
+      subscriptions.delete('sub_Gone2');
+      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${person}`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${person}::text)`;
+    }
+  });
+
+  it('records whether the subscription carries the metered overage price, which alone lifts the stop', async () => {
+    const metered = `billing-metered-${randomUUID()}`;
+    const selling = fakeStripe(subscriptions, false, { overagePrice: 'price_overage' }).stripe;
+    const reported = { erased: [] as string[] };
+    const developer = (id: string, prices: string[], status = 'active'): SlotlockStripeSubscription => ({
+      id,
+      status,
+      customer: 'cus_Metered1',
+      metadata: { tenant_ref: metered },
+      items: {
+        data: prices.map((price) => ({ current_period_end: Math.floor(Date.UTC(2026, 11, 9) / 1000), price: { id: price } })),
+      },
+    });
+    const stop = async () => (await readSlotlockTenantQuotas(sql, metered, { overageStopPercent: 300 }))?.stopPercent;
+    try {
+      // Bought before overage was sold: the Developer price alone. Refused past 110%, as before.
+      subscriptions.set('sub_M1', developer('sub_M1', ['price_month']));
+      await deliverTo({ data: { object: { object: 'subscription', id: 'sub_M1' } } }, reported, selling);
+      expect(await readSlotlockTenantPlan(sql, metered)).toMatchObject({ plan: 'developer', status: 'active', stripeSubscription: 'sub_M1' });
+      expect(await stop()).toBe(110);
+      // The metered price added to it (Stripe sends customer.subscription.updated): its use past the
+      // quota is billed, so it runs to the overage stop.
+      subscriptions.set('sub_M1', developer('sub_M1', ['price_month', 'price_overage']));
+      await deliverTo({ data: { object: { object: 'subscription', id: 'sub_M1' } } }, reported, selling);
+      expect(await stop()).toBe(300);
+      // Read by a Worker that sells no overage, it is not known to carry the price: 110% again.
+      await deliverTo(aboutInvoice('sub_M1'), reported);
+      expect(await stop()).toBe(110);
+      await deliverTo(aboutInvoice('sub_M1'), reported, selling);
+      expect(await stop()).toBe(300);
+      // A plan written for another subscription (as a Worker from before this release writes it)
+      // never keeps the last one's price.
+      await setSlotlockTenantPlan(sql, {
+        tenantRef: metered,
+        plan: 'developer',
+        status: 'active',
+        stripeCustomer: 'cus_Metered1',
+        stripeSubscription: 'sub_M2',
+      });
+      expect(await stop()).toBe(110);
+      // Unpaid: Free, whatever its items.
+      subscriptions.set('sub_M1', developer('sub_M1', ['price_month', 'price_overage'], 'unpaid'));
+      await sql`UPDATE slotlock.tenant_plans SET stripe_subscription = 'sub_M1' WHERE tenant_ref = ${metered}`;
+      await deliverTo(aboutInvoice('sub_M1'), reported, selling);
+      expect(await stop()).toBe(100);
+    } finally {
+      subscriptions.delete('sub_M1');
+      await sql`DELETE FROM slotlock.tenant_plans WHERE tenant_ref = ${metered}`;
+      await sql`SELECT * FROM slotlock.erase_tenant(${metered}::text)`;
+    }
   });
 });

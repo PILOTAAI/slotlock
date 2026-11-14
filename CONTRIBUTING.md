@@ -131,6 +131,6 @@ such a stage and release a version that fixes it; accept a named advisory with
 `--allow <GHSA id>` only when the release notes say why. It approves nothing itself.
 
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
-publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the
-failing job names `scripts/bootstrap-release.sh`. One run of it does that step, re-runs the failed
-jobs and waits for them.
+publisher, the image's visibility, and the deploy key `tag-release.yml` and the Go module job push
+tags with), the failing job names `scripts/bootstrap-release.sh`. One run of it does that step,
+re-runs the failed jobs and waits for them.

@@ -432,6 +432,39 @@ describe('a REST call', () => {
     });
   });
 
+  it('answers 428 on every route that performs a guarded write, the named booking routes included', async () => {
+    const confirmHold = vi.fn();
+    const server = buildServer({
+      backend: { ...backend, confirmHold } as SlotlockAgentCalendarBackend,
+      confirmation: {
+        operations: ['slotlock_create_event', 'slotlock_update_event', 'slotlock_delete_event'],
+        secrets: ['confirmation-secret-0123456789abcdef'],
+      },
+    });
+    const event = `/v1/events/${encodeURIComponent(EVENT_ID)}`;
+    const routes: [string, string, Record<string, unknown> | undefined][] = [
+      ['DELETE', `${event}?expected_revision=1&idempotency_key=d-1`, undefined],
+      ['POST', `${event}/cancel`, { expected_revision: 1 }],
+      ['PATCH', event, { expected_revision: 1, title: 'Moved', idempotency_key: 'm-1' }],
+      [
+        'POST',
+        `${event}/reschedule`,
+        { expected_revision: 1, starts_at: '2027-03-02T10:00:00Z', ends_at: '2027-03-02T11:00:00Z' },
+      ],
+      ['POST', '/v1/events', BOOKING],
+      ['POST', '/v1/slot-holds/7d3f8c2a-4b1e-4f6a-9c2d-1e5b7a9f3c4d/confirm', { title: 'Handover' }],
+    ];
+    for (const [method, path, body] of routes) {
+      const response = await server.fetch(call(method, path, body === undefined ? {} : { body }));
+      expect(response.status, `${method} ${path}`).toBe(428);
+      expect(await errorCode(response)).toBe('confirmation_required');
+    }
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(updateEvent).not.toHaveBeenCalled();
+    expect(deleteEvent).not.toHaveBeenCalled();
+    expect(confirmHold).not.toHaveBeenCalled();
+  });
+
   it("holds a key to its scopes and to the server's authorize", async () => {
     const server = buildServer();
     const write = await server.fetch(

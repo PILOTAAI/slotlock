@@ -3,6 +3,7 @@
 // functions, never from the session cookie. A person's own workspace has no row: they are its
 // Owner. GitHub organizations' members are recorded at each sign-in from what GitHub lists.
 import { createHash } from 'node:crypto';
+import { createSlotlockSchemaFunctions } from './schema-functions.js';
 import type { SlotlockSql } from './store.js';
 import { type SlotlockWorkspaceDomains, createSlotlockWorkspaceDomains } from './workspace-domains.js';
 import { type SlotlockWorkspaceSso, createSlotlockWorkspaceSso } from './workspace-sso.js';
@@ -301,7 +302,14 @@ function checkMemberships(organizations: readonly SlotlockGitHubMembership[] | u
 }
 
 /** Through slotlock.dashboard_sign_in, dashboard_standing and dashboard_sign_out_everywhere. */
+const SUSPENSION_NOTICE = 'slotlock.tenant_suspension_notice(text)';
+const DASHBOARD_NOTICES = 'slotlock.tenant_dashboard_notices(text)';
+
 export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDashboardWorkspaces {
+  // Every signed-in page reads both notices. A schema from before the admin console (0.10.2's)
+  // lacks the functions, and calling them there broke the dashboard Worker's requests through
+  // Hyperdrive even though the failures were caught (schema-functions.ts), so they are asked for.
+  const has = createSlotlockSchemaFunctions(sql, [SUSPENSION_NOTICE, DASHBOARD_NOTICES]);
   return {
     async signedIn(person, githubOrganizations) {
       if (!PERSON.test(person)) refuse('needs github:<id> or google:<subject>');
@@ -346,6 +354,9 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
     teams: createTeams(sql),
     sessions: createSessions(sql),
     async suspension(tenantRef) {
+      // A schema from before this release: no notice, as before; the store still refuses a
+      // suspended tenant's writes.
+      if (!(await has(SUSPENSION_NOTICE))) return null;
       try {
         const [row] = await sql<{ suspended_at: Date | null; message: string | null }[]>`
           SELECT suspended_at, message FROM slotlock.tenant_suspension_notice(${tenantRef}::text)`;
@@ -359,6 +370,8 @@ export function createSlotlockDashboardWorkspaces(sql: SlotlockSql): SlotlockDas
       }
     },
     async notices(tenantRef) {
+      // A schema from before this release: nothing to show, every feature as configured.
+      if (!(await has(DASHBOARD_NOTICES))) return SLOTLOCK_NO_DASHBOARD_NOTICES;
       try {
         const [row] = await sql<{ notices: unknown }[]>`
           SELECT slotlock.tenant_dashboard_notices(${tenantRef}::text) AS notices`;

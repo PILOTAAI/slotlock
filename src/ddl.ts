@@ -365,7 +365,10 @@ export const SLOTLOCK_SCHEMA_FUNCTIONS = Object.freeze([
   'slotlock.installed_schema_version()',
 ] as const);
 
-/** The table of suspended tenants: they may read, and write nothing (store.ts withTenant). */
+/**
+ * The table of suspended tenants: they write nothing (store.ts withTenant), and their API keys are
+ * refused (authenticate_scoped_api_key).
+ */
 export const SLOTLOCK_TENANT_ADMIN_TABLES = Object.freeze([
   'tenant_suspensions',
   'tenant_plans',
@@ -416,6 +419,10 @@ export const SLOTLOCK_TENANT_ADMIN_FUNCTIONS = Object.freeze([
   'slotlock.erase_subject_changes(text, text, text, text)',
   'slotlock.tenant_suspension_notice(text)',
   'slotlock.note_billing_event(text, text, text, jsonb)',
+  // Whether a tenant's subscription carries the metered overage price (overage.ts): the webhook
+  // records it, and quotas read it.
+  'slotlock.set_tenant_plan_overage(text, text, boolean)',
+  'slotlock.tenant_plan_overage(text)',
   // A dashboard's announcements and feature flags, and maintenance's record of its passes (RFC
   // 0006, M10 and M11; staff-ddl.ts).
   ...SLOTLOCK_STAFF_SERVING_FUNCTIONS,
@@ -891,7 +898,10 @@ $slotlock_set_api_key_resource_scope$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[6]} FROM PUBLIC;
 
 -- As authenticate_api_key, with the key's scope: null locations and groups for a key with none.
--- A key of a partner's account whose partner is not active (RFC 0003 P2) authenticates as nothing.
+-- A key of a suspended tenant authenticates as nothing, from the request after the suspension: its
+-- own suspension, its live tenant's for a test environment's key, or its partner's when the partner
+-- is not active (RFC 0003 P2), as tenant_suspended reads them. Its dashboard, by session, still
+-- reads.
 CREATE OR REPLACE FUNCTION slotlock.authenticate_scoped_api_key(presented_secret_hash bytea)
 RETURNS TABLE (key_id uuid, key_tenant_ref text, key_scopes text[], scope_locations text[], scope_groups text[])
 LANGUAGE plpgsql
@@ -904,7 +914,7 @@ BEGIN
   SELECT found.key_id, found.key_tenant_ref, found.key_scopes, scope.locations, scope.groups
     FROM slotlock.authenticate_api_key(presented_secret_hash) found
     LEFT JOIN slotlock.api_key_resource_scopes scope ON scope.key_id = found.key_id
-   WHERE NOT slotlock.partner_tenant_blocked(found.key_tenant_ref);
+   WHERE NOT slotlock.tenant_suspended(found.key_tenant_ref);
 END
 $slotlock_authenticate_scoped_api_key$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_API_KEY_FUNCTIONS[7]} FROM PUBLIC;
@@ -1539,7 +1549,8 @@ $slotlock_dashboard_display$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_DASHBOARD_FUNCTIONS[9]} FROM PUBLIC;
 
 -- A new team workspace, its creator its Owner. With requested_cap, a person may have created at
--- most that many active team workspaces that are not on a paid plan.
+-- most that many team workspaces that are not on a paid plan. One being deleted counts until it is
+-- erased: any Owner can keep it until then, which would otherwise make one more.
 CREATE OR REPLACE FUNCTION slotlock.create_team(
   requested_person text, requested_name text, requested_handle text, requested_cap integer)
 RETURNS TABLE (tenant_ref text, refusal text)
@@ -1580,7 +1591,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:create-team:' || requested_person, 0));
   IF requested_cap IS NOT NULL THEN
     SELECT count(*) INTO free_count FROM slotlock.workspaces ws
-     WHERE ws.created_by = requested_person AND ws.status = 'active'
+     WHERE ws.created_by = requested_person AND ws.status IN ('active', 'deleting')
        AND NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans paid
                         WHERE paid.tenant_ref = ws.tenant_ref AND paid.plan = 'team' AND paid.status <> 'canceled');
     IF free_count >= requested_cap THEN
@@ -2666,10 +2677,10 @@ $slotlock_installed_schema_version$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_SCHEMA_FUNCTIONS[0]} FROM PUBLIC;
 `;
 
-// Tenant suspension and erasure. A suspended tenant may read and write nothing; its keys still
-// authenticate but it gets no new key. The table names tenants and reasons, so RLS with no policy
-// and no grants: servers read it only through tenant_suspended(), and only the deployment role
-// (owner) suspends. Erasure keeps the suspension.
+// Tenant suspension and erasure. A suspended tenant writes nothing, its API keys authenticate as
+// nothing and it gets no new key; its dashboard still reads it. The table names tenants and
+// reasons, so RLS with no policy and no grants: servers read it only through tenant_suspended(),
+// and only the deployment role (owner) suspends. Erasure keeps the suspension.
 //
 // Every server transaction for a tenant holds its lock shared before reading the suspension;
 // suspension and erasure take it exclusively, so a suspension waits for transactions in flight and
@@ -2721,6 +2732,28 @@ BEGIN
   END IF;
 END
 $slotlock_tenant_suspensions_message$;
+
+-- Who made a suspension: the deployment's operator (slotlock tenant suspend), staff (the admin
+-- console) or the tenant's partner (the partner API, RFC 0003 P3). A partner lifts only its own,
+-- and the operator or staff take a partner's over, so theirs stays whatever the partner does. Rows
+-- from before the column are read once, when it is added: a partner's had its 'partner: ' reason
+-- and no one recorded, staff's a staff reference; any other is the operator's, which no partner
+-- lifts.
+DO $slotlock_tenant_suspensions_source$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute
+     WHERE attrelid = 'slotlock.tenant_suspensions'::regclass AND attname = 'source' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE slotlock.tenant_suspensions ADD COLUMN source text NOT NULL DEFAULT 'operator'
+      CONSTRAINT slotlock_tenant_suspensions_source_valid CHECK (source IN ('operator', 'staff', 'partner'));
+    UPDATE slotlock.tenant_suspensions held
+       SET source = CASE WHEN held.suspended_by LIKE 'github:%' THEN 'staff' ELSE 'partner' END
+     WHERE held.suspended_by LIKE 'github:%'
+        OR (held.suspended_by IS NULL AND held.reason LIKE 'partner: %');
+  END IF;
+END
+$slotlock_tenant_suspensions_source$;
 
 -- A suspended tenant's notice for its dashboard: since when, and the message staff left (null for
 -- none). One row while it is suspended (its own suspension, its live tenant's, or its partner's),
@@ -2856,6 +2889,11 @@ BEGIN
   END IF;
 END
 $slotlock_tenant_plans_source$;
+-- Whether the subscription the plan names carries the metered overage price (overage.ts), as the
+-- webhook last read it from Stripe: only then is use past the quota billed, so only then may a
+-- Developer tenant run past its plan's stop. False until the webhook says so, as for a plan written
+-- before this column, so such a tenant stops at its plan's stop as the Terms say.
+ALTER TABLE slotlock.tenant_plans ADD COLUMN IF NOT EXISTS overage_metered boolean NOT NULL DEFAULT false;
 REVOKE ALL ON slotlock.tenant_plans FROM PUBLIC;
 
 -- The plan a hosted deployment puts every tenant without a row of its own on, from applies_from:
@@ -3096,7 +3134,11 @@ $slotlock_set_plan_default$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_OPERATOR_FUNCTIONS[2]} FROM PUBLIC;
 
 -- Sets the tenant's plan as its billing says it is now (the dashboard's Stripe webhook). Under the
--- key lock, so a key being issued counts against the plan before or after, never between.
+-- key lock, so a key being issued counts against the plan before or after, never between. An
+-- account of the dashboard's (a person, a team workspace, an organization) that no longer exists
+-- gets no plan: erasure took its plan under the same lock, and a row made by a later event would
+-- keep its Stripe ids after it (PRIVACY.md). Refused (tenant_erased), so the webhook reports it.
+-- Whether the subscription carries the metered overage price is kept only while it is the same one.
 CREATE OR REPLACE FUNCTION slotlock.set_tenant_plan(
   requested_tenant_ref text,
   requested_plan text,
@@ -3114,8 +3156,24 @@ VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog, slotlock, pg_temp
 AS $slotlock_set_tenant_plan$
+DECLARE
+  live text := regexp_replace(requested_tenant_ref, '~test$', '');
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
+  -- In parentheses: PL/pgSQL would end the IF's condition at the CASE's first THEN.
+  IF NOT EXISTS (SELECT 1 FROM slotlock.tenant_plans current WHERE current.tenant_ref = requested_tenant_ref)
+     AND (CASE
+            WHEN live ~ '^team:' THEN
+              NOT EXISTS (SELECT 1 FROM slotlock.workspaces ws WHERE ws.tenant_ref = live)
+            WHEN live ~ '^github-org:' THEN
+              NOT EXISTS (SELECT 1 FROM slotlock.dashboard_organizations org WHERE org.org_id = substr(live, 12))
+            WHEN live ~ '^(github|google|sso):' THEN
+              NOT EXISTS (SELECT 1 FROM slotlock.dashboard_people person WHERE person.person_ref = live)
+            ELSE false
+          END) THEN
+    RAISE EXCEPTION 'Slotlock tenant no longer exists: its plan is not written again'
+      USING ERRCODE = 'no_data_found', HINT = 'tenant_erased';
+  END IF;
   INSERT INTO slotlock.tenant_plans AS current (
     tenant_ref, plan, status, max_resources, max_api_keys, max_webhook_endpoints,
     stripe_customer, stripe_subscription, current_period_end, updated_at
@@ -3134,10 +3192,50 @@ BEGIN
       stripe_customer = COALESCE(EXCLUDED.stripe_customer, current.stripe_customer),
       stripe_subscription = EXCLUDED.stripe_subscription,
       current_period_end = EXCLUDED.current_period_end,
+      overage_metered = current.overage_metered
+        AND current.stripe_subscription IS NOT DISTINCT FROM EXCLUDED.stripe_subscription,
       updated_at = EXCLUDED.updated_at;
 END
 $slotlock_set_tenant_plan$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[11]} FROM PUBLIC;
+
+-- Records whether the subscription the plan names carries the metered overage price (the
+-- dashboard's Stripe webhook, from the subscription it read): for that subscription only, so a
+-- late answer about another one changes nothing.
+CREATE OR REPLACE FUNCTION slotlock.set_tenant_plan_overage(
+  requested_tenant_ref text, requested_stripe_subscription text, requested_metered boolean)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_set_tenant_plan_overage$
+BEGIN
+  UPDATE slotlock.tenant_plans current
+     SET overage_metered = coalesce(requested_metered, false)
+   WHERE current.tenant_ref = requested_tenant_ref
+     AND current.stripe_subscription = requested_stripe_subscription
+     AND current.overage_metered IS DISTINCT FROM coalesce(requested_metered, false);
+END
+$slotlock_set_tenant_plan_overage$;
+REVOKE ALL ON FUNCTION slotlock.set_tenant_plan_overage(text, text, boolean) FROM PUBLIC;
+
+-- Whether the tenant's use past its quota is billed (overage.ts): its own plan names a subscription
+-- that is not cancelled and carries the metered overage price. A test environment's never is.
+CREATE OR REPLACE FUNCTION slotlock.tenant_plan_overage(requested_tenant_ref text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, slotlock, pg_temp
+AS $slotlock_tenant_plan_overage$
+  SELECT EXISTS (
+    SELECT 1 FROM slotlock.tenant_plans own
+     WHERE own.tenant_ref = requested_tenant_ref AND requested_tenant_ref !~ '~test$'
+       AND own.source = 'direct' AND own.overage_metered
+       AND own.stripe_subscription IS NOT NULL AND own.status <> 'canceled');
+$slotlock_tenant_plan_overage$;
+REVOKE ALL ON FUNCTION slotlock.tenant_plan_overage(text) FROM PUBLIC;
 
 -- A tenant's use of the service (usage.ts), by UTC day: operations its keys and the assistant ran
 -- (recorded by the servers), and the bookings and holds it committed (rolled up from its feed). By
@@ -3550,7 +3648,9 @@ END
 $slotlock_note_usage_threshold$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_TENANT_ADMIN_FUNCTIONS[18]} FROM PUBLIC;
 
--- True when the tenant was not suspended already; a second suspension keeps the first's reason.
+-- True when it suspended the tenant: one not suspended, or suspended by its partner, whose suspension
+-- this takes over, so the partner cannot lift it (set_partner_account_suspended). Otherwise a second
+-- suspension keeps the first's reason. Who did it is recorded after (staff_operator_record).
 CREATE OR REPLACE FUNCTION slotlock.suspend_tenant(requested_tenant_ref text, requested_reason text)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -3562,9 +3662,12 @@ BEGIN
   -- The tenant's key lock too: a key or secret being issued commits first, and one issued after
   -- this commits sees the suspension and is refused.
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || requested_tenant_ref, 0));
-  INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
-  VALUES (requested_tenant_ref, requested_reason)
-  ON CONFLICT (tenant_ref) DO NOTHING;
+  INSERT INTO slotlock.tenant_suspensions AS held (tenant_ref, reason, source)
+  VALUES (requested_tenant_ref, requested_reason, 'operator')
+  ON CONFLICT (tenant_ref) DO UPDATE
+     SET reason = EXCLUDED.reason, source = EXCLUDED.source, suspended_at = EXCLUDED.suspended_at,
+         customer_message = NULL, suspended_by = NULL
+   WHERE held.source = 'partner';
   RETURN FOUND;
 END
 $slotlock_suspend_tenant$;
@@ -6191,7 +6294,8 @@ $slotlock_get_partner_account$;
 REVOKE ALL ON FUNCTION ${SLOTLOCK_PARTNER_FUNCTIONS[5]} FROM PUBLIC;
 
 -- Suspend an account of the partner's, or lift a suspension the partner made: one Pylota made (for
--- abuse, say) the partner cannot lift. True when it changed something; null for no such account.
+-- abuse, say), before the partner's or taking it over after, the partner cannot lift. True when it
+-- changed something; null for no such account.
 CREATE OR REPLACE FUNCTION slotlock.set_partner_account_suspended(
   requested_partner_id text, requested_account text, requested_suspended boolean, requested_reason text
 )
@@ -6212,13 +6316,13 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:tenant:' || tenant, 0));
   PERFORM pg_advisory_xact_lock(hashtextextended('slotlock:api-keys:' || tenant, 0));
   IF requested_suspended THEN
-    INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason)
-    VALUES (tenant, 'partner: ' || COALESCE(left(requested_reason, 200), 'suspended by its partner'))
+    INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason, source)
+    VALUES (tenant, 'partner: ' || COALESCE(left(requested_reason, 200), 'suspended by its partner'), 'partner')
     ON CONFLICT (tenant_ref) DO NOTHING;
     RETURN FOUND;
   END IF;
   DELETE FROM slotlock.tenant_suspensions held
-   WHERE held.tenant_ref = tenant AND held.reason LIKE 'partner: %';
+   WHERE held.tenant_ref = tenant AND held.source = 'partner';
   RETURN FOUND;
 END
 $slotlock_set_partner_account_suspended$;

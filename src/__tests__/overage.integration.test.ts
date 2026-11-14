@@ -1,11 +1,12 @@
 // Metered overage for Developer, against real Postgres as the schema owner: each paying Developer
-// tenant's operations above its quota are sent to Stripe once, as Billing Meter events, and a
-// paying tenant is refused only past the overage stop. Skipped without DATABASE_URL.
+// tenant whose subscription carries the metered price has its operations above its quota sent to
+// Stripe once, as Billing Meter events, and is refused only past the overage stop. Skipped without
+// DATABASE_URL.
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { reportSlotlockOverage, slotlockMonthOf } from '../overage.js';
-import { readSlotlockTenantQuotas, setSlotlockTenantPlan } from '../plans.js';
+import { readSlotlockTenantQuotas, setSlotlockTenantPlan, setSlotlockTenantPlanOverage } from '../plans.js';
 import { createSlotlockStore } from '../store.js';
 
 const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?.trim();
@@ -13,6 +14,8 @@ const url = process.env.DATABASE_URL?.trim() || process.env.DATABASE_URL_DIRECT?
 describe.skipIf(!url)('metered overage (real Postgres)', () => {
   const paying = `overage-paying-${randomUUID()}`;
   const free = `overage-free-${randomUUID()}`;
+  // Pays for Developer, bought before overage was sold: no metered price on its subscription.
+  const unmetered = `overage-unmetered-${randomUUID()}`;
   const month = slotlockMonthOf(Date.now());
   let sql: ReturnType<typeof postgres>;
 
@@ -28,8 +31,17 @@ describe.skipIf(!url)('metered overage (real Postgres)', () => {
       stripeCustomer: 'cus_Overage1',
       stripeSubscription: 'sub_Overage1',
     });
+    await setSlotlockTenantPlanOverage(sql, { tenantRef: paying, stripeSubscription: 'sub_Overage1', metered: true });
+    await setSlotlockTenantPlan(sql, {
+      tenantRef: unmetered,
+      plan: 'developer',
+      status: 'active',
+      stripeCustomer: 'cus_Overage2',
+      stripeSubscription: 'sub_Overage2',
+    });
+    await setSlotlockTenantPlanOverage(sql, { tenantRef: unmetered, stripeSubscription: 'sub_Overage2', metered: false });
     await setSlotlockTenantPlan(sql, { tenantRef: free, plan: 'free', status: 'active' });
-    for (const tenant of [paying, free]) {
+    for (const tenant of [paying, unmetered, free]) {
       await sql`
         INSERT INTO slotlock.usage_daily (tenant_ref, day, metric, key_id, origin, count)
         VALUES (${tenant}, current_date, 'operations', '', 'rest', 600000)`;
@@ -37,21 +49,37 @@ describe.skipIf(!url)('metered overage (real Postgres)', () => {
   });
 
   afterAll(async () => {
-    for (const tenant of [paying, free]) {
+    for (const tenant of [paying, unmetered, free]) {
       await sql`UPDATE slotlock.tenant_plans SET stripe_subscription = NULL WHERE tenant_ref = ${tenant}`;
       await sql`SELECT * FROM slotlock.erase_tenant(${tenant}::text)`;
     }
     await sql.end();
   });
 
-  it('lets a paying Developer tenant past its quota up to the overage stop, and no one else', async () => {
+  it('lets a paying Developer tenant whose subscription carries the metered price past its quota up to the overage stop, and no one else', async () => {
     expect(await readSlotlockTenantQuotas(sql, paying, { overageStopPercent: 300 })).toEqual({
       operations: 500_000,
       bookings: 25_000,
       stopPercent: 300,
     });
     expect(await readSlotlockTenantQuotas(sql, paying)).toMatchObject({ stopPercent: 110 });
+    // Paying, but nothing would bill its use past the quota: refused past 110%, as the Terms say.
+    expect(await readSlotlockTenantQuotas(sql, unmetered, { overageStopPercent: 300 })).toMatchObject({ stopPercent: 110 });
     expect(await readSlotlockTenantQuotas(sql, free, { overageStopPercent: 300 })).toMatchObject({ stopPercent: 100 });
+  });
+
+  it('stops a paying tenant at 110% on a schema from before this release, which cannot say the price is carried', async () => {
+    // The dashboard Worker deploys on its own, so it may run against a database not migrated yet.
+    const rolledBack = new Error('rolled back');
+    const seen = await sql
+      .begin(async (tx) => {
+        await tx`DROP FUNCTION slotlock.tenant_plan_overage(text)`;
+        const quotas = await readSlotlockTenantQuotas(tx, paying, { overageStopPercent: 300 });
+        throw Object.assign(rolledBack, { quotas });
+      })
+      .catch((error: unknown) => (error === rolledBack ? (error as { quotas?: unknown }).quotas : Promise.reject(error)));
+    expect(seen).toMatchObject({ stopPercent: 110 });
+    expect(await readSlotlockTenantQuotas(sql, paying, { overageStopPercent: 300 })).toMatchObject({ stopPercent: 300 });
   });
 
   it('sends each operation above the quota once, and again only what is new', async () => {
@@ -71,6 +99,9 @@ describe.skipIf(!url)('metered overage (real Postgres)', () => {
     const first = await reportSlotlockOverage(sql, { month, stripe });
     expect(ours(first)).toEqual({ tenant: paying, over: 100_000, reported: 100_000, sent: 100_000 });
     expect(first.tenants.some((row) => row.tenant === free)).toBe(false);
+    // Its use past the quota is free for it, so none is sent: Stripe would have nothing to bill it at.
+    expect(first.tenants.some((row) => row.tenant === unmetered)).toBe(false);
+    expect(events.some((form) => form.get('payload[stripe_customer_id]') === 'cus_Overage2')).toBe(false);
     const sent = events.filter((form) => form.get('payload[stripe_customer_id]') === 'cus_Overage1');
     expect(sent).toHaveLength(1);
     expect(sent[0]?.get('event_name')).toBe('slotlock_operations');

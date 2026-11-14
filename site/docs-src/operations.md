@@ -42,8 +42,10 @@ In a process of your own:
   command is evaluated afresh under its expected revision, and a pruned agent identity can be
   created again. `retentionDays` (1-3650) changes the window; keep it longer than any client retries.
 - **Export.** `slotlock tenant export --out <dir>` writes everything the tenant keeps, read at one
-  moment, as one `<table>.ndjson` file a table (owner-only files, in a new or empty directory);
-  without `--out` it prints `{"table": ..., "row": ...}` lines. Secrets stay out. Over the API,
+  moment, as one `<table>.ndjson` file a table: owner-only files it makes itself, in a new directory
+  (made owner-only) or an empty one that is yours and no one else can write. A link there, or a file
+  that appears under a table's name, stops it; export again into a new directory. Without `--out`
+  it prints `{"table": ..., "row": ...}` lines. Secrets stay out. Over the API,
   `POST /v1/tenant/exports` builds the same into parts kept 24 hours; maintenance deletes expired
   ones and builds any a stopped server left pending.
 - **One person.** `slotlock subject export --email <address>` (or `--holder`, `--contact`,
@@ -62,7 +64,9 @@ In a process of your own:
   your own erasure workflow; nothing is deleted table by table. Only the API keys' SHA-256 digests
   stay, with nothing about the tenant, so an erased key is never accepted again. The dashboard's
   other records hold no tenant and expire within 12 hours; a form record carries a SHA-256 digest
-  of the GitHub user id that sent it, and an accepted write confirmation a digest of its nonce.
+  of the person who sent it, and an accepted write confirmation a digest of its nonce. The form
+  records of a session a team's single sign-on began alone, and of signing out past the form limit,
+  count apart from the person's and stay until they expire.
 
 ## Production checklist
 

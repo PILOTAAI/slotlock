@@ -1570,6 +1570,41 @@ function budgetTimezoneCoverage(root: ICAL.Component, budget: RecurrenceBudget):
   }
 }
 
+/** An untrusted calendar parsed with a feed's bounds, for a reader outside this module. */
+export interface BoundedICalendar {
+  root: ICAL.Component;
+  /**
+   * `event.iterator()`, its construction and every later step charged to the parse's one budget
+   * (a feed's): throws CalendarExpansionLimitError past it, or CalendarContractError for a rule
+   * that cannot be budgeted.
+   */
+  expand(event: ICAL.Event): ICAL.RecurExpansion;
+}
+
+/**
+ * Parse untrusted iCalendar read elsewhere (holiday calendars, src/holidays.ts) under the bounds
+ * parseICalendarFeed applies, so ical.js never does unbounded work on it: property heads and
+ * VTIMEZONEs counted before ical.js parses, the zones' rules budgeted and every VEVENT's spans and
+ * dates bounded before any time is read, and each expansion built by `expand`. It leaves the VEVENT
+ * count, and whether the root is a VCALENDAR, to the caller. Throws CalendarContractError
+ * (CalendarExpansionLimitError past a limit), or what ical.js throws for text it cannot parse.
+ */
+export function parseBoundedICalendar(input: string): BoundedICalendar {
+  if (Buffer.byteLength(input, 'utf8') > MAX_ICAL_INPUT_BYTES) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  if ((input.match(/^BEGIN:VTIMEZONE\r?$/gim)?.length ?? 0) > MAX_ICAL_TIMEZONES) expansionLimit();
+  boundPropertyHeads(input);
+  const budget = new RecurrenceBudget(FEED_LIMITS);
+  const root = new ICAL.Component(ICAL.parse(input));
+  let Budgeted: typeof ICAL.RecurIterator | undefined;
+  const budgeted = () => (Budgeted ??= budgetedRecurIterator(budget));
+  budgetTimezoneRules(root, budgeted);
+  budgetTimezoneCoverage(root, budget);
+  boundComponents(root.getAllSubcomponents('vevent'));
+  return { root, expand: (event) => budgetedExpansion(event, budgeted(), budget) };
+}
+
 function cursorTime(time: ICAL.Time): CursorTime {
   return [time.year, time.month, time.day, time.hour, time.minute, time.second, time.isDate];
 }

@@ -1,7 +1,8 @@
 // scripts/deploy-dashboard.mjs against stand-ins for wrangler, for Cloudflare's API and for the live
 // dashboard: it deploys and checks the live site; it rolls back to the versions that were live when
 // that check fails; and it stops before deploying a configuration that would break the dashboard
-// (a var with a secret's name, a missing secret, Hyperdrive caching, values left from the example).
+// (a var with a secret's name, a missing secret, Hyperdrive caching, values left from the example) or
+// let its fetches skip its own zone's security settings (no global_fetch_strictly_public).
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type Server, createServer } from 'node:http';
@@ -93,7 +94,8 @@ function config(vars: Record<string, string> = {}, extra = '') {
 {
   "name": "slotlock-dashboard",
   "main": "worker.ts",
-  "compatibility_date": "2026-10-01",${extra}
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["global_fetch_strictly_public"],${extra}
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "${HYPERDRIVE}" }],
   "vars": ${JSON.stringify({ SLOTLOCK_PUBLIC_URL: base, SLOTLOCK_SERVICE_URL: 'https://slotlock-api.test', ...vars })},
 }
@@ -203,6 +205,8 @@ describe('scripts/deploy-dashboard.mjs', () => {
     ['a free-plan date', null, 'vars.SLOTLOCK_FREE_PLAN_FROM makes billing answer 503'],
     ['plain http to another host', null, 'vars.SLOTLOCK_PUBLIC_URL must be the dashboard\'s https origin'],
     ['another entry point', null, '"main" must be worker.ts'],
+    ['no strictly public fetch', null, '"compatibility_flags" must include "global_fetch_strictly_public"'],
+    ['the private-origin fetch', null, '"compatibility_flags" must include "global_fetch_strictly_public"'],
     ['not JSON', '{ "name": ', 'It is not JSON or JSONC'],
   ])('refuses %s before it asks Cloudflare anything', async (name, given, message) => {
     const text =
@@ -212,6 +216,11 @@ describe('scripts/deploy-dashboard.mjs', () => {
         'a free-plan date': config({ SLOTLOCK_FREE_PLAN_FROM: '2026-11-16' }),
         'plain http to another host': config({ SLOTLOCK_PUBLIC_URL: 'http://app.slotlock.test' }),
         'another entry point': config().replace('"main": "worker.ts"', '"main": "src/other.ts"'),
+        'no strictly public fetch': config().replace('  "compatibility_flags": ["global_fetch_strictly_public"],\n', ''),
+        'the private-origin fetch': config().replace(
+          '["global_fetch_strictly_public"]',
+          '["global_fetch_strictly_public", "global_fetch_private_origin"]',
+        ),
       }[name] ??
       '';
     const result = await deploy(text);

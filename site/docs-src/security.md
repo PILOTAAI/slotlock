@@ -13,6 +13,10 @@ With `confirmation`, a listed write first asks the person a yes/no question that
 will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
 handover".` Only an explicit yes runs the write.
 
+- Listing a write guards every tool that performs it, whichever name is listed: `slotlock_cancel`
+  waits with `slotlock_delete_event` and is asked as the same deletion, `slotlock_reschedule` with
+  `slotlock_update_event`, and `slotlock_confirm_slot` with `slotlock_create_event`, asked as
+  booking the time its hold holds. Holds never wait: they book nothing and lapse within minutes.
 - A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
   the other fields it sets (`also description, attendees`) without quoting them.
 - Facts come first: the resource by its own reference, times in its own zone, and an event as it
@@ -60,7 +64,8 @@ threat model, including what the role check does not read.
 - A callback works once, a signed-out cookie stays out, and a reloaded form does not create or
   rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, kept until its cookie or
   form expires (12 hours at most), so this holds on every server sharing the database, behind any
-  load balancer; a form record also carries a digest of the GitHub user id that sent it. The server
+  load balancer; a form record also carries a digest of the person who sent it (and of the team's
+  provider, for a session its single sign-on began alone), so each has its own limit. The server
   role reaches them only through two SECURITY DEFINER functions, and `serve` refuses to start the
   dashboard until `migrate` has granted them.
 - The database's clock decides when a sign-in or session has expired, so servers whose clocks drift

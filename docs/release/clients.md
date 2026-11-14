@@ -13,7 +13,7 @@ every client's manifest and User-Agent constant to the release (`scripts/client-
 | Rust | crates.io, `slotlock` | `crates-io` | Trusted publishing (OIDC), after a first manual publish |
 | .NET | NuGet, `Slotlock.Client` | `nuget` | Trusted publishing (OIDC); no token stored |
 | Java | Maven Central, `io.pylota:slotlock` | `maven-central` | Central Portal user token and a signing key, in the environment |
-| Go | `github.com/PILOTAAI/slotlock/clients/go` | `go-module` | `GITHUB_TOKEN` pushes the `clients/go/v<version>` tag |
+| Go | `github.com/PILOTAAI/slotlock/clients/go` | `go-module` | The release deploy key pushes the `clients/go/v<version>` tag |
 
 Approving an environment is the human gate for every registry: once approved, the job publishes.
 For Maven Central, the job uploads a deployment that publishes itself once Central has validated it
@@ -112,9 +112,12 @@ Maven Central has no trusted publishing; the Central Portal takes a user token
 
 ### Go
 
-Nothing to create. The `go-module` job pushes the annotated tag `clients/go/v<version>` on the
-release commit and asks proxy.golang.org for it, which lists it for `go get` and pkg.go.dev. The
-"Release tags are permanent" ruleset keeps anyone but an admin from moving or deleting the tag.
+Nothing to create: `scripts/configure-github.sh` stores the release deploy key in the `go-module`
+environment. The `go-module` job pushes the annotated tag `clients/go/v<version>` on the release
+commit with it, and asks proxy.golang.org for it, which lists it for `go get` and pkg.go.dev. The
+proxy serves whatever commit such a tag names, so the "Release tags" ruleset lets only an admin or
+a deploy key create one: no other token that can write to the repository publishes a Go version.
+"Release tags are permanent" keeps anyone but an admin from moving or deleting it.
 
 ## Installing a published client
 

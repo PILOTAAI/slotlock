@@ -29,6 +29,14 @@
   // From 2026-08-04 the Node.js APIs the dashboard uses (node:crypto, node:async_hooks, Buffer) are
   // on by default.
   "compatibility_date": "2026-10-01",
+  // Without this flag, a Worker's fetch to a hostname in its own zone goes straight to that zone's
+  // origin, "bypassing Cloudflare security settings" (WAF, Access, IP rules); with it, the fetch goes
+  // through the zone's front door like any request from the internet. The dashboard fetches URLs
+  // members give: a holiday calendar's, the assistant's model, a team's identity provider. The flag
+  // has no default date, so keep it: scripts/deploy-dashboard.mjs refuses a configuration without it.
+  // https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public
+  // (read 2026-11-14; workerd 1.20261019.1, which wrangler 4.152.0 runs, knows it).
+  "compatibility_flags": ["global_fetch_strictly_public"],
   // Yours: the dashboard's hostname. A Custom Domain gets its own certificate at any depth; no Worker
   // route in the zone may match it, because a route runs before a Custom Domain.
   "routes": [{ "pattern": "dashboard.example.com", "custom_domain": true }],

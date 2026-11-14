@@ -40,6 +40,7 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
   const stackapi = `stackapi-${suffix}`;
   const rival = `rival-${suffix}`;
   const billed = `billed-${suffix}`;
+  const held = `held-${suffix}`;
   let admin: ReturnType<typeof postgres>;
   let application: ReturnType<typeof postgres>;
 
@@ -59,7 +60,7 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
   });
 
   afterAll(async () => {
-    for (const partner of [stackapi, rival, billed]) {
+    for (const partner of [stackapi, rival, billed, held]) {
       await admin`DELETE FROM slotlock.partner_invoices WHERE partner_id = ${partner}`;
       await admin`DELETE FROM slotlock.partner_month_closes WHERE partner_id = ${partner}`;
       for (const { tenant_ref } of await admin<{ tenant_ref: string }[]>`
@@ -194,10 +195,12 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
       code: 'forbidden',
     });
 
-    // Suspended by its partner: reads only; lifted by it. One Pylota made, it cannot lift.
+    // Suspended by its partner: its keys are refused until it lifts it. One Pylota made, it cannot lift.
     expect(await call('partnerSuspendAccount', { account: 'user-1', reason: 'unpaid' })).toEqual({ suspended: true });
     expect(await store.isTenantSuspended({ tenantRef })).toBe(true);
+    expect(await authenticateKey(bearer(rotated.key))).toBeNull();
     expect(await call('partnerUnsuspendAccount', { account: 'user-1' })).toEqual({ unsuspended: true });
+    expect(await authenticateKey(bearer(rotated.key))).toMatchObject({ tenantRef });
     await createSlotlockStore(admin).suspendTenant({ tenantRef, reason: 'abuse' });
     expect(await call('partnerUnsuspendAccount', { account: 'user-1' })).toEqual({ unsuspended: false });
     expect(await store.isTenantSuspended({ tenantRef })).toBe(true);
@@ -230,6 +233,96 @@ describe.skipIf(!url)('partner accounts (real Postgres)', () => {
     expect(await authenticateKey(bearer(rotated.key))).toBeNull();
     expect(await call('partnerListAccounts', {})).toEqual({ accounts: [] });
     expect(await readSlotlockTenantPlan(application, tenantRef)).toBeNull();
+  });
+
+  it('keeps a suspension Pylota made, whatever the order, and erases no suspended account', async () => {
+    await putSlotlockPartner(admin, { id: held, name: 'Held', contract: CONTRACT });
+    const store = createSlotlockStore(application);
+    const owner = createSlotlockStore(admin);
+    const backend = createSlotlockStoreApplicationBackend(store, {
+      partners: createSlotlockPartnerStore(application, {
+        keys: createSlotlockApiKeyStore(application),
+        eraseTenant: (tenantRef) => store.eraseTenant({ tenantRef }),
+      }),
+    });
+    const partner: SlotlockAgentPrincipal = {
+      subject: 'partner_key:held',
+      tenantRef: `partner:${held}`,
+      scopes: ['partner'],
+      partnerId: held,
+    };
+    const call = (name: keyof typeof backend, input: Record<string, unknown>) =>
+      backend[name]({ principal: partner, operation: name as never, signal: new AbortController().signal }, input);
+    const account = { account: 'acct-1' };
+    const erase = { account: 'acct-1', confirm: 'acct-1' };
+    const tenantRef = `partner:${held}:acct-1`;
+    await call('partnerPutAccount', { ...account, plan: 'partner_free' });
+    await store.withTenant(tenantRef, (tenant) => tenant.createResource({ tenantRef, externalRef: 'van-1', timezone: 'UTC' }));
+
+    // The partner's first, then Pylota's: Pylota's takes it over, and the partner cannot lift it.
+    expect(await call('partnerSuspendAccount', { ...account, reason: 'unpaid' })).toEqual({ suspended: true });
+    expect(await owner.suspendTenant({ tenantRef, reason: 'abuse case 2' })).toEqual({ suspended: true });
+    expect(await owner.suspendTenant({ tenantRef, reason: 'abuse case 2' })).toEqual({ suspended: false });
+    expect(await call('partnerUnsuspendAccount', account)).toEqual({ unsuspended: false });
+    expect(await store.isTenantSuspended({ tenantRef })).toBe(true);
+    // Nor can it erase the account while Pylota holds it: its data is kept for Pylota.
+    await expect(call('partnerEraseAccount', erase)).rejects.toMatchObject({ code: 'tenant_suspended', status: 403 });
+    expect(await call('partnerGetAccount', account)).toMatchObject({ account: { status: 'suspended', resources: 1 } });
+    expect(await owner.unsuspendTenant({ tenantRef })).toEqual({ unsuspended: true });
+
+    // Pylota's first: the partner's suspension adds nothing, and its lift lifts nothing.
+    expect(await owner.suspendTenant({ tenantRef, reason: 'abuse case 3' })).toEqual({ suspended: true });
+    expect(await call('partnerSuspendAccount', { ...account, reason: 'unpaid' })).toEqual({ suspended: false });
+    expect(await call('partnerUnsuspendAccount', account)).toEqual({ unsuspended: false });
+    expect(await store.isTenantSuspended({ tenantRef })).toBe(true);
+    await expect(call('partnerEraseAccount', erase)).rejects.toMatchObject({ code: 'tenant_suspended', status: 403 });
+    expect(await owner.unsuspendTenant({ tenantRef })).toEqual({ unsuspended: true });
+
+    // Its own suspension stops its erasure too, until it lifts it.
+    expect(await call('partnerSuspendAccount', account)).toEqual({ suspended: true });
+    await expect(call('partnerEraseAccount', erase)).rejects.toMatchObject({ code: 'tenant_suspended', status: 403 });
+    expect(await call('partnerUnsuspendAccount', account)).toEqual({ unsuspended: true });
+    expect(await call('partnerEraseAccount', erase)).toMatchObject({ erased: true });
+    expect(await call('partnerListAccounts', {})).toEqual({ accounts: [] });
+  });
+
+  it("records who made a suspension from before that was recorded: a partner's by its reason alone", async () => {
+    const refs = {
+      partner: `partner:${held}:legacy`,
+      operator: `legacy-operator-${suffix}`,
+      cli: `legacy-cli-${suffix}`,
+      staff: `legacy-staff-${suffix}`,
+    };
+    const sources = async () =>
+      Object.fromEntries(
+        (
+          await admin<{ tenant_ref: string; source: string }[]>`
+            SELECT tenant_ref, source FROM slotlock.tenant_suspensions WHERE tenant_ref IN ${admin(Object.values(refs))}`
+        ).map((row) => [row.tenant_ref, row.source]),
+      );
+    try {
+      // A schema from before the column, with what each party wrote then.
+      await admin`ALTER TABLE slotlock.tenant_suspensions DROP COLUMN source`;
+      await admin`
+        INSERT INTO slotlock.tenant_suspensions (tenant_ref, reason, suspended_by) VALUES
+          (${refs.partner}, 'partner: unpaid', NULL),
+          (${refs.operator}, 'abuse', NULL),
+          (${refs.cli}, 'partner: in its words', 'cli:ops'),
+          (${refs.staff}, 'Card testing', 'github:1002')`;
+      await createSlotlockStore(admin).applySchema();
+      expect(await sources()).toEqual({
+        [refs.partner]: 'partner',
+        [refs.operator]: 'operator',
+        [refs.cli]: 'operator',
+        [refs.staff]: 'staff',
+      });
+      // Read once, when the column is added: a later migration leaves every source as it is.
+      await admin`UPDATE slotlock.tenant_suspensions SET reason = 'partner: now', suspended_by = NULL WHERE tenant_ref = ${refs.operator}`;
+      await createSlotlockStore(admin).applySchema();
+      expect((await sources())[refs.operator]).toBe('operator');
+    } finally {
+      await admin`DELETE FROM slotlock.tenant_suspensions WHERE tenant_ref IN ${admin(Object.values(refs))}`;
+    }
   });
 
   it('closes a month once: priced lines recorded, usage.period_closed signed, Stripe items made once', async () => {

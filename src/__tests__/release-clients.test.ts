@@ -217,7 +217,24 @@ describe('client publishing', () => {
     expect(read('scripts/central-bundle.sh')).toContain('publishingType=AUTOMATIC');
     expect(read('scripts/central-bundle.sh')).not.toContain('USER_MANAGED&');
     expect(job('go-module')).toContain('scripts/tag-go-module.sh');
-    expect(job('go-module')).toContain('contents: write');
+  });
+
+  // proxy.golang.org serves whatever commit a clients/go/v<version> tag names, so creating one
+  // publishes a version. GITHUB_TOKEN, and any other token that can write to the repository (the
+  // Slotlock CMS App's, say), must not be able to: the go-module job pushes it with the release
+  // deploy key, which only runs on main and an approved go-module job can read.
+  it('pushes the Go module tag with the release deploy key, not GITHUB_TOKEN', () => {
+    const go = job('go-module');
+    expect(go).toMatch(/ {4}permissions:\n(?: {6}#.*\n)* {6}contents: read\n {4}steps:/);
+    expect(go).not.toMatch(/(?:contents|actions): write/);
+    expect(go).toContain('ssh-key: ${{ secrets.TAG_RELEASE_DEPLOY_KEY }}');
+    expect(go).toContain("HAS_DEPLOY_KEY: ${{ secrets.TAG_RELEASE_DEPLOY_KEY != '' }}");
+    // The one action the job runs is set up before the key is on disk.
+    expect(go.indexOf('uses: actions/setup-go@')).toBeGreaterThan(0);
+    expect(go.indexOf('uses: actions/setup-go@')).toBeLessThan(go.indexOf('uses: actions/checkout@'));
+    // A clients/go/v* tag pushed with a deploy key starts no workflow: release.yml's v* does not
+    // match across a slash, and every other push trigger names branches only.
+    expect(release).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
   });
 
   it("ships the licence in the Python sdist and wheel: a copy of the repository's, named in pyproject", () => {
@@ -257,16 +274,27 @@ describe('client publishing', () => {
         ),
       );
     }
-    // A Go module version is its tag: once pushed, nobody but an admin moves or deletes it.
-    const permanent = [
+    // A Go module version is its tag: only an admin or a deploy key creates one, as for a v* tag,
+    // and once pushed, nobody but an admin moves or deletes it.
+    const rulesets = [
       ...result.stdout.matchAll(/^> (?:PUT|POST) \/\S+rulesets\S*\n(\{[\s\S]*?\n\})$/gm),
-    ]
-      .map(([, json]) => JSON.parse(json as string))
-      .find((body) => body.name === 'Release tags are permanent');
+    ].map(([, json]) => JSON.parse(json as string));
+    const created = rulesets.find((body) => body.name === 'Release tags');
+    expect(created.rules).toEqual([{ type: 'creation' }]);
+    expect(created.conditions.ref_name.include).toEqual(['refs/tags/v*', 'refs/tags/clients/go/v*']);
+    expect(created.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+      { actor_id: null, actor_type: 'DeployKey', bypass_mode: 'always' },
+    ]);
+    const permanent = rulesets.find((body) => body.name === 'Release tags are permanent');
     expect(permanent.conditions.ref_name.include).toEqual([
       'refs/tags/v*',
       'refs/tags/clients/go/v*',
     ]);
+    // The go-module job gets the deploy key that ruleset lets through.
+    expect(result.stdout).toContain(
+      'gh secret set TAG_RELEASE_DEPLOY_KEY --env go-module --repo PILOTAAI/slotlock',
+    );
   });
 });
 

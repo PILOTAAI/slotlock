@@ -3323,8 +3323,9 @@ public abstract class SlotlockOperations {
 
   /**
    * Get the tenant. The key's tenant: its reference, and whether it is suspended. A suspended
-   * tenant may read and writes nothing (403 tenant_suspended); only the server's operator
-   * suspends a tenant or lifts a suspension (slotlock tenant suspend).
+   * tenant writes nothing (403 tenant_suspended), and its API keys are refused (401) until the
+   * suspension is lifted; only the server's operator suspends a tenant or lifts a suspension
+   * (slotlock tenant suspend).
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -4259,8 +4260,9 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Suspend an account. Suspend the account, as slotlock tenant suspend: it may read, and writes
-   * nothing; its keys get no new secret. suspended says whether it was not suspended already.
+   * Suspend an account. Suspend the account, as slotlock tenant suspend: it writes nothing, and
+   * its keys are refused (401) and get no new secret until the suspension is lifted. suspended
+   * says whether it was not suspended already.
    *
    * @param account {@code account}, string
    * @param optional the optional arguments, or null: {@code reason} (string)
@@ -4275,8 +4277,9 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Suspend an account. Suspend the account, as slotlock tenant suspend: it may read, and writes
-   * nothing; its keys get no new secret. suspended says whether it was not suspended already.
+   * Suspend an account. Suspend the account, as slotlock tenant suspend: it writes nothing, and
+   * its keys are refused (401) and get no new secret until the suspension is lifted. suspended
+   * says whether it was not suspended already.
    *
    * @param account {@code account}, string
    * @return the response body
@@ -4287,8 +4290,9 @@ public abstract class SlotlockOperations {
   }
 
   /**
-   * Lift a suspension. Lift a suspension the partner made. One Pylota made stays: unsuspended is
-   * false then, as when the account was not suspended.
+   * Lift a suspension. Lift a suspension the partner made. One Pylota made stays, whether before
+   * the partner's or after (it takes the partner's over): unsuspended is false then, as when the
+   * account was not suspended.
    *
    * @param account {@code account}, string
    * @return the response body
@@ -4302,7 +4306,9 @@ public abstract class SlotlockOperations {
 
   /**
    * Erase an account. Erase the account's tenant, every row it owns, as /v1/tenant/erase, and the
-   * partner's record of it. confirm repeats the account. Cannot be undone.
+   * partner's record of it. confirm repeats the account. Cannot be undone. A suspended account is
+   * not erased (403 tenant_suspended), whoever suspended it: the partner lifts its own suspension
+   * first, and one Pylota made keeps the data for Pylota.
    *
    * @param account {@code account}, string
    * @param confirm {@code confirm}, string
