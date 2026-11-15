@@ -721,6 +721,51 @@ describe.skipIf(!url)('admin console CMS (real Postgres, fake GitHub)', () => {
     expect(await (await ownerBrowser.request(`/content/${draft}?error=not_submitted`)).text()).toContain('It is still a draft. Choose Ready to publish first.');
   });
 
+  it('deletes a post: a pull request that takes it and its files off the site, published by an Owner', async () => {
+    const gone = 'calendars-to-delete';
+    const text = (repo.text('main', `site/content/blog/${EXISTING}.md`) ?? '').replace(
+      /^description: .*$/m,
+      'description: A post that goes, with its picture, once an Owner publishes its deletion from the admin console.',
+    );
+    const title = parsePost(text, gone).front.title;
+    repo.pushToMain({ [`site/content/blog/${gone}.md`]: text, [`site/public/blog/${gone}/van.png`]: 'not really a picture' });
+
+    // Anyone who writes asks for it, here an Editor: a pull request that removes the post and its files.
+    const asked = await form(editor, `/content/${gone}/delete`, {}, `/content/${gone}`);
+    expect(asked.headers.get('location')).toBe(`/content/${gone}?done=delete_opened`);
+    const files = repo.files(`cms/${gone}`);
+    expect(files.has(`site/content/blog/${gone}.md`)).toBe(false);
+    expect(files.has(`site/public/blog/${gone}/van.png`)).toBe(false);
+    expect(repo.text('main', `site/content/blog/${gone}.md`)).not.toBeNull();
+    expect(pullOf(gone)?.title).toBe(`Blog: delete "${title}"`);
+    expect(await log('github:1004')).toContain(`content.deleted post:${gone}`);
+
+    // The post's page says what publishing does, with Publish for an Owner and a way to keep the post.
+    const page = await (await ownerBrowser.request(`/content/${gone}`)).text();
+    expect(page).toContain('To delete');
+    expect(page).toContain(`action="/content/${gone}/publish"`);
+    expect(page).toContain(`action="/content/${gone}/discard"`);
+    expect(await (await ownerBrowser.request('/content')).text()).toContain('To delete');
+    // Asked again while that pull request is open: refused, nothing more is written.
+    const head = headOf(gone);
+    expect((await form(ownerBrowser, `/content/${gone}/delete`, {}, `/content/${gone}`)).headers.get('location')).toBe(`/content/${gone}?error=delete_draft`);
+    expect(headOf(gone)).toBe(head);
+    // Keeping the post closes that pull request and goes back to the post, which is as it was.
+    const kept = await form(ownerBrowser, `/content/${gone}/discard`, {}, `/content/${gone}`);
+    expect(kept.headers.get('location')).toBe(`/content/${gone}?done=delete_cancelled`);
+    expect(repo.head(`cms/${gone}`)).toBeNull();
+    expect(await (await ownerBrowser.request(`/content/${gone}`)).text()).toContain('Delete post');
+    expect((await form(editor, `/content/${gone}/delete`, {}, `/content/${gone}`)).headers.get('location')).toBe(`/content/${gone}?done=delete_opened`);
+
+    // Published once its checks pass: the post and its files leave main, and its address has no post.
+    const published = await form(ownerBrowser, `/content/${gone}/publish`, { sha: headOf(gone) }, `/content/${gone}`);
+    expect(published.headers.get('location')).toBe('/content?done=deleted');
+    expect(repo.text('main', `site/content/blog/${gone}.md`)).toBeNull();
+    expect(repo.bytes('main', `site/public/blog/${gone}/van.png`)).toBeNull();
+    expect(await log('github:1001')).toContain(`content.published post:${gone}`);
+    expect((await ownerBrowser.request(`/content/${gone}`)).status).toBe(404);
+  });
+
   it('says what to set when the CMS App is not configured', async () => {
     const bare = createSlotlockAdmin({
       sql: () => adminSql,

@@ -10,7 +10,8 @@ tags:
   - MCP
 image: blog-introducing-slotlock
 imageAlt: Introducing Slotlock, the calendar AI agents can't double-book.
-status: draft
+status: published
+publishAt: 2026-11-16T13:00Z
 related:
   - Booking MCP server | /mcp-server/
   - Quickstart | /docs/quickstart/

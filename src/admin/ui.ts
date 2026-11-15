@@ -1211,7 +1211,7 @@ ${bannerFrame('dark')}
 .article h2{margin:1.6em 0 .5em;font-size:20px;font-weight:600;letter-spacing:-.01em;color:var(--ink)}
 .article h3{margin:1.4em 0 .4em;font-size:16px;color:var(--ink)}
 .article p,.article ul,.article ol{margin:0 0 1em}
-.article a{color:var(--accent-ink)}
+.article a{color:var(--accent-ink);text-decoration:underline 1px color-mix(in srgb,currentColor 35%,transparent);text-underline-offset:.2em}.article a:hover{text-decoration-color:currentColor}
 .article strong{color:var(--ink)}
 .article code{font-size:.86em}
 .article pre{margin:0 0 1.2em;padding:14px 16px;overflow-x:auto;border-radius:10px;background:var(--fill);color:var(--ink);font-size:13px;line-height:1.6}

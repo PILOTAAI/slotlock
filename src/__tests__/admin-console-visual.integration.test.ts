@@ -430,6 +430,7 @@ describe.skipIf(!url || (!chromium && !REQUIRED))('the admin console in a browse
     { name: 'privacy-request', path: '/privacy/1' },
     { name: 'content', path: '/content', review: true },
     { name: 'post', path: '/content/booking-rules-for-agents' },
+    { name: 'post-live', path: '/content/why-ai-agents-double-book' },
     { name: 'site', path: '/site' },
     { name: 'communications', path: '/communications', review: true },
     { name: 'status-page', path: '/communications#status' },
@@ -492,6 +493,26 @@ describe.skipIf(!url || (!chromium && !REQUIRED))('the admin console in a browse
     // it waits for the save rather than putting live the post without this change.
     await tab.evaluate(`(() => { const body = document.getElementById('f-body'); body.value += '\\n\\nOne more line.'; body.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     expect(await tab.evaluate(button)).toEqual({ disabled: true, text: 'Save to publish' });
+    await browserContext.close();
+  });
+
+  it('offers Delete post on a post with no pull request open, and says what it does', async (context) => {
+    if (!browser) context.skip();
+    const { context: browserContext, tab } = await open(1440, 'dark', 2);
+    await tab.goto(`${ORIGIN}/content/why-ai-agents-double-book`, { waitUntil: 'load' });
+    const found = await tab.evaluate<{ action: string | null; text: string; inside: boolean } | null>(`(() => {
+      const box = [...document.querySelectorAll('details.popover')].find((item) => item.querySelector('summary').textContent.trim() === 'Delete post');
+      if (!box) return null;
+      box.open = true;
+      box.scrollIntoView({ block: 'center' });
+      const pop = box.querySelector('.pop').getBoundingClientRect();
+      return { action: box.querySelector('form').getAttribute('action'), text: box.textContent.replace(/\\s+/g, ' ').trim(), inside: pop.left >= 0 && pop.right <= window.innerWidth };
+    })()`);
+    // Open, it stays on the screen: it is the panel's last button, so it opens leftwards.
+    expect(found?.inside).toBe(true);
+    expect(found?.action).toBe('/content/why-ai-agents-double-book/delete');
+    expect(found?.text).toContain('Publishing it takes the post off the site, and its address answers Not found.');
+    await tab.screenshot({ path: join(SHOTS, 'post-delete-1440-dark@2x.png') });
     await browserContext.close();
   });
 
