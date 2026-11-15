@@ -26,7 +26,7 @@ import (
 )
 
 // Version is this client's version, sent in its User-Agent.
-const Version = "0.12.2"
+const Version = "0.12.3"
 
 type operation struct {
 	name       string
