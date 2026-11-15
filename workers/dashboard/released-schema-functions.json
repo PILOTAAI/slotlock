@@ -1,5 +1,5 @@
 {
-  "release": "0.12.2",
+  "release": "0.12.3",
   "functions": [
     "accept_invitation",
     "admin_account",
