@@ -126,17 +126,62 @@ export interface SlotlockServeDashboardConfig {
   githubClientId: string;
   githubClientSecret: string;
   sessionSecret: string;
-  /** GitHub user ids that may sign in, or `'*'` for every GitHub account. */
+  /** GitHub user ids and Google accounts (`google:<subject>`) that may sign in, or `'*'` for everyone. */
   allowedUsers: '*' | string[];
-  /** GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS). */
-  organizations?: string[];
+  /** Sign-in with Google too (SLOTLOCK_GOOGLE_CLIENT_ID and SLOTLOCK_GOOGLE_CLIENT_SECRET). */
+  google?: { clientId: string; clientSecret: string };
+  /**
+   * GitHub organization ids whose members share a tenant each (SLOTLOCK_DASHBOARD_ORGS), or
+   * `'enabled'`: those an owner turned on from the dashboard (Teams on Cloud, teams.ts).
+   */
+  organizations?: string[] | 'enabled';
+  /**
+   * Team workspaces (SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on): anyone signed in creates one and invites
+   * people to it by email, each with a role (workspaces.ts).
+   */
+  teamWorkspaces?: boolean;
+  /**
+   * Team invitations sent by email (SLOTLOCK_INVITATION_EMAIL resend or postmark, with
+   * SLOTLOCK_INVITATION_EMAIL_KEY and SLOTLOCK_INVITATION_EMAIL_FROM); without it, the person inviting
+   * sends the link.
+   */
+  invitationEmail?: { provider: 'resend' | 'postmark'; key: string; from: string };
+  /**
+   * Verified domains (SLOTLOCK_VERIFIED_DOMAINS=on, with team workspaces): a team's Owner proves a
+   * domain with a DNS record, and the people whose verified address is at it may ask to join. Looked
+   * up over DNS-over-HTTPS, or with the system's resolver (SLOTLOCK_DNS_RESOLVER=system, a server only).
+   */
+  verifiedDomains?: { resolver: 'doh' | 'system' };
+  /**
+   * Single sign-on through each team's own identity provider (SLOTLOCK_TEAM_SSO=on, with verified
+   * domains): its client secrets sealed under SLOTLOCK_SSO_SECRET.
+   */
+  teamSso?: { secret: string };
+  /**
+   * SCIM provisioning (SLOTLOCK_TEAM_SCIM=on, with verified domains): each team's identity provider
+   * adds, deactivates and groups its people at the dashboard's /scim/v2.
+   */
+  teamScim?: boolean;
   /** What the deployment is called in the dashboard (SLOTLOCK_DASHBOARD_NAME). */
   name?: string;
+  /**
+   * The terms people accept by signing in (SLOTLOCK_DASHBOARD_TERMS_URL): the sign-in page links
+   * them beside the button. Without it, the page names no terms.
+   */
+  termsUrl?: string;
+  /** What the sign-in page links as the privacy notice (SLOTLOCK_DASHBOARD_PRIVACY_URL). */
+  privacyUrl?: string;
   /**
    * Seals each tenant's model API key for the dashboard assistant (SLOTLOCK_ASSISTANT_SECRET).
    * Without it the assistant is off.
    */
   assistantSecret?: string;
+  /**
+   * Secrets model keys may still be sealed under, newest first (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS,
+   * comma-separated): each key one opens is sealed again under SLOTLOCK_ASSISTANT_SECRET when next
+   * used.
+   */
+  assistantPreviousSecrets?: string[];
   /**
    * Let the assistant reach a model at a local or private network address
    * (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on): a self-hosted model on the same machine or network.
@@ -161,9 +206,10 @@ const DASHBOARD_VARIABLES = [
 export function readDashboardUsers(env: SlotlockEnv): '*' | string[] | undefined {
   const users = optional(env, 'SLOTLOCK_DASHBOARD_USERS')?.replaceAll(' ', '');
   if (users === undefined) return undefined;
-  if (users !== '*' && !/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(users)) {
+  const person = '(?:[1-9]\\d{0,19}|google:[A-Za-z0-9._-]{1,255})';
+  if (users !== '*' && !new RegExp(`^${person}(,${person})*$`).test(users)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_USERS must be * for every GitHub account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id)',
+      'SLOTLOCK_DASHBOARD_USERS must be * for every account, or a comma-separated list of GitHub user ids (gh api users/<login> --jq .id) and Google accounts as google:<subject>',
     );
   }
   return users === '*' ? '*' : [...new Set(users.split(','))];
@@ -188,6 +234,16 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
       'SLOTLOCK_GITHUB_CLIENT_SECRET is required to serve the dashboard: a client secret of that GitHub OAuth app',
     );
   }
+  const googleClientId = optional(env, 'SLOTLOCK_GOOGLE_CLIENT_ID');
+  const googleClientSecret = readSecret(env, 'SLOTLOCK_GOOGLE_CLIENT_SECRET');
+  if ((googleClientId === undefined) !== (googleClientSecret === undefined)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GOOGLE_CLIENT_ID and SLOTLOCK_GOOGLE_CLIENT_SECRET go together: an OAuth client of a Google Cloud project whose redirect URI is <SLOTLOCK_PUBLIC_URL>/dashboard/callback',
+    );
+  }
+  if (googleClientId !== undefined && !/^[A-Za-z0-9._-]{1,200}$/.test(googleClientId)) {
+    throw new SlotlockConfigError('SLOTLOCK_GOOGLE_CLIENT_ID must be a Google OAuth client id');
+  }
   const sessionSecret = readSecret(env, 'SLOTLOCK_SESSION_SECRET');
   if (sessionSecret === undefined) {
     throw new SlotlockConfigError(
@@ -198,6 +254,7 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
     env.SLOTLOCK_GITHUB_CLIENT_SECRET,
     env.SLOTLOCK_AUTH_TOKEN,
     env.SLOTLOCK_CONFIRMATION_SECRET,
+    ...(googleClientSecret !== undefined ? [googleClientSecret] : []),
   ];
   if (others.includes(sessionSecret)) {
     throw new SlotlockConfigError('SLOTLOCK_SESSION_SECRET must differ from every other secret');
@@ -220,27 +277,112 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
   ) {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_SECRET must differ from every other secret');
   }
+  const previousSecrets = readAssistantPreviousSecrets(env, assistantSecret, [sessionSecret, ...others]);
   const privateUrls = optional(env, 'SLOTLOCK_ASSISTANT_PRIVATE_URLS') ?? 'off';
   if (privateUrls !== 'on' && privateUrls !== 'off') {
     throw new SlotlockConfigError('SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off');
   }
   const orgs = readDashboardOrganizations(env);
+  if (Array.isArray(orgs) && googleClientId !== undefined) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_GOOGLE_CLIENT_ID does not go with a list of SLOTLOCK_DASHBOARD_ORGS: those organizations are GitHub\'s; use SLOTLOCK_DASHBOARD_ORGS=enabled to have both',
+    );
+  }
+  const teamWorkspaces = readDashboardTeamWorkspaces(env);
+  if (teamWorkspaces && Array.isArray(orgs)) {
+    throw new SlotlockConfigError(
+      'SLOTLOCK_DASHBOARD_TEAM_WORKSPACES does not go with a list of SLOTLOCK_DASHBOARD_ORGS: with a list, everyone works in those organizations',
+    );
+  }
+  const invitationEmail = readInvitationEmail(env, teamWorkspaces);
+  const verifiedDomains = readVerifiedDomains(env);
+  const teamSso = readTeamSso(env, verifiedDomains !== undefined);
+  const teamScim = readTeamScim(env, verifiedDomains !== undefined);
   const name = optional(env, 'SLOTLOCK_DASHBOARD_NAME')?.trim();
   if (name !== undefined && name !== '' && !SLOTLOCK_DASHBOARD_NAME_PATTERN.test(name)) {
     throw new SlotlockConfigError(
       'SLOTLOCK_DASHBOARD_NAME must be 1-60 characters, without <, > or control or invisible characters',
     );
   }
+  const termsUrl = readPolicyUrl(env, 'SLOTLOCK_DASHBOARD_TERMS_URL');
+  const privacyUrl = readPolicyUrl(env, 'SLOTLOCK_DASHBOARD_PRIVACY_URL');
   return {
     githubClientId,
     githubClientSecret,
     sessionSecret,
     allowedUsers: users,
+    ...(googleClientId !== undefined && googleClientSecret !== undefined
+      ? { google: { clientId: googleClientId, clientSecret: googleClientSecret } }
+      : {}),
     ...(orgs !== undefined ? { organizations: orgs } : {}),
+    ...(teamWorkspaces ? { teamWorkspaces: true } : {}),
+    ...(invitationEmail ? { invitationEmail } : {}),
+    ...(verifiedDomains ? { verifiedDomains } : {}),
+    ...(teamSso ? { teamSso } : {}),
+    ...(teamScim ? { teamScim } : {}),
     ...(name !== undefined && name !== '' ? { name } : {}),
+    ...(termsUrl !== undefined ? { termsUrl } : {}),
+    ...(privacyUrl !== undefined ? { privacyUrl } : {}),
     ...(assistantSecret !== undefined ? { assistantSecret } : {}),
+    ...(previousSecrets.length > 0 ? { assistantPreviousSecrets: previousSecrets } : {}),
     ...(assistantSecret !== undefined && privateUrls === 'on' ? { assistantPrivateUrls: true } : {}),
   };
+}
+
+/** Previous assistant secrets a deployment may keep (assistant.ts SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS). */
+const MAX_ASSISTANT_PREVIOUS_SECRETS = 3;
+
+/**
+ * SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: up to three earlier values of SLOTLOCK_ASSISTANT_SECRET,
+ * comma-separated, newest first, each as strong as a secret must be and unlike every other secret.
+ * Only with SLOTLOCK_ASSISTANT_SECRET: without a current secret nothing would seal the keys again.
+ */
+function readAssistantPreviousSecrets(
+  env: SlotlockEnv,
+  current: string | undefined,
+  others: readonly (string | undefined)[],
+): string[] {
+  const name = 'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS';
+  const value = env[name];
+  if (value === undefined || value.trim() === '') return [];
+  if (current === undefined) {
+    throw new SlotlockConfigError(
+      `${name} needs SLOTLOCK_ASSISTANT_SECRET: the secret keys are sealed again under`,
+    );
+  }
+  const secrets = value.split(',').map((part) => readSecret({ [name]: part }, name));
+  if (secrets.some((secret) => secret === undefined)) {
+    throw new SlotlockConfigError(`${name} must be comma-separated secrets, with no empty one`);
+  }
+  const listed = secrets as string[];
+  if (listed.length > MAX_ASSISTANT_PREVIOUS_SECRETS) {
+    throw new SlotlockConfigError(`${name} takes at most ${String(MAX_ASSISTANT_PREVIOUS_SECRETS)} secrets`);
+  }
+  if (new Set(listed).size !== listed.length || listed.some((secret) => secret === current || others.includes(secret))) {
+    throw new SlotlockConfigError(
+      `${name} must differ from each other, from SLOTLOCK_ASSISTANT_SECRET and from every other secret`,
+    );
+  }
+  return listed;
+}
+
+/** A policy page the sign-in page links: an https URL, or undefined when the setting is empty. */
+function readPolicyUrl(
+  env: SlotlockEnv,
+  name: 'SLOTLOCK_DASHBOARD_TERMS_URL' | 'SLOTLOCK_DASHBOARD_PRIVACY_URL',
+): string | undefined {
+  const value = optional(env, name)?.trim();
+  if (value === undefined || value === '') return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SlotlockConfigError(`${name} must be an https URL`);
+  }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') {
+    throw new SlotlockConfigError(`${name} must be an https URL`);
+  }
+  return url.href;
 }
 
 /**
@@ -248,15 +390,114 @@ export function readDashboardConfig(env: SlotlockEnv): SlotlockServeDashboardCon
  * well: a server whose dashboard runs elsewhere (on Cloudflare Workers) still takes those
  * organizations' keys, and only theirs.
  */
-export function readDashboardOrganizations(env: SlotlockEnv): string[] | undefined {
+export function readDashboardOrganizations(env: SlotlockEnv): string[] | 'enabled' | undefined {
   const orgs = optional(env, 'SLOTLOCK_DASHBOARD_ORGS')?.replaceAll(' ', '');
   if (orgs === undefined) return undefined;
+  if (orgs === 'enabled') return 'enabled';
   if (!/^[1-9]\d{0,19}(,[1-9]\d{0,19})*$/.test(orgs)) {
     throw new SlotlockConfigError(
-      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id)',
+      'SLOTLOCK_DASHBOARD_ORGS must be a comma-separated list of GitHub organization ids (gh api orgs/<login> --jq .id), or enabled',
     );
   }
   return [...new Set(orgs.split(','))];
+}
+
+/**
+ * SLOTLOCK_INVITATION_EMAIL (resend or postmark), with its key and the verified sender: all three, or
+ * none. Only with team workspaces, the one thing it sends.
+ */
+function readInvitationEmail(
+  env: SlotlockEnv,
+  teamWorkspaces: boolean,
+): { provider: 'resend' | 'postmark'; key: string; from: string } | undefined {
+  const provider = optional(env, 'SLOTLOCK_INVITATION_EMAIL');
+  const key = optional(env, 'SLOTLOCK_INVITATION_EMAIL_KEY');
+  const from = optional(env, 'SLOTLOCK_INVITATION_EMAIL_FROM');
+  if (provider === undefined && key === undefined && from === undefined) return undefined;
+  if (provider !== 'resend' && provider !== 'postmark') {
+    throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL must be resend or postmark');
+  }
+  if (!teamWorkspaces) {
+    throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL sends team invitations: it needs SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on');
+  }
+  if (key === undefined || !/^[\x21-\x7e]{10,500}$/.test(key)) {
+    throw new SlotlockConfigError(`SLOTLOCK_INVITATION_EMAIL_KEY must be ${provider === 'resend' ? "Resend's API key" : "Postmark's server token"}`);
+  }
+  if (from === undefined || !/^([^<>\r\n"]{1,80} )?<?[^@\s<>"]{1,64}@[^@\s<>"]+\.[^@\s<>"]+>?$/.test(from)) {
+    throw new SlotlockConfigError('SLOTLOCK_INVITATION_EMAIL_FROM must be the sender the provider verified: team@example.com or Name <team@example.com>');
+  }
+  return { provider, key, from };
+}
+
+/**
+ * SLOTLOCK_VERIFIED_DOMAINS: on or off (the default), only with team workspaces; and
+ * SLOTLOCK_DNS_RESOLVER, how a domain's record is looked up: doh (the default: Cloudflare's
+ * DNS-over-HTTPS, cross-checked by Google's) or system (the server's own resolver, which follows
+ * split-horizon DNS). Read on its own as well: the server that runs maintenance checks the domains
+ * each day, wherever the dashboard runs.
+ */
+export function readVerifiedDomains(env: SlotlockEnv): { resolver: 'doh' | 'system' } | undefined {
+  const value = optional(env, 'SLOTLOCK_VERIFIED_DOMAINS') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_VERIFIED_DOMAINS must be on or off');
+  }
+  const resolver = optional(env, 'SLOTLOCK_DNS_RESOLVER');
+  if (resolver !== undefined && resolver !== 'doh' && resolver !== 'system') {
+    throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER must be doh or system');
+  }
+  if (value === 'off') {
+    if (resolver !== undefined) {
+      throw new SlotlockConfigError('SLOTLOCK_DNS_RESOLVER looks up verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+    }
+    return undefined;
+  }
+  if (!readDashboardTeamWorkspaces(env)) {
+    throw new SlotlockConfigError('SLOTLOCK_VERIFIED_DOMAINS verifies team workspaces\' domains: it needs SLOTLOCK_DASHBOARD_TEAM_WORKSPACES=on');
+  }
+  return { resolver: resolver ?? 'doh' };
+}
+
+/**
+ * SLOTLOCK_TEAM_SSO: on or off (the default), only with verified domains; with it,
+ * SLOTLOCK_SSO_SECRET (32+ characters), which seals each team's client secret.
+ */
+function readTeamSso(env: SlotlockEnv, verifiedDomains: boolean): { secret: string } | undefined {
+  const value = optional(env, 'SLOTLOCK_TEAM_SSO') ?? 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_TEAM_SSO must be on or off');
+  const secret = optional(env, 'SLOTLOCK_SSO_SECRET');
+  if (value === 'off') {
+    if (secret !== undefined) throw new SlotlockConfigError('SLOTLOCK_SSO_SECRET seals teams\' client secrets: it needs SLOTLOCK_TEAM_SSO=on');
+    return undefined;
+  }
+  if (!verifiedDomains) {
+    throw new SlotlockConfigError('SLOTLOCK_TEAM_SSO trusts addresses only at verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+  }
+  if (secret === undefined || secret.length < 32 || /\s/.test(secret)) {
+    throw new SlotlockConfigError(`SLOTLOCK_SSO_SECRET must be 32 or more characters without spaces. ${SECRET_HINT}`);
+  }
+  return { secret };
+}
+
+/** SLOTLOCK_TEAM_SCIM: on or off (the default), only with verified domains. */
+function readTeamScim(env: SlotlockEnv, verifiedDomains: boolean): boolean {
+  const value = optional(env, 'SLOTLOCK_TEAM_SCIM') ?? 'off';
+  if (value !== 'on' && value !== 'off') throw new SlotlockConfigError('SLOTLOCK_TEAM_SCIM must be on or off');
+  if (value === 'on' && !verifiedDomains) {
+    throw new SlotlockConfigError('SLOTLOCK_TEAM_SCIM adds people only at verified domains: it needs SLOTLOCK_VERIFIED_DOMAINS=on');
+  }
+  return value === 'on';
+}
+
+/**
+ * SLOTLOCK_DASHBOARD_TEAM_WORKSPACES: on or off (the default). Read on its own as well: a server whose
+ * dashboard runs elsewhere (on Cloudflare Workers) takes team workspaces' keys only with it on.
+ */
+export function readDashboardTeamWorkspaces(env: SlotlockEnv): boolean {
+  const value = optional(env, 'SLOTLOCK_DASHBOARD_TEAM_WORKSPACES') ?? 'off';
+  if (value !== 'on' && value !== 'off') {
+    throw new SlotlockConfigError('SLOTLOCK_DASHBOARD_TEAM_WORKSPACES must be on or off');
+  }
+  return value === 'on';
 }
 
 /** A token bucket: `perSecond` tokens come back each second, and it holds at most `burst`. */
@@ -329,7 +570,7 @@ export interface SlotlockLimits {
  *   loop was busy while its write held it, up to a second, then goes to the tenant with the fewest
  *   writes in flight and, among those, the least use lately. That keeps a tenant sending one write
  *   at a time from waiting behind tenants with more, not behind many tenants with one each
- *   (rate-limit.ts).
+ *   (rate-limit.ts). Sandbox races and fast-forwards wait for the maintenance runs' slots.
  * - `subscriptions`: MCP live-update streams the server holds open. When it is full, a tenant
  *   holding fewer than the tenant holding most, less one, ends that tenant's oldest stream.
  * - `tenant_subscriptions`: of those, how many one tenant may hold.

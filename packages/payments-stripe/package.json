@@ -1,0 +1,28 @@
+{
+  "name": "@slotlock/payments-stripe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Payments for Slotlock holds on the tenant's own Stripe account: a verified PaymentIntent marks its hold paid. Slotlock never moves money.",
+  "license": "Apache-2.0",
+  "author": "TREFT LTD",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "slotlock-payments-stripe": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -35,7 +35,46 @@ const RESOURCE = {
   visibility: 'shared',
   archived_at: null,
   pool: null,
+  name: null,
+  description: null,
+  kind: 'other',
+  capacity: null,
+  labels: [],
+  attributes: {},
+  location: null,
+  groups: [],
+  parent_id: null,
+  part_index: null,
+  inherited_availability: null,
 };
+
+const HOLIDAY_CALENDAR = {
+  calendar_id: '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d',
+  name: 'UK bank holidays',
+  location: 'london-depot',
+  resource_id: null,
+  url: 'https://example.com/holidays/gb.ics',
+  imported_at: '2026-11-01T09:00:00.000Z',
+  next_import_at: '2026-12-01T09:00:00.000Z',
+  last_error: null,
+  closures: 8,
+  created_at: '2026-11-01T09:00:00.000Z',
+};
+const AVAILABILITY_EXCEPTION = {
+  id: '7b3c1d9e-4f2a-4e8b-9c6d-1a2b3c4d5e6f',
+  location: null,
+  resource_id: null,
+  starts_on: '2026-12-25',
+  ends_on: '2026-12-26',
+  outcome: 'closed',
+  hours: null,
+  label: 'Christmas',
+  source: 'manual',
+  calendar_id: null,
+  created_at: '2026-11-10T09:00:00.000Z',
+};
+const LOCATION = { ref: 'leeds', name: 'Leeds clinic', parent_ref: null, timezone: 'Europe/London', resources: 2 };
+const GROUP = { ref: 'physio', name: 'Physiotherapy team', description: null, members: 3 };
 const HOLD = {
   id: HOLD_ID,
   resource_id: RESOURCE_ID,
@@ -44,6 +83,28 @@ const HOLD = {
   expires_at: '2027-03-29T08:10:00.000Z',
   source: 'checkout',
 };
+/** An agent's event as SLOTLOCK_EVENT_OUTPUT answers it (the tenant's bundle and pool bookings). */
+const AGENT_EVENT = {
+  id: 'event-1',
+  resource_id: '0f8b6c1e-2d4a-4c7e-9b1a-3e5f7a9c2d4b',
+  starts_at: '2027-03-02T09:00:00.000Z',
+  ends_at: '2027-03-02T10:00:00.000Z',
+  timezone: 'Europe/London',
+  title: null,
+  description: null,
+  location: null,
+  organizer: null,
+  attendees: [],
+  reminders: [],
+  status: 'confirmed',
+  transparency: 'opaque',
+  sequence: 0,
+  revision: 1,
+  recurrence_rule: null,
+  recurrence_exceptions: [],
+  recurrence_id: null,
+};
+
 const TENANT_EVENT = {
   id: EVENT_ID,
   event_ref: 'agent:handover',
@@ -90,6 +151,16 @@ const agentBackend = {
 
 const backend = {
   createResource: vi.fn(),
+  updateResource: vi.fn(),
+  listLocations: vi.fn(),
+  createLocation: vi.fn(),
+  updateLocation: vi.fn(),
+  deleteLocation: vi.fn(),
+  listGroups: vi.fn(),
+  createGroup: vi.fn(),
+  deleteGroup: vi.fn(),
+  addGroupMember: vi.fn(),
+  removeGroupMember: vi.fn(),
   getResource: vi.fn(),
   archiveResource: vi.fn(),
   restoreResource: vi.fn(),
@@ -97,10 +168,19 @@ const backend = {
   listBusy: vi.fn(),
   setResourceAvailability: vi.fn(),
   setTenantAvailability: vi.fn(),
+  getAvailabilityDefaults: vi.fn(),
+  setLocationAvailability: vi.fn(),
+  listAvailabilityExceptions: vi.fn(),
+  createAvailabilityException: vi.fn(),
+  deleteAvailabilityException: vi.fn(),
+  importHolidays: vi.fn(),
+  listHolidayCalendars: vi.fn(),
+  deleteHolidayCalendar: vi.fn(),
   acquireHold: vi.fn(),
   getHold: vi.fn(),
   listHolds: vi.fn(),
   confirmHold: vi.fn(),
+  markHoldPaid: vi.fn(),
   releaseHold: vi.fn(),
   getReservation: vi.fn(),
   listReservations: vi.fn(),
@@ -116,13 +196,17 @@ const backend = {
   setResourceBookingRules: vi.fn(),
   listChanges: vi.fn(),
   setResourcePool: vi.fn(),
+  setResourceParent: vi.fn(),
   listPools: vi.fn(),
+  setPoolOrder: vi.fn(),
   getBookingRuleDefaults: vi.fn(),
   setTenantBookingRules: vi.fn(),
   setPoolBookingRules: vi.fn(),
   getResourceHistory: vi.fn(),
   getCoverage: vi.fn(),
   recordCoverageFailure: vi.fn(),
+  putSourceBusy: vi.fn(),
+  reportCoverageConflict: vi.fn(),
   deleteCoverage: vi.fn(),
   getReservationHistory: vi.fn(),
   getTenantEventHistory: vi.fn(),
@@ -134,9 +218,48 @@ const backend = {
   importResourceAvailability: vi.fn(),
   exportTenantEvent: vi.fn(),
   checkInReservation: vi.fn(),
+  putContact: vi.fn(),
+  getContact: vi.fn(),
+  listContacts: vi.fn(),
+  deleteContact: vi.fn(),
   joinWaitlist: vi.fn(),
   listWaitlist: vi.fn(),
   leaveWaitlist: vi.fn(),
+  declineWaitlistOffer: vi.fn(),
+  tenantBookTogether: vi.fn(),
+  tenantBookPool: vi.fn(),
+  getUsage: vi.fn(),
+  listAuditEvents: vi.fn(),
+  verifyAuditLog: vi.fn(),
+  exportSubject: vi.fn(),
+  eraseSubject: vi.fn(),
+  createTenantExport: vi.fn(),
+  listTenantExports: vi.fn(),
+  getTenantExport: vi.fn(),
+  getTenantExportPart: vi.fn(),
+  deleteTenantExport: vi.fn(),
+  listApprovalPolicies: vi.fn(),
+  putApprovalPolicy: vi.fn(),
+  deleteApprovalPolicy: vi.fn(),
+  listApprovals: vi.fn(),
+  getApproval: vi.fn(),
+  decideApproval: vi.fn(),
+  sandboxSeed: vi.fn(),
+  sandboxReset: vi.fn(),
+  sandboxFastForward: vi.fn(),
+  sandboxRace: vi.fn(),
+  partnerPutAccount: vi.fn(),
+  partnerListAccounts: vi.fn(),
+  partnerGetAccount: vi.fn(),
+  partnerListKeys: vi.fn(),
+  partnerCreateKey: vi.fn(),
+  partnerRotateKey: vi.fn(),
+  partnerRevokeKey: vi.fn(),
+  partnerSuspendAccount: vi.fn(),
+  partnerUnsuspendAccount: vi.fn(),
+  partnerEraseAccount: vi.fn(),
+  partnerGetUsage: vi.fn(),
+  partnerReconcileUsage: vi.fn(),
 } satisfies Record<keyof SlotlockApplicationBackend, ReturnType<typeof vi.fn>>;
 const authorizeApplication = vi.fn();
 const consumeRateLimit = vi.fn();
@@ -146,6 +269,7 @@ const onEvent = vi.fn();
 const admin = { subject: 'app-1', tenantRef: 'tenant-a', scopes: ['read', 'write', 'admin'] };
 const agent = { subject: 'agent-1', tenantRef: 'tenant-a', scopes: ['read', 'write'] };
 const operator = { subject: 'operator', tenantRef: 'tenant-a' };
+const partner = { subject: 'partner_key:p1', tenantRef: 'partner:stackapi', scopes: ['partner'], partnerId: 'stackapi' };
 
 /** Options to change; `undefined` leaves an option out. */
 type Overrides = { [Name in keyof SlotlockAgentServerOptions]?: SlotlockAgentServerOptions[Name] | undefined };
@@ -159,6 +283,7 @@ function buildServer(overrides: Overrides = {}) {
       if (token === 'Bearer admin') return admin;
       if (token === 'Bearer agent') return agent;
       if (token === 'Bearer operator') return operator;
+      if (token === 'Bearer partner') return partner;
       return null;
     },
     authorize: async () => true,
@@ -222,6 +347,20 @@ function exampleRequest(name: string, token = 'admin'): Request {
   return call(definition.method, path, { body: rest, token });
 }
 
+const TENANT_EXPORT = {
+  id: '0b6c8d1e-4f2a-4c3b-9d5e-7f8a9b0c1d2e',
+  status: 'ready',
+  requested_by: 'api_key:00000000-0000-4000-8000-0000000000b2',
+  created_at: '2026-11-10T09:00:00.000Z',
+  finished_at: '2026-11-10T09:00:02.000Z',
+  expires_at: '2026-11-11T09:00:02.000Z',
+  parts: 1,
+  rows: 1,
+  bytes: 64,
+  tables: { resources: 1 },
+  error: null,
+};
+
 const HISTORY = {
     history: [
       {
@@ -248,6 +387,7 @@ const WEBHOOK = {
   last_error: null,
   disabled_at: null,
   disabled_reason: null,
+  filter: null,
 };
 
 const WAITLIST_ENTRY = {
@@ -263,23 +403,94 @@ const WAITLIST_ENTRY = {
     offered_resource_id: null,
     offered_at: null,
     created_at: '2027-03-01T09:00:00.000Z',
+    duration_minutes: null,
+    decided_at: null,
   };
 
+const PARTNER_ACCOUNT = {
+  account: 'user-4821',
+  plan: 'partner_pro',
+  status: 'active',
+  created_at: '2026-11-01T09:00:00.000Z',
+  updated_at: '2026-11-01T09:00:00.000Z',
+};
+const PARTNER_KEY = {
+  id: '7d1e4f8a-2b3c-4d5e-8f90-123456789abc',
+  name: 'Booking agent',
+  prefix: 'slk_AbCdEfGh',
+  scopes: ['read', 'write'],
+  created_at: '2026-11-01T09:00:00.000Z',
+  expires_at: null,
+  last_used_at: null,
+  revoked_at: null,
+  limits: null,
+};
+const APPROVAL_POLICY = {
+  policy_ref: 'long-van-hires',
+  name: 'Van hires over a day',
+  applies_to: { pools: ['van'] },
+  conditions: { longer_than_minutes: 1440 },
+  outcome: 'require_approval',
+  approval_ttl_minutes: 240,
+  lead_minutes: 60,
+  include_application: false,
+  created_at: '2026-11-01T09:00:00.000Z',
+  updated_at: '2026-11-01T09:00:00.000Z',
+};
+const APPROVAL = {
+  approval_id: '3f6b2a1c-8d4e-4b7a-9c2f-1e5d7a9b3c4d',
+  policy_ref: 'long-van-hires',
+  status: 'pending',
+  operation: 'slotlock_create_event',
+  request: { resource_id: '00000000-0000-4000-8000-000000000001', starts_at: '2027-03-02T09:00:00Z' },
+  requested_by: 'agent-1',
+  resource_ids: ['00000000-0000-4000-8000-000000000001'],
+  starts_at: '2027-03-02T09:00:00.000Z',
+  ends_at: '2027-03-04T09:00:00.000Z',
+  expires_at: '2026-11-01T13:00:00.000Z',
+  decided_by: null,
+  decided_at: null,
+  reason: null,
+  created_at: '2026-11-01T09:00:00.000Z',
+};
 const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>> = {
   createResource: { resource: RESOURCE },
+  updateResource: { resource: { ...RESOURCE, name: 'Van 42', labels: ['ev'], location: 'leeds', groups: ['physio'] } },
+  listLocations: { locations: [LOCATION] },
+  createLocation: { location: LOCATION },
+  updateLocation: { location: { ...LOCATION, name: 'Leeds city clinic' } },
+  deleteLocation: { deleted: true },
+  listGroups: { groups: [GROUP] },
+  createGroup: { group: GROUP },
+  deleteGroup: { deleted: true },
+  addGroupMember: { added: true },
+  removeGroupMember: { removed: false },
   getResource: { resource: RESOURCE },
   archiveResource: { resource: { ...RESOURCE, archived_at: '2027-03-01T00:00:00.000Z' } },
   restoreResource: { resource: RESOURCE },
   deleteResource: { deleted: true },
   listBusy: { busy: [{ start: '2027-03-29T09:00:00.000Z', end: '2027-03-29T10:00:00.000Z' }] },
   setResourceAvailability: { resource: RESOURCE },
-  setTenantAvailability: { resources_updated: 3 },
+  setTenantAvailability: { resources_updated: 3, resources_with_own_hours: 1 },
+  getAvailabilityDefaults: { tenant: null, locations: [] },
+  setLocationAvailability: { location: 'london-depot', resources_updated: 2, resources_with_own_hours: 0 },
+  listAvailabilityExceptions: { exceptions: [AVAILABILITY_EXCEPTION], next: null },
+  createAvailabilityException: { exception: AVAILABILITY_EXCEPTION },
+  deleteAvailabilityException: { deleted: true },
+  importHolidays: { imported: 8, skipped: 1, removed: 0, calendar: HOLIDAY_CALENDAR },
+  listHolidayCalendars: { calendars: [HOLIDAY_CALENDAR] },
+  deleteHolidayCalendar: { deleted: true, closures: 8 },
   exportResourceAvailability: { icalendar: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' },
   importResourceAvailability: { resource: RESOURCE },
   checkInReservation: { reference: 'BK-42', checked_in_at: '2027-03-29T09:05:00.000Z' },
-  joinWaitlist: { entry: WAITLIST_ENTRY },
+  putContact: { contact: { contact_ref: 'customer-42', name: 'Ada', email: 'ada@example.com', phone: '+447700900123', whatsapp: null, consent: { email: true, sms: false }, consent_at: { email: '2026-11-01T09:00:00.000Z', sms: '2026-11-01T09:00:00.000Z' }, locale: 'en-GB', created_at: '2026-11-01T09:00:00.000Z', updated_at: '2026-11-01T09:00:00.000Z' }, created: true },
+  getContact: { contact: { contact_ref: 'customer-42', name: 'Ada', email: 'ada@example.com', phone: '+447700900123', whatsapp: null, consent: { email: true, sms: false }, consent_at: { email: '2026-11-01T09:00:00.000Z', sms: '2026-11-01T09:00:00.000Z' }, locale: 'en-GB', created_at: '2026-11-01T09:00:00.000Z', updated_at: '2026-11-01T09:00:00.000Z' } },
+  listContacts: { contacts: [{ contact_ref: 'customer-42', name: 'Ada', email: 'ada@example.com', phone: '+447700900123', whatsapp: null, consent: { email: true, sms: false }, consent_at: { email: '2026-11-01T09:00:00.000Z', sms: '2026-11-01T09:00:00.000Z' }, locale: 'en-GB', created_at: '2026-11-01T09:00:00.000Z', updated_at: '2026-11-01T09:00:00.000Z' }], next_cursor: null },
+  deleteContact: { deleted: true, bookings: 2 },
+  joinWaitlist: { entry: WAITLIST_ENTRY, replayed: false },
   listWaitlist: { entries: [WAITLIST_ENTRY] },
   leaveWaitlist: { left: true },
+  declineWaitlistOffer: { entry: { ...WAITLIST_ENTRY, status: 'declined', decided_at: '2027-03-29T09:10:00.000Z' } },
   exportTenantEvent: {
     event: {
       '@type': 'Event',
@@ -299,18 +510,21 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
   getHold: { hold: HOLD },
   listHolds: { holds: [HOLD], next_cursor: null },
   confirmHold: { reservation: RESERVATION },
+  markHoldPaid: { hold: { ...HOLD, payment_required: true, payment_ref: 'pi_123', paid_at: '2026-11-01T09:01:00.000Z' }, replayed: false },
   releaseHold: { released: true },
   getReservation: { reservation: RESERVATION },
   listReservations: { reservations: [RESERVATION], next_cursor: 'eyJzdGFydCI6IjIwMjcifQ' },
   putReservation: { reservation: RESERVATION, replayed: false },
-  cancelReservation: { cancelled: true, revision: 2 },
+  cancelReservation: { cancelled: true, revision: 2, cancellation_fee: null },
   recordCoverage: { revision: 7, replayed: false },
   listTenantEvents: { events: [TENANT_EVENT], next_cursor: null },
   getTenantEvent: { event: TENANT_EVENT },
-  cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false },
+  tenantBookTogether: { events: [AGENT_EVENT, AGENT_EVENT], replayed: false },
+  tenantBookPool: { event: AGENT_EVENT, replayed: false },
+  cancelTenantEvent: { event_id: EVENT_ID, revision: 3, cancelled: true, replayed: false, cancellation_fee: null },
   getTenant: { tenant: { ref: 'tenant-a', suspended: false } },
   eraseTenant: { total: 12, rows: { resources: 2, reservations: 10 } },
-  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, capped: false },
+  runMaintenance: { extended: 0, conflicts: 0, refused: 0, pruned: 0, zone_shifts: 0, stale_sources: 0, no_shows: 0, waitlist_offers: 0, approvals_expired: 0, bookings_completed: 0, reminders_due: 0, capped: false },
   listChanges: {
     changes: [
       {
@@ -326,10 +540,12 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     ],
     next_cursor: 'MToxOjE6MA',
   },
-  createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=` },
+  createWebhook: { webhook: WEBHOOK, secret: `whsec_${'A'.repeat(43)}=`, replayed: false },
   listWebhooks: { webhooks: [WEBHOOK] },
   setResourcePool: { resource: { ...RESOURCE, pool: 'van' } },
-  listPools: { pools: [{ pool: 'van', capacity: 5 }] },
+  setResourceParent: { resource: { ...RESOURCE, parent_id: '0e7c1f9a-3b5d-4c2e-9f81-6a4b2d8c7e10', part_index: 0 } },
+  listPools: { pools: [{ pool: 'van', capacity: 5, order: 'stable' }] },
+  setPoolOrder: { pool: 'van', order: 'least_booked' },
   getBookingRuleDefaults: {
     tenant: { min_notice_minutes: 120 },
     pools: [{ pool: 'van', rules: { buffer_before_minutes: 15, turnaround_minutes: 15 } }],
@@ -353,11 +569,130 @@ const OUTPUTS: Record<keyof SlotlockApplicationBackend, Record<string, unknown>>
     ],
   },
   recordCoverageFailure: { recorded: true },
+  putSourceBusy: { revision: 8, replayed: false, busy: 1, conflicts: 0 },
+  reportCoverageConflict: { reported: true },
   deleteCoverage: { deleted: true },
   getReservationHistory: HISTORY,
   getTenantEventHistory: HISTORY,
   deleteWebhook: { deleted: true },
   enableWebhook: { webhook: WEBHOOK },
+  getUsage: {
+    from: '2026-11-01',
+    to: '2026-11-10',
+    totals: { operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 4 },
+    days: [
+      { day: '2026-11-10', operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 4 },
+    ],
+    keys: [{ key_id: null, operations: 3, bookings: 1, holds: 0, webhook_deliveries: 2, assistant_messages: 0, resources: 0 }],
+    surfaces: [{ origin: 'rest', operations: 3, bookings: 1, holds: 0, webhook_deliveries: 0, assistant_messages: 0, resources: 0 }],
+  },
+  listAuditEvents: {
+    events: [
+      {
+        id: '00000000-0000-4000-8000-0000000000a1',
+        occurred_at: '2026-11-10T09:00:00.000Z',
+        action: 'api_key.created',
+        actor_type: 'person',
+        actor_ref: 'github:1',
+        actor_role: 'owner',
+        target_type: 'api_key',
+        target_ref: 'api_key:00000000-0000-4000-8000-0000000000b2',
+        outcome: 'success',
+        reason: null,
+        ip_address: null,
+        user_agent: null,
+        metadata: {},
+        chain_index: 1,
+        hash: 'a'.repeat(64),
+      },
+    ],
+    next_cursor: null,
+  },
+  verifyAuditLog: { checked: 1, broken_at: null },
+  exportSubject: {
+    records: {
+      contacts: [{ ref: 'customer-42', email: 'ada@example.com' }],
+      calendar_event_attendees: [],
+      calendar_events: [],
+      reservations: [],
+      reservation_tombstones: [],
+      reservation_conflict_archive: [],
+      calendar_event_tombstones: [],
+      calendar_event_commands: [],
+      waitlist_entries: [],
+      approvals: [],
+      outbox: [],
+    },
+    truncated: false,
+  },
+  eraseSubject: {
+    erased: {
+      contacts: 1,
+      calendar_event_attendees: 0,
+      calendar_events: 0,
+      reservations: 2,
+      reservation_tombstones: 0,
+      reservation_conflict_archive: 0,
+      calendar_event_tombstones: 0,
+      calendar_event_commands: 0,
+      waitlist_entries: 0,
+      approvals: 0,
+      outbox: 3,
+    },
+  },
+  createTenantExport: { export: TENANT_EXPORT },
+  listTenantExports: { exports: [TENANT_EXPORT] },
+  getTenantExport: { export: TENANT_EXPORT },
+  getTenantExportPart: {
+    export_id: TENANT_EXPORT.id,
+    part: 1,
+    table: 'resources',
+    rows: [{ id: '00000000-0000-4000-8000-000000000001', external_ref: 'van-1' }],
+  },
+  deleteTenantExport: { deleted: true },
+  listApprovalPolicies: { policies: [APPROVAL_POLICY] },
+  putApprovalPolicy: { policy: APPROVAL_POLICY },
+  deleteApprovalPolicy: { deleted: true },
+  listApprovals: { approvals: [APPROVAL] },
+  getApproval: { approval: APPROVAL },
+  decideApproval: {
+    approval: { ...APPROVAL, status: 'declined', decided_by: 'admin', decided_at: '2026-11-01T10:00:00.000Z', reason: 'Fleet busy' },
+    booking: null,
+  },
+  sandboxSeed: { scenario: 'car-rental', resources: 5, locations: 2, groups: 1, pools: 2, bookings: 3 },
+  sandboxReset: { removed: { resources: 5, reservations: 3 } },
+  sandboxFastForward: { minutes: 60, holds: 1, approvals: 0, maintenance: { pruned: 1, capped: false } },
+  sandboxRace: {
+    agents: 100,
+    booked: 1,
+    refused: { overlap: 99 },
+    with_alternatives: 99,
+    server_errors: 0,
+    p50_ms: 380,
+    p99_ms: 420,
+    max_ms: 431,
+  },
+  partnerPutAccount: { account: PARTNER_ACCOUNT, created: true },
+  partnerListAccounts: { accounts: [PARTNER_ACCOUNT] },
+  partnerGetAccount: { account: { ...PARTNER_ACCOUNT, resources: 2, api_keys: 1 } },
+  partnerListKeys: { keys: [PARTNER_KEY] },
+  partnerCreateKey: { key: `slk_${'a'.repeat(46)}`, api_key: PARTNER_KEY },
+  partnerRotateKey: { key: `slk_${'b'.repeat(46)}`, api_key: PARTNER_KEY },
+  partnerRevokeKey: { api_key: { ...PARTNER_KEY, revoked_at: '2026-11-10T12:00:00.000Z' } },
+  partnerSuspendAccount: { suspended: true },
+  partnerUnsuspendAccount: { unsuspended: true },
+  partnerEraseAccount: { erased: true, rows: 12 },
+  partnerReconcileUsage: {
+    day: '2026-11-09',
+    within_tolerance: true,
+    tolerance_percent: 0.5,
+    accounts: [{ account: 'user-4821', metric: 'operations', ours: 1204, theirs: 1204, difference_percent: 0 }],
+  },
+  partnerGetUsage: {
+    from: '2026-11-01',
+    to: '2026-11-30',
+    usage: [{ account: 'user-4821', day: '2026-11-10', metric: 'operations', count: 42 }],
+  },
 };
 
 beforeEach(() => {
@@ -427,7 +762,8 @@ describe('the application operations', () => {
       buffer_after_minutes: 0,
     });
     const create = slotlockApplicationOperation('slotlock_create_resource');
-    expect(create.input.parse({ external_ref: 'van-1' })).toEqual({ external_ref: 'van-1', timezone: 'UTC' });
+    // No time zone given: the store gives it UTC, or its location's.
+    expect(create.input.parse({ external_ref: 'van-1' })).toEqual({ external_ref: 'van-1' });
     expect(create.input.safeParse({ external_ref: 'van-1', tenant_ref: 'other' }).success).toBe(false);
   });
 });
@@ -436,7 +772,9 @@ describe('the application API over REST', () => {
   it('runs each operation for an admin key with the input its schema parsed, in the key\'s tenant', async () => {
     const server = buildServer();
     for (const definition of SLOTLOCK_APPLICATION_OPERATIONS) {
-      const response = await server.fetch(exampleRequest(definition.name));
+      // The partner API's are a partner key's; the rest an admin key's.
+      const caller = definition.scope === 'partner' ? partner : admin;
+      const response = await server.fetch(exampleRequest(definition.name, definition.scope === 'partner' ? 'partner' : 'admin'));
       expect({ name: definition.name, status: response.status }).toEqual({
         name: definition.name,
         status: 200,
@@ -448,12 +786,12 @@ describe('the application API over REST', () => {
         { principal: unknown; operation: string; signal: AbortSignal },
         Record<string, unknown>,
       ];
-      expect(context.principal).toEqual(admin);
+      expect(context.principal).toEqual(caller);
       expect(context.operation).toBe(definition.name);
       expect(context.signal).toBeInstanceOf(AbortSignal);
       expect(input).toEqual(definition.input.parse(definition.example));
       expect(authorizeApplication).toHaveBeenLastCalledWith({
-        principal: admin,
+        principal: caller,
         operation: definition.name,
         input,
       });
@@ -461,9 +799,19 @@ describe('the application API over REST', () => {
     // Each call is charged once, as one protocol request; no agent tool ran.
     expect(consumeRateLimit).toHaveBeenCalledTimes(SLOTLOCK_APPLICATION_OPERATIONS.length);
     for (const [args] of consumeRateLimit.mock.calls) {
-      expect(args).toEqual({ principal: admin, operation: 'protocol' });
+      expect(args).toMatchObject({ operation: 'protocol' });
     }
     for (const method of Object.values(agentBackend)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it('keeps the partner API to partner keys, and partner keys to it', async () => {
+    const server = buildServer();
+    for (const definition of SLOTLOCK_APPLICATION_OPERATIONS) {
+      const wrong = definition.scope === 'partner' ? 'admin' : 'partner';
+      const response = await server.fetch(exampleRequest(definition.name, wrong));
+      expect({ name: definition.name, status: response.status }).toEqual({ name: definition.name, status: 403 });
+    }
+    expect(authorizeApplication).not.toHaveBeenCalled();
   });
 
   it('refuses a key without the admin scope before reading the arguments', async () => {
@@ -626,10 +974,18 @@ describe('the application API over REST', () => {
       'slotlock_acquire_hold',
       'slotlock_book_pool',
       'slotlock_book_together',
+      'slotlock_cancel',
       'slotlock_cancel_tenant_event',
+      'slotlock_confirm_slot',
       'slotlock_create_event',
+      'slotlock_create_webhook',
       'slotlock_delete_event',
       'slotlock_hold_slots',
+      'slotlock_hold_together',
+      'slotlock_join_waitlist',
+      'slotlock_reschedule',
+      'slotlock_tenant_book_pool',
+      'slotlock_tenant_book_together',
       'slotlock_update_event',
     ]);
   });
@@ -638,7 +994,6 @@ describe('the application API over REST', () => {
     const create = slotlockApplicationOperation('slotlock_create_resource');
     expect(create.input.parse({ external_ref: 'van-1', visibility: 'private' })).toEqual({
       external_ref: 'van-1',
-      timezone: 'UTC',
       visibility: 'private',
     });
     // Left out, it is not defaulted: an existing resource is then answered as it is.
@@ -818,7 +1173,7 @@ describe('the OpenAPI document with the application API', () => {
     const result = await validator.validate(document);
     expect(result.errors ?? []).toEqual([]);
     expect(result.valid).toBe(true);
-    expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application']);
+    expect(document.tags.map(({ name }) => name)).toEqual(['Agent tools', 'Application', 'Partner']);
 
     const operations = Object.values(document.paths).flatMap((methods) => Object.values(methods));
     const ids = operations.map((operation) => operation.operationId as string);
@@ -837,8 +1192,8 @@ describe('the OpenAPI document with the application API', () => {
       expect(operation).toMatchObject({
         operationId: definition.name,
         summary: definition.title,
-        tags: ['Application'],
-        'x-slotlock-scope': 'admin',
+        tags: [definition.scope === 'partner' ? 'Partner' : 'Application'],
+        'x-slotlock-scope': definition.scope ?? 'admin',
       });
       const responses = operation.responses as Record<string, unknown>;
       expect(Object.keys(responses)).toEqual(

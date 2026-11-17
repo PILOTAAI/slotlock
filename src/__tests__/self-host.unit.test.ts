@@ -1,7 +1,19 @@
 // The `slotlock` command's configuration: defaults, every refusal, and that no refusal or usage error
 // echoes a secret. Nothing here connects to a database; a refused configuration never gets that far.
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  chownSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { slotlockAgentOperationScope, slotlockAgentTools } from '../agent-server.js';
 import { SLOTLOCK_CAP_NAMES, SLOTLOCK_DEFAULT_LIMITS, formatSlotlockRate } from '../config.js';
@@ -94,8 +106,52 @@ describe('slotlock serve configuration', () => {
       restApi: true,
       webhooks: 'on',
       sharedLimits: false,
+      usage: false,
+      quotas: false,
       limits: SLOTLOCK_DEFAULT_LIMITS,
     });
+  });
+
+  it('meters usage only when asked', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on' })).usage).toBe(true);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'off' })).usage).toBe(false);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'yes' }))).toThrow(
+      'SLOTLOCK_USAGE must be on or off',
+    );
+  });
+
+  it('holds tenants to their quotas only when asked, and only with usage metered', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on' })).quotas).toBe(true);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on' })).quotas).toBe(false);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_QUOTAS: 'on' }))).toThrow(
+      'SLOTLOCK_QUOTAS=on needs SLOTLOCK_USAGE=on',
+    );
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'yes' }))).toThrow(
+      'SLOTLOCK_QUOTAS must be on or off',
+    );
+  });
+
+  it('bills overage only when asked, and only with quotas', () => {
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on' })).overageStopPercent).toBeUndefined();
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on', SLOTLOCK_OVERAGE: 'on' })).overageStopPercent).toBe(300);
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on', SLOTLOCK_OVERAGE: '200' })).overageStopPercent).toBe(200);
+    expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_OVERAGE: 'on' }))).toThrow('SLOTLOCK_OVERAGE needs SLOTLOCK_QUOTAS=on');
+    for (const bad of ['yes', '100', '1001', '150.5']) {
+      expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_USAGE: 'on', SLOTLOCK_QUOTAS: 'on', SLOTLOCK_OVERAGE: bad })), bad).toThrow(
+        'SLOTLOCK_OVERAGE must be',
+      );
+    }
+  });
+
+  it('names in metrics only the integrators the deployment lists', () => {
+    expect(readSlotlockServeConfig(serveEnv({})).knownClients).toBeUndefined();
+    expect(readSlotlockServeConfig(serveEnv({ SLOTLOCK_KNOWN_CLIENTS: 'stackapi, n8n,stackapi' })).knownClients).toEqual([
+      'stackapi',
+      'n8n',
+    ]);
+    for (const bad of ['StackAPI', 'other', 'a,,b', 'x'.repeat(41), Array.from({ length: 51 }, (_, i) => `c${i}`).join(',')]) {
+      expect(() => readSlotlockServeConfig(serveEnv({ SLOTLOCK_KNOWN_CLIENTS: bad })), bad).toThrow('SLOTLOCK_KNOWN_CLIENTS must be');
+    }
   });
 
   it('shares tenant budgets through the database only when asked', () => {
@@ -238,15 +294,26 @@ describe('slotlock serve configuration', () => {
     expect(config.confirmWrites).toEqual([]);
     expect('confirmationSecret' in config).toBe(false);
     const optedIn = readSlotlockServeConfig(serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'all' }));
+    // Every write, the named booking tools included: each books, moves or cancels as the others do.
     expect(optedIn.confirmWrites).toEqual([
       'slotlock_create_event',
       'slotlock_book_together',
       'slotlock_book_pool',
       'slotlock_update_event',
       'slotlock_delete_event',
+      'slotlock_confirm_slot',
+      'slotlock_reschedule',
+      'slotlock_cancel',
     ]);
     expect(optedIn.confirmationSecret).toBeDefined();
     expect(SLOTLOCK_CLI_HELP).toMatch(/SLOTLOCK_CONFIRM_WRITES +none \(default\), all,/);
+  });
+
+  it('accepts the named booking tools in SLOTLOCK_CONFIRM_WRITES', () => {
+    const config = readSlotlockServeConfig(
+      serveEnv({ SLOTLOCK_CONFIRM_WRITES: 'slotlock_cancel, slotlock_reschedule,slotlock_confirm_slot' }),
+    );
+    expect(config.confirmWrites).toEqual(['slotlock_cancel', 'slotlock_reschedule', 'slotlock_confirm_slot']);
   });
 
   it('reads every optional setting', () => {
@@ -471,6 +538,26 @@ describe('slotlock serve configuration', () => {
       );
     });
 
+    it('reads the policy pages the sign-in page links', () => {
+      const dashboard = readSlotlockServeConfig(
+        dashboardEnv({
+          SLOTLOCK_DASHBOARD_TERMS_URL: ' https://slotlock.example/docs/terms/ ',
+          SLOTLOCK_DASHBOARD_PRIVACY_URL: 'https://slotlock.example/docs/privacy/',
+        }),
+      ).dashboard;
+      expect(dashboard?.termsUrl).toBe('https://slotlock.example/docs/terms/');
+      expect(dashboard?.privacyUrl).toBe('https://slotlock.example/docs/privacy/');
+      expect('termsUrl' in (readSlotlockServeConfig(dashboardEnv({ SLOTLOCK_DASHBOARD_TERMS_URL: '' })).dashboard ?? {})).toBe(false);
+      for (const value of ['http://slotlock.example/terms', 'not a url', 'https://user:pass@slotlock.example/']) {
+        expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_TERMS_URL: value })).message).toMatch(
+          /SLOTLOCK_DASHBOARD_TERMS_URL must be an https URL/,
+        );
+      }
+      expect(refusal(dashboardEnv({ SLOTLOCK_DASHBOARD_PRIVACY_URL: 'ftp://slotlock.example/' })).message).toMatch(
+        /SLOTLOCK_DASHBOARD_PRIVACY_URL must be an https URL/,
+      );
+    });
+
     it('reads the organizations without the dashboard, for a dashboard on Cloudflare Workers', () => {
       const config = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: '91' }));
       expect(config.dashboard).toBeUndefined();
@@ -492,10 +579,25 @@ describe('slotlock serve configuration', () => {
       expect(slotlockServeAllowsTenant(config, 'github:999')).toBe(false);
       // Tenants that are not a GitHub person's (a CLI-made key's) are not the list's to refuse.
       expect(slotlockServeAllowsTenant(config, 'pylota-deploy-smoke')).toBe(true);
+      // A test environment is let through as its live tenant, so a removed person's stops too.
+      expect(slotlockServeAllowsTenant(config, 'github:4242~test')).toBe(true);
+      expect(slotlockServeAllowsTenant(config, 'github:999~test')).toBe(false);
+      expect(slotlockServeAllowsTenant({ organizations: ['7'] }, 'github-org:8~test')).toBe(false);
+      expect(slotlockServeAllowsTenant({ organizations: ['7'] }, 'github-org:7~test')).toBe(true);
+      // With enabled, organizations are the database's to allow (serve's organization check).
+      const teams = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_ORGS: 'enabled' }));
+      expect(teams.organizations).toBe('enabled');
+      expect(slotlockServeAllowsTenant(teams, 'github-org:8')).toBe(true);
       const open = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '*' }));
       expect(open.allowedUsers).toBe('*');
       expect(slotlockServeAllowsTenant(open, 'github:999')).toBe(true);
       expect(slotlockServeAllowsTenant(readSlotlockServeConfig(serveEnv()), 'github:999')).toBe(true);
+      // Google people are named in the same list, as google:<subject>.
+      const mixed = readSlotlockServeConfig(serveEnv({ SLOTLOCK_DASHBOARD_USERS: '4242,google:109876543210' }));
+      expect(slotlockServeAllowsTenant(mixed, 'google:109876543210')).toBe(true);
+      expect(slotlockServeAllowsTenant(mixed, 'google:109876543210~test')).toBe(true);
+      expect(slotlockServeAllowsTenant(mixed, 'google:4242')).toBe(false);
+      expect(slotlockServeAllowsTenant(open, 'google:1')).toBe(true);
       expect(refusal(serveEnv({ SLOTLOCK_DASHBOARD_USERS: 'octocat' })).message).toMatch(
         /SLOTLOCK_DASHBOARD_USERS must be/,
       );
@@ -508,8 +610,15 @@ describe('slotlock serve configuration', () => {
       ['the session secret is missing', { SLOTLOCK_SESSION_SECRET: undefined }, /SLOTLOCK_SESSION_SECRET is required/],
       ['the session secret is weak', { SLOTLOCK_SESSION_SECRET: 'z'.repeat(40) }, /SLOTLOCK_SESSION_SECRET is too weak/],
       ['no one is allowed', { SLOTLOCK_DASHBOARD_USERS: undefined }, /SLOTLOCK_DASHBOARD_USERS is required/],
+      ['a Google entry is not a subject', { SLOTLOCK_DASHBOARD_USERS: 'google:a/b' }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['users are logins, not ids', { SLOTLOCK_DASHBOARD_USERS: 'octocat' }, /SLOTLOCK_DASHBOARD_USERS is required/],
       ['organizations are logins, not ids', { SLOTLOCK_DASHBOARD_ORGS: 'acme-fleet' }, /SLOTLOCK_DASHBOARD_ORGS must be/],
+      ['Google has an id and no secret', { SLOTLOCK_GOOGLE_CLIENT_ID: '1234-abc.apps.googleusercontent.com' }, /go together/],
+      [
+        'Google comes with a list of GitHub organizations',
+        { SLOTLOCK_GOOGLE_CLIENT_ID: '1234-abc.apps.googleusercontent.com', SLOTLOCK_GOOGLE_CLIENT_SECRET: secret(), SLOTLOCK_DASHBOARD_ORGS: '91' },
+        /does not go with a list/,
+      ],
     ])('refuses to start when %s', (_case, overrides, message) => {
       expect(refusal(dashboardEnv(overrides)).message).toMatch(message);
     });
@@ -545,6 +654,37 @@ describe('slotlock serve configuration', () => {
       ).toBe(true);
       expect(refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_PRIVATE_URLS: 'yes' })).message).toMatch(
         /SLOTLOCK_ASSISTANT_PRIVATE_URLS must be on or off/,
+      );
+    });
+
+    it('keeps up to three previous assistant secrets, each strong and unlike every other secret', () => {
+      const own = secret();
+      const [first, second] = [secret(), secret()];
+      const read = (previous: string, extra: SlotlockEnv = {}) =>
+        readSlotlockServeConfig(
+          dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own, SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: previous, ...extra }),
+        ).dashboard;
+      expect(read('')).not.toHaveProperty('assistantPreviousSecrets');
+      expect(read(`${first},${second}`)?.assistantPreviousSecrets).toEqual([first, second]);
+      const refused = (previous: string, extra: SlotlockEnv = {}) =>
+        refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_SECRET: own, SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: previous, ...extra }))
+          .message;
+      // Never with the secret it names in the message.
+      for (const message of [
+        refused(own),
+        refused(`${first},${first}`),
+        refused(first, { SLOTLOCK_SESSION_SECRET: first }),
+      ]) {
+        expect(message).toMatch(/SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS must differ/);
+        expect(message).not.toContain(first);
+        expect(message).not.toContain(own);
+      }
+      expect(refused(`${first},`)).toMatch(/no empty one/);
+      expect(refused('z'.repeat(40))).toMatch(/SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS is too weak/);
+      expect(refused([secret(), secret(), secret(), secret()].join(','))).toMatch(/at most 3/);
+      // Without a current secret, nothing would seal the keys again.
+      expect(refusal(dashboardEnv({ SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: first })).message).toMatch(
+        /needs SLOTLOCK_ASSISTANT_SECRET/,
       );
     });
   });
@@ -695,6 +835,11 @@ describe('slotlock command line', () => {
     [['key', 'rotate'], /wrong number of arguments for "key rotate"/],
     [['key', 'create'], /wrong number of arguments for "key create"/],
     [['key', 'revoke'], /wrong number of arguments for "key revoke"/],
+    [['key', 'limits'], /wrong number of arguments for "key limits"/],
+    [['sandbox', 'seed'], /wrong number of arguments for "sandbox seed"/],
+    [['sandbox', 'reset', '--agents', '5'], /--agents and --start apply only to sandbox race/],
+    [['key', 'list', '--max-holds', '2'], /--max-holds, --max-held-hours, --requests-per-minute and --requires-approval are for key create and key limits/],
+    [['key', 'create', 'agent', '--requests-per-minute', '100001'], /--requests-per-minute must be a whole number from 1 to 100,000/],
     [['key', 'list', 'all'], /wrong number of arguments for "key list"/],
     [['serve', '--scope', 'read'], /--scope applies only to key create/],
     [['key', 'list', '--expires-in-days', '30'], /--expires-in-days applies only to key create/],
@@ -702,6 +847,15 @@ describe('slotlock command line', () => {
     [['key', 'create', 'agent', '--scope', 'read,'], /--scope must be a comma-separated list of read, write and admin/],
     [['key', 'create', 'agent', '--scope', ''], /--scope must be a comma-separated list of read, write and admin/],
     [['maintain', 'now'], /wrong number of arguments for "maintain"/],
+    [['partner', 'close'], /wrong number of arguments for "partner close"/],
+    [['resource', 'parent', 'room-1'], /wrong number of arguments for "resource parent"/],
+    [['overage', 'report', 'now'], /wrong number of arguments for "overage report"/],
+    [['billing', 'daily', 'now'], /wrong number of arguments for "billing daily"/],
+    [['billing', 'monthly'], /unknown command "billing monthly"/],
+    [['overage', 'report', '--month', 'May'], /--month must be a month/],
+    [['key', 'list', '--event', 'x'], /--event applies only to overage report/],
+    [['partner', 'close', 'stackapi', '--month', '2026-13'], /--month must be a month/],
+    [['partner', 'list', '--month', '2026-10'], /--month applies only to partner close/],
     [['key', 'create', 'agent', '--expires-in-days', '0'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '3651'], /--expires-in-days must be/],
     [['key', 'create', 'agent', '--expires-in-days', '7.5'], /--expires-in-days must be/],
@@ -714,14 +868,28 @@ describe('slotlock command line', () => {
     [['tenant', 'erase', '--confirm', 'someone-else'], /--confirm must repeat SLOTLOCK_TENANT/],
     [['tenant', 'suspend', '--confirm', 'default'], /--confirm applies only to tenant erase/],
     [['tenant', 'unsuspend', '--reason', 'abuse'], /--reason applies only to tenant suspend/],
+    [['plan'], /unknown command "plan"/],
+    [['plan', 'set', 'free'], /unknown command "plan set"/],
+    [['plan', 'default'], /wrong number of arguments for "plan default"/],
+    [['plan', 'default', 'gold'], /plan default takes free, developer or none/],
+    [['plan', 'default', 'free', '--from', 'next week'], /--from must be an ISO date or time/],
+    [['plan', 'default', 'none', '--from', '2026-12-09'], /--from applies only to a plan/],
+    [['plan', 'status', '--from', '2026-12-09'], /--from applies only to plan default/],
     [['hours'], /unknown command "hours"/],
     [['hours', 'delete'], /unknown command "hours delete"/],
     [['hours', 'set', '--all'], /wrong number of arguments for "hours set"/],
     [['hours', 'show', 'van'], /wrong number of arguments for "hours show"/],
-    [['hours', 'set', '[]'], /hours set needs --resource <ref> or --all/],
-    [['hours', 'clear', '--resource', 'van', '--all'], /hours clear needs --resource <ref> or --all/],
+    [['hours', 'set', '[]'], /hours set needs --resource <ref>, --location <ref> or --all/],
+    [['hours', 'clear', '--resource', 'van', '--all'], /hours clear needs --resource <ref>, --location <ref> or --all/],
     [['hours', 'show', '--all'], /--all applies only to hours set and hours clear/],
-    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours and rules commands/],
+    [['resource', 'list', '--resource', 'van'], /--resource applies only to hours, closures and rules commands/],
+    [['closures', 'add', '2027-12-25'], /closures add needs <first-day> \[<last-day>\] --label/],
+    [['closures', 'list', '--label', 'x'], /--label applies only to closures add and closures import/],
+    [['hours', 'set', '[]', '--location', 'depot', '--all'], /one of them/],
+    [['hours', 'set', '[]', '--resource', 'van', '--override'], /--override applies only to hours set --all/],
+    [['hours', 'set', '[]', '--resource', 'van', '--matching'], /--matching applies only to hours set --all/],
+    [['hours', 'clear', '--all', '--matching'], /--matching applies only to hours set --all/],
+    [['hours', 'set', '[]', '--all', '--override', '--matching'], /--override and --matching: give one/],
     [['hours', 'set', 'Mon 9-5', '--all'], /hours must be a JSON array of weekly rules/],
     [
       ['hours', 'set', '[{"rrule":"FREQ=DAILY","startMinutes":540,"durationMinutes":60}]', '--all'],
@@ -764,11 +932,73 @@ describe('slotlock command line', () => {
     expect(logged.join('')).not.toContain(proof);
   });
 
+  it('keeps each previous assistant secret out of the log', async () => {
+    const [older, oldest] = [randomBytes(16).toString('hex'), randomBytes(16).toString('hex')];
+    const logged: string[] = [];
+    const result = await runSlotlockCli(['serve'], {
+      env: serveEnv({
+        DATABASE_URL: `postgresql://slotlock_app:pass@${oldest}.invalid:5432/slotlock`,
+        SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS: `${older},${oldest}`,
+        PORT: '0',
+      }),
+      stdout: { write: () => {} },
+      stderr: { write: (chunk: string) => logged.push(chunk) },
+      signal: new AbortController().signal,
+    });
+    expect(result).toBe(1);
+    expect(logged.join('')).toContain('[redacted].invalid');
+    expect(logged.join('')).not.toContain(oldest);
+  });
+
   it('refuses a weak token without printing it', async () => {
     const weak = 'aaaaaaaabbbbbbbbccccccccdddddddd';
     const result = await run(['serve'], serveEnv({ SLOTLOCK_AUTH_TOKEN: weak }));
     expect(result.code).toBe(2);
     expect(result.stderr).toMatch(/SLOTLOCK_AUTH_TOKEN is too weak/);
     expect(result.stderr).not.toContain(weak);
+  });
+
+  // Whoever else can write in an export's directory can read the export, or link a table's file
+  // elsewhere: only a new directory, or an empty one only this user can write, is taken.
+  it('refuses a tenant export directory someone else could write in, before it connects', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'slotlock-export-dir-'));
+    const env = { DATABASE_URL, SLOTLOCK_TENANT: 'acme' };
+    const refused = async (out: string, why: string) => {
+      const result = await run(['tenant', 'export', '--out', out], env);
+      expect(result).toEqual({
+        code: 1,
+        stdout: '',
+        stderr: `slotlock: ${out} ${why}: export into a new directory, or an empty one only you can write\n`,
+      });
+    };
+    try {
+      const full = join(scratch, 'full');
+      mkdirSync(full, { mode: 0o700 });
+      writeFileSync(join(full, 'notes.txt'), '');
+      await refused(full, 'is not empty');
+      const shared = join(scratch, 'shared');
+      mkdirSync(shared);
+      chmodSync(shared, 0o777);
+      await refused(shared, 'can be written by other users');
+      const group = join(scratch, 'group');
+      mkdirSync(group);
+      chmodSync(group, 0o770);
+      await refused(group, 'can be written by other users');
+      const empty = join(scratch, 'empty');
+      mkdirSync(empty, { mode: 0o700 });
+      symlinkSync(empty, join(scratch, 'link'));
+      await refused(join(scratch, 'link'), 'is a link');
+      writeFileSync(join(scratch, 'file'), '');
+      await refused(join(scratch, 'file'), 'is not a directory');
+      if (process.getuid?.() === 0) {
+        const theirs = join(scratch, 'theirs');
+        mkdirSync(theirs, { mode: 0o700 });
+        chownSync(theirs, 65_534, 65_534);
+        await refused(theirs, 'belongs to another user');
+      }
+      expect(readdirSync(shared)).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

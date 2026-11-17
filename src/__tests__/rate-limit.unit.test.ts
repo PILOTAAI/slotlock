@@ -8,6 +8,7 @@ import {
   SlotlockAgentOperationError,
   createSlotlockAgentServer,
 } from '../agent-server.js';
+import { SLOTLOCK_APPLICATION_OPERATIONS, type SlotlockApplicationBackend } from '../application-api.js';
 import { SLOTLOCK_DEFAULT_LIMITS, type SlotlockLimits } from '../config.js';
 import {
   type SlotlockRefusalCounts,
@@ -453,6 +454,81 @@ describe('token buckets', () => {
       'GET /v1/resources 429 "key_read";r=0;t=1',
       'GET /v1/resources/r1 200 "app_read";r=0;t=3',
     ]);
+  });
+
+  it('charges a dry run as a read, on REST (in the query string) and on a tool call (RFC 0004 A3)', async () => {
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({
+        rates: {
+          address: null,
+          key_read: { perSecond: 1, burst: 5 },
+          key_write: { perSecond: 1, burst: 1 },
+          tenant_read: { perSecond: 1, burst: 5 },
+          tenant_write: { perSecond: 1, burst: 1 },
+        },
+      }),
+      basePath: '',
+      now: clock().now,
+      authenticate: async () => PRINCIPAL,
+    });
+    // The agent server's part: the request's charge, a dry run named in its query string as a read.
+    const target = limiter.serve({
+      async fetch(request) {
+        const principal = (await limiter.authenticate(request)) as typeof PRINCIPAL;
+        const dryRun = new URL(request.url).searchParams.get('dry_run') === 'true';
+        const ok = await limiter.consumeRateLimit({ principal, operation: 'protocol', ...(dryRun ? { dryRun } : {}) });
+        return ok ? Response.json({ ok: true }) : Response.json({ error: { code: 'rate_limited' } }, { status: 429 });
+      },
+    });
+    const post = (path: string) =>
+      target.fetch(new Request(`http://localhost${path}`, { method: 'POST', headers: { authorization: 'Bearer good' } }), {
+        remoteAddress: '127.0.0.1',
+      });
+    // Three dry runs within one write token, then the one real write it allows.
+    for (let index = 0; index < 3; index++) {
+      expect((await post('/v1/events?dry_run=true')).headers.get('ratelimit')).toMatch(/^"(key|tenant)_read"/);
+    }
+    expect((await post('/v1/events')).status).toBe(200);
+    expect((await post('/v1/events')).status).toBe(429);
+  });
+
+  it("holds a key to its own rate below the server's, once a request (RFC 0004 A5)", async () => {
+    const time = clock();
+    const limited: SlotlockAgentPrincipal = {
+      subject: 'api_key:9',
+      tenantRef: 'fleet-7',
+      scopes: ['read', 'write'],
+      limits: { requestsPerMinute: 2 },
+    };
+    const limiter = createSlotlockRequestLimits({
+      limits: limitsWith({ rates: { address: null } }),
+      basePath: '',
+      now: time.now,
+      authenticate: async () => limited,
+    });
+    const target = limiter.serve({
+      async fetch(request) {
+        const principal = (await limiter.authenticate(request)) as SlotlockAgentPrincipal;
+        // A tool call charges the request once and its operation again: the key's rate counts it once.
+        const ok =
+          (await limiter.consumeRateLimit({ principal, operation: 'protocol' })) &&
+          (await limiter.consumeRateLimit({ principal, operation: 'slotlock_create_event' }));
+        return ok ? Response.json({ ok: true }) : Response.json({ error: { code: 'rate_limited' } }, { status: 429 });
+      },
+    });
+    const post = () =>
+      target.fetch(new Request('http://localhost/mcp', { method: 'POST', headers: { authorization: 'Bearer x' } }), {
+        remoteAddress: '127.0.0.1',
+      });
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(200);
+    const refused = await post();
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('ratelimit')).toMatch(/^"key_limit";r=0;t=\d+$/);
+    expect(refused.headers.get('ratelimit-policy')).toBe('"key_limit";q=2;w=60');
+    // Half a minute later, one more.
+    time.advance(30_000);
+    expect((await post()).status).toBe(200);
   });
 
   it("charges a key that may not use the application API its own buckets, not the application's", async () => {
@@ -1028,6 +1104,169 @@ describe('series writes', () => {
     void held;
     limiter.close();
   });
+});
+
+describe('sandbox races', () => {
+  const KEYS: Record<string, SlotlockAgentPrincipal> = {
+    'Bearer a': { subject: 'api_key:a', tenantRef: 'fleet-7~test', scopes: ['read', 'write', 'admin'] },
+    'Bearer b': { subject: 'api_key:b', tenantRef: 'harbour~test', scopes: ['read', 'write', 'admin'] },
+  };
+  const SLOT = {
+    resource_id: '00000000-0000-4000-8000-000000000001',
+    starts_at: '2029-03-02T10:00:00Z',
+    ends_at: '2029-03-02T11:00:00Z',
+  };
+
+  /** The application API behind the limits, as `slotlock serve` puts them; `hold` keeps a race running. */
+  function serve(limits: SlotlockLimits, options: { now?: () => number; hold?: () => Promise<void> } = {}) {
+    const limiter = createSlotlockRequestLimits({
+      limits,
+      basePath: '',
+      ...(options.now ? { now: options.now } : {}),
+      authenticate: async (request) => KEYS[request.headers.get('authorization') ?? ''] ?? null,
+    });
+    const agent = createSlotlockAgentServer({
+      publicBaseUrl: 'http://localhost',
+      allowInsecureLocalhost: true,
+      backend: {} as SlotlockAgentCalendarBackend,
+      authenticate: limiter.authenticate,
+      consumeRateLimit: limiter.consumeRateLimit,
+      authorize: async () => true,
+      health: async () => ({ ready: true, checks: [] }),
+      rest: true,
+      application: {
+        backend: {
+          // Every other application method is never called here.
+          ...Object.fromEntries(
+            SLOTLOCK_APPLICATION_OPERATIONS.map(({ invoke }) => [invoke, async () => ({})]),
+          ),
+          async sandboxRace(_context: unknown, input: Record<string, unknown>) {
+            await options.hold?.();
+            const agents = (input.agents as number | undefined) ?? 100;
+            return {
+              agents,
+              booked: 1,
+              refused: { overlap: agents - 1 },
+              with_alternatives: agents - 1,
+              server_errors: 0,
+              p50_ms: 1,
+              p99_ms: 1,
+              max_ms: 1,
+            };
+          },
+          async sandboxFastForward() {
+            return { minutes: 60, holds: 0, approvals: 0, maintenance: {} };
+          },
+          async sandboxReset() {
+            return { removed: {} };
+          },
+        } as unknown as SlotlockApplicationBackend,
+        authorize: async ({ principal, operation, input }) => {
+          if (principal.scopes?.includes('admin') !== true) return false;
+          await limiter.admit({ principal, operation, input });
+          return true;
+        },
+      },
+    });
+    const target = limiter.serve(agent);
+    const post = (key: string, path: string, body: Record<string, unknown>) =>
+      target.fetch(
+        new Request(`http://localhost${path}`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
+        { remoteAddress: '127.0.0.1' },
+      );
+    return { limiter, post };
+  }
+
+  const answer = async (response: Promise<Response>) => {
+    const settled = await response;
+    const body = (await settled.json()) as { error?: { code?: string } };
+    return `${settled.status} ${body.error?.code ?? 'ok'} ${settled.headers.get('ratelimit')} ${settled.headers.get('retry-after')}`;
+  };
+
+  it("charges a race a write for each of its agents from the tenant's write budget, and the rest is owed", async () => {
+    // A race of 50 agents ran 153 transactions on one write token.
+    const time = clock();
+    const { limiter, post } = serve(
+      limitsWith({ rates: { address: null, app_write: { perSecond: 1, burst: 20 } } }),
+      { now: time.now },
+    );
+    const race = (agents?: number) =>
+      answer(post('a', '/v1/sandbox/race', { ...SLOT, ...(agents !== undefined ? { agents } : {}) }));
+    const reset = () => answer(post('a', '/v1/sandbox/reset', {}));
+    expect(await race(12)).toBe('200 ok "app_write";r=8;t=12 null');
+    expect(await reset()).toBe('200 ok "app_write";r=7;t=13 null');
+    // More agents than the bucket holds: it runs, and the tenant's next write waits until it is
+    // paid for, as one at a time would have.
+    expect(await race(30)).toBe('200 ok "app_write";r=0;t=43 null');
+    expect(await reset()).toBe('429 rate_limited "app_write";r=0;t=24 24');
+    expect(await race(2)).toBe('429 rate_limited "app_write";r=0;t=24 24');
+    time.advance(43_000);
+    // A race that names no number runs 100.
+    expect(await race()).toBe('200 ok "app_write";r=0;t=100 null');
+    limiter.close();
+  });
+
+  it("counts each agent in the server's write budget, which lends one tenant's race nothing", async () => {
+    const time = clock();
+    const { limiter, post } = serve(
+      limitsWith({
+        rates: {
+          address: null,
+          app_write: { perSecond: 1, burst: 100 },
+          global_write: { perSecond: 10, burst: 25 },
+        },
+      }),
+      { now: time.now },
+    );
+    expect(await answer(post('a', '/v1/sandbox/race', { ...SLOT, agents: 10 }))).toBe(
+      '200 ok "global_write";r=15;t=1 null',
+    );
+    // Forty more than the server holds: it takes what is there, and is owed none of the rest.
+    expect(await answer(post('a', '/v1/sandbox/race', { ...SLOT, agents: 40 }))).toBe(
+      '200 ok "global_write";r=0;t=3 null',
+    );
+    expect(await answer(post('b', '/v1/sandbox/reset', {}))).toBe('429 rate_limited "global_write";r=0;t=1 1');
+    time.advance(100);
+    expect(await answer(post('b', '/v1/sandbox/reset', {}))).toBe('200 ok "global_write";r=0;t=3 null');
+    limiter.close();
+  });
+
+  it('runs one race or fast-forward of a tenant at a time, in the maintenance slots', async () => {
+    let finishFirst: () => void = () => {};
+    const firstHolds = new Promise<void>((resolve) => (finishFirst = resolve));
+    let races = 0;
+    const { limiter, post } = serve(SLOTLOCK_DEFAULT_LIMITS, {
+      hold: async () => {
+        races += 1;
+        if (races === 1) await firstHolds;
+      },
+    });
+    const first = answer(post('a', '/v1/sandbox/race', { ...SLOT, agents: 2 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The tenant's second race, and its fast-forward, wait two seconds for the first and are then
+    // refused; another tenant's waits for the server's slot and is answered busy.
+    const [second, forward, other] = await Promise.all([
+      answer(post('a', '/v1/sandbox/race', { ...SLOT, agents: 2 })),
+      answer(post('a', '/v1/sandbox/fast-forward', { minutes: 60 })),
+      answer(post('b', '/v1/sandbox/race', { ...SLOT, agents: 2 })),
+    ]);
+    expect(second).toBe('429 rate_limited "tenant_maintenance_runs";r=0 1');
+    expect(forward).toBe('429 rate_limited "tenant_maintenance_runs";r=0 1');
+    expect(other).toBe('503 server_busy "maintenance_runs";r=0 1');
+    expect(races).toBe(1);
+    // One that comes while the first runs waits for it, then runs.
+    const third = answer(post('a', '/v1/sandbox/race', { ...SLOT, agents: 2 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    finishFirst();
+    expect(await first).toMatch(/^200 ok /);
+    expect(await third).toMatch(/^200 ok /);
+    expect(races).toBe(2);
+    limiter.close();
+  }, 10_000);
 });
 
 describe('refusal counts', () => {

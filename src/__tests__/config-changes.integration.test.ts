@@ -95,6 +95,7 @@ describe.skipIf(!url)('configuration changes and provenance on the feed (real Po
           timezone: 'UTC',
           visibility: 'shared',
           pool: null,
+          location: null,
           availability: null,
           booking_rules: null,
         },
@@ -242,7 +243,8 @@ describe.skipIf(!url)('configuration changes and provenance on the feed (real Po
       deleted: true,
     });
     expect(await feed.next()).toEqual([
-      { type: 'resource.deleted', subject: id, resource_id: id, data: { id, reference: 'van-1' }, ...by },
+      // With where it was, for an endpoint filtered by pool, location or group.
+      { type: 'resource.deleted', subject: id, resource_id: id, data: { id, reference: 'van-1', pool: 'vans' }, ...by },
     ]);
 
     // No URL, token or secret anywhere on the feed, and every row says where it came from.

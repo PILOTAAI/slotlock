@@ -144,6 +144,22 @@ export function clientOperations(document: Schema): ClientOperation[] {
 }
 
 /** Arguments in the order a method takes them: path, then required, then optional. */
+/**
+ * Arguments a release made optional that code written earlier passes as required, by operation:
+ * `resource_ids` once searches could select their resources instead (RFC 0003 G4). The Rust client
+ * keeps them a plain list, sent when not empty; the Java client keeps its methods that take them
+ * first, beside the ones that take them in `optional`; the .NET client keeps its 0.2.0 overloads
+ * (csharpCompatOverload). Go's and Python's calls read the same either way.
+ */
+const RELAXED_ARGUMENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  slotlock_get_free_busy: ['resource_ids'],
+  slotlock_find_next_available: ['resource_ids'],
+  slotlock_find_available_slots: ['resource_ids'],
+});
+
+const relaxed = (operation: ClientOperation, name: string) =>
+  RELAXED_ARGUMENTS[operation.id]?.includes(name) === true;
+
 function argumentsOf(operation: ClientOperation): {
   path: Field[];
   required: Field[];
@@ -503,6 +519,13 @@ function rustOperations(operations: ClientOperation[]): string {
         out.push(
           `    pub ${rustField(p.name)}: ${p.nullable ? `Option<${rustType(p.kind)}>` : rustType(p.kind)},`,
         );
+      } else if (relaxed(operation, p.name) && p.kind.type === 'array') {
+        // Required before: a plain list, left out when empty, so earlier calls still compile.
+        out.push(
+          '    /// Left out when empty.',
+          '    #[serde(skip_serializing_if = "Vec::is_empty")]',
+          `    pub ${rustField(p.name)}: ${rustType(p.kind)},`,
+        );
       } else if (p.nullable) {
         out.push(
           '    /// `None` leaves it out; `Some(None)` sends null, which clears it.',
@@ -682,6 +705,48 @@ function javaOperations(operations: ClientOperation[]): string {
         '',
       );
     }
+    // The methods earlier releases had, taking a now optional argument in its old place.
+    const kept = optional.filter((p) => relaxed(operation, p.name));
+    if (kept.length > 0) {
+      const rest = [...operation.query, ...operation.body];
+      const before = rest.filter((p) => p.required || kept.includes(p));
+      const oldParams = [
+        ...path.map((p) => `String ${camel(p.name)}`),
+        ...before.map((p) => `${javaType(p.kind)} ${camel(p.name)}`),
+      ];
+      const currentArgs = params.map((param) => param.split(' ').pop());
+      const keptDoc = [
+        '  /**',
+        ...wrap(
+          `${javaDoc(operation.summary)}, as earlier releases took it: ${kept.map((p) => `{@code ${p.name}}`).join(', ')} in its old place. See the method that takes them in {@code optional}.`,
+          '   * ',
+        ),
+        '   *',
+        ...[...path, ...before].map((p) => `   * @param ${camel(p.name)} {@code ${p.name}}`),
+      ];
+      out.push(
+        ...keptDoc,
+        '   * @param optional the other optional arguments, or null',
+        '   * @return the response body',
+        '   * @throws SlotlockException when the server refuses the call',
+        '   */',
+        `  public Map<String, Object> ${method}(${[...oldParams, 'Map<String, ?> optional'].join(', ')}) {`,
+        '    Map<String, Object> merged = new LinkedHashMap<>();',
+        '    if (optional != null) merged.putAll(optional);',
+        ...kept.map((p) => `    merged.put("${p.name}", ${camel(p.name)});`),
+        `    return ${method}(${[...currentArgs, 'merged'].join(', ')});`,
+        '  }',
+        '',
+        ...keptDoc,
+        '   * @return the response body',
+        '   * @throws SlotlockException when the server refuses the call',
+        '   */',
+        `  public Map<String, Object> ${method}(${oldParams.join(', ')}) {`,
+        `    return ${method}(${[...oldParams.map((param) => param.split(' ').pop()), 'null'].join(', ')});`,
+        '  }',
+        '',
+      );
+    }
   }
   out.push('}');
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
@@ -748,11 +813,18 @@ function csharpCompatOverload(method: string, old: string[], current: string[]):
   if (old.join() === current.join()) return [];
   const nameOf = (param: string) => param.slice(param.lastIndexOf(' ') + 1);
   const typeOf = (param: string) => param.slice(0, param.lastIndexOf(' '));
-  const missing = old.filter((param) => !current.includes(param));
-  const added = current.filter((param) => !old.includes(param));
+  // A parameter 0.2.0 required that is now optional (`T x` now `Optional<T> x`) is still kept: the
+  // overload passes it on as `new Optional<T>(x)`, since C# applies no user-defined conversion
+  // from an interface type such as IEnumerable<string>.
+  const optionalOf = (param: string) => `Optional<${typeOf(param)}> ${nameOf(param)}`;
+  const missing = old.filter((param) => !current.includes(param) && !current.includes(optionalOf(param)));
+  const relaxed = old.filter((param) => !current.includes(param) && current.includes(optionalOf(param)));
+  const added = current.filter(
+    (param) => !old.includes(param) && !relaxed.some((kept) => optionalOf(kept) === param),
+  );
   if (
     missing.length > 0 ||
-    added.length === 0 ||
+    (added.length === 0 && relaxed.length === 0) ||
     added.some((param) => !param.startsWith('Optional<')) ||
     old.map(typeOf).join() === current.map(typeOf).join()
   ) {
@@ -761,7 +833,11 @@ function csharpCompatOverload(method: string, old: string[], current: string[]):
     );
   }
   const args = [
-    ...old.map(nameOf).map((name) => `${name}: ${name}`),
+    ...old.map((param) =>
+      relaxed.includes(param)
+        ? `${nameOf(param)}: new Optional<${typeOf(param)}>(${nameOf(param)})`
+        : `${nameOf(param)}: ${nameOf(param)}`,
+    ),
     ...added.map(nameOf).map((name) => `${name}: default`),
   ];
   return [

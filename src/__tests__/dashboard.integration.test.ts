@@ -39,6 +39,9 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
 
   afterAll(async () => {
     await admin`DELETE FROM slotlock.api_keys WHERE tenant_ref = ${tenantRef}`;
+    await admin`DELETE FROM slotlock.availability_exceptions WHERE tenant_ref = ${tenantRef}`;
+    await admin`DELETE FROM slotlock.holiday_calendars WHERE tenant_ref = ${tenantRef}`;
+    await admin`DELETE FROM slotlock.availability_defaults WHERE tenant_ref = ${tenantRef}`;
     await admin`DELETE FROM slotlock.resources WHERE tenant_ref = ${tenantRef}`;
     await application?.end({ timeout: 5 });
     await admin.unsafe(`DROP OWNED BY ${role}`).catch(() => undefined);
@@ -146,15 +149,73 @@ describe.skipIf(!url)('dashboard (real Postgres)', () => {
       { rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 480, durationMinutes: 240 },
       { rrule: 'FREQ=WEEKLY;BYDAY=FR', startMinutes: 1_320, durationMinutes: 480 },
     ]);
+    // Your hours are stored once; the override clears the van's own so it inherits them (RFC 0004 B2).
     expect(
-      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed' }, session)).status,
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'closed', override: 'all' }, session)).status,
+    ).toBe(303);
+    expect(await read()).not.toHaveProperty('availabilityRules');
+    expect((await read())?.inheritedAvailability).toEqual({ source: 'tenant', rules: [] });
+    expect(await (await get('/dashboard/resources', session)).text()).toContain('<span>Your hours: Closed</span><a class="meta-link" href');
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: 'all', mode: 'server' }, session)).status,
+    ).toBe(303);
+    expect(
+      (await post('/dashboard/hours', { csrf, resource: van, mode: 'closed' }, session)).status,
     ).toBe(303);
     expect((await read())?.availabilityRules).toEqual([]);
-    expect(await (await get('/dashboard/resources', session)).text()).toContain('<span>Closed</span><a class="meta-link" href');
     expect(
       (await post('/dashboard/hours', { csrf, resource: van, mode: 'server' }, session)).status,
     ).toBe(303);
     expect(await read()).not.toHaveProperty('availabilityRules');
+
+    // Closures: a holiday calendar uploaded (larger than other forms may be), kept by its name,
+    // imported again without what it dropped, and deleted with its closures (RFC 0004 B1).
+    const year = new Date().getUTCFullYear() + 1;
+    const holidays = (days: string[]) =>
+      [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Test//Office//EN',
+        'X-WR-CALNAME:Office closed',
+        ...days.flatMap((day) => [
+          'BEGIN:VEVENT',
+          `UID:office-${day}`,
+          `DTSTART;VALUE=DATE:${year}${day}`,
+          `SUMMARY:Closed ${day}`,
+          // Long enough that the file is more than an ordinary form's 8 KB.
+          `DESCRIPTION:${'x'.repeat(5_000)}`,
+          'END:VEVENT',
+        ]),
+        'END:VCALENDAR',
+        '',
+      ].join('\r\n');
+    const upload = async (file: string) => {
+      const once = /name="once" value="([^"]+)"/.exec(await (await get('/dashboard/keys', session)).text())?.[1] as string;
+      const form = new FormData();
+      form.append('csrf', csrf);
+      form.append('once', once);
+      form.append('scope', '');
+      form.append('icalendar_file', new Blob([file], { type: 'text/calendar' }), 'office.ics');
+      return dashboard.fetch(
+        new Request(`${ORIGIN}/dashboard/closures/import`, { method: 'POST', headers: { cookie: session, origin: ORIGIN }, body: form }),
+      );
+    };
+    const closures = await (await get('/dashboard/closures', session)).text();
+    expect(closures).toContain('enctype="multipart/form-data"');
+    // This server fetches no calendars by address, so it offers none.
+    expect(closures).not.toContain('name="url"');
+    const imported = await upload(holidays(['0102', '0103']));
+    expect(imported.status).toBe(200);
+    const importedPage = await imported.text();
+    expect(importedPage).toContain('Imported 2 closures.');
+    expect(importedPage).toMatch(/<td data-label="Calendar" class="wrap">Office closed<\/td>.*?<td data-label="Closures">2<\/td>/s);
+    const again = await (await upload(holidays(['0102']))).text();
+    expect(again).toContain('Imported 1 closure; removed 1 holiday the calendar no longer has.');
+    const [calendar] = await store.withTenant(tenantRef, (tenant) => tenant.listHolidayCalendars({ tenantRef }));
+    expect(calendar).toMatchObject({ name: 'Office closed', closures: 1 });
+    expect((await post('/dashboard/closures/calendars/delete', { csrf, id: calendar?.id as string }, session)).status).toBe(303);
+    expect(await store.withTenant(tenantRef, (tenant) => tenant.listHolidayCalendars({ tenantRef }))).toEqual([]);
+    expect(await (await get('/dashboard/closures', session)).text()).not.toContain('Office closed');
 
     const revoked = await post('/dashboard/keys/revoke', { csrf, id: listed?.id as string }, session);
     expect(revoked.status).toBe(303);

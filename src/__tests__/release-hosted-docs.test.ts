@@ -2,17 +2,21 @@
 // a privacy notice with what UK GDPR Article 13 asks for, terms with the Article 28(3) processing
 // terms, an acceptable-use policy, a hosted service page whose limits are the code's, a versioning
 // policy for /v1, and a site that links them instead of saying there is no hosted service.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SLOTLOCK_DASHBOARD_MAX_RESOURCES } from '../dashboard.js';
+import { SLOTLOCK_MAX_WEBHOOK_ENDPOINTS } from '../event-feed.js';
 import { SLOTLOCK_API_KEY_ACTIVE_LIMIT, SLOTLOCK_API_KEY_RETAINED_LIMIT } from '../ddl.js';
 import { SLOTLOCK_API_KEY_MAX_LIFETIME_DAYS } from '../api-keys.js';
+import { SLOTLOCK_AUDIT_RETENTION_DAYS, SLOTLOCK_CHANGE_RETENTION_BY_PLAN } from '../ddl.js';
+import { SLOTLOCK_PLAN_LIMITS } from '../plans.js';
 import { SLOTLOCK_CALENDAR_HORIZON_DAYS } from '../rules.js';
 import { parseAvailabilityRules } from '../weekly-hours.js';
 import {
   SLOTLOCK_AGENT_OWNER_COMMAND_QUOTA,
   SLOTLOCK_AGENT_OWNER_EVENT_QUOTA,
   SLOTLOCK_EVENT_COMMAND_RETENTION_DAYS,
+  SLOTLOCK_TENANT_EXPORT_HOURS,
 } from '../store.js';
 
 const path = (file: string) => new URL(`../../${file}`, import.meta.url);
@@ -58,10 +62,27 @@ describe('the published policies', () => {
     expect(privacy).toContain(`\`${cookie('SIGN_IN_COOKIE')}\` for the ten minutes a sign-in takes`);
     expect(declared('src/dashboard.ts', /const SIGN_IN_TTL_MS = ([0-9_ *]+);/) / 60_000).toBe(10);
     expect(privacy).toContain('| The sign-in in progress, in a cookie | The service | 10 minutes |');
-    // Assistant conversations, and the hourly maintenance that deletes what retention ends.
-    const conversationHours =
-      declared('src/dashboard.ts', /conversationTtlMs \?\? ([0-9_ *]+);/) / 3_600_000;
-    expect(privacy).toContain(`a conversation ${conversationHours} hours after its last message`);
+    // Assistant chats are kept until deleted (no lifetime unless a deployment sets one), at most
+    // so many a person; and the hourly maintenance that deletes what retention ends.
+    expect(read('src/dashboard.ts')).toContain('conversationTtlMs ?? null;');
+    const maxChats = declared('src/ddl.ts', /const SLOTLOCK_ASSISTANT_MAX_CHATS = ([0-9_]+);/);
+    expect(privacy).toContain(
+      `each conversation until the person who had it deletes it or the account is erased, at most ${String(maxChats)} per person`,
+    );
+    // Contacts, busy time from other calendars and payments for holds are listed, as long as the
+    // code keeps them, and erasure takes each.
+    const busyDays = declared('src/store.ts', /const SOURCE_BUSY_RETENTION_DAYS = ([0-9_]+);/);
+    expect(privacy).toContain(
+      `| ${busyDays} days after the period ends, then deleted; at once when you retire the source or your account is erased |`,
+    );
+    expect(privacy).toContain(`busy time that ended ${busyDays} days ago`);
+    expect(privacy).toContain('Until you delete the contact, which also takes it off every booking, or your account is erased');
+    expect(privacy).toContain('Changes and webhooks name a contact only by its reference, never its details');
+    for (const table of ['contacts', 'source_busy', 'hold_payments', 'reminder_dispatches', 'reservation_reminder_dispatches']) {
+      expect(read('src/ddl.ts'), `erase_tenant erases ${table}`).toContain(`erased_table := '${table}';`);
+    }
+    expect(privacy).toContain('event, hold, payment record, waitlist entry, contact, busy period, webhook');
+    expect(privacy).toContain('Hosted Slotlock sends no email, SMS or WhatsApp message to your contacts');
     const maintenanceMinutes =
       declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
     expect(maintenanceMinutes).toBe(60);
@@ -70,16 +91,23 @@ describe('the published policies', () => {
     );
     expect(privacy).not.toContain('since it last started');
     expect(read('src/self-host.ts')).toContain('SELECT slotlock.maintenance_tenants(');
-    // What erasure leaves: key digests, and a suspension, which outlives it (README).
+    // What erasure leaves: key digests, and a suspension, which outlives it (self-hosting page).
     expect(privacy).toContain('the digests of your erased keys, with nothing about you');
     expect(privacy).toContain('a record that the account was suspended, with the reason we gave, if it was');
-    expect(flat(read('README.md'))).toContain('A suspension outlives it.');
+    expect(flat(read('site/docs-src/self-host.md'))).toContain('A suspension outlives it.');
     // Backups and the log store are named; the old 150 MB cap was never hosted practice.
     expect(privacy).toContain('Backups of the whole database, encrypted');
     expect(privacy).toContain('stores our encrypted backups (R2)');
     expect(privacy).toContain('keeps them for 30 days and then deletes them.');
     expect(privacy).not.toMatch(/10 years|3,650 days/);
     expect(privacy).not.toContain('150 MB');
+    // The history's retention by plan (RFC 0004 D2), and erasing one person (D3).
+    const { free, developer, team } = SLOTLOCK_CHANGE_RETENTION_BY_PLAN;
+    expect(privacy).toContain(`${free} days on the Free plan, ${developer} days on Developer and ${team} days on Team`);
+    expect(privacy).toContain(`${SLOTLOCK_AUDIT_RETENTION_DAYS} days (${team} days on the Team plan)`);
+    expect(privacy).toContain('`POST /v1/subjects/erase` (or `slotlock subject erase`)');
+    expect(privacy).toContain(`${SLOTLOCK_TENANT_EXPORT_HOURS} hours after it is ready`);
+    expect(privacy).toContain(`for you to download within ${SLOTLOCK_TENANT_EXPORT_HOURS} hours`);
     // Outbox rows hold no event content, as the history row says.
     expect(read('src/ddl.ts')).toContain('never titles,\n// descriptions or attendees');
     expect(privacy).toContain('It never holds titles, descriptions or attendees');
@@ -164,7 +192,9 @@ describe('the published policies', () => {
     expect(terms.slice(terms.indexOf('8. '))).toContain(
       'allow for and contribute to audits, including inspections, by you or an auditor you mandate',
     );
-    expect(terms).toContain('free while it is offered as a preview');
+    expect(terms).toContain('## Plans and payment');
+    expect(terms).toContain('Stripe sells it to you as merchant of record');
+    expect(terms).toContain('at least 30 days\' notice of a new price');
     expect(terms).toContain('no service level agreement');
     expect(terms).toContain('law of England and Wales');
     expect(terms).toContain('[Acceptable Use Policy](ACCEPTABLE-USE.md)');
@@ -211,8 +241,8 @@ describe('the hosted service page', () => {
     expect(text).toContain('`https://app.slotlock.pylota.io/dashboard`');
     expect(text).toContain('no service level agreement');
     expect(text).toContain('Writes take effect at once.');
-    // Sign-up is open to any GitHub account, and self-hosting stays a supported path.
-    expect(text).toContain('Any GitHub account can sign in.');
+    // Sign-up is open to any GitHub or Google account, and self-hosting stays a supported path.
+    expect(text).toContain('Any GitHub or Google account can sign in.');
     expect(text).toContain('Self-hosting stays fully supported');
     for (const file of ['docs/hosted/README.md', 'site/docs-src/hosted.md', 'README.md', 'SECURITY.md']) {
       expect(flat(read(file)), file).not.toMatch(/is not open|do not answer|only supported path/);
@@ -221,19 +251,48 @@ describe('the hosted service page', () => {
     expect(text).not.toMatch(/opens once|is released;/);
   });
 
+  // The landing page offers the assistant whenever the server reads its secret
+  // (site/scripts/sync-content.mjs); the hosted page says Slotlock Cloud has it, with the bounds
+  // the code sets.
+  it('says Slotlock Cloud has the assistant the landing page offers, with the bounds the code sets', () => {
+    const offered = read('src/self-host.ts').includes("'SLOTLOCK_ASSISTANT_SECRET'");
+    expect(offered, 'canary: the server reads the assistant secret').toBe(true);
+    const assistant = flat(read('docs/hosted/README.md').split('\n## Assistant\n')[1]?.split('\n## ')[0] ?? '');
+    const source = read('src/assistant.ts');
+    const dashboard = read('src/dashboard.ts');
+    const steps = /SLOTLOCK_ASSISTANT_MAX_STEPS = (\d+);/.exec(source)?.[1];
+    const perMinute = /rate \?\? \{ perSecond: (\d+) \/ 60,/.exec(dashboard)?.[1];
+    const maxChats = /const SLOTLOCK_ASSISTANT_MAX_CHATS = (\d+);/.exec(read('src/ddl.ts'))?.[1];
+    expect([steps, perMinute, maxChats]).toEqual(['8', '10', '100']);
+    expect(dashboard).toContain('conversationTtlMs ?? null;');
+    expect(assistant).toContain('in Settings, Assistant');
+    expect(assistant).toContain('the Anthropic Messages API, or any OpenAI-compatible API');
+    expect(assistant).toContain(`up to ${String(steps)} model calls a message`);
+    expect(assistant).toContain(`${String(perMinute)} messages a minute per person`);
+    expect(assistant).toContain(`until you delete it (or the account is erased), up to ${String(maxChats)} per person`);
+    expect(assistant).toContain('**Approve** or **Dismiss**');
+    expect(assistant).toContain('needs a public HTTPS address, or a hosted provider');
+    // Its privacy notice row is the one for a dashboard that offers the assistant.
+    expect(flat(read('PRIVACY.md'))).toContain('if the dashboard offers the assistant and you set it up');
+  });
+
   it('publishes the limits the code enforces', () => {
     const text = page();
     const row = (what: string, limit: string) => expect(text).toContain(`| ${what} | ${limit}`);
     row(
       'Active API keys per account',
-      `${SLOTLOCK_API_KEY_ACTIVE_LIMIT} (${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} kept in all`,
+      `As the [plan](#plans) allows (${thousands(SLOTLOCK_API_KEY_RETAINED_LIMIT)} kept in all`,
     );
-    row('Resources added in the dashboard', `${SLOTLOCK_DASHBOARD_MAX_RESOURCES} |`);
-    const serveResources = declared(
-      'src/self-host.ts',
-      /const SERVE_MAX_TENANT_RESOURCES = ([0-9_]+);/,
-    );
-    row('Resources per account through the application API', `${thousands(serveResources)} |`);
+    // Every plan fits under the caps that hold without one.
+    const { free, developer, team } = SLOTLOCK_PLAN_LIMITS;
+    for (const plan of [developer, team]) {
+      expect(plan.apiKeys).toBeLessThanOrEqual(SLOTLOCK_API_KEY_ACTIVE_LIMIT);
+      expect(plan.resources).toBeLessThanOrEqual(SLOTLOCK_DASHBOARD_MAX_RESOURCES);
+      expect(plan.webhookEndpoints).toBeLessThanOrEqual(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS);
+    }
+    row('Resources', `${free.resources} | ${developer.resources} | ${team.resources} |`);
+    row('Active API keys', `${free.apiKeys} | ${developer.apiKeys} | ${team.apiKeys} |`);
+    row('Webhook endpoints', `${free.webhookEndpoints} | ${developer.webhookEndpoints} | ${team.webhookEndpoints} |`);
     row(
       'Events one key can hold, active and cancelled',
       `${thousands(SLOTLOCK_AGENT_OWNER_EVENT_QUOTA)} |`,
@@ -271,7 +330,7 @@ describe('the hosted service page', () => {
     "each named only by a pseudonym: a hash of its IP address, keyed by a secret held only in the running server's memory and replaced when it restarts";
   // Every reason the server counts a refusal for, in the notice's words.
   const REFUSALS =
-    'For each minute in which the server refused requests, they also record how many it refused (over a rate limit, while too busy, too large, or with a credential it did not accept)';
+    'For each minute in which the server refused requests, they also record how many it refused (over a rate limit or a monthly allowance, while too busy, too large, or with a credential it did not accept)';
   it('tells the privacy notice how refused requests are logged', () => {
     const privacy = flat(read('PRIVACY.md'));
     expect(privacy).toContain(PSEUDONYM);
@@ -285,12 +344,14 @@ describe('the hosted service page', () => {
       expect(limits).toContain("createHmac('sha256', pseudonymKey).update(address)");
       expect(limits).toMatch(/const MAX_LOGGED_CLIENTS = 10;/);
       expect(limits).toMatch(/const REFUSAL_LOG_INTERVAL_MS = 60_000;/);
-      // The reasons REFUSALS names: a rate limit, three caps on work at once, size and credentials.
+      // The reasons REFUSALS names: a rate limit, a monthly allowance, three caps on work at once,
+      // size and credentials.
       const reasons = /export type SlotlockRefusalReason =([^;]*);/.exec(limits)?.[1] ?? '';
       expect([...reasons.matchAll(/'(\w+)'/g)].map(([, reason]) => reason).sort()).toEqual([
         'auth_refused',
         'lookup_overflow',
         'maintenance_busy',
+        'quota_exceeded',
         'rate_limited',
         'request_too_large',
         'series_writes_busy',
@@ -361,10 +422,10 @@ describe('the specification and the README', () => {
 
 describe('availability rule spellings (W24)', () => {
   it('names the spelling each surface takes, as their parsers read it', () => {
-    const readme = read('README.md');
-    const rules = /slotlock hours set '(\[[^']+\])'/.exec(readme)?.[1];
-    expect(rules, 'canary: the README hours set example').toBeDefined();
-    // The CLI and SLOTLOCK_AVAILABILITY parse the README's camelCase example.
+    const page = read('site/docs-src/booking-rules.md');
+    const rules = /slotlock hours set '(\[[^']+\])'/.exec(page)?.[1];
+    expect(rules, 'canary: the hours page hours set example').toBeDefined();
+    // The CLI and SLOTLOCK_AVAILABILITY parse the hours page's camelCase example.
     expect(parseAvailabilityRules(JSON.parse(rules ?? '[]'))).toHaveLength(1);
     expect(() =>
       parseAvailabilityRules([{ rrule: 'FREQ=WEEKLY;BYDAY=SA', start_minutes: 600, duration_minutes: 240 }]),
@@ -373,7 +434,7 @@ describe('availability rule spellings (W24)', () => {
     const openApi = read('openapi.json');
     expect(openApi).toContain('"start_minutes"');
     expect(openApi).not.toContain('"startMinutes"');
-    const said = flat(readme);
+    const said = flat(page);
     expect(said).toContain('A rule is `rrule`, `startMinutes` and `durationMinutes` here and in `SLOTLOCK_AVAILABILITY`.');
     expect(said).toContain('`rrule`, `start_minutes` and `duration_minutes`.');
   });
@@ -391,11 +452,15 @@ describe('the site', () => {
       ['versioning', 'VERSIONING.md'],
       ['clients', 'clients/python/README.md snippet'],
       ['clients', 'clients/dotnet/README.md snippet'],
-      ['operations', 'README.md#operations body promote'],
     ]) {
       expect(read(`site/docs-src/${page}.md`), page).toContain(`<!-- include ${include} -->`);
       expect(config, page).toContain(`'docs/${page}'`);
     }
+    // The operations page is written for the site, around the tested maintenance example.
+    expect(read('site/docs-src/operations.md')).toContain(
+      '<!-- code examples/maintenance.ts#maintenance -->',
+    );
+    expect(config).toContain("'docs/operations'");
   });
 
   it('no longer says there is no hosted service, and links the hosted pages from every page footer', () => {
@@ -405,13 +470,15 @@ describe('the site', () => {
     expect(landing).not.toContain('`Not yet.');
     for (const href of [
       '/docs/hosted/',
-      '/docs/status/',
+      // Status is the public status page itself; how it is checked is linked from the hosted page.
+      'https://stats.uptimerobot.com/F7RQohQzXM',
       '/docs/privacy/',
       '/docs/terms/',
       '/docs/acceptable-use/',
     ]) {
       expect(landing).toContain(`href: '${href}'`);
     }
+    expect(read('docs/hosted/README.md')).toContain('[how they are raised](/docs/hosted/status.md)');
   });
 
   it('is rebuilt when any document it includes changes', () => {
@@ -445,7 +512,15 @@ describe('the site', () => {
       ([, file]) => file as string,
     );
     expect(examples.length, 'the library page shows the tested examples').toBeGreaterThan(0);
-    for (const file of [...included, ...examples, 'openapi.json']) {
+    // Any page may include a document or show an example, not only those above.
+    const everywhere = readdirSync(path('site/docs-src'))
+      .filter((file) => file.endsWith('.md'))
+      .flatMap((file) =>
+        [...read(`site/docs-src/${file}`).matchAll(/<!-- (?:include\??|code) ([^#\s>]+)/g)].map(
+          ([, source]) => source as string,
+        ),
+      );
+    for (const file of [...included, ...examples, ...everywhere, 'openapi.json']) {
       expect(covered(file), file).toBe(true);
     }
   });

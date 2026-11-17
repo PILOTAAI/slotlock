@@ -1,0 +1,5 @@
+// The Slotlock icon the dashboard serves as its favicon (the design system's favicon.svg). A copy of site/public/favicon.svg, which a
+// test keeps identical; the dashboard's Content-Security-Policy allows images from its own origin
+// only, so the mark is served, not inlined.
+export const SLOTLOCK_DASHBOARD_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img"><title>Slotlock icon</title><rect width="64" height="64" rx="12.8" fill="#0a0b0d"></rect><g transform="translate(3.955315315315313 3.736216216216216) scale(0.8763963963963964)"><path d="M20 30V20a12 12 0 0 1 24 0V30" fill="none" stroke="#d9ff43" stroke-width="7"></path><path fill="#d9ff43" fill-rule="evenodd" d="M17 28h30a9 9 0 0 1 9 9v14a9 9 0 0 1-9 9H17a9 9 0 0 1-9-9V37a9 9 0 0 1 9-9ZM32 37a3 3 0 0 0-3 3v9a3 3 0 0 0 6 0v-9a3 3 0 0 0-3-3Z"></path></g></svg>
+`;

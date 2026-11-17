@@ -1,0 +1,16 @@
+---
+import type { GetStaticPaths } from 'astro';
+import Page from '../../components/marketing/Page.astro';
+import { useCasePages } from '../../data/pages/use-cases';
+import type { MarketingPage } from '../../lib/page';
+
+export const getStaticPaths = (() =>
+  useCasePages.map((page) => ({
+    params: { slug: page.path.split('/')[2] },
+    props: { page },
+  }))) satisfies GetStaticPaths;
+
+const { page } = Astro.props as { page: MarketingPage };
+---
+
+<Page page={page} />

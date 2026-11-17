@@ -1,10 +1,11 @@
 ---
 title: Quickstart
+seoTitle: 'Quickstart: run Slotlock and let Claude Code book a slot'
 description: Run Slotlock and PostgreSQL 18 with Docker, connect Claude Code, and have an agent find and book a free slot.
 ---
 
 :::tip[Nothing to run]
-[Slotlock Cloud](/docs/hosted/) is hosted for you: sign in with GitHub at
+[Slotlock Cloud](/docs/hosted/) is hosted for you: sign in with GitHub or Google at
 `https://app.slotlock.pylota.io/dashboard`, create a key, and connect your agent to
 `https://slotlock-api.pylota.io/mcp`. This page runs Slotlock yourself.
 :::
@@ -115,4 +116,4 @@ book without asking. Keep confirmation on for anything real.
 - [Connect an agent](/docs/connect/): Cursor, VS Code, the Claude API, A2A.
 - [TypeScript library](/docs/library/): the same engine in your code.
 - For a server beyond this machine, put a TLS proxy in front, set `SLOTLOCK_PUBLIC_URL`, and work
-  through the [production checklist](https://github.com/PILOTAAI/slotlock#production-checklist).
+  through the [production checklist](/docs/operations/#production-checklist).

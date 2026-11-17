@@ -1,6 +1,8 @@
 ---
 title: Security model
+seoTitle: 'Security model: tenants, API keys and row-level security'
 description: How Slotlock keeps agent writes safe. An MCP client can ask its person to confirm each one, PostgreSQL decides every overlap, and forced row-level security keeps tenants apart.
+seoDescription: "How Slotlock keeps agent writes safe: people can confirm each MCP write, PostgreSQL decides every overlap, and row-level security keeps tenants apart."
 ---
 
 Three rules hold everywhere: the database decides overlaps, the tenant comes from the authenticated
@@ -8,7 +10,31 @@ caller, and an agent's write can be made to wait for a person.
 
 ## Confirmation before writes
 
-<!-- include README.md#confirm-before-writing body -->
+With `confirmation`, a listed write first asks the person a yes/no question that says exactly what
+will change, such as `Book vehicle-42 for 2027-03-29 10:00–11:00 (Europe/London): "Vehicle
+handover".` Only an explicit yes runs the write.
+
+- Listing a write guards every tool that performs it, whichever name is listed: `slotlock_cancel`
+  waits with `slotlock_delete_event` and is asked as the same deletion, `slotlock_reschedule` with
+  `slotlock_update_event`, and `slotlock_confirm_slot` with `slotlock_create_event`, asked as
+  booking the time its hold holds. Holds never wait: they book nothing and lapse within minutes.
+- A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
+  the other fields it sets (`also description, attendees`) without quoting them.
+- Facts come first: the resource by its own reference, times in its own zone, and an event as it
+  stands now, read through your backend's `describeResource` and `getEvent` when the caller may
+  read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its
+  UTC offset. The agent's own text comes last, quoted.
+- A repeating booking says how many times it books, the first and the last, and each moved
+  occurrence, from the same expansion the store books with; a change to one says it covers every
+  repeat. Agents may send RFC 5545 rules that repeat daily or less often and can occur.
+- The pending question is sealed (HMAC-SHA256) to the caller, the tool and the exact arguments, and
+  expires after `ttlSeconds` (600).
+- Clients that cannot ask (MCP 2025 revisions, A2A) get `confirmation_required`; nothing is written.
+- The yes comes from the client: Slotlock relies on the MCP client to ask its person, and a key
+  holder's own client can answer for itself. Confirmation keeps an agent from writing unasked; it is
+  not an authorization boundary. Scopes and `authorize` decide who may write.
+- `secrets` holds 1 to 8 keys of 32+ bytes: list the new one first to rotate. `onEvent` reports each
+  outcome for audit.
 
 ## Tenant isolation
 
@@ -28,15 +54,23 @@ threat model, including what the role check does not read.
 
 ## Dashboard sign-in
 
-- Sign-in asks GitHub for no scope, uses `state` and PKCE, and keeps only the GitHub user id and
-  login. The GitHub token is used once and dropped.
+- Sign-in asks GitHub for no scope (`read:org` with [organizations](/docs/dashboard/#organizations)),
+  uses `state` and PKCE, and keeps only the GitHub user id and login (and, with organizations, the
+  served ones the person belongs to, or with `enabled` up to 20 of theirs). The GitHub token is
+  used once and dropped.
 - A session is a signed, HttpOnly cookie that lasts 12 hours. The allowlist
   (`SLOTLOCK_DASHBOARD_USERS`) is checked on every request, dashboard and API alike.
 - Every form carries a token bound to the session and must come from the server's own origin. The
   pages run no inline script, under a Content-Security-Policy that allows only their own files.
 - A callback works once, a signed-out cookie stays out, and a reloaded form does not create or
-  rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, so this holds on every
-  server sharing the database. The database's clock decides when anything has expired.
+  rotate a key twice. Each is recorded in PostgreSQL as a SHA-256 digest, kept until its cookie or
+  form expires (12 hours at most), so this holds on every server sharing the database, behind any
+  load balancer; a form record also carries a digest of the person who sent it (and of the team's
+  provider, for a session its single sign-on began alone), so each has its own limit. The server
+  role reaches them only through two SECURITY DEFINER functions, and `serve` refuses to start the
+  dashboard until `migrate` has granted them.
+- The database's clock decides when a sign-in or session has expired, so servers whose clocks drift
+  from it or from each other cannot let a replay or a signed-out session through.
 
 ## Live updates
 

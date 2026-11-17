@@ -8,6 +8,8 @@ import {
   createSlotlockApiKeyStore,
   generateSlotlockApiKey,
   isSlotlockApiKey,
+  isSlotlockTestTenant,
+  slotlockLiveTenant,
   slotlockApiKeyDigest,
 } from '../api-keys.js';
 import type { SlotlockSql } from '../store.js';
@@ -35,6 +37,20 @@ describe('API key format', () => {
       generated.add(key);
     }
     expect(generated.size).toBe(200);
+  });
+
+  it("marks a test environment's key slk_test_, checked the same way, and never a partner's", () => {
+    const { key, prefix } = generateSlotlockApiKey(true);
+    expect(key).toMatch(/^slk_test_[0-9A-Za-z]{46}$/);
+    expect(prefix).toBe(key.slice(0, 17));
+    expect(isSlotlockApiKey(key)).toBe(true);
+    expect(isSlotlockApiKey(`${key.slice(0, -1)}${key.endsWith('A') ? 'B' : 'A'}`)).toBe(false);
+    // The same random part under the other prefix fails its checksum's shape check, not the lookup.
+    expect(isSlotlockApiKey(`slk_partner_${key.slice('slk_test_'.length)}`)).toBe(false);
+    expect(isSlotlockTestTenant('github:42~test')).toBe(true);
+    expect(isSlotlockTestTenant('github:42')).toBe(false);
+    expect(slotlockLiveTenant('github:42~test')).toBe('github:42');
+    expect(slotlockLiveTenant('acme')).toBe('acme');
   });
 
   it('carries a checksum, so a mistyped or truncated key is refused without a lookup', () => {

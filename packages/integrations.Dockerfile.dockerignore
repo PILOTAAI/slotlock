@@ -1,0 +1,26 @@
+# An allow-list, as the server image's: the build reads only these, so local secrets (.env), git
+# history, node_modules, any dist and the site never enter the build context.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!scripts/
+!src/
+src/__tests__/
+!*.md
+!LICENSE
+!NOTICE
+!slotlock.manifest.json
+!slotlock-manifest.schema.json
+!openapi.json
+!packages/sync/package.json
+!packages/sync/tsconfig.build.json
+!packages/sync/src/
+!packages/notify/package.json
+!packages/notify/tsconfig.build.json
+!packages/notify/src/
+!packages/payments-stripe/package.json
+!packages/payments-stripe/tsconfig.build.json
+!packages/payments-stripe/src/
+packages/*/src/*.test.ts

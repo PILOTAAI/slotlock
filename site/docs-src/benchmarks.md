@@ -20,6 +20,12 @@ slot with a primary key, so a 1-hour booking writes 4 rows. Each write books one
 transaction, through a function that catches the conflict as a server would, so a refused booking
 counts as an answer, not an error. Both tables start empty for every run.
 
+Three write workloads also run a third time, against Slotlock's own schema (the Slotlock schema
+column): the same bookings into its reservations table, with the exclusion constraint, the triggers
+that keep each booking's occupied time, a composite's claims and the change feed, and the indexes,
+as a booking meets them once the store's checks have passed. The gap to the range constraint is
+what those cost. A run without the schema applied leaves the column out.
+
 | Workload | What each transaction does |
 | --- | --- |
 | Non-overlapping, 1 resource | Books an hour no one holds on one resource: every attempt lands. |

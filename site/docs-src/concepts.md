@@ -1,5 +1,6 @@
 ---
 title: Concepts
+seoTitle: 'How Slotlock prevents double bookings: core concepts'
 description: The ideas Slotlock is built on, from resources and availability rules to holds, free/busy certainty and tenancy.
 ---
 

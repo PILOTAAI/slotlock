@@ -10,6 +10,7 @@ versions it was built with, where each comes from, and the packages each pulls i
 
 - ical.js, Mozilla Public License 2.0
 - rrule, BSD 3-Clause License
+- tldts, MIT License
 - zod, MIT License
 
 Peer dependency, installed and versioned by the application that embeds Slotlock:

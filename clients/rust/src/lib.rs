@@ -123,6 +123,9 @@ pub struct Options {
     pub allow_insecure: bool,
     /// Sent as User-Agent; `slotlock-rust/<version>` unless set.
     pub user_agent: Option<String>,
+    /// With a partner key (`slk_partner_...`), one of the partner's accounts to act for, sent as
+    /// `Slotlock-Account` (where the partner's contract allows it). None by default.
+    pub account: Option<String>,
 }
 
 impl Default for Options {
@@ -131,6 +134,7 @@ impl Default for Options {
             timeout: Duration::from_secs(30),
             allow_insecure: false,
             user_agent: None,
+            account: None,
         }
     }
 }
@@ -141,6 +145,7 @@ pub struct Client {
     base_url: String,
     api_key: String,
     user_agent: String,
+    account: Option<String>,
     agent: ureq::Agent,
 }
 
@@ -189,6 +194,17 @@ impl Client {
                 "api_key must be a Slotlock API key or the server token".into(),
             ));
         }
+        if let Some(account) = &options.account {
+            let valid = (1..=128).contains(&account.len())
+                && account
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+            if !valid {
+                return Err(Error::Invalid(
+                    "account must be 1-128 letters, digits, dots, dashes or underscores".into(),
+                ));
+            }
+        }
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(options.timeout))
@@ -206,6 +222,7 @@ impl Client {
             user_agent: options
                 .user_agent
                 .unwrap_or_else(|| format!("slotlock-rust/{VERSION}")),
+            account: options.account,
             agent: ureq::Agent::new_with_config(config),
         })
     }
@@ -280,12 +297,15 @@ impl Client {
             )
         };
         let (url, body) = url_and_body;
-        let builder = http::Request::builder()
+        let mut builder = http::Request::builder()
             .method(spec.method)
             .uri(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Accept", "application/json")
             .header("User-Agent", &self.user_agent);
+        if let Some(account) = &self.account {
+            builder = builder.header("Slotlock-Account", account);
+        }
         let mut response = match body {
             Some(bytes) => {
                 let request = builder

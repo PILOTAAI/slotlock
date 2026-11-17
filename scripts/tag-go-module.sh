@@ -7,7 +7,8 @@
 # pkg.go.dev. A re-run finds the tag on origin naming the release commit and pushes nothing; a tag
 # naming another commit stops it, since a published module version must never change.
 #   scripts/tag-go-module.sh <version> <commit>
-# Needs git with an origin it can push tags to.
+# Needs git with an origin it can push tags to: in the job, the release deploy key, since the
+# "Release tags" ruleset lets only admins and deploy keys create a clients/go/v* tag.
 set -eu
 [ "$#" -eq 2 ] || {
   echo "usage: scripts/tag-go-module.sh <version> <commit>" >&2

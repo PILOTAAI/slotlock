@@ -1,5 +1,6 @@
 ---
 title: Language clients
+seoTitle: 'Slotlock clients for Python, Go, Rust, Java and .NET'
 description: Slotlock's REST API from Python, Go, Rust, Java and .NET, one method per operation, each tested against a real server in CI.
 sidebar:
   label: Language clients

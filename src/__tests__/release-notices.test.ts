@@ -130,7 +130,12 @@ describe('the zod fix', () => {
     const changelog = read('CHANGELOG.md');
     const later = changelog.slice(0, changelog.search(/^## 0\.2\.0 - /m));
     expect(later, 'canary: 0.2.0 has a heading').not.toBe(changelog);
-    const security = flat(section(later, '### Security'));
+    // Every Security section since then: later releases add their own above it.
+    const security = later
+      .split('\n### Security\n')
+      .slice(1)
+      .map((rest) => flat(section(`### Security\n${rest}`, '### Security')))
+      .join(' ');
     expect(security).toContain('GHSA-mrhx-c7xc-m3w5');
     expect(security).toMatch(/zod[^.]*4\.6\.5[^.]*4\.6\.7/);
   });

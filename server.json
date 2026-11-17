@@ -3,7 +3,7 @@
   "name": "io.github.PILOTAAI/slotlock",
   "title": "Slotlock",
   "description": "Calendars for AI agents: free/busy, next free slot, and bookings PostgreSQL never double-books.",
-  "version": "0.6.3",
+  "version": "0.12.3",
   "websiteUrl": "https://slotlock.pylota.io",
   "repository": {
     "url": "https://github.com/PILOTAAI/slotlock",
@@ -12,7 +12,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/pilotaai/slotlock:0.6.3",
+      "identifier": "ghcr.io/pilotaai/slotlock:0.12.3",
       "runtimeHint": "docker",
       "transport": {
         "type": "streamable-http",
@@ -97,7 +97,7 @@
         },
         {
           "name": "SLOTLOCK_CONFIRM_WRITES",
-          "description": "Writes that wait for a person to confirm them: none, all, or a comma-separated list of slotlock_create_event, slotlock_book_together, slotlock_book_pool, slotlock_update_event, slotlock_delete_event. Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
+          "description": "Writes that wait for a person to confirm them: none, all, or a comma-separated list of slotlock_create_event, slotlock_book_together, slotlock_book_pool, slotlock_update_event, slotlock_delete_event, slotlock_confirm_slot, slotlock_reschedule, slotlock_cancel. Listing one also guards the tool that makes the same write (slotlock_cancel with slotlock_delete_event, slotlock_reschedule with slotlock_update_event, slotlock_confirm_slot with slotlock_create_event). Clients without MCP 2026-07-28 form elicitation have guarded writes refused.",
           "default": "none"
         },
         {

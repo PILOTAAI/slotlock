@@ -306,6 +306,10 @@ export function canonicalTimeZoneName(timezone: string): string {
   const invalid = () =>
     Object.assign(new Error(`Invalid timezone: ${timezone}`), { code: 'invalid_timezone' });
   if (!name || /^[+-]/.test(name)) throw invalid();
+  // Each name resolves the same for the process's life (its time zone data does not change under
+  // it), and building a formatter to ask is the costly part: remembered, valid names only.
+  const known = canonicalNames.get(name);
+  if (known !== undefined) return known;
   let resolved: string;
   try {
     resolved = new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
@@ -313,8 +317,15 @@ export function canonicalTimeZoneName(timezone: string): string {
     throw invalid();
   }
   if (/^[+-]/.test(resolved)) throw invalid();
-  return resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
+  const canonical = resolved.toLowerCase() === name.toLowerCase() ? resolved : name;
+  if (canonicalNames.size >= MAX_CANONICAL_NAMES) canonicalNames.clear();
+  canonicalNames.set(name, canonical);
+  return canonical;
 }
+
+/** Names canonicalTimeZoneName resolved; a few hundred zones exist, so this rarely fills. */
+const canonicalNames = new Map<string, string>();
+const MAX_CANONICAL_NAMES = 2_000;
 
 export interface ZonedCalendarDate {
   /** Civil date of the instant in the zone, `YYYY-MM-DD`. */

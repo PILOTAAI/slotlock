@@ -1,13 +1,15 @@
 ---
 title: Introduction
+seoTitle: 'Slotlock docs: the booking engine for AI agents'
 description: Slotlock is the calendar AI agents cannot double-book. Each resource is its own calendar, holds expire on their own, and PostgreSQL refuses every overlapping write and returns the conflict as data.
+seoDescription: "Slotlock is the calendar AI agents cannot double-book: each resource is its own calendar, holds expire on their own, and PostgreSQL refuses overlaps."
 ---
 
 <!-- include README.md#_intro -->
 
 ## Start here
 
-- [Slotlock Cloud](/docs/hosted/): nothing to deploy. Sign in with GitHub at
+- [Slotlock Cloud](/docs/hosted/): nothing to deploy. Sign in with GitHub or Google at
   `https://app.slotlock.pylota.io/dashboard`, create a key, and connect an agent to
   `https://slotlock-api.pylota.io/mcp`.
 - [Quickstart](/docs/quickstart/): run Slotlock with Docker and have Claude Code book a slot.

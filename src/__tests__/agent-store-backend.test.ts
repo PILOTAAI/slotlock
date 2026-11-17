@@ -67,6 +67,11 @@ describe('Slotlock store-backed agent server adapter', () => {
     getCalendarEvent,
     listCalendarEvents,
     cancelCalendarEvent,
+    // No approval policies (RFC 0004 A4): every write goes straight through.
+    findApproval: async () => null,
+    listApprovalPolicies: async () => [],
+    // No closures or special days (RFC 0004 B1).
+    availabilityExceptionsFor: async () => new Map(),
   } as unknown as SlotlockTenantStore;
   const store = { withTenant } as unknown as SlotlockStore;
 
@@ -191,7 +196,8 @@ describe('Slotlock store-backed agent server adapter', () => {
       idempotency_key: 'create-1',
     });
 
-    expect(withTenant).toHaveBeenCalledOnce();
+    // One transaction asks whether a policy covers it (none here), one makes it.
+    expect(withTenant).toHaveBeenCalledTimes(2);
     expect(putCalendarEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         tenantRef,

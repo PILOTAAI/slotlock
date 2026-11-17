@@ -276,7 +276,11 @@ validated and handed to the backend unchanged.
 
 ### Human confirmation
 
-An embedder may require a person's confirmation for any of the three writes. On 2026-07-28, after
+An embedder may require a person's confirmation for any write that books, moves or cancels. Listing
+one guards every tool that performs it: `slotlock_cancel` with `slotlock_delete_event`,
+`slotlock_reschedule` with `slotlock_update_event`, and `slotlock_confirm_slot` with
+`slotlock_create_event`, whichever of each pair is listed. A guarded write with no question of its
+own is refused, never asked as another write. On 2026-07-28, after
 authentication, argument validation and authorization pass, the first call answers
 `input_required` with one form elicitation (a required boolean) describing the change in words
 derived only from the validated arguments, and a `requestState` sealed with HMAC-SHA256 over the
@@ -341,7 +345,7 @@ at most 100 active keys and 1,000 in all. The digest of a rotated or erased key 
 is never valid again. A server's own bearer token is never `admin`.
 
 A dashboard signs a person in with GitHub, asking for no scope, to the tenant `github:<user id>`,
-and manages that tenant's keys, resources (at most 100) and weekly hours.
+and manages that tenant's keys, resources (at most 500) and weekly hours.
 
 ### Maintenance
 

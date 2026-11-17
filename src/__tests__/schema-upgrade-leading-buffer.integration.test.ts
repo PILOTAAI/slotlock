@@ -12,6 +12,8 @@ const HOUR = 3_600_000;
 async function shapeAsBeforeLeadingBuffers(sql: postgres.Sql) {
   await sql.unsafe(`
     ALTER TABLE slotlock.reservations DROP CONSTRAINT slotlock_reservations_no_overlap;
+    -- Composite claims (RFC 0003 G8) came later still.
+    DROP TRIGGER slotlock_reservations_composite_claim ON slotlock.reservations;
     DROP TRIGGER slotlock_reservations_set_occupied_start ON slotlock.reservations;
     DROP FUNCTION slotlock.set_reservation_occupied_start();
     ALTER TABLE slotlock.reservations DROP COLUMN occupied_starts_at, DROP COLUMN buffer_before_ms;

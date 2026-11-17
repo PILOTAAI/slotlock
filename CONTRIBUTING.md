@@ -30,6 +30,11 @@ role named `slotlock` is the package's schema, which `"$user"` puts first on the
 command-line tool redacts the database password from everything it prints, so a short or
 product-like password rewrites the output the tests read.
 
+The browser suites (the admin console's pages, and the dashboard assistant end to end) also need
+Chromium for the Playwright version `package.json` pins, `npx playwright install chromium`, and skip
+without it; CI's "Admin console in a browser" job runs the console's, and keeps its screenshots when
+it fails.
+
 Property suites (`*.property.test.ts`) check the engine, time zones, iCalendar parsing and API
 keys on input [fast-check](https://fast-check.dev/) generates, with a new seed each run. A failure
 prints the seed and the shrunk counterexample; add `{ seed, path }` from it to that `fc.assert` to
@@ -51,11 +56,18 @@ A check on each pull request fails when a commit lacks the line. To fix earlier 
 
 ## Documentation
 
-Every TypeScript block in README.md is quoted from a region of `examples/*.ts`
-(`// #region <name>` … `// #endregion <name>`) marked `<!-- example: examples/<file>#<name> -->`.
-Edit the example, not the README copy: `readme-examples.test.ts` fails when they differ, and
-`examples.integration.test.ts` runs the examples against PostgreSQL. The website and docs live in
-`site/`.
+Every TypeScript example the docs show is a region of `examples/*.ts`
+(`// #region <name>` … `// #endregion <name>`). README.md quotes one after
+`<!-- example: examples/<file>#<name> -->`; a docs page in `site/docs-src/` names one with
+`<!-- code examples/<file>#<name> -->`, and the site build puts the code in. Edit the example, not
+a copy: `docs-examples.test.ts` fails when a README copy differs, a marker names no region, or a
+region is shown nowhere, and `examples.integration.test.ts` runs the examples against PostgreSQL.
+
+The website and docs live in `site/`. Document a topic on its page in `site/docs-src/`, the one
+place it is written down. The README is the front door: it says what Slotlock is, how to run it,
+and links to those pages; `readme.test.ts` keeps it short and its links working. Its intro, "Why
+it is built for agents", "Project status and boundaries" and "Supported versions" also appear on
+the site, which includes them.
 
 ## Pull requests
 
@@ -83,7 +95,10 @@ that section becomes the release notes.
 To release, run **Actions > Release a version** with the version (for example `0.1.1`). It sets the
 version in `package.json`, `package-lock.json`, `server.json` and `slotlock.manifest.json` and dates
 the `## Unreleased` heading (`scripts/prepare-release.sh`), opens the pull request, merges it once CI
-and DCO pass on it, and `tag-release.yml` tags the release commit. The tag starts `release.yml`: the
+and DCO pass on it, and `tag-release.yml` tags the release commit. The script also records the
+release's database functions in `workers/dashboard/released-schema-functions.json`: the hosted
+dashboard deploys from `main` before the release migrates its database, so CI refuses dashboard code
+that calls a function missing there unless it asks first (`src/schema-functions.ts`). The tag starts `release.yml`: the
 suite, then npm and the GitHub release, and, only once the suite has passed, `image.yml` (the image,
 then the MCP Registry). The image and the registry entry each wait for a maintainer to approve their
 environment (`ghcr`, `mcp-registry`), and npm holds each staged version until a maintainer approves
@@ -92,8 +107,13 @@ dated, is released the same way. After a failed run, run it again with the same 
 the release branch the failed run left when that already holds this release, so checks already run
 there still count, replaces it otherwise, and reuses its pull request (`scripts/open-release-pr.sh`).
 
-The pull request is opened and merged by the release app, a GitHub App that can only write this
-repository's contents and pull requests. An owner of the organization creates it once with
+The pull request is opened and merged by the release app, the project's one GitHub App, installed
+on this repository only. It holds what its three users need between them: contents, pull requests
+and issues write, and Actions, checks and commit statuses read. Each token asks only for its own
+part. Release a version asks for contents and pull requests. The hourly CMS schedule
+(`cms-schedule.yml`) uses the same key and asks for checks too. The admin console has a private key
+of its own, so either key can be revoked alone (SECURITY.md, Admin console). An owner of the
+organization creates it once with
 `node scripts/create-release-app.mjs` (click **Create GitHub App**, then install it on `slotlock`
 only); the script checks the installation and stores the app's key in the `release-app` environment,
 which only `main` can use. Without the app, the workflow opens the pull request as
@@ -124,6 +144,6 @@ such a stage and release a version that fixes it; accept a named advisory with
 `--allow <GHSA id>` only when the release notes say why. It approves nothing itself.
 
 When a run needs a step npm or GitHub keeps for a person (the first npm version, the npm trusted
-publisher, the image's visibility, and the deploy key `tag-release.yml` pushes tags with), the
-failing job names `scripts/bootstrap-release.sh`. One run of it does that step, re-runs the failed
-jobs and waits for them.
+publisher, the image's visibility, and the deploy key `tag-release.yml` and the Go module job push
+tags with), the failing job names `scripts/bootstrap-release.sh`. One run of it does that step,
+re-runs the failed jobs and waits for them.

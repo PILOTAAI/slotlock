@@ -1,5 +1,6 @@
-// The README advises `transaction_timeout` on the serving role (PostgreSQL 17+; absent on 16): it
-// ends a caller's transaction, and a store call within it works. Skipped without DATABASE_URL.
+// The production checklist advises `transaction_timeout` on the serving role (PostgreSQL 17+;
+// absent on 16): it ends a caller's transaction, and a store call within it works. Skipped without
+// DATABASE_URL.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import postgres from 'postgres';

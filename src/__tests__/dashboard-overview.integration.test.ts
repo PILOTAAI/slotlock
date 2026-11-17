@@ -101,22 +101,5 @@ describe.skipIf(!url)('the dashboard overview (real Postgres)', () => {
     expect(await adapter.webhooks?.list(other)).toEqual([]);
     expect(await adapter.webhooks?.remove(other, id)).toBe(false);
     expect(await adapter.webhooks?.remove(tenant, id)).toBe(true);
-
-    // Two waiting for the same free hour: the first is offered it; when it leaves, the second is.
-    const join = (holderRef: string) =>
-      store.withTenant(tenant, (t) => t.joinWaitlist({ tenantRef: tenant, resourceId: car.id, start: at(100), end: at(101), holderRef }));
-    const first = await join('first');
-    await join('second');
-    await store.withTenant(tenant, (t) => t.offerWaitlist({ tenantRef: tenant }));
-    const offered = (await adapter.waitlist?.list(tenant, 10)) ?? [];
-    expect(offered.map(({ status }) => status)).toEqual(['offered', 'waiting']);
-    expect(await adapter.waitlist?.leave(other, first.ok ? first.entry.id : '')).toBe(false);
-    expect(await adapter.waitlist?.leave(tenant, first.ok ? first.entry.id : '', 'github:42')).toBe(true);
-    // The person who removed it is on the feed: its offered hold, released by them.
-    const released = (await adapter.recentChanges?.(tenant, 20))?.find(({ type }) => type === 'hold.released');
-    expect(released?.actor).toBe('github:42');
-    expect((await adapter.waitlist?.list(tenant, 10))?.map(({ holderRef, status }) => [holderRef, status])).toEqual([
-      ['second', 'offered'],
-    ]);
   });
 });

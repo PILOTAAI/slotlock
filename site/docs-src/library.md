@@ -1,5 +1,6 @@
 ---
 title: TypeScript library
+seoTitle: 'TypeScript availability and booking library | Slotlock'
 description: Call Slotlock's engine and PostgreSQL store from your own Node.js code, with no server in between.
 sidebar:
   label: TypeScript library
@@ -14,17 +15,26 @@ From another language, use the [REST API](/docs/api/) or a [client](/docs/client
 npm install slotlock@{{version}} postgres
 ```
 
-Node.js 22.12+ and PostgreSQL 16+ with `btree_gist`, which Slotlock creates if it is missing.
-TypeScript declarations are included.
+Node.js 22.12+, PostgreSQL 16+ with `btree_gist` (which Slotlock creates if it is missing; CI runs
+16, 17 and 18), and `postgres` ^3.4.5 as a peer dependency. TypeScript declarations are included.
 
 ## Find a free slot, with no database
 
+The availability maths needs no database:
+
 <!-- code examples/availability.ts#next-slot -->
+
+A rule `expandRules` cannot evaluate adds no availability; it never invents a slot. A search window
+may be 367 days at most (`invalid_window`), here and in `findNextAvailableFor`.
 
 ## Set up the database
 
-Two roles: one owns the schema and deploys it once per release; your application connects as
-another that owns nothing and cannot bypass row-level security.
+| Role | Owns | Used for |
+| --- | --- | --- |
+| Deployment | the `slotlock` schema | `applySchema`, `applyTenantRls`, `grantApplicationRole`, once per release |
+| Application | nothing (`NOSUPERUSER NOBYPASSRLS`) | all traffic, confined to one tenant by forced row-level security |
+
+Create the application role once, then deploy as the owner:
 
 ```sql
 CREATE ROLE slotlock_app LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS;
@@ -32,7 +42,14 @@ CREATE ROLE slotlock_app LOGIN PASSWORD '…' NOSUPERUSER NOBYPASSRLS;
 
 <!-- code examples/deploy.ts#deploy -->
 
-Run it after every upgrade: `applySchema` is idempotent and safe from several instances at once.
+- `applySchema` is idempotent and safe to run from several instances at once.
+- `grantApplicationRole` grants schema usage and DML on Slotlock's tables, and refuses
+  (`unsafe_application_role`) a role that could get around row-level security. Run it after every
+  `applySchema`. [SECURITY.md](https://github.com/PILOTAAI/slotlock/blob/main/SECURITY.md#security-model)
+  lists what it checks.
+- `applySchema` refuses a `slotlock` schema another role controls (`unsafe_slotlock_schema`).
+- Already have a tenant setting such as `app.tenant_id`? Pass `{ tenantContextSetting:
+  'app.tenant_id' }` to `createSlotlockStore`.
 
 ## Book time
 
@@ -40,13 +57,115 @@ Run it after every upgrade: `applySchema` is idempotent and safe from several in
 
 <!-- code examples/store.ts#book -->
 
-- `withTenant` scopes every call to one tenant through row-level security.
-- A taken window comes back as `{ ok: false, code: 'overlap' }`, never a thrown error.
-- Holds, reservations, recurring events and external calendar feeds work the same way.
+Run every store method inside `withTenant`. A call outside it is not refused: it runs with no tenant
+context, so as the application role forced row-level security shows it no rows.
+
+`withTenant` validates the tenant, sets the context transaction-locally on the one connection every
+callback call uses, supports nested savepoints, and restores the previous context. Do not issue a
+standalone `set_config(..., true)` through a pool: its transaction ends before the next call.
+`withTenant(tenantRef, callback, { isolation: 'read committed' })` runs the callback in a READ
+COMMITTED transaction whatever the role's default, and refuses inside a caller's transaction of
+another level. A store sharing one pool among tenants can bound each tenant's share:
+`createSlotlockStore(sql, { maxTenantTransactions, tenantLockTimeoutMs })` runs at most that many
+of a tenant's `withTenant` transactions at once (the rest wait in the process, and leave the line
+when `withTenant`'s `signal` aborts), and refuses one that waits longer than that for a lock with
+`lock_timeout`, safe to retry. `slotlock serve` sets `tenant_transactions` (2) and 5,000.
+
+`createResource({ ..., maxTenantResources })` refuses a new resource (`resource_limit_reached`) once
+the tenant has that many (1-100,000); an existing `externalRef` is still updated. Capped creates for
+one tenant take a database lock and count under READ COMMITTED, so racing ones stop at the cap on
+any number of servers; inside a REPEATABLE READ or SERIALIZABLE transaction they refuse
+(`invalid_transaction_isolation`). Uncapped creates take no lock.
+
+`setResourceAvailability({ tenantRef, id, rules })` gives a resource its own bookable hours (`null`
+inherits, `[]` closes it). `storeTenantAvailability({ tenantRef, rules, overrideResources? })` and
+`setLocationAvailability({ tenantRef, location, rules })` store hours a resource without its own
+inherits: its location's, the nearest up the chain, then the tenant's (RFC 0004 B2). Each answers
+`{ inheriting, ownHours }`. `overrideResources` is `none` (resources keep their own hours, the
+default), `all` (they lose them) or `matching` (only those the same as the tenant's were, or as
+these). `setTenantAvailability({ tenantRef, rules })` is kept as 0.8.0 had it, deprecated: every
+resource uses the hours afterwards, and it answers how many. A resource read carries `inheritedAvailability` when it has no hours of
+its own. `createAvailabilityException`, `listAvailabilityExceptions` and
+`deleteAvailabilityException` keep closures and special days (B1). `openWindows` (exported) is the
+one evaluator search and enforced writes share. `createSlotlockStoreAgentBackend` answers from
+those hours and calls `availabilityRules` only for resources that inherit nothing. [Booking rules](/docs/booking-rules/) say what
+a booking on a resource must satisfy.
+
+### Writing rules
+
+- Create with `expectedRevision: 0`; update with the revision you last read and a new idempotency
+  key. Replaying the same command and key returns the original result (`idempotent: true`); reusing
+  a key with a different payload returns `idempotency_conflict`.
+- A conflicting opaque occurrence returns `{ ok: false, code: 'overlap' }`, never a thrown error.
+  Transparent events never block.
+- Cancelling leaves a tombstone, so a delayed create cannot resurrect the event; use a new external
+  reference for a genuinely new event.
+- `listCalendarEvents` and `listResources` return at most 1,000 rows and page with keyset cursors.
+
+## Holds, external bookings and the feed
+
+<!-- code examples/store.ts#holds -->
+
+## Waitlists
+
+`joinWaitlist({ tenantRef, resourceId | pool, start, end, holderRef, offerTtlMs })` waits for a
+window that is taken now. When it comes free (a cancel, a released or expired hold, a no-show),
+`offerWaitlist` gives it to the entries in the order they joined: the first whose window is free, on
+its resource or the first free member of its pool, gets a hold for its holder, and the feed says so
+(`waitlist.offered`, with `hold_id`). Confirm the hold to book it; let it go and the next is
+offered.
+
+Cancels, releases and moves, whether an agent (MCP, A2A) or the application API makes them, offer
+at once; maintenance offers what lapses on its own (an expired hold, a no-show) and expires entries
+whose window has started (`waitlist.expired`). With `checkInMinutes` in a resource's booking rules,
+maintenance releases a booking made since the rule was set that nobody checked in that long after
+its start, or after it was made for a walk-in (`reservation.no_show`), and the waitlist is offered
+its time. Check-in opens an hour before the start; moving a booking to another start clears it.
+Leaving the waitlist lets an offer not yet confirmed go with it.
+
+An entry may wait for any slot of a length within its window (`duration_minutes`, RFC 0004 B6),
+on a resource or a pool: it is offered the earliest free one. An offer ends `accepted` (its hold
+confirmed, by the application API or an agent's `slotlock_confirm_slot`), `declined`
+(`POST /v1/waitlist/{entry_id}/decline`, or the hold released) or `lapsed` (the hold expired), each
+on the feed, and the time goes to the next who waits.
+
+## The booking lifecycle
+
+The booking lifecycle (RFC 0004 B4) is written down in `src/lifecycle.ts`
+(`SLOTLOCK_BOOKING_TRANSITIONS`, `slotlockBookingNext`), and a test holds the store to it:
+
+| From | Moves | Refused |
+| --- | --- | --- |
+| `held` | confirm → `confirmed`, release → `released`, expire → `expired`, reschedule → `held` | booking operations: `reservation_not_found` |
+| `confirmed` | reschedule, check in → `checked_in`, cancel → `cancelled`, no-show → `no_show`, its end → `completed` | hold operations: `hold_not_found` |
+| `checked_in` | reschedule, check in again, cancel, its end → `completed` | no-show: `reservation_checked_in` |
+| `completed` | reschedule (a correction), cancel (a void) | check in, no-show: `reservation_ended` |
+| `cancelled`, `no_show` | nothing | writing the reference again: `reservation_cancelled` |
+| `released`, `expired` | nothing | confirming: `hold_not_found`, `hold_expired` |
+
+A cancelled or no-show booking's tombstone keeps why it ended (`end_reason`). Erasure takes
+everything and tells no one.
+
+Cancellation and reschedule policies (RFC 0004 B5): `cancelCutoffMinutes` and
+`rescheduleCutoffMinutes` refuse a cancel or move that late before the start
+(`booking_rule_cancel_cutoff`, `booking_rule_reschedule_cutoff`). An agent cannot go past them. An
+admin can, with `override_reason` (or `overrideReason`), which the tombstone and the feed keep.
+`cancellationFee` (`{ amountMinor, currency, withinMinutes? }`) is recorded on a late cancellation
+(its tombstone, `reservation.cancelled` or `event.cancelled`, and the API's answer) for you to
+charge: Slotlock moves no money. A series is held to them by its next occurrence not yet started
+(or, with none left, the one under way): cancelling one cancels what is still to come.
+
+## Calendar standards
+
+`emitVAvailability({ rules, timezone, uid })` writes rules as an iCalendar VAVAILABILITY (RFC 7953)
+and `parseVAvailability(text)` reads one back as `{ timezone, rules }`; `toJSCalendarEvent(event)`
+answers a calendar event as a JSCalendar Event (RFC 8984). The API serves them at
+`/v1/resources/{resource_id}/availability/ical` and `/v1/tenant/events/{event_id}/jscalendar`.
 
 ## Next
 
 - [Concepts](/docs/concepts/): resources, events, holds, coverage and tenants.
-- [The README](https://github.com/PILOTAAI/slotlock#book-and-read-as-the-application): every store
-  call, recurring events, external calendars and serving your own MCP endpoint.
+- [Recurring events](/docs/recurring-events/): series, their budgets and the rules Slotlock stores.
+- [External calendars](/docs/external-calendars/): iCalendar in and out, feeds and coverage.
+- [Protocol reference](/docs/reference/): serving your own MCP and A2A endpoint.
 - [Operations](/docs/operations/): maintenance, retention and upgrades.

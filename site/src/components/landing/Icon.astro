@@ -2,7 +2,18 @@
 // 1.3px-stroke outline icons on a 16px grid, and the filled GitHub mark. Decorative: always
 // aria-hidden.
 interface Props {
-  name: 'arrow' | 'chevron' | 'copy' | 'check' | 'github' | 'contrast';
+  name:
+    | 'arrow'
+    | 'chevron'
+    | 'copy'
+    | 'check'
+    | 'github'
+    | 'contrast'
+    | 'calendar'
+    | 'timer'
+    | 'refuse'
+    | 'pick'
+    | 'menu';
 }
 const { name } = Astro.props;
 ---
@@ -24,6 +35,31 @@ const { name } = Astro.props;
         </>
       )}
       {name === 'check' && <path d="M3.5 8.5l3 3 6-7" />}
+      {name === 'calendar' && (
+        <>
+          <rect x="2.5" y="3.5" width="11" height="10" rx="1.5" />
+          <path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" />
+        </>
+      )}
+      {name === 'timer' && (
+        <>
+          <circle cx="8" cy="9" r="5" />
+          <path d="M8 9V6.5M6.5 1.5h3" />
+        </>
+      )}
+      {name === 'refuse' && (
+        <>
+          <circle cx="8" cy="8" r="5.5" />
+          <path d="M4.2 11.8l7.6-7.6" />
+        </>
+      )}
+      {name === 'pick' && (
+        <>
+          <path d="M3 3h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5L5 13.5V11H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
+          <path d="M5.5 7l1.5 1.5 3-3" />
+        </>
+      )}
+      {name === 'menu' && <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" />}
       {name === 'contrast' && (
         <>
           <circle cx="8" cy="8" r="5.5" />

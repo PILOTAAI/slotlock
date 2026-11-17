@@ -1,7 +1,8 @@
 // The event feed: what changed for a tenant, read by position, and the webhook endpoints it is
 // delivered to. Rows are appended by triggers in the changing transaction (ddl.ts,
 // SLOTLOCK_OUTBOX_DDL); webhooks.ts signs and sends.
-import { randomBytes } from 'node:crypto';
+import { slotlockPlanReadRefusal } from './plans.js';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Sql, TransactionSql } from 'postgres';
 
 type SlotlockSql = Sql | TransactionSql;
@@ -18,20 +19,45 @@ export const SLOTLOCK_CHANGE_TYPES = Object.freeze([
   'hold.confirmed',
   'hold.released',
   'hold.expired',
+  // The integrator's payment for a hold that waits for one (RFC 0004 C3).
+  'hold.paid',
   'reservation.created',
   'reservation.updated',
   'reservation.cancelled',
   'reservation.checked_in',
   'reservation.no_show',
+  // A booking moved (also reservation.updated), and one whose end has passed (RFC 0004 B4).
+  'reservation.rescheduled',
+  'reservation.completed',
   'event.created',
   'event.updated',
   'event.cancelled',
   'event.timezone_shifted',
   'event.timezone_conflict',
+  // A reservation that carries its wall time, which now falls at another instant (RFC 0004 B9).
+  'reservation.timezone_shifted',
+  'reservation.timezone_conflict',
+  // A stored reminder fell due (RFC 0004 P3): the change's id is the send key.
+  'reminder.due',
   'coverage.stale',
+  // A source reported busy time over a booking Slotlock already holds (RFC 0004 C1, C4).
+  'coverage.conflict',
   'waitlist.offered',
   'waitlist.expired',
+  // A waitlist entry joined, its offer accepted, declined or lapsed, and an entry left (RFC 0004 B6).
+  'waitlist.joined',
+  'waitlist.accepted',
+  'waitlist.declined',
+  'waitlist.lapsed',
+  'waitlist.left',
+  // A write waiting for a person (approval policies): requested, then granted, declined or expired.
+  'approval.requested',
+  'approval.granted',
+  'approval.declined',
+  'approval.expired',
   'webhook.disabled',
+  // A plan's monthly quota 80% or 100% used (quotas.ts): the metric, the share and the counts.
+  'usage.threshold_reached',
   // Configuration changes: ids and states, never a secret or a URL.
   'resource.created',
   'resource.updated',
@@ -127,7 +153,7 @@ export function slotlockServedChange(
 /** How long the feed keeps a change, and so how far back a cursor may reach. */
 export const SLOTLOCK_CHANGE_RETENTION_DAYS = 30;
 /** Webhook endpoints one tenant may have. */
-export const SLOTLOCK_MAX_WEBHOOK_ENDPOINTS = 10;
+export const SLOTLOCK_MAX_WEBHOOK_ENDPOINTS = 25;
 /** After this long failing, an endpoint is disabled and the feed says so (`webhook.disabled`). */
 export const SLOTLOCK_WEBHOOK_FAILING_LIMIT_MS = 24 * 60 * 60 * 1_000;
 
@@ -150,11 +176,31 @@ export interface SlotlockChange {
   position: string;
 }
 
+/** Resources one webhook endpoint's filter may name. */
+export const SLOTLOCK_WEBHOOK_FILTER_RESOURCES = 100;
+/** Pools, locations or groups one webhook endpoint's filter may name, of each. */
+export const SLOTLOCK_WEBHOOK_FILTER_REFS = 20;
+
+/**
+ * Which resources' changes an endpoint receives (RFC 0003 G5): only changes about a resource that
+ * matches one of these, as it is when the change is delivered, so a change about no resource (a key,
+ * a webhook, a usage notice) is not sent. A location includes every location in it. At most
+ * SLOTLOCK_WEBHOOK_FILTER_RESOURCES ids, and SLOTLOCK_WEBHOOK_FILTER_REFS of each of the others.
+ */
+export interface SlotlockWebhookFilter {
+  resourceIds?: string[];
+  pools?: string[];
+  locations?: string[];
+  groups?: string[];
+}
+
 export interface SlotlockWebhookEndpoint {
   id: string;
   url: string;
   /** Null: every type. */
   eventTypes: SlotlockChangeType[] | null;
+  /** Only changes about these resources; absent, changes about any resource or none. */
+  filter?: SlotlockWebhookFilter;
   createdAt: Date;
   /** Failed attempts since the last delivery that succeeded. */
   attempts: number;
@@ -175,8 +221,11 @@ export interface SlotlockWebhookClaim {
 }
 
 export type CreateWebhookEndpointResult =
-  | { ok: true; endpoint: SlotlockWebhookEndpoint; secret: string }
-  | { ok: false; code: 'invalid_webhook_url' | 'invalid_event_types' }
+  | { ok: true; endpoint: SlotlockWebhookEndpoint; secret: string; /** True when an idempotency key answered what an earlier create made. */ replayed?: boolean }
+  | {
+      ok: false;
+      code: 'invalid_webhook_url' | 'invalid_event_types' | 'invalid_webhook_filter' | 'idempotency_conflict' | 'invalid_identity';
+    }
   | { ok: false; code: 'webhook_limit_reached'; limit: number };
 
 export type ListChangesResult =
@@ -209,6 +258,13 @@ export interface SlotlockEventFeed {
     tenantRef: string;
     url: string;
     eventTypes?: readonly string[];
+    /** Only changes about these resources (`invalid_webhook_filter` past its bounds). */
+    filter?: SlotlockWebhookFilter;
+    /**
+     * A retry identity, kept as long as the endpoint: the same key and request answer the endpoint
+     * and secret the first made (`replayed`), another request `idempotency_conflict`.
+     */
+    idempotencyKey?: string;
   }): Promise<CreateWebhookEndpointResult>;
   listWebhookEndpoints(params: { tenantRef: string }): Promise<SlotlockWebhookEndpoint[]>;
   deleteWebhookEndpoint(params: { tenantRef: string; id: string }): Promise<{ deleted: boolean }>;
@@ -257,7 +313,7 @@ export interface SlotlockEventFeed {
     limit?: number;
     before?: string;
   }): Promise<SlotlockChange[]>;
-  /** Delete up to `limit` of the tenant's changes older than the retention; how many went. */
+  /** Delete up to `limit` of the tenant's changes past retention (slotlock.prune_changes); how many went. */
   pruneChanges(params: { tenantRef: string; limit: number }): Promise<number>;
 }
 
@@ -314,6 +370,10 @@ interface EndpointRow {
   id: string;
   url: string;
   event_types: SlotlockChangeType[] | null;
+  filter_resource_ids: string[] | null;
+  filter_pools: string[] | null;
+  filter_locations: string[] | null;
+  filter_groups: string[] | null;
   created_at: Date;
   attempts: number;
   failing_since: Date | null;
@@ -324,7 +384,7 @@ interface EndpointRow {
 }
 
 function toEndpoint(row: EndpointRow): SlotlockWebhookEndpoint {
-  return {
+  const endpoint: SlotlockWebhookEndpoint = {
     id: row.id,
     url: row.url,
     eventTypes: row.event_types,
@@ -336,11 +396,85 @@ function toEndpoint(row: EndpointRow): SlotlockWebhookEndpoint {
     disabledAt: row.disabled_at,
     disabledReason: row.disabled_reason,
   };
+  const filter: SlotlockWebhookFilter = {};
+  if (row.filter_resource_ids) filter.resourceIds = row.filter_resource_ids;
+  if (row.filter_pools) filter.pools = row.filter_pools;
+  if (row.filter_locations) filter.locations = row.filter_locations;
+  if (row.filter_groups) filter.groups = row.filter_groups;
+  if (Object.keys(filter).length > 0) endpoint.filter = filter;
+  return endpoint;
 }
 
 const ENDPOINT_COLUMNS = (sql: SlotlockSql) =>
   sql`id, url, event_types, created_at, attempts, failing_since, last_status, last_error,
-      disabled_at, disabled_reason`;
+      disabled_at, disabled_reason, filter_resource_ids::text[], filter_pools, filter_locations,
+      filter_groups`;
+
+/** A pool's, location's or group's reference. */
+const GROUPING_REF = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
+/**
+ * A webhook filter as it is stored, each list without repeats, or null when one is out of bounds.
+ * An empty filter, or empty lists, filter nothing.
+ */
+function parseWebhookFilter(filter: SlotlockWebhookFilter | undefined): {
+  resourceIds: string[] | null;
+  pools: string[] | null;
+  locations: string[] | null;
+  groups: string[] | null;
+} | null {
+  const list = (values: unknown, max: number, valid: (value: string) => boolean): string[] | null | false => {
+    if (values === undefined) return null;
+    if (!Array.isArray(values)) return false;
+    const kept = [...new Set(values)];
+    if (kept.length === 0) return null;
+    if (kept.length > max || !kept.every((value) => typeof value === 'string' && valid(value))) return false;
+    return (kept as string[]).sort();
+  };
+  const resourceIds = list(filter?.resourceIds, SLOTLOCK_WEBHOOK_FILTER_RESOURCES, (value) => UUID.test(value));
+  const pools = list(filter?.pools, SLOTLOCK_WEBHOOK_FILTER_REFS, (value) => GROUPING_REF.test(value));
+  const locations = list(filter?.locations, SLOTLOCK_WEBHOOK_FILTER_REFS, (value) => GROUPING_REF.test(value));
+  const groups = list(filter?.groups, SLOTLOCK_WEBHOOK_FILTER_REFS, (value) => GROUPING_REF.test(value));
+  if (resourceIds === false || pools === false || locations === false || groups === false) return null;
+  return {
+    resourceIds: resourceIds?.map((id) => id.toLowerCase()) ?? null,
+    pools,
+    locations,
+    groups,
+  };
+}
+
+/**
+ * Whether a change (`change`, a row of slotlock.outbox) passes an endpoint's filter (`due`, a row of
+ * slotlock.webhook_endpoints): no filter, or a resource it names, or one in a pool, at a location
+ * (or a location in it) or in a group it names, as the resource is now; or a change to a resource
+ * that says it was in one (resource.created, resource.deleted, or resource.updated's `before`),
+ * so an endpoint also learns of a resource deleted, or moved out of what it follows.
+ */
+const FILTER_MATCH = `(
+  (due.filter_resource_ids IS NULL AND due.filter_pools IS NULL
+   AND due.filter_locations IS NULL AND due.filter_groups IS NULL)
+  OR change.resource_id = ANY (due.filter_resource_ids)
+  OR EXISTS (
+    SELECT 1 FROM slotlock.resources held
+     WHERE held.tenant_ref = change.tenant_ref AND held.id = change.resource_id
+       AND (held.pool_ref = ANY (due.filter_pools)
+            OR (held.location_ref IS NOT NULL
+                AND slotlock.location_path(held.tenant_ref, held.location_ref) && due.filter_locations)
+            OR EXISTS (SELECT 1 FROM slotlock.resource_group_members member
+                        WHERE member.tenant_ref = held.tenant_ref AND member.resource_id = held.id
+                          AND member.group_ref = ANY (due.filter_groups))))
+  OR (change.type LIKE 'resource.%' AND (
+       (change.data ->> 'pool') = ANY (due.filter_pools)
+    OR (change.data #>> '{before,pool}') = ANY (due.filter_pools)
+    OR EXISTS (
+         SELECT 1 FROM unnest(ARRAY[change.data ->> 'location', change.data #>> '{before,location}']) was(ref)
+          WHERE was.ref IS NOT NULL
+            AND (was.ref = ANY (due.filter_locations)
+                 OR slotlock.location_path(change.tenant_ref, was.ref) && due.filter_locations))
+    OR (jsonb_typeof(change.data -> 'groups') = 'array' AND (change.data -> 'groups') ?| due.filter_groups)
+    OR (jsonb_typeof(change.data #> '{before,groups}') = 'array'
+        AND (change.data #> '{before,groups}') ?| due.filter_groups))))`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -471,24 +605,57 @@ export function slotlockEventFeedMethods(
       ) {
         return { ok: false, code: 'invalid_event_types' };
       }
+      const filter = parseWebhookFilter(params.filter);
+      if (filter === null) return { ok: false, code: 'invalid_webhook_filter' };
+      const key = params.idempotencyKey;
+      if (key !== undefined && !isIdentity(key)) return { ok: false, code: 'invalid_identity' };
+      const payloadHash =
+        key === undefined
+          ? null
+          : createHash('sha256')
+              .update(JSON.stringify([params.url, types === null ? null : [...types].sort(), filter]))
+              .digest('hex');
       const secret = `whsec_${randomBytes(32).toString('base64')}`;
       return inTransaction(sql, async (tx): Promise<CreateWebhookEndpointResult> => {
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`slotlock:webhooks:${params.tenantRef}`}, 0))`;
-        const [count] = await tx<{ count: number }[]>`
-          SELECT count(*)::int AS count FROM slotlock.webhook_endpoints
-           WHERE tenant_ref = ${params.tenantRef}`;
-        if ((count?.count ?? 0) >= SLOTLOCK_MAX_WEBHOOK_ENDPOINTS) {
-          return { ok: false, code: 'webhook_limit_reached', limit: SLOTLOCK_MAX_WEBHOOK_ENDPOINTS };
+        if (key !== undefined) {
+          // Under the tenant's webhook lock: a retry racing its first finds what the first made.
+          const [earlier] = await tx<(EndpointRow & { secret: string; payload_hash: string })[]>`
+            SELECT ${ENDPOINT_COLUMNS(tx)}, secret, payload_hash FROM slotlock.webhook_endpoints
+             WHERE tenant_ref = ${params.tenantRef} AND idempotency_key = ${key}`;
+          if (earlier) {
+            if (earlier.payload_hash !== payloadHash) return { ok: false, code: 'idempotency_conflict' };
+            return { ok: true, endpoint: toEndpoint(earlier), secret: earlier.secret, replayed: true };
+          }
+        }
+        const [count] = await tx<{ count: number; planned: number | null }[]>`
+          SELECT count(*)::int AS count,
+                 (SELECT max_webhook_endpoints FROM slotlock.tenant_plan(${params.tenantRef}::text))
+                   AS planned
+            FROM slotlock.webhook_endpoints
+           WHERE tenant_ref = ${params.tenantRef}`.catch((error: unknown) => {
+          throw slotlockPlanReadRefusal(error);
+        });
+        // The lower of the server's limit and the tenant's plan (plans.ts), when it has one.
+        const limit = Math.min(SLOTLOCK_MAX_WEBHOOK_ENDPOINTS, count?.planned ?? SLOTLOCK_MAX_WEBHOOK_ENDPOINTS);
+        if ((count?.count ?? 0) >= limit) {
+          return { ok: false, code: 'webhook_limit_reached', limit };
         }
         // From now on: every transaction not yet ended is at or after this position.
         const [row] = await tx<EndpointRow[]>`
-          INSERT INTO slotlock.webhook_endpoints (tenant_ref, url, secret, event_types, cursor_txid)
+          INSERT INTO slotlock.webhook_endpoints (
+            tenant_ref, url, secret, event_types, cursor_txid,
+            filter_resource_ids, filter_pools, filter_locations, filter_groups,
+            idempotency_key, payload_hash
+          )
           VALUES (${params.tenantRef}, ${params.url}, ${secret}, ${types}::text[],
-                  pg_snapshot_xmin(pg_current_snapshot()))
+                  pg_snapshot_xmin(pg_current_snapshot()),
+                  ${filter.resourceIds}::uuid[], ${filter.pools}::text[], ${filter.locations}::text[],
+                  ${filter.groups}::text[], ${key ?? null}, ${payloadHash})
           RETURNING ${ENDPOINT_COLUMNS(tx)}`;
         if (!row) throw new Error('slotlock: webhook endpoint insert returned no row');
         await tx`SELECT slotlock.register_webhook_tenant(${params.tenantRef}::text)`;
-        return { ok: true, endpoint: toEndpoint(row), secret };
+        return { ok: true, endpoint: toEndpoint(row), secret, replayed: false };
       });
     },
 
@@ -543,6 +710,32 @@ export function slotlockEventFeedMethods(
       if (!(Number.isSafeInteger(params.batch) && params.batch >= 1 && params.batch <= 100)) {
         throw new RangeError('Slotlock webhook batch must be 1-100 changes');
       }
+      // An endpoint that takes only some changes (by type or filter) moves past the ones it does
+      // not take, up to the last change that has ended, when none before it is for the endpoint:
+      // else its cursor would stay where it was made, keeping the whole feed from being pruned and
+      // every claim reading it all again. Not one being delivered (leased), nor one waiting to try
+      // again (it has a change for it).
+      await sql`
+        UPDATE slotlock.webhook_endpoints due
+           SET cursor_txid = head.txid, cursor_id = head.id
+          FROM (SELECT change.txid, change.id FROM slotlock.outbox change
+                 WHERE change.tenant_ref = ${params.tenantRef}
+                   AND change.txid < pg_snapshot_xmin(pg_current_snapshot())
+                 ORDER BY change.txid DESC, change.id DESC
+                 LIMIT 1) head
+         WHERE due.tenant_ref = ${params.tenantRef}
+           AND due.disabled_at IS NULL
+           AND (due.lease_until IS NULL OR due.lease_until <= now())
+           AND (due.event_types IS NOT NULL OR due.filter_resource_ids IS NOT NULL OR due.filter_pools IS NOT NULL
+                OR due.filter_locations IS NOT NULL OR due.filter_groups IS NOT NULL)
+           AND (head.txid, head.id) > (due.cursor_txid, due.cursor_id)
+           AND NOT EXISTS (
+             SELECT 1 FROM slotlock.outbox change
+              WHERE change.tenant_ref = due.tenant_ref
+                AND (change.txid, change.id) > (due.cursor_txid, due.cursor_id)
+                AND (change.txid, change.id) <= (head.txid, head.id)
+                AND (due.event_types IS NULL OR change.type = ANY (due.event_types))
+                AND ${sql.unsafe(FILTER_MATCH)})`;
       const endpoints = await sql<
         { id: string; url: string; secret: string; attempts: number; lease_token: string; event_types: string[] | null; cursor_txid: string; cursor_id: string }[]
       >`
@@ -561,6 +754,7 @@ export function slotlockEventFeedMethods(
                    AND change.txid < pg_snapshot_xmin(pg_current_snapshot())
                    AND (change.txid, change.id) > (due.cursor_txid, due.cursor_id)
                    AND (due.event_types IS NULL OR change.type = ANY (due.event_types))
+                   AND ${sql.unsafe(FILTER_MATCH)}
               )
             FOR UPDATE SKIP LOCKED
          )
@@ -569,14 +763,16 @@ export function slotlockEventFeedMethods(
       const claims: SlotlockWebhookClaim[] = [];
       for (const endpoint of endpoints) {
         const rows = await sql<ChangeRow[]>`
-          SELECT id::text, txid::text, type, resource_id, subject, data, occurred_at, actor, origin,
-               key_id::text
-            FROM slotlock.outbox
-           WHERE tenant_ref = ${params.tenantRef}
-             AND txid < pg_snapshot_xmin(pg_current_snapshot())
-             AND (txid, id) > (${endpoint.cursor_txid}::xid8, ${endpoint.cursor_id}::bigint)
-             AND (${endpoint.event_types}::text[] IS NULL OR type = ANY (${endpoint.event_types}::text[]))
-           ORDER BY txid, id
+          SELECT change.id::text, change.txid::text, change.type, change.resource_id, change.subject,
+                 change.data, change.occurred_at, change.actor, change.origin, change.key_id::text
+            FROM slotlock.outbox change, slotlock.webhook_endpoints due
+           WHERE due.id = ${endpoint.id}::uuid
+             AND change.tenant_ref = ${params.tenantRef}
+             AND change.txid < pg_snapshot_xmin(pg_current_snapshot())
+             AND (change.txid, change.id) > (${endpoint.cursor_txid}::xid8, ${endpoint.cursor_id}::bigint)
+             AND (${endpoint.event_types}::text[] IS NULL OR change.type = ANY (${endpoint.event_types}::text[]))
+             AND ${sql.unsafe(FILTER_MATCH)}
+           ORDER BY change.txid, change.id
            LIMIT ${params.batch}`;
         claims.push({
           endpoint: { id: endpoint.id, url: endpoint.url, secret: endpoint.secret, attempts: endpoint.attempts },
@@ -677,41 +873,13 @@ export function slotlockEventFeedMethods(
 
     async pruneChanges(params) {
       if (!isIdentity(params.tenantRef)) throw identityError();
-      // Oldest first in feed order, and only up to the first change kept (within retention, still
-      // owed to an enabled webhook, or later than the oldest running transaction), so every kept
-      // change is after every pruned one and a reader starting over reads past the gap.
+      // Through slotlock.prune_changes: the serving role may only add changes and read them (RFC
+      // 0004 D2). It keeps retentionDays, or the tenant's plan's days if longer, and prunes oldest
+      // first in feed order up to the first change kept, so a reader starting over reads past the gap.
       const rows = await sql<{ deleted: number }[]>`
-        WITH head AS MATERIALIZED (
-          SELECT outbox.id, outbox.txid,
-                 outbox.occurred_at >= now() - make_interval(days => ${retentionDays})
-                 OR EXISTS (
-                   SELECT 1 FROM slotlock.webhook_endpoints endpoint
-                    WHERE endpoint.tenant_ref = outbox.tenant_ref AND endpoint.disabled_at IS NULL
-                      AND (outbox.txid, outbox.id) > (endpoint.cursor_txid, endpoint.cursor_id)
-                 ) AS kept
-            FROM slotlock.outbox
-           WHERE outbox.tenant_ref = ${params.tenantRef}
-             AND outbox.txid < pg_snapshot_xmin(pg_current_snapshot())
-           ORDER BY outbox.txid, outbox.id
-           LIMIT ${params.limit}
-        ), doomed AS MATERIALIZED (
-          SELECT change.id, change.txid FROM head change
-           WHERE NOT EXISTS (
-             SELECT 1 FROM head keeper
-              WHERE keeper.kept AND (keeper.txid, keeper.id) <= (change.txid, change.id))
-        ), missed AS (
-          -- A disabled endpoint that had not received one of them has lost it.
-          UPDATE slotlock.webhook_endpoints endpoint SET changes_pruned = true
-           WHERE endpoint.tenant_ref = ${params.tenantRef} AND endpoint.disabled_at IS NOT NULL
-             AND NOT endpoint.changes_pruned
-             AND EXISTS (
-               SELECT 1 FROM doomed
-                WHERE (doomed.txid, doomed.id) > (endpoint.cursor_txid, endpoint.cursor_id))
-        ), deleted AS (
-          DELETE FROM slotlock.outbox change USING doomed WHERE change.id = doomed.id RETURNING 1
-        )
-        SELECT count(*)::int AS deleted FROM deleted`;
-      return rows[0]?.deleted ?? 0;
+        SELECT slotlock.prune_changes(${params.tenantRef}::text, ${params.limit}::integer,
+                                      ${retentionDays}::integer) AS deleted`;
+      return Number(rows[0]?.deleted ?? 0);
     },
   };
 }

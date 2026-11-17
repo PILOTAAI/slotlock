@@ -36,7 +36,7 @@ const backend = {
 } as unknown as SlotlockAgentCalendarBackend;
 const onEvent = vi.fn<(event: SlotlockAgentServerEvent) => void>();
 
-function buildServer() {
+function buildServer(extra: Partial<Parameters<typeof createSlotlockAgentServer>[0]> = {}) {
   return createSlotlockAgentServer({
     publicBaseUrl: 'http://localhost/slotlock',
     allowInsecureLocalhost: true,
@@ -49,6 +49,7 @@ function buildServer() {
     authorize: async () => true,
     health: async () => ({ ready: true, checks: [] }),
     onEvent,
+    ...extra,
   });
 }
 
@@ -208,6 +209,19 @@ describe('call events', () => {
     ]) {
       expect(reported).not.toContain(absent);
     }
+  });
+
+  it("gives the caller's span to the tracer alone, never to the events", async () => {
+    const traced = vi.fn();
+    const server = buildServer({ onCallTrace: traced });
+    await server.fetch(modernRequest('tools/call', { name: 'slotlock_list_resources', arguments: {} }, { meta: { traceparent: TRACEPARENT } }));
+    await server.fetch(modernRequest('tools/call', { name: 'slotlock_list_resources', arguments: {} }));
+    expect(traced).toHaveBeenCalledTimes(1);
+    expect(traced).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'call', operation: 'slotlock_list_resources', traceId: TRACE_ID }),
+      { parentSpanId: PARENT_ID },
+    );
+    expect(JSON.stringify(events())).not.toContain(PARENT_ID);
   });
 
   it('answers the caller the same when onEvent throws', async () => {

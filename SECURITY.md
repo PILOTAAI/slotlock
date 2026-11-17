@@ -45,7 +45,10 @@ The [Acceptable Use Policy](ACCEPTABLE-USE.md) permits research within these rul
 Slotlock treats all external calendar content as untrusted. The parser has explicit size, component,
 occurrence, exception, work, and expansion-window bounds. Reservation conflicts are arbitrated by a
 PostgreSQL exclusion constraint. Tenant policies are forced and fail closed when their transaction
-context is missing. Embedding applications remain responsible for authentication, authorization,
+context is missing. A key limited to locations or groups is held to its resources by a second,
+restrictive policy (`resource_scope_v1`) on each table keyed by resource, which can only narrow what
+the tenant policy allows; the deployment check accepts exactly those two policies on those tables
+and the tenant policy alone on the rest. Embedding applications remain responsible for authentication, authorization,
 provider-secret storage, webhook verification, network egress, and erasure.
 
 Upgrading repairs data across tenants (expired holds in a turnaround buffer, duplicate resources,
@@ -148,9 +151,10 @@ bearer-token verification, per-principal authorization, distributed rate limitin
 and a readiness check. Do not place provider credentials or raw calendar content in authentication,
 authorization, rate-limit, or health callbacks. `slotlock serve`, its own embedder, limits requests
 per client address before any credential is looked up, then per key, per tenant and for the whole
-server, caps writes that expand a recurring series, maintenance runs and live-update streams per
-tenant, answers a full key-lookup queue as busy rather than unauthenticated, and logs counts of
-refusals with each client as a pseudonym (`SLOTLOCK_LIMITS`, `SLOTLOCK_TRUSTED_PROXY_HEADER`). A
+server, caps writes that expand a recurring series, maintenance runs, sandbox races and live-update
+streams per tenant, charges a sandbox race a write for each of its agents, answers a full
+key-lookup queue as busy rather than unauthenticated, and logs counts of refusals with each client
+as a pseudonym (`SLOTLOCK_LIMITS`, `SLOTLOCK_TRUSTED_PROXY_HEADER`). A
 key that authenticated in the last 15 minutes waits in a lookup queue of its own, served first; a
 valid key that has not authenticated in the last 15 minutes (any key, after a restart) waits with
 made-up keys and may be answered busy (503 with `Retry-After`) while a flood of them lasts, never
@@ -163,7 +167,7 @@ it is not an authorization boundary. Scopes and `authorize` decide who may write
 
 ## API keys and the application API
 
-An API key is `slk_`, 40 base62 characters from the operating system's random source (about 238
+An API key is `slk_` (`slk_test_` in a test environment, `<tenant>~test`), 40 base62 characters from the operating system's random source (about 238
 bits) and a 6-character checksum, and the database keeps only its SHA-256. A slow password hash
 (bcrypt, scrypt, Argon2) defends a secret a person chose against offline guessing; nobody can guess
 238 random bits, so a fast hash
@@ -178,6 +182,193 @@ covers the application API (resources, hours, holds, reservations, coverage, mai
 never offered to agents over MCP or A2A. Every application operation checks the tenant itself, not
 only through row-level security: another tenant's resource or hold is not found even on a connection
 that bypasses RLS.
+
+A suspended account's keys authenticate as nothing from the next request until the suspension is
+lifted: the database's key lookup reads the suspension (the account's own, its live tenant's for a
+test key, or its partner's), so no server path can skip it. Its dashboard still shows its data. A
+partner lifts only a suspension it made: one the operator or staff made, before the partner's or
+after, takes the partner's over and stays, and a suspended account cannot be erased through the
+partner API.
+
+## Admin console
+
+The people who run Slotlock Cloud use an admin console ([RFC 0006](docs/rfc/0006-admin-console.md),
+`src/admin/`, `workers/admin`) on its own hostname. It is the only place where staff can see more
+than one account at a time, so it sits behind three locks, and each one stops someone who got past
+the one before:
+
+- Cloudflare Access in front of the hostname. The console also checks Access's signed token on
+  every request itself, rather than trusting that a request came through Access.
+- GitHub sign-in, with state and PKCE and no scope. The database maps the GitHub id to an active
+  staff member.
+- A passkey with user verification before any page that shows data. A staff member's first passkey
+  needs a one-time code from `slotlock staff add` or `reset`. The database stores only the code's
+  digest, and the code can be used once, for two days.
+
+The session lives in the database, and the browser holds only its token, in a signed `__Host-`
+cookie. It lasts 8 hours at most and ends after 30 minutes idle. Signing out ends it wherever the
+cookie went, and so do a passkey reset, a role change or a removal (`slotlock staff`). Every POST
+checks its Origin and a token bound to the session.
+
+The console connects to the database as its own role (`SLOTLOCK_ADMIN_DATABASE_URL`), which can read
+no table. It can only run the admin functions, each of which takes a session's token and never the
+name of a staff member:
+
+- the database opens a session only for a caller that shows the console's key, from `slotlock staff
+  console-key` (a Worker secret, of which the database keeps only the digest, where the console's
+  role cannot read it). So the database credential alone acts as no one;
+- a passkey challenge is kept on its session and used once, and only a passkey raises a session to
+  one that reaches data;
+- each function checks the staff member's role, and records the call in a hash-chained staff log.
+
+`slotlock migrate` refuses a console role that holds any right on a slotlock table, or a serving
+role that holds an admin function, through membership either way. The console checks its own role
+before it serves anything.
+
+The log only grows: an erasure never removes it. The console's role and the serving role can change
+nothing in it. The schema owner could, by turning its triggers off, but not without breaking the
+chain: the Staff log page and `slotlock staff verify-log` show its head, to record somewhere the
+owner cannot change.
+
+Staff are added, have their role changed and are removed only with the deployment role's
+credentials (`slotlock staff`), never from the console. The console shows account metadata: plan,
+usage, key prefixes and the audit log. It never shows booking titles, descriptions or attendees.
+
+Support staff can act on an account: suspend it or lift its suspension, revoke a key, end a
+person's dashboard sessions, add an internal note, and work an abuse case. Each action needs:
+
+- a role that allows it, checked again by the database;
+- the form's session token;
+- a passkey in the last 15 minutes;
+- a reason.
+
+The reason is written to the staff log and to the account's own audit log, as "Slotlock staff"
+and the role, in the same transaction. The customer always sees what staff did to their account.
+
+Billing staff can put an account on a plan, or raise its limits, until a date. An override longer
+than 90 days needs one Owner to ask and another to approve. The console reads Stripe only with a
+restricted key that reads subscriptions and invoices, and keeps what it read for an hour. It
+cannot change a subscription, refund or invoice.
+
+The blog is written in the console too, but it stays files in this repository. The console writes
+it through the release app (below, under Releases), installed on this repository only, and writes
+only `cms/` branches. A post is saved there as the staff member who wrote it, with their sign-off,
+and reaches `main` only by a pull request that passes the same required checks as any other; the
+App has no bypass. Only an Owner publishes, and the console merges a pull request only:
+
+- at the commit the Owner saw, and judged by what merging that exact commit brings;
+- when it changes nothing but that post's own files (its text and images; for a rename, the old
+  post's files, and redirects that lead only to the new one);
+- once its checks pass.
+
+A post's one-line fields refuse line breaks, so no field can add a `Signed-off-by` line, and the
+merge message keeps only each commit's own author's sign-off. The hourly workflow that publishes
+scheduled posts holds to the same rules, reads every comment of a pull request, and acts only on a
+schedule the App itself wrote. The renderer escapes every character of a post, so a post cannot
+carry a script, a style or raw HTML. An image is accepted only as PNG, JPEG or WebP, by its bytes.
+
+The project has one GitHub App, the release app. Release a version, the hourly CMS schedule and
+the console each use it, and each token they mint asks only for what that job needs. The release
+workflow and the CMS schedule share a key, in the `release-app` environment that only `main` can
+use. The console's Worker has a second key of its own, a Worker secret that no page shows. Deleting
+one key in the App's settings stops that holder alone, and the others keep working.
+
+The App can do more than any one of its users needs. It can write contents, pull requests and
+issues, and read Actions, checks and commit statuses, on this repository alone. So a leaked console
+key could, until it is deleted:
+
+- push to any branch the rulesets do not protect;
+- open, update and merge pull requests;
+- open, comment on and close issues, the status page's included;
+- read workflow runs and checks.
+
+It could not change a workflow (the App has no Workflows permission), create or move a release tag,
+read a secret, or publish to npm, where each version waits for a maintainer's two-factor approval.
+Branch protection is what keeps such a key from changing `main` on its own. The "Protect main"
+ruleset has no bypass for the App or anyone else: a merge needs the required checks ("CI passed",
+"Signed-off-by") to pass on a branch that is up to date with `main`. While MAINTAINERS.md lists one
+maintainer, the ruleset asks for no approving review. A leaked key could then merge a change that
+passes CI, and a merge to `main` deploys the site and the dashboard. Delete a key the moment it may
+have leaked. GOVERNANCE.md's second maintainer brings the required review that closes this.
+
+A CMS pull request's preview is uploaded by `site-preview.yml`, which runs on `workflow_run` and so
+always as main has it: a pull request cannot change the workflow that holds the preview's
+Cloudflare token. It checks out main, takes the build only as files, and never runs them.
+
+Privacy requests are answered in the console too. A request is shown to come from the account's
+holder by a key they name with a word staff send back, made after the request, as the account (for
+a team or an organization, as one of its Owners). An export made for one waits on the holder's own
+dashboard, behind their sign-in; staff see its counts by table, never its rows, and no link to it
+is ever emailed. An erasure goes in fixed steps, each checked by the database: the Stripe
+subscription cancelled (an unpaid one too, since paying it renews it), a second Owner's approval
+(the one who asked cannot give it), then the erasure and its receipt in one transaction. A Stripe
+event that arrives after it writes nothing of the account again. The queue keeps no email address: the database refuses
+an `@` in a request's text.
+
+Only an Owner writes what customers are told and turns features on or off. An announcement is one
+line of text with an optional `https` link, which the dashboard escapes like any other text; a notice
+to one account, and a feature turned on or off for one, is recorded in that account's audit log. A
+flag can only turn off what the deployment configured, never turn on what it did not. The status
+page's incidents are posted through the release app too, which has Issues (read and write) and
+Actions (read) for this: the console comments on and closes only open issues labelled `status`, and
+reads workflow runs only to list deploys. Search Console, Bing Webmaster Tools and Cloudflare Web
+Analytics are read with read-only credentials (a service account added as a restricted user, an API
+key, a token with Account Analytics Read), kept an hour, and never shown on a page. The System page
+shows which settings are connected, never their values, and counts failing webhooks across accounts
+without any endpoint's address. A server records each account whose maintenance failed with the
+error's class, code and first line, cut at its first quotation mark, where a value would start.
+
+The staff log, closed abuse cases and closed privacy requests are kept six years and then deleted.
+Until then, nothing in the staff log can be changed or deleted through the console or the serving
+role. The schema owner's rewrite shows in the chain, as above.
+
+`scripts/configure-admin-console.mjs` sets the console up from the owner's machine. It hands every
+secret to Wrangler and gh on stdin, never as an argument or in a file, and prints none but one: the
+console role's database URL, once, when it creates that role, for the owner to keep with their
+release settings. PostgreSQL gets that role's password only as a SCRAM verifier, so no server log
+holds it. Cloudflare gets it in Hyperdrive's configuration, which never returns it. The script makes
+the Access policy from the addresses it is given. It creates no GitHub App. Before it deploys, it
+signs in as the release app with the console's own key and checks three things: the App asks for
+exactly the permissions above, its installation has accepted them, and that installation reaches
+this repository alone. If one fails, it says what to change on GitHub and stores nothing. It hands
+the key only to the Worker. It refuses to deploy before 14 November 2026, and never replaces a
+console key or session secret, nor re-adds a staff member, that is already there.
+
+Report a problem with the console as above. Its hostname is not in scope for testing: Access refuses
+anyone who is not staff.
+
+## Releases
+
+A release comes only from a protected `v<version>` tag (GOVERNANCE.md, Releases). Only an admin or
+the release deploy key can create a `v*` tag, or a Go client version's `clients/go/v*` tag, and only
+an admin can move or delete one. The key lives in two GitHub environments: `release-tag`, which only
+runs on `main` can read, and `go-module`, which a release's run can read once a maintainer approves
+it. A workflow's `GITHUB_TOKEN`, the release app and any other token that can write to the
+repository cannot create either tag.
+
+Before you run a server image, check that `image.yml` built it, in the run for that version's tag,
+on a GitHub-hosted runner:
+
+```sh
+gh attestation verify oci://ghcr.io/pilotaai/slotlock:<version> --repo PILOTAAI/slotlock \
+  --signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml \
+  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+```
+
+`--signer-workflow` alone is not enough: it accepts `image.yml` run from any branch, which the
+`ghcr` environment's reviewer never saw.
+
+The MCP Registry entry `io.github.PILOTAAI/slotlock` is published by `mcp-registry.yml` once a
+maintainer approves it. The registry, though, decides who may publish to `io.github.PILOTAAI` by
+GitHub organization, not by repository or workflow: a workflow in any PILOTAAI repository that can
+request an OIDC token, and the organization's members (`mcp-publisher login github`), could publish
+a version of it. Nothing in this repository can narrow that, and we accept it. A domain namespace
+(`io.pylota/slotlock`, proven by a key published in pylota.io's DNS) would tie publishing to that
+key and to whoever runs that DNS, but it is another server's name: every client would have to move
+to it, and this name would stay open to the organization. Instead, the organization keeps its members and repositories to those
+who need them, `launch-check.yml` fails when the registry's latest version is not the release's, and
+an entry is only as good as its image: install one whose package is
+`ghcr.io/pilotaai/slotlock:<version>`, and verify that image as above.
 
 ## Dependencies
 

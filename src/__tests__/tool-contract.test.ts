@@ -17,6 +17,17 @@ describe('advertised tool contract', () => {
     );
   });
 
+  // MCP's destructiveHint: a client that confirms destructive calls (Claude does) asks a person
+  // first. Overwriting or moving a booking is destructive even though it can be undone; letting go
+  // of one's own hold, which lapses within minutes anyway, is not.
+  it('marks every write that overwrites, moves or removes a booking destructive', () => {
+    const destructive = slotlockAgentTools()
+      .filter((tool) => tool.annotations.destructiveHint)
+      .map((tool) => tool.name)
+      .sort();
+    expect(destructive).toEqual(['slotlock_cancel', 'slotlock_delete_event', 'slotlock_reschedule', 'slotlock_update_event']);
+  });
+
   it('describes every input and output as an object with properties', () => {
     for (const tool of slotlockAgentTools()) {
       for (const schema of [tool.inputSchema, tool.outputSchema] as Record<string, unknown>[]) {

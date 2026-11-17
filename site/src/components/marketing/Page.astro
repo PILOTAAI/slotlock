@@ -1,0 +1,204 @@
+---
+// One page outside the docs, from its data (src/lib/page.ts): the trail, the heading, one band per
+// section, and the closing call. Built from the landing page's own pieces and styles.
+import '../../styles/pages.css';
+import Marketing from '../../layouts/Marketing.astro';
+import { type MarketingPage, pageSeo } from '../../lib/page';
+import Icon from '../landing/Icon.astro';
+import Rich from '../landing/Rich.astro';
+
+interface Props {
+  page: MarketingPage;
+}
+const { page } = Astro.props;
+const crumbs = [{ name: 'Slotlock', path: '/' }, ...page.crumbs];
+---
+
+<Marketing seo={pageSeo(page)}>
+  <section class="hero page-hero" aria-labelledby="page-title">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <ol>
+          {
+            crumbs.map((crumb, index) =>
+              index === crumbs.length - 1 ? (
+                <li aria-current="page">{crumb.name}</li>
+              ) : (
+                <li>
+                  <a href={crumb.path}>{crumb.name}</a>
+                </li>
+              ),
+            )
+          }
+        </ol>
+      </nav>
+      <h1 class="h1" id="page-title">
+        <span class="h2__topic">{page.hero.topic}</span>
+        <span class="soft">{page.hero.heading.soft}</span>
+        <span class="strong">{page.hero.heading.strong}</span>
+      </h1>
+      <p class="lede"><Rich text={page.hero.lede} /></p>
+      {
+        page.hero.actions && (
+          <div class="hero__actions">
+            {page.hero.actions.map((action, index) => (
+              <a class={index === 0 ? 'btn btn--primary' : 'btn btn--ghost'} href={action.href}>
+                {action.label}
+              </a>
+            ))}
+          </div>
+        )
+      }
+    </div>
+  </section>
+
+  {
+    page.sections.map((section, index) => (
+      <section class={index % 2 === 0 ? 'band band--tint' : 'band'} id={section.id} aria-labelledby={`${section.id}-title`}>
+        <div class="wrap">
+          <div class={section.lede ? 'head head--split' : 'head'}>
+            <h2 class="h2" id={`${section.id}-title`}>
+              <span class="h2__topic">{section.topic}</span>
+              <span class="soft">{section.heading.soft}</span>
+              <span class="strong">{section.heading.strong}</span>
+            </h2>
+            {section.lede && (
+              <p class="lede">
+                <Rich text={section.lede} />
+              </p>
+            )}
+          </div>
+          <div class="blocks">
+            {section.blocks.map((block) =>
+              block.kind === 'text' ? (
+                <div class="prose">
+                  {block.paragraphs.map((paragraph) => (
+                    <p>
+                      <Rich text={paragraph} />
+                    </p>
+                  ))}
+                </div>
+              ) : block.kind === 'list' ? (
+                <ul class="statements">
+                  {block.items.map((item) => (
+                    <li>
+                      <Rich text={item} />
+                    </li>
+                  ))}
+                </ul>
+              ) : block.kind === 'cards' ? (
+                <ul class="industries cards">
+                  {block.items.map((item) => (
+                    <li class="industry">
+                      <h3>{item.href ? <a href={item.href}>{item.title}</a> : item.title}</h3>
+                      <p>
+                        <Rich text={item.body} />
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : block.kind === 'steps' ? (
+                <ol class="points steps">
+                  {block.items.map((item) => (
+                    <li>
+                      <h3>{item.title}</h3>
+                      <p>
+                        <Rich text={item.body} />
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              ) : block.kind === 'table' ? (
+                <div class="table-wrap">
+                  <table class="compare">
+                    <caption class="sr-only">{block.caption}</caption>
+                    <thead>
+                      <tr>
+                        {block.columns.map((column, i) => (
+                          <th scope="col" class={i === block.highlight ? 'ours' : undefined}>
+                            {column}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {block.rows.map(([first, ...rest]) => (
+                        <tr>
+                          <th scope="row">
+                            <Rich text={first ?? ''} />
+                          </th>
+                          {rest.map((value, i) => (
+                            <td data-label={block.columns[i + 1]} class={i + 1 === block.highlight ? 'ours' : undefined}>
+                              <Rich text={value} />
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : block.kind === 'code' ? (
+                <figure class="code">
+                  <figcaption class="code__bar">
+                    <span class="grow">{block.caption}</span>
+                  </figcaption>
+                  <pre><code>{block.code}</code></pre>
+                </figure>
+              ) : block.kind === 'faq' ? (
+                <dl class="faq">
+                  {block.items.map((item) => (
+                    <div>
+                      <dt>{item.q}</dt>
+                      <dd>
+                        <Rich text={item.a} />
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : block.kind === 'links' ? (
+                <p class="link-row">
+                  {block.items.map((item) => (
+                    <a class="arrow-link" href={item.href}>
+                      {item.label} <Icon name="arrow" />
+                    </a>
+                  ))}
+                </p>
+              ) : (
+                <div class="sources">
+                  <p>Sources, checked {block.checked}:</p>
+                  <ul>
+                    {block.items.map((item) => (
+                      <li>
+                        <a href={item.href}>{item.label}</a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ),
+            )}
+          </div>
+        </div>
+      </section>
+    ))
+  }
+
+  {
+    page.closing && (
+      <section class="band closing" aria-labelledby="closing-title">
+        <div class="wrap">
+          <h2 class="h2" id="closing-title">
+            <span class="soft">{page.closing.heading.soft}</span>
+            <span class="strong">{page.closing.heading.strong}</span>
+          </h2>
+          <div class="hero__actions">
+            {page.closing.actions.map((action, index) => (
+              <a class={index === 0 ? 'btn btn--primary' : 'btn btn--ghost'} href={action.href}>
+                {action.label}
+              </a>
+            ))}
+          </div>
+        </div>
+      </section>
+    )
+  }
+</Marketing>

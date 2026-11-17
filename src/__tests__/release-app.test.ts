@@ -28,7 +28,17 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', {
 const CLIENT_ID = 'Iv23liSlotlockTest';
 const SLUG = 'pilotaai-slotlock-release';
 const WEB = 'https://github.test';
-const GRANTED = { contents: 'write', metadata: 'read', pull_requests: 'write' };
+// What release-version.yml, cms-schedule.yml and the admin console need between them; each token
+// asks only for its own part.
+const PERMISSIONS = {
+  actions: 'read',
+  checks: 'read',
+  contents: 'write',
+  issues: 'write',
+  pull_requests: 'write',
+  statuses: 'read',
+};
+const GRANTED = { ...PERMISSIONS, metadata: 'read' };
 
 interface Scenario {
   owner?: string;
@@ -272,12 +282,12 @@ describe('release app setup', () => {
       name: 'PILOTAAI Slotlock release',
       url: 'https://github.com/PILOTAAI/slotlock',
       description:
-        'Opens and merges Slotlock release pull requests for .github/workflows/release-version.yml.',
+        "Opens and merges Slotlock's release pull requests, publishes scheduled blog posts, and keeps the admin console's posts, status page and deploy history.",
       hook_attributes: { url: 'https://slotlock.pylota.io/', active: false },
       redirect_url: `${base}/created`,
       setup_url: `${base}/installed`,
       public: false,
-      default_permissions: { contents: 'write', pull_requests: 'write' },
+      default_permissions: PERMISSIONS,
       default_events: [],
       request_oauth_on_install: false,
       setup_on_update: false,
@@ -315,6 +325,10 @@ describe('release app setup', () => {
     expect(run.api.seen.revoked).toEqual(run.api.seen.minted);
     expect(run.output()).toContain(
       `Release a version now opens and merges release pull requests as ${SLUG}[bot]`,
+    );
+    // The console gets a key of its own, so each can be revoked alone.
+    expect(run.output()).toContain(
+      `The admin console uses this app with a private key of its own: generate a second one at ${WEB}/organizations/PILOTAAI/settings/apps/${SLUG} (Private keys > Generate a private key), and give it to node scripts/configure-admin-console.mjs go-live as SLOTLOCK_ADMIN_CMS_APP_KEY_FILE.`,
     );
   });
 
@@ -355,7 +369,12 @@ describe('release app setup', () => {
     [
       'more permissions',
       { permissions: { ...GRANTED, administration: 'write' } },
-      'it was given contents: write, metadata: read, pull_requests: write, administration: write',
+      'it was given actions: read, checks: read, contents: write, issues: write, pull_requests: write, statuses: read, metadata: read, administration: write',
+    ],
+    [
+      "only the release's permissions",
+      { permissions: { contents: 'write', metadata: 'read', pull_requests: 'write' } },
+      'it was given contents: write, metadata: read, pull_requests: write',
     ],
   ])('refuses an app GitHub created with %s, storing nothing', async (_, scenario, problem) => {
     const run = await start(scenario);
@@ -458,9 +477,7 @@ describe('release app setup', () => {
       env: { PATH: '/nonexistent' },
     });
     expect(dry.status, dry.stderr).toBe(0);
-    expect(dry.stdout).toContain(
-      '"default_permissions": {\n    "contents": "write",\n    "pull_requests": "write"\n  }',
-    );
+    expect(JSON.parse(dry.stdout.slice(0, dry.stdout.indexOf('\n}\n') + 2)).default_permissions).toEqual(PERMISSIONS);
     for (const args of [['--name', 'x'.repeat(35)], ['--name'], ['--bogus']]) {
       const bad = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
       expect(bad.status, args.join(' ')).toBe(2);

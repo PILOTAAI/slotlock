@@ -1,13 +1,16 @@
-// Suspending and erasing a tenant, deployed as the README's deployment role under forced RLS and
-// served by the LOGIN role grantApplicationRole grants. Erasure covers every table with a tenant
-// column, read from the catalog, so a later table must be covered. Needs a role that creates
+// Suspending and erasing a tenant, deployed as the library page's deployment role under forced RLS
+// and served by the LOGIN role grantApplicationRole grants. Erasure covers every table with a
+// tenant column, read from the catalog, so a later table must be covered. Needs a role that creates
 // databases and roles; skipped without DATABASE_URL.
 import { randomBytes, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSlotlockApiKeyStore } from '../api-keys.js';
 import { createSlotlockDashboardState } from '../dashboard.js';
+import { setSlotlockTenantPlan } from '../plans.js';
 import { type SlotlockStore, createSlotlockStore } from '../store.js';
+import { noteSlotlockQuotaThreshold, slotlockQuotaPeriod } from '../quotas.js';
+import { recordSlotlockUsage, slotlockUsageDay } from '../usage.js';
 
 const url = process.env.DATABASE_URL?.trim();
 const HOUR = 60 * 60 * 1000;
@@ -126,7 +129,7 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
   }
 
   describe('suspension', () => {
-    it('refuses every write and keeps every read, for that tenant only', async () => {
+    it('refuses every write and its keys, and keeps every read, for that tenant only', async () => {
       const { tenantRef, resourceId } = await freshTenant();
       const other = await freshTenant();
       await expect(
@@ -163,17 +166,22 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         ),
       ).resolves.toMatchObject({ ok: true });
 
-      // No new key; one it has still authenticates (reads go on).
+      // No new key, and the keys it has are refused, its test environment's too, until the
+      // suspension is lifted.
       const keys = createSlotlockApiKeyStore(application);
       await expect(keys.create({ tenantRef, name: 'New key', scopes: ['read'] })).rejects.toThrow(/suspended/);
       const kept = await keys.create({ tenantRef: other.tenantRef, name: 'Kept key', scopes: ['read'] });
+      const trial = await keys.create({ tenantRef: `${other.tenantRef}~test`, name: 'Trial key', scopes: ['read'] });
+      await expect(keys.authenticate(kept.key)).resolves.toMatchObject({ tenantRef: other.tenantRef });
       await asOwner((store) => store.suspendTenant({ tenantRef: other.tenantRef }));
-      await expect(keys.authenticate(kept.key)).resolves.toMatchObject({
-        tenantRef: other.tenantRef,
-      });
+      await expect(keys.authenticate(kept.key)).resolves.toBeNull();
+      await expect(keys.authenticate(trial.key)).resolves.toBeNull();
       await expect(keys.rotate({ tenantRef: other.tenantRef, id: kept.apiKey.id })).rejects.toThrow(
         /suspended/,
       );
+      await asOwner((store) => store.unsuspendTenant({ tenantRef: other.tenantRef }));
+      await expect(keys.authenticate(kept.key)).resolves.toMatchObject({ tenantRef: other.tenantRef });
+      await expect(keys.authenticate(trial.key)).resolves.toMatchObject({ tenantRef: `${other.tenantRef}~test` });
 
       await expect(asOwner((store) => store.unsuspendTenant({ tenantRef }))).resolves.toEqual({
         unsuspended: true,
@@ -342,12 +350,25 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
     /** A tenant with a row in every table it can own rows in. */
     async function populate(tenantRef: string, uid: string) {
       await app.withTenant(tenantRef, async (tenant) => {
+        // Where it is and a group it is in (RFC 0003 G2, G3).
+        await tenant.putLocation({ tenantRef, ref: 'depot', name: 'Depot' });
+        await tenant.putGroup({ tenantRef, ref: 'fleet', name: 'Fleet' });
         const resource = await tenant.createResource({
           tenantRef,
           externalRef: 'van-1',
           timezone: 'UTC',
+          location: 'depot',
         });
         const resourceId = resource.id;
+        await tenant.addGroupMember({ tenantRef, group: 'fleet', resourceId });
+        // The order its pool is booked in (RFC 0003 G7).
+        await tenant.setPoolOrder({ tenantRef, pool: 'vans', order: 'round_robin' });
+        // A composite with a part booked (RFC 0003 G8): its claim on the whole.
+        const hall = await tenant.createResource({ tenantRef, externalRef: 'hall', timezone: 'UTC' });
+        const room = await tenant.createResource({ tenantRef, externalRef: 'hall-room-1', timezone: 'UTC' });
+        await tenant.setResourceParent({ tenantRef, id: room.id, parentId: hall.id });
+        const roomHold = await tenant.acquireHold({ tenantRef, resourceId: room.id, ...slot(0), ttlMs: 600_000 });
+        if (!roomHold.ok) throw new Error(roomHold.code);
         const hold = await tenant.acquireHold({
           tenantRef,
           resourceId,
@@ -436,6 +457,37 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         const waiting = await tenant.joinWaitlist({ tenantRef, resourceId, ...slot(2), holderRef: 'waiting' });
         if (!waiting.ok) throw new Error(waiting.code);
         await tenant.setBookingRuleDefaults({ tenantRef, pool: null, rules: { minNoticeMinutes: 0 } });
+        // A policy, and a booking it holds for a person (RFC 0004 A4).
+        await tenant.putApprovalPolicy({ tenantRef, ref: 'vans', name: 'Vans', outcome: 'require_approval' });
+        const approval = await tenant.requestApproval({
+          tenantRef,
+          policyRef: 'vans',
+          operation: 'slotlock_create_event',
+          request: { resource_id: resourceId },
+          requester: { subject: 'agent-1' },
+          requesterRef: 'agent-1',
+          requestKey: 'a'.repeat(64),
+          holds: [{ resourceId, ...slot(5) }],
+          ...slot(5),
+          expiresAt: new Date(Date.now() + HOUR),
+        });
+        if (!approval.ok) throw new Error(approval.code);
+        // Stored hours and a closure (RFC 0004 B1, B2).
+        await tenant.setLocationAvailability({
+          tenantRef,
+          location: 'depot',
+          rules: [{ rrule: 'FREQ=WEEKLY;BYDAY=MO', startMinutes: 540, durationMinutes: 60 }],
+        });
+        await tenant.createAvailabilityException({ tenantRef, location: 'depot', startsOn: '2027-12-25', outcome: 'closed', label: 'Christmas' });
+        // A holiday calendar and the closure it made (RFC 0004 B1).
+        await tenant.importHolidayCalendar({
+          tenantRef,
+          location: 'depot',
+          name: 'Depot holidays',
+          url: 'https://example.com/holidays.ics',
+          holidays: [{ uid: 'boxing-day', startsOn: '2027-12-26', endsOn: '2027-12-26', label: 'Boxing Day' }],
+          span: { from: '2027-01-01', to: '2027-12-31' },
+        });
         await tenant.putAssistantSettings({
           tenantRef,
           provider: 'openai',
@@ -443,13 +495,19 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
           model: 'your-model',
           key: { sealed: 'v1.sealed.key', hint: 'abcd' },
         });
-        await tenant.putAssistantConversation({
+        await tenant.putAssistantChat({
           tenantRef,
           memberRef: `github:${uid}`,
+          chatId: 'chat-0123456789a',
+          title: 'Anything free tomorrow?',
           messages: [{ role: 'user', text: 'Anything free tomorrow?' }],
           added: {},
           keep: [],
           ttlMs: HOUR,
+        });
+        await tenant.recordAuditEvent({
+          tenantRef,
+          event: { action: 'api_key.created', actorType: 'person', actorRef: `github:${uid}`, actorRole: 'owner' },
         });
         expect(
           (
@@ -462,6 +520,61 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
             })
           ).ok,
         ).toBe(true);
+        // What integrations build on (RFC 0004 P3): a contact, a calendar's busy time, and a
+        // reminder said on the feed.
+        expect((await tenant.putContact({ tenantRef, ref: 'driver-1', email: 'driver@example.com' })).ok).toBe(true);
+        expect(
+          (
+            await tenant.replaceSourceBusy({
+              tenantRef,
+              resourceId,
+              source: 'google:fleet',
+              window: { start: slot(30).start, end: slot(40).end },
+              revision: 1,
+              busy: [slot(31)],
+            })
+          ).ok,
+        ).toBe(true);
+        const soon = Math.floor(Date.now() / 1_000) * 1_000 + 10 * 60_000;
+        const reminded = await tenant.putCalendarEvent({
+          tenantRef,
+          externalRef: 'soon-1',
+          idempotencyKey: 'soon-create',
+          expectedRevision: 0,
+          resourceId,
+          start: new Date(soon),
+          end: new Date(soon + HOUR),
+          timezone: 'UTC',
+          summary: 'Soon',
+          reminders: [{ action: 'display', minutesBeforeStart: 30 }],
+        });
+        if (!reminded.ok) throw new Error(reminded.code);
+        const remindedBooking = await tenant.createExternalReservation({
+          tenantRef,
+          externalRef: 'soon-booking',
+          resourceId,
+          start: new Date(soon + 2 * HOUR),
+          end: new Date(soon + 3 * HOUR),
+          bufferAfterMs: 0,
+          revision: 1,
+          reminderMinutes: [180],
+        });
+        if (!remindedBooking.ok) throw new Error(remindedBooking.code);
+        expect(await tenant.dueReminders({ tenantRef })).toBe(2);
+        // A hold's payment, kept apart from the hold (RFC 0004 C3).
+        const paying = await tenant.acquireHold({
+          tenantRef,
+          resourceId,
+          ...slot(40),
+          ttlMs: 600_000,
+          paymentRequired: true,
+          payment: { amountMinor: 1000, currency: 'GBP' },
+        });
+        if (!paying.ok) throw new Error(paying.code);
+        expect(
+          (await tenant.markHoldPaid({ tenantRef, holdId: paying.hold.id, paymentRef: 'pi_seed', received: { amountMinor: 1000, currency: 'GBP' } }))
+            .ok,
+        ).toBe(true);
         return resourceId;
       });
       const resourceId = (
@@ -472,6 +585,14 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       await superuser`
         DELETE FROM slotlock.outbox
          WHERE id = (SELECT min(id) FROM slotlock.outbox WHERE tenant_ref = ${tenantRef})`;
+      // Overage it was billed for, which only the owner's overage report writes.
+      await superuser`
+        INSERT INTO slotlock.overage_reports (tenant_ref, month, reported)
+        VALUES (${tenantRef}, date_trunc('month', now())::date, 1)`;
+      // A conversation as 0.8 kept it, which a server of 0.8 still running during an upgrade writes.
+      await superuser`
+        INSERT INTO slotlock.assistant_conversations (tenant_ref, member_ref, expires_at)
+        VALUES (${tenantRef}, 'github:1', now() + interval '1 hour')`;
       // A booking an upgrade set aside, which only the deployment DDL writes.
       await superuser`
         INSERT INTO slotlock.reservation_conflict_archive (
@@ -483,14 +604,60 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
         )`;
       const keys = createSlotlockApiKeyStore(application);
       const key = await keys.create({ tenantRef, name: 'Agent key', scopes: ['read', 'write'] });
+      // A key limited to part of the tenant (RFC 0003 G6), whose limit is the tenant's too.
+      await keys.create({
+        tenantRef,
+        name: 'Depot key',
+        scopes: ['read'],
+        resourceScope: { locations: ['depot'], groups: [] },
+        // And held below the server's limits (RFC 0004 A5).
+        limits: { maxHolds: 2 },
+      });
       await keys.revoke({
         tenantRef,
         id: (await keys.create({ tenantRef, name: 'Old key', scopes: ['read'] })).apiKey.id,
+      });
+      // A plan is written only for a person the dashboard holds (one never erased, or signed in again).
+      await superuser`SELECT slotlock.dashboard_sign_in(${tenantRef}, NULL)`;
+      await setSlotlockTenantPlan(application, { tenantRef, plan: 'developer', status: 'active' });
+      // A plan override staff gave it (RFC 0006, M5), and a billing alert the Stripe webhook noted.
+      await superuser`
+        INSERT INTO slotlock.tenant_plan_overrides (tenant_ref, plan, max_resources, max_api_keys,
+          max_webhook_endpoints, ends_at, reason, created_by, approved_by, approved_at)
+        VALUES (${tenantRef}, 'team', 500, 100, 25, now() + interval '30 days', 'Pilot', 'github:1', 'github:1', now())`;
+      await application`SELECT slotlock.note_billing_event('payment_failed', ${tenantRef}, ${`in_${uid}`}, '{}'::jsonb)`;
+      // A notice staff sent it and a feature they turned off for it (RFC 0006, M10 and M11), and a
+      // maintenance pass of its that failed.
+      await superuser`
+        INSERT INTO slotlock.announcements (audience, tenant_ref, kind, message, starts_at, ends_at, created_by)
+        VALUES ('account', ${tenantRef}, 'notice', 'Your plan changes on Monday', now(), now() + interval '1 day', 'github:1')`;
+      await superuser`
+        INSERT INTO slotlock.feature_flags (flag, tenant_ref, enabled, reason, set_by)
+        VALUES ('assistant', ${tenantRef}, false, 'Pilot without the assistant', 'github:1')`;
+      await application`SELECT slotlock.note_maintenance_failure(${tenantRef}, 'Error', NULL, 'Roll failed')`;
+      // Its usage: operations a server counted, and its feed rolled up (which writes its cursor).
+      await recordSlotlockUsage(application, randomUUID(), [
+        { tenantRef, day: slotlockUsageDay(Date.now()), metric: 'operations', keyId: '', origin: 'rest', count: 1 },
+      ]);
+      await app.withTenant(tenantRef, (tenant) => tenant.rollUpUsage({ tenantRef }));
+      // A notice that it used most of a monthly quota.
+      await noteSlotlockQuotaThreshold(application, {
+        tenantRef,
+        metric: 'operations',
+        percent: 80,
+        used: 400_000,
+        quota: 500_000,
+        periodStart: slotlockQuotaPeriod(Date.now()).periodStart,
       });
       const dashboard = createSlotlockDashboardState(application);
       expect(await dashboard.use('form', `form-${randomUUID()}`, Date.now() + HOUR, uid)).toBe(
         true,
       );
+      // A copy of it all, built (RFC 0004 D3).
+      const asked = await app.withTenant(tenantRef, (tenant) => tenant.createTenantExport({ tenantRef }));
+      expect(
+        (await app.withTenant(tenantRef, (tenant) => tenant.buildTenantExport({ tenantRef, exportId: asked.id })))?.status,
+      ).toBe('ready');
       return { key: key.key, resourceId };
     }
 
@@ -506,7 +673,32 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       const tables = await tenantTables();
       // The suspension is kept on purpose (an erased abuser stays suspended); every other table with
       // a tenant column is the tenant's data and must be erased.
-      const owned = tables.filter((table) => table !== 'tenant_suspensions');
+      // partner_accounts is a partner's record of one of its accounts (partner:<id>:<account>):
+      // erased with it, which partners.integration covers, and never a direct tenant's.
+      // workspace_memberships holds a shared workspace's members (github-org:, team:), never a
+      // person's own tenant's: workspaces.integration covers its erasure, a person's included.
+      // workspaces and workspace_invitations hold team workspaces (team:) only: team-workspaces.integration
+      // covers theirs, and what a person's erasure takes from them. workspace_domains and
+      // workspace_join_requests and workspace_join_blocks are team workspaces' too: workspace-domains.integration
+      // covers them.
+      const teamOnly = new Set([
+        'workspace_memberships',
+        'workspaces',
+        'workspace_invitations',
+        'workspace_domains',
+        'workspace_join_requests',
+        'workspace_join_blocks',
+        // A team's single sign-on: workspace-sso.integration covers its erasure, and a person's.
+        'sso_connections',
+        'sso_bypasses',
+        // A team's directory: scim-server.integration and workspace-scim cover its erasure.
+        'scim_tokens',
+        'scim_users',
+        'scim_groups',
+      ]);
+      const owned = tables.filter(
+        (table) => table !== 'tenant_suspensions' && table !== 'partner_accounts' && !teamOnly.has(table),
+      );
       expect(tables).toContain('tenant_suspensions');
       const before = await counts(tenantRef, owned);
       const canaryBefore = await counts(canary, owned);
@@ -517,7 +709,9 @@ describe.skipIf(!url)('tenant suspension and erasure (real Postgres, deployment 
       const erased = await app.eraseTenant({ tenantRef });
       for (const table of owned) expect(erased.rows[table], table).toBe(before[table]);
       expect(erased.rows.dashboard_tokens).toBe(1);
-      expect(erased.total).toBe(Object.values(before).reduce((sum, count) => sum + count, 0) + 1);
+      // The person's dashboard record, which their plan needed (populate).
+      expect(erased.rows.dashboard_people).toBe(1);
+      expect(erased.total).toBe(Object.values(before).reduce((sum, count) => sum + count, 0) + 2);
       const after = await counts(tenantRef, owned);
       for (const table of owned) expect(after[table], table).toBe(0);
       expect((await ownerDigest(uid))[0]?.count).toBe(0);

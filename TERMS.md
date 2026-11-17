@@ -1,6 +1,6 @@
 # Terms of Service for hosted Slotlock
 
-Last updated: 8 November 2026.
+Last updated: 13 November 2026.
 
 These terms are an agreement between you and TREFT LTD, trading as Pylota (company number 16211391,
 registered office 20 Wenlock Road, London, England, N1 7GU), for hosted Slotlock: the API at
@@ -14,7 +14,8 @@ it yourself, and nothing here limits your rights under that licence.
 
 ## The service
 
-- Hosted Slotlock is free while it is offered as a preview. It is provided on a best-effort basis,
+- Hosted Slotlock has a Free plan and paid Developer and Team plans, described under
+  [Plans and payment](#plans-and-payment). On every plan it is provided on a best-effort basis,
   with no service level agreement: it may be slow, unavailable or changed without notice, and it
   may lose data. Keep your own records of anything you cannot afford to lose.
 - It runs a released version of Slotlock. Its REST API follows the stability and deprecation
@@ -25,13 +26,51 @@ it yourself, and nothing here limits your rights under that licence.
 - We may end the service. We will give at least 30 days' notice on the hosted service page and the
   status page, during which you can read your data through the API.
 
+## Plans and payment
+
+- **Free** costs nothing and has the limits shown on the [hosted service page](docs/hosted/README.md#plans).
+  Accounts created before 9 November 2026 move to those limits on 16 November 2026.
+- From 16 November 2026, each plan also allows a number of operations (calls to the API, the
+  assistant's included) and bookings each calendar month, shown on the
+  [hosted service page](docs/hosted/README.md#monthly-allowances). We tell you in your account's
+  change feed and on the Plan page when you have used 80% and 100% of either. On Free, calls past an
+  allowance are refused until the month ends; on Developer and Team, calls past 110% of it are. Use
+  past an allowance is never charged for.
+- **Developer** costs £5 a month or £50 a year, shown at checkout in your currency with any sales
+  tax or VAT added. Stripe sells it to you as merchant of record: Stripe takes the payment, charges
+  the tax and issues the invoices, under its own terms for buyers, which it shows at checkout. These
+  terms cover the service itself.
+- **Team** is for a shared workspace: a team workspace, or a GitHub organization that an owner has
+  turned Slotlock on for. It costs £15 a month or £150 a year for the whole workspace, however many
+  people use it, and is bought, sold and taxed as Developer is. Only the workspace's Owners and
+  Billing managers can buy, change or cancel it. If Slotlock is turned off for an organization, its
+  plan continues until it is cancelled. On Free, a team workspace has up to 3 people, open
+  invitations included, and each person may create one.
+- A Developer or Team plan renews at the end of each period until you cancel it, which you can do at any
+  time from **Manage billing** on the dashboard's Plan page. It then runs to the end of the period
+  already paid for. Payments are not refunded for part of a period, except where the law gives you
+  a right to a refund or where we end the service.
+- If a payment fails, Stripe tries again for a few weeks and the plan continues meanwhile; if it is
+  still not paid, the account returns to Free. When an account returns to Free nothing is deleted,
+  but nothing more can be added while it holds more than Free allows.
+- We will give at least 30 days' notice of a new price before it applies to your next renewal, and
+  of any lower limit on a plan before it applies to you. If we end the service, we refund the unused
+  part of any period already paid for.
+- **Custom**, Slotlock run on your own infrastructure with our support, is agreed separately in
+  writing.
+
 ## Your account
 
-- Any GitHub account can sign in. Your account is your GitHub user, and it holds one Slotlock
-  account; keep that GitHub account secure.
+- Any GitHub or Google account can sign in. Your account is that GitHub user or Google account, and
+  it holds one Slotlock account; keep that account secure.
 - You are responsible for the API keys you create and for everything done with them. Give each
   agent its own key with the narrowest scope it needs, and revoke a key you no longer trust.
 - You must follow the [Acceptable Use Policy](ACCEPTABLE-USE.md), which is part of these terms.
+- **Team workspaces.** A team workspace belongs to its Owners, who are responsible for it as for an
+  account: who they invite, the role each person has, and what members do in it. Invite only people
+  who expect it, at an address they gave you. Members of a workspace see each other's GitHub login
+  or Google email, their roles, and the workspace's audit log as their role allows. When someone
+  leaves or is removed, what they made in the workspace stays the workspace's.
 
 ## Your content
 

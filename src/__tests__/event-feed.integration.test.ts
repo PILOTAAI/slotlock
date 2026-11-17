@@ -114,6 +114,7 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
       'hold.released',
       'reservation.created',
       'reservation.updated',
+      'reservation.rescheduled',
       'reservation.cancelled',
       'event.created',
     ]);
@@ -223,6 +224,22 @@ describe.skipIf(!url)('the event feed (real Postgres)', () => {
     await store.enableWebhookEndpoint({ tenantRef, id: gone?.id as string });
     expect(await deliverSlotlockWebhooks({ feed: store, tenantRef, send })).toEqual({ delivered: 1, failed: 0 });
     expect(received.at(-1)?.subject).toBe('W-4');
+  });
+
+  it('answers a create retried with its idempotency key with the first webhook and secret', async () => {
+    const key = `hook-${randomUUID()}`;
+    const params = { tenantRef, url: 'https://example.com/retried', eventTypes: ['reservation.created'], idempotencyKey: key };
+    const first = await store.createWebhookEndpoint(params);
+    expect(first).toMatchObject({ ok: true, replayed: false });
+    const again = await store.createWebhookEndpoint(params);
+    expect(again).toEqual({ ...first, replayed: true });
+    expect(await store.createWebhookEndpoint({ ...params, url: 'https://example.com/other' })).toEqual({
+      ok: false,
+      code: 'idempotency_conflict',
+    });
+    const listed = await store.listWebhookEndpoints({ tenantRef });
+    expect(listed.filter((endpoint) => endpoint.url === 'https://example.com/retried')).toHaveLength(1);
+    if (first.ok) await store.deleteWebhookEndpoint({ tenantRef, id: first.endpoint.id });
   });
 
   it('refuses a URL that is not https or a private address, a bad cursor, and an old one', async () => {

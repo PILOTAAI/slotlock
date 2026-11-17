@@ -275,3 +275,22 @@ func TestARequiredArgumentThatMayBeNullSendsNullOrAValue(t *testing.T) {
 		t.Fatalf("sent %s", got)
 	}
 }
+
+func TestAPartnerKeyActsForAnAccountOnlyWhenAsked(t *testing.T) {
+	s := newStub(t, nil)
+	if _, err := stubClient(t, s.URL).GetEvent(context.Background(), GetEventInput{EventID: "e1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stubClient(t, s.URL, WithAccount("user-4821")).GetEvent(context.Background(), GetEventInput{EventID: "e1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.requests[0].Header.Values("Slotlock-Account"); len(got) != 0 {
+		t.Errorf("sent Slotlock-Account %v without an account", got)
+	}
+	if got := s.requests[1].Header.Get("Slotlock-Account"); got != "user-4821" {
+		t.Errorf("Slotlock-Account %q", got)
+	}
+	if _, err := New(s.URL, "slk_secret", WithAccount("not ok\r\n")); err == nil {
+		t.Error("took an account that is not one")
+	}
+}

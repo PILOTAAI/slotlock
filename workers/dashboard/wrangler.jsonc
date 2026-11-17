@@ -1,7 +1,8 @@
 // The Slotlock dashboard (src/dashboard.ts) as a Worker: an example configuration to copy, and the
 // one this repository's Dashboard workflow bundles to check the Worker builds. Deploy it from your own
 // pipeline with your own Cloudflare credentials and your own values for everything marked below
-// (README "Dashboard on Cloudflare Workers"); this repository never holds a deploy token.
+// (README "Dashboard on Cloudflare Workers"). Slotlock Cloud's own copy is the `dashboard`
+// environment's SLOTLOCK_DASHBOARD_WRANGLER_CONFIG, which dashboard-deploy.yml deploys from main.
 // Config reference: https://developers.cloudflare.com/workers/wrangler/configuration/ (read 2026-10-18).
 //
 // Before the first deploy:
@@ -10,8 +11,12 @@
 //       SLOTLOCK_GITHUB_CLIENT_ID      the GitHub OAuth app's Client ID
 //       SLOTLOCK_GITHUB_CLIENT_SECRET  a client secret of that app
 //       SLOTLOCK_SESSION_SECRET        32+ random characters (openssl rand -hex 32)
-//     and, to turn on the chat assistant (optional):
-//       SLOTLOCK_ASSISTANT_SECRET      32+ random characters; seals each organization's model key
+//     and, to turn on the chat assistant (optional; Slotlock Cloud sets it):
+//       SLOTLOCK_ASSISTANT_SECRET      32+ random characters; seals each organization's model key.
+//                                      Keep it. To change it, put the old value in
+//       SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS  (a secret too; up to three, comma-separated, newest
+//                                      first): keys sealed under it still open and are sealed
+//                                      again under the new one when next used.
 //     (SLOTLOCK_ASSISTANT_PRIVATE_URLS=on, a var, allows localhost and private-address model URLs;
 //     a Worker cannot reach a private network anyway, so it is for a model behind a public name.)
 //
@@ -24,6 +29,23 @@
   // From 2026-08-04 the Node.js APIs the dashboard uses (node:crypto, node:async_hooks, Buffer) are
   // on by default.
   "compatibility_date": "2026-10-01",
+  // Without this flag, a Worker's fetch to a hostname in its own zone goes straight to that zone's
+  // origin, "bypassing Cloudflare security settings" (WAF, Access, IP rules); with it, the fetch goes
+  // through the zone's front door like any request from the internet. The dashboard fetches URLs
+  // members give: a holiday calendar's, the assistant's model, a team's identity provider. The flag
+  // has no default date, so keep it: scripts/deploy-dashboard.mjs refuses a configuration without it.
+  // https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public
+  // (read 2026-11-14; workerd 1.20261019.1, which wrangler 4.152.0 runs, knows it).
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  // Run the Worker next to the database. A dashboard page makes dozens of queries one after another
+  // (the overview about 60), and through Hyperdrive each one travels from wherever the Worker runs
+  // to the database: from an edge far from it, a page takes seconds. Hyperdrive's guidance for
+  // sequential queries is a placement hint that matches the database's region
+  // (developers.cloudflare.com/hyperdrive/concepts/how-hyperdrive-works/, "Reduce latency with
+  // Placement", read 2026-11-14). Yours: the region nearest your database, such as
+  // "gcp:europe-west2" for London, or { "mode": "smart" }. scripts/deploy-dashboard.mjs refuses a
+  // configuration without one.
+  "placement": { "region": "aws:us-east-1" },
   // Yours: the dashboard's hostname. A Custom Domain gets its own certificate at any depth; no Worker
   // route in the zone may match it, because a route runs before a Custom Domain.
   "routes": [{ "pattern": "dashboard.example.com", "custom_domain": true }],
@@ -37,7 +59,8 @@
     }
   ],
   // The Worker answers 503 without the first two, and without the ceiling counts sign-ins from every
-  // client in SLOTLOCK_SIGN_IN_RATE_LIMIT, as before the ceiling existed. A sign-in writes to the
+  // client in SLOTLOCK_SIGN_IN_RATE_LIMIT, as before the ceiling existed. Without the SCIM binding,
+  // with SCIM on, it counts teams' SCIM calls in SLOTLOCK_CLIENT_RATE_LIMIT. A sign-in writes to the
   // database and asks GitHub with the app's client secret, and the limit on sign-ins in flight is per
   // isolate, so these bound the requests of every isolate. Counts are per Cloudflare location.
   // namespace_id must be unique in the account (two bindings with the same one share their counts);
@@ -62,6 +85,13 @@
       "name": "SLOTLOCK_SIGN_IN_CEILING_RATE_LIMIT",
       "namespace_id": "41003",
       "simple": { "limit": 600, "period": 60 }
+    },
+    {
+      // SCIM calls from teams' identity providers (SLOTLOCK_TEAM_SCIM), per client address, apart
+      // from the dashboard's: a provider calls from addresses its other customers share.
+      "name": "SLOTLOCK_SCIM_RATE_LIMIT",
+      "namespace_id": "41004",
+      "simple": { "limit": 600, "period": 60 }
     }
   ],
   // A page takes several queries; run the Worker near the database rather than near each visitor.
@@ -73,6 +103,13 @@
     "SLOTLOCK_SERVICE_URL": "https://slotlock.example.com",
     // Who may sign in: "*" for every GitHub account (each gets its own tenant), or GitHub ids.
     "SLOTLOCK_DASHBOARD_USERS": "*"
+    // Meter the assistant's operations in each tenant's usage, as slotlock serve does (off by
+    // default). Uncomment and set:
+    // "SLOTLOCK_USAGE": "on",
+    // Hold the assistant's operations, and approvals granted on the Approvals page, to each
+    // tenant's monthly quotas, as slotlock serve does (off by default; needs SLOTLOCK_USAGE).
+    // Uncomment and set:
+    // "SLOTLOCK_QUOTAS": "on",
     // For organizations instead of people: GitHub organization ids, each one tenant its members
     // share (gh api orgs/<login> --jq .id). Uncomment and set:
     // "SLOTLOCK_DASHBOARD_ORGS": "123456",

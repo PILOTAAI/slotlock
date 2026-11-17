@@ -34,6 +34,7 @@ describe('slotlock metrics', () => {
       series_writes_busy: 0,
       maintenance_busy: 0,
       request_too_large: 1,
+      quota_exceeded: 0,
       clients: [{ client: 'pseudonym', refusals: 4 }],
     });
     metrics.maintenance({
@@ -45,6 +46,10 @@ describe('slotlock metrics', () => {
       staleSources: 1,
       noShows: 2,
       waitlistOffers: 1,
+      approvalsExpired: 0,
+      bookingsCompleted: 0,
+      remindersDue: 0,
+      holidayCalendarsImported: 0,
       capped: false,
       rollPending: false,
     });

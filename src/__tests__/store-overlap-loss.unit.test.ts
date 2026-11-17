@@ -11,8 +11,8 @@ function losingClient() {
   const client = Object.assign(
     async (strings: TemplateStringsArray) => {
       const text = strings.join('?');
-      // overlapLoss looks the winner up on the client itself.
-      if (text.includes('FROM slotlock.reservations')) return [];
+      // overlapLoss looks the winner up on the client itself, then a composite's claim in the way.
+      if (text.includes('FROM slotlock.reservations') || text.includes('slotlock.composite_claims')) return [];
       throw new Error(`unexpected query: ${text}`);
     },
     {

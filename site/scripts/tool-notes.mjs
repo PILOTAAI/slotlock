@@ -15,9 +15,13 @@ export const SUMMARIES = {
     'The earliest slot of a given length across resources, offered only when the answer is certain.',
   slotlock_find_available_slots:
     'Up to 50 slots of a given length, earliest first, to offer a person a choice.',
+  slotlock_find_available_ranges:
+    'Hires across days, such as a car from Friday to Monday: the earliest range on each resource or pool member.',
   slotlock_hold_slots:
     'Hold up to five candidate slots for a few minutes while a person chooses, as one group.',
   slotlock_release_slots: 'Release one of your holds and the rest of its group at once.',
+  slotlock_hold_together:
+    'Hold one time on 2-20 resources at once, all or none, as one group with one time to live.',
   slotlock_book_together: 'Book the same time on 2-20 resources at once, all or none.',
   slotlock_book_pool: 'Book any one member of a pool, such as a vehicle class, for a time.',
   slotlock_get_pool_availability:
@@ -28,6 +32,9 @@ export const SUMMARIES = {
   slotlock_list_events: 'List the events this caller created in a window, one page at a time.',
   slotlock_update_event: 'Change an event at the revision you last read.',
   slotlock_delete_event: 'Cancel an event at the revision you last read.',
+  slotlock_confirm_slot: 'Book a time you hold: the held resource and time exactly.',
+  slotlock_reschedule: 'Move one of your events to a new time, and resource, at the revision you last read.',
+  slotlock_cancel: 'Cancel one of your events at the revision you last read.',
 };
 
 /** A paragraph after the summary, where the schema alone would mislead. */
@@ -38,6 +45,8 @@ export const DETAILS = {
     'A slot is offered only inside the resource’s bookable hours, and only when the coverage of every resource asked about is `certain`. Otherwise `resource_id`, `start` and `end` are `null`: treat that as unknown, not as free.',
   slotlock_find_available_slots:
     'Each slot is free of busy time and inside the resource’s bookable hours, found the way `slotlock_find_next_available` finds one, and they never overlap on one resource. The list is empty unless the coverage of every resource asked about is `certain`. In an MCP Apps host the calendar view lets the person pick one, and sends the agent a message naming it.',
+  slotlock_find_available_ranges:
+    'A range starts in the pick-up window and lasts `days` local days, or ends in the return window, whichever you give. It is free throughout with the resource’s buffers, starts and ends inside its bookable hours, and meets its booking rules, pick-up and return times and lengths included. One range per resource, the earliest; none unless every resource’s coverage is `certain`. Book one with `slotlock_create_event`, or `slotlock_book_pool` for a pool, at exactly its start and end.',
   slotlock_hold_slots:
     'Each free candidate is held for `ttl_seconds`, busy for everyone else; a taken one is listed in `refused` with its code. Book one with `slotlock_create_event`’s `hold_id`: the others are released in the same transaction. A hold is yours alone, and one agent may have 20 live at once (`hold_limit_reached`), holding a bounded number of hours together (`held_time_limit_reached`).',
   slotlock_book_pool:
@@ -46,10 +55,12 @@ export const DETAILS = {
     'The window is split where the number of free members changes; each part says how many are free, counting only the members you may book, and each only where its booking rules let a booking start (after its notice, within how far ahead it books, inside its hours when it enforces them). A member’s slot step is not counted. The count is certain only when `coverage.certainty` is `certain`. Book one of them with `slotlock_book_pool`.',
   slotlock_book_together:
     'One event per resource, in one transaction: if any resource is taken or breaks its booking rules, nothing is booked and the refusal names that `resource_id`. Bundles take their resources in one order, so two racing over the same ones end with one booked and one refused, never stuck. Find the time first with `slotlock_find_available_slots` and `require_free`.',
+  slotlock_hold_together:
+    'Every resource is held, or none is: a taken one rolls the others back, and the refusal names its `resource_id`. The holds share one group and expire together, when the earliest would. `slotlock_book_together` with `hold_group_id` books the set from them, in one transaction; `slotlock_release_slots` with any `hold_id` lets the whole set go.',
   slotlock_release_slots:
     'Holds expire on their own; release them when the person walks away, so the time is free sooner.',
   slotlock_create_event:
-    'An opaque event goes through the database’s overlap check; a transparent one stays visible and blocks nothing. A retry with the same `idempotency_key` and arguments returns the first result with `replayed: true`.',
+    'An opaque event goes through the database’s overlap check; a transparent one stays visible and blocks nothing. A refused time (`overlap`, or a `booking_rule_…` other than `booking_rule_uncertain`) comes with `alternatives`: up to three free times of the same length from the time asked for, within seven days, found as `slotlock_find_available_slots` finds them. An `overlap` says when the booking in the way makes the time busy (`busy_start`, `busy_end`), and names it when it is yours (`conflicting_hold_id`, `conflicting_event_id`). A retry with the same `idempotency_key` and arguments returns the first result with `replayed: true`.',
   slotlock_get_event:
     'Only events this caller created are visible. Other bookings on the resource still count as busy time.',
   slotlock_list_events:
@@ -57,6 +68,12 @@ export const DETAILS = {
   slotlock_update_event:
     'Send only the fields you change; the others keep their values. The result is the event at its new `revision`.',
   slotlock_delete_event: 'The event becomes a tombstone, so a delayed create cannot bring it back.',
+  slotlock_confirm_slot:
+    'The event is made exactly as `slotlock_create_event` with `hold_id` makes it, in the resource’s time zone unless you give one, and the other holds of its group are released in the same transaction. A hold that lapsed first is `hold_expired`; one released, booked or not yours is `hold_not_found`. Without an `idempotency_key` the hold is the retry identity: confirming it again returns the same event with `replayed: true`.',
+  slotlock_reschedule:
+    'The same change `slotlock_update_event` makes with only a new time (and resource). A time already taken is `overlap`, with `alternatives`. Without an `idempotency_key` the event, revision and new time are the retry identity: a retry returns the same move, and a different move from the same revision is `revision_conflict`.',
+  slotlock_cancel:
+    'The same cancellation `slotlock_delete_event` makes. Without an `idempotency_key` the event and revision are the retry identity, so a retry after it succeeded returns it again with `replayed: true`.',
 };
 
 /**
@@ -166,16 +183,19 @@ export const OBJECTS = {
   ATTENDEE_INPUT: { name: 'Attendee input', role: 'input' },
   REMINDER_INPUT: { name: 'Reminder input', role: 'input' },
   RECURRENCE_EXCEPTION_INPUT: { name: 'Recurrence exception input', role: 'input' },
+  ALTERNATIVE_SCHEMA: { name: 'Alternative', role: 'output' },
 };
 
 /** Codes a tool returns besides the ones every tool can (COMMON_ERRORS), most likely first. */
 export const TOOL_ERRORS = {
   slotlock_list_resources: [],
   slotlock_get_free_busy: ['resource_not_found'],
-  slotlock_find_next_available: ['resource_not_found'],
-  slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments'],
+  slotlock_find_next_available: ['resource_not_found', 'duration_required'],
+  slotlock_find_available_slots: ['resource_not_found', 'invalid_arguments', 'duration_required'],
+  slotlock_find_available_ranges: ['resource_not_found', 'pool_not_found', 'ranges_unavailable'],
   slotlock_hold_slots: ['holds_unavailable', 'idempotency_conflict'],
   slotlock_release_slots: ['holds_unavailable'],
+  slotlock_hold_together: ['overlap', 'resource_not_found', 'holds_unavailable', 'hold_limit_reached', 'idempotency_conflict'],
   slotlock_get_pool_availability: ['pool_not_found', 'pools_unavailable'],
   slotlock_book_pool: [
     'pool_full',
@@ -193,6 +213,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'bundles_unavailable',
     'owner_event_quota_exceeded',
   ],
@@ -201,7 +226,9 @@ export const TOOL_ERRORS = {
     'idempotency_conflict',
     'resource_not_found',
     'hold_not_found',
+    'hold_expired',
     'hold_mismatch',
+    'payment_required',
     'invalid_event',
     'owner_event_quota_exceeded',
     'owner_command_quota_exceeded',
@@ -212,6 +239,11 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'store_inconsistent',
   ],
   slotlock_get_event: ['event_not_found'],
@@ -229,9 +261,59 @@ export const TOOL_ERRORS = {
     'booking_rule_slot_step',
     'booking_rule_outside_hours',
     'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
     'store_inconsistent',
   ],
   slotlock_delete_event: [
+    'revision_conflict',
+    'idempotency_conflict',
+    'event_not_found',
+    'owner_command_quota_exceeded',
+  ],
+  slotlock_confirm_slot: [
+    'hold_not_found',
+    'hold_expired',
+    'payment_required',
+    'holds_unavailable',
+    'idempotency_conflict',
+    'resource_not_found',
+    'owner_event_quota_exceeded',
+    'owner_command_quota_exceeded',
+    'booking_rule_slot_step',
+    'booking_rule_outside_hours',
+    'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
+    'store_inconsistent',
+  ],
+  slotlock_reschedule: [
+    'revision_conflict',
+    'overlap',
+    'idempotency_conflict',
+    'event_not_found',
+    'resource_not_found',
+    'invalid_event',
+    'owner_command_quota_exceeded',
+    'booking_rule_min_notice',
+    'booking_rule_max_advance',
+    'booking_rule_slot_step',
+    'booking_rule_outside_hours',
+    'booking_rule_uncertain',
+    'booking_rule_min_duration',
+    'booking_rule_max_duration',
+    'booking_rule_duration_not_allowed',
+    'booking_rule_pickup_time',
+    'booking_rule_return_time',
+    'store_inconsistent',
+  ],
+  slotlock_cancel: [
     'revision_conflict',
     'idempotency_conflict',
     'event_not_found',
@@ -241,6 +323,28 @@ export const TOOL_ERRORS = {
 
 /** Every tool: schema validation, `authorize`, `consumeRateLimit`, a request that went away. */
 export const COMMON_ERRORS = ['invalid_arguments', 'forbidden', 'rate_limited', 'request_aborted'];
+
+/** The bookings an approval policy can hold for a person (RFC 0004 A4). */
+export const APPROVAL_TOOLS = [
+  'slotlock_create_event',
+  'slotlock_confirm_slot',
+  'slotlock_book_pool',
+  'slotlock_book_together',
+  'slotlock_update_event',
+  'slotlock_reschedule',
+];
+
+/** What those answer when a policy covers them. */
+export const APPROVAL_ERRORS = [
+  'approval_pending',
+  'approval_declined',
+  'approval_expired',
+  'approval_policy_refused',
+  'approval_required',
+  'approval_too_late',
+  'approval_series_unsupported',
+  'approval_limit_reached',
+];
 
 /** Write tools, when the server asks a person to confirm them (`confirmation`). */
 export const CONFIRMATION_ERRORS = [
@@ -254,6 +358,15 @@ export const CONFIRMATION_ERRORS = [
  * no entry matches fails the build, so a new rule gets a sentence before it ships.
  */
 export const REFINEMENTS = [
+  {
+    matches: (text) => text.includes('value.payment === undefined || value.payment_required === true'),
+    note: () => '`payment` is given only with `payment_required: true`.',
+  },
+  {
+    matches: (text) => text.startsWith('selectsOrNames'),
+    note: () =>
+      'Name the resources with `resource_ids`, or select them with any of `location`, `group`, `labels`, `kind` and `pool`: one or the other, not both.',
+  },
   {
     matches: (text) => text === 'boundedAgentWindow',
     note: (facts) => `\`end\` must be after \`start\`, at most ${facts.horizonDays} days later.`,
@@ -285,5 +398,18 @@ export const REFINEMENTS = [
   {
     matches: (text) => /Date\.parse\(value\.end\) > Date\.parse\(value\.start\)/.test(text),
     note: () => '`end` is after `start`.',
+  },
+  {
+    matches: (text) => text.includes('(value.resource_ids !== undefined) !== (value.pool !== undefined)'),
+    note: () => 'Give `resource_ids` or `pool`, one of them.',
+  },
+  {
+    matches: (text) => text.includes('value.days !== undefined') && text.includes('value.return_start'),
+    note: () => 'Give `days`, or `return_start` and `return_end`: one or the other.',
+  },
+  {
+    matches: (text) => text.includes('value.pickup_end') && text.includes('MAX_AGENT_WINDOW_MS'),
+    note: (facts) =>
+      `\`pickup_end\` is at or after \`pickup_start\`, the return window runs forward, and the whole search spans at most ${facts.horizonDays} days.`,
   },
 ];

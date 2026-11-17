@@ -4,6 +4,7 @@
 # image tag), in slotlock.manifest.json and in each language client (scripts/client-versions.sh: its
 # manifest and its User-Agent constant), and turns CHANGELOG.md's "## Unreleased" heading into
 # "## <version> - <today, UTC>". Merged to main, that change is a release: tag-release.yml tags it.
+# It also records the release's schema functions (workers/dashboard/released-schema-functions.json).
 # It refuses a version that is not later than package.json's, one already tagged, and a CHANGELOG.md
 # whose "## Unreleased" section is missing or empty, since the release notes are that section.
 #   scripts/prepare-release.sh <version>      for example 0.1.1, or 0.2.0-rc.1 (no leading v)
@@ -62,6 +63,11 @@ replace slotlock.manifest.json "\"version\": \"$current\"" "\"version\": \"$new\
 if lagging=$(client_versions_set "$current" "$new"); then :; else
   fail "$lagging is not at $new."
 fi
+# The release's schema functions: the hosted dashboard Worker, deployed from main before its
+# database is migrated, may call only these or ask first (src/__tests__/dashboard-schema.unit.test.ts).
+if [ -f src/ddl.ts ]; then
+  node "$(dirname "$0")/schema-functions.mjs" --write >/dev/null
+fi
 
 # Every copy of the version moved, or nothing is committed.
 [ "$(jq -r .version package.json)" = "$new" ] || fail "package.json is not at $new."
@@ -72,5 +78,9 @@ fi
   fail "server.json's image is not ghcr.io/pilotaai/slotlock:$new."
 [ "$(jq -r .version slotlock.manifest.json)" = "$new" ] || fail "slotlock.manifest.json is not at $new."
 grep -q "^## $new - $date\$" CHANGELOG.md || fail "CHANGELOG.md does not date $new."
+if [ -f src/ddl.ts ]; then
+  [ "$(jq -r .release workers/dashboard/released-schema-functions.json)" = "$new" ] ||
+    fail "workers/dashboard/released-schema-functions.json is not at $new."
+fi
 
 echo "Prepared $new (was $current), dated $date."

@@ -6,7 +6,10 @@ import {
   SLOTLOCK_CORE_DDL,
   SLOTLOCK_DASHBOARD_FORM_LIMIT,
   SLOTLOCK_DASHBOARD_FUNCTIONS,
+  SLOTLOCK_PARTNER_FUNCTIONS,
+  SLOTLOCK_PARTNER_TABLES,
   SLOTLOCK_DASHBOARD_TABLES,
+  SLOTLOCK_APPEND_ONLY_TABLES,
   SLOTLOCK_DEFINER_FUNCTIONS,
   SLOTLOCK_DEFINER_TABLES,
   SLOTLOCK_DEPLOYMENT_CHECKS,
@@ -22,6 +25,8 @@ import {
   createSlotlockApplicationRoleGrantsDdl,
   createSlotlockTenantRlsDdl,
 } from '../ddl.js';
+import { SLOTLOCK_ADMIN_FUNCTIONS, SLOTLOCK_STAFF_TABLES } from '../staff-ddl.js';
+import { SLOTLOCK_TENANT_EXPORT_LEFT_OUT, SLOTLOCK_TENANT_EXPORT_TABLES } from '../types.js';
 
 describe('tenant RLS DDL', () => {
   it('persists bounded owner namespaces and upgrades legacy event identities idempotently', () => {
@@ -165,13 +170,18 @@ describe('deployment DDL name resolution', () => {
   it('defines the API key, dashboard, schema version and tenant functions as SECURITY DEFINER, executable by no one by default', () => {
     expect([...SLOTLOCK_DEFINER_FUNCTIONS]).toEqual([
       ...SLOTLOCK_API_KEY_FUNCTIONS,
+      ...SLOTLOCK_PARTNER_FUNCTIONS,
       ...SLOTLOCK_DASHBOARD_FUNCTIONS,
       ...SLOTLOCK_SCHEMA_FUNCTIONS,
       ...SLOTLOCK_TENANT_ADMIN_FUNCTIONS,
     ]);
     const definers = functions.filter(([, , , header]) => header?.includes('SECURITY DEFINER'));
+    // The serving role's definer functions, and the admin console's, which only its role runs
+    // (staff-ddl.ts; staff-ddl.unit.test.ts checks them).
     expect(definers.map(([, name]) => name).sort()).toEqual(
-      SLOTLOCK_DEFINER_FUNCTIONS.map((signature) => signature.slice(0, signature.indexOf('('))).sort(),
+      [...SLOTLOCK_DEFINER_FUNCTIONS, ...SLOTLOCK_ADMIN_FUNCTIONS]
+        .map((signature) => signature.slice(0, signature.indexOf('(')))
+        .sort(),
     );
     for (const signature of SLOTLOCK_DEFINER_FUNCTIONS) {
       expect(SLOTLOCK_CORE_DDL).toContain(`REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC;`);
@@ -204,9 +214,11 @@ describe('deployment DDL name resolution', () => {
   it('keeps API keys, dashboard records, the schema version and suspensions in tables no role but their owner reads or writes', () => {
     expect([...SLOTLOCK_DEFINER_TABLES]).toEqual([
       ...SLOTLOCK_API_KEY_TABLES,
+      ...SLOTLOCK_PARTNER_TABLES,
       ...SLOTLOCK_DASHBOARD_TABLES,
       ...SLOTLOCK_SCHEMA_TABLES,
       ...SLOTLOCK_TENANT_ADMIN_TABLES,
+      ...SLOTLOCK_STAFF_TABLES,
     ]);
     for (const table of SLOTLOCK_DEFINER_TABLES) {
       expect(SLOTLOCK_CORE_DDL).toContain(`CREATE TABLE IF NOT EXISTS slotlock.${table} (`);
@@ -314,10 +326,29 @@ describe('application role grants', () => {
     }
   });
 
-  it('grants schema usage, DML on those tables and EXECUTE on the definer functions only', () => {
+  // A tenant table added later is exported or left out on purpose, never forgotten (RFC 0004 D3).
+  it('names every tenant table as exported or left out of a tenant export, with why', () => {
+    const exported: readonly string[] = SLOTLOCK_TENANT_EXPORT_TABLES;
+    const leftOut = Object.keys(SLOTLOCK_TENANT_EXPORT_LEFT_OUT);
+    for (const table of SLOTLOCK_TENANT_TABLES) {
+      expect(`${table}: ${Number(exported.includes(table)) + Number(leftOut.includes(table))}`).toBe(`${table}: 1`);
+    }
+    // API keys come from slotlock.list_api_keys, which holds no digest, and the person's sign-in
+    // record from slotlock.tenant_export_person; every other is a tenant table.
+    for (const table of exported) {
+      if (table !== 'api_keys' && table !== 'dashboard_people') expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
+    }
+    expect(exported).toContain('dashboard_people');
+    for (const table of leftOut) expect(SLOTLOCK_TENANT_TABLES as readonly string[]).toContain(table);
+  });
+
+  it('grants schema usage, DML on those tables (only adding to and reading the append-only ones) and EXECUTE on the definer functions only', () => {
     const ddl = createSlotlockApplicationRoleGrantsDdl('slotlock_app');
+    const appendOnly: readonly string[] = SLOTLOCK_APPEND_ONLY_TABLES;
+    // The change history and the workspace audit log (RFC 0004 D2).
+    expect(appendOnly).toEqual(['outbox', 'audit_events']);
     expect(ddl).toBe(
-      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
+      `GRANT USAGE ON SCHEMA slotlock TO "slotlock_app";\nGRANT SELECT, INSERT, UPDATE, DELETE ON ${SLOTLOCK_TENANT_TABLES.filter((table) => !appendOnly.includes(table)).map((table) => `slotlock.${table}`).join(', ')} TO "slotlock_app";\nGRANT SELECT, INSERT ON slotlock.outbox, slotlock.audit_events TO "slotlock_app";\nREVOKE UPDATE, DELETE ON slotlock.outbox, slotlock.audit_events FROM "slotlock_app";\nGRANT EXECUTE ON FUNCTION ${SLOTLOCK_DEFINER_FUNCTIONS.join(', ')} TO "slotlock_app";\n`,
     );
     for (const signature of SLOTLOCK_DASHBOARD_FUNCTIONS) expect(ddl).toContain(signature);
     expect(ddl).not.toContain('rls_policy_contracts');

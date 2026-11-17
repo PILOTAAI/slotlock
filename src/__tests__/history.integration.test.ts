@@ -61,6 +61,8 @@ describe.skipIf(!url)('history (real Postgres)', () => {
     };
     expect(history.map(({ type, actor }) => [type, actor])).toEqual([
       ['reservation.cancelled', 'api_key:desk'],
+      // A move is also reservation.rescheduled (RFC 0004 B4).
+      ['reservation.rescheduled', 'api_key:desk'],
       ['reservation.updated', 'api_key:desk'],
       ['reservation.created', 'api_key:site'],
     ]);
@@ -76,11 +78,11 @@ describe.skipIf(!url)('history (real Postgres)', () => {
     expect(first.next_before).toBe(first.history[1]?.id);
     const rest = (await app.getResourceHistory(as('api_key:auditor'), {
       resource_id: resource.id,
-      limit: 2,
+      limit: 3,
       before: first.next_before,
     })) as { history: Entry[] };
     // And, oldest, the resource's own creation.
-    expect(rest.history.map(({ type }) => type)).toEqual(['reservation.created', 'resource.created']);
+    expect(rest.history.map(({ type }) => type)).toEqual(['reservation.updated', 'reservation.created', 'resource.created']);
   });
 
   it("records an event's update and cancel by the key that made them", async () => {

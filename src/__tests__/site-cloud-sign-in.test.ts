@@ -16,8 +16,14 @@ describe('the site signs people in to Slotlock Cloud', () => {
     expect(landing).toContain(`export const CLOUD_API_URL = '${API}';`);
     expect(landing).toMatch(/export const signIn = \{\n {2}label: 'Sign in',[^}]*href: SIGN_IN_URL,/);
     const page = read('site/src/pages/index.astro');
-    // The header, the hero, the Cloud section and the closing band.
-    expect(page.match(/href=\{signIn\.href\}/g)?.length).toBe(4);
+    const layout = read('site/src/layouts/Marketing.astro');
+    // Sign in and Start free in the header and Sign in in the phone menu (the layout every page
+    // outside the docs shares), Start free in the hero and the closing band. The Free plan's
+    // button takes the same URL from its plan.
+    expect(layout.match(/href=\{signIn\.href\}/g)?.length).toBe(3);
+    expect(page.match(/href=\{signIn\.href\}/g)?.length).toBe(2);
+    expect(layout).not.toMatch(/target="_blank"/);
+    expect(landing).toMatch(/cta: \{ label: signIn\.start, href: SIGN_IN_URL \}/);
     expect(page).not.toMatch(/target="_blank"/);
     // The docs: beside GitHub in the wide header and the menu (Starlight's SocialIcons), and beside
     // the menu button in the narrow header (Header).
@@ -28,7 +34,9 @@ describe('the site signs people in to Slotlock Cloud', () => {
     }
   });
 
-  it('names the policies beside the button, each a page the site builds', () => {
+  it('names the policies under the Free plan, each a page the site builds', () => {
+    // Once on the page; the dashboard's sign-in page names the terms too (SLOTLOCK_DASHBOARD_TERMS_URL).
+    expect(read('site/src/pages/index.astro').match(/signIn\.terms/g)?.length).toBe(1);
     const terms = /terms:\n\s+'([^']+)'/.exec(landing)?.[1] ?? '';
     expect(terms).toMatch(/^By signing in you agree to the /);
     const docs = readdirSync(path('site/docs-src')).map((file) => file.replace(/\.md$/, ''));
@@ -40,13 +48,20 @@ describe('the site signs people in to Slotlock Cloud', () => {
     }
   });
 
-  it('promises Slotlock Cloud no organization tenants, which it does not configure', () => {
-    // The hosted dashboard sets no SLOTLOCK_DASHBOARD_ORGS: each account is its own tenant.
-    const cloud = landing.slice(landing.indexOf('export const cloud = {'), landing.indexOf('export const proof = {'));
-    expect(cloud, 'canary: the cloud section').toContain("eyebrow: 'Slotlock Cloud'");
+  it('promises Slotlock Cloud organizations only as owners turn them on (SLOTLOCK_DASHBOARD_ORGS=enabled)', () => {
+    // Each account is its own tenant; an organization is one only once an owner turns it on, on the
+    // Teams page: never a fixed list the service would have to configure.
+    const cloud = landing.slice(landing.indexOf('export const pricing = {'), landing.indexOf('export const source = {'));
+    expect(cloud, 'canary: the pricing section').toContain("eyebrow: 'Slotlock Cloud'");
     expect(cloud).not.toMatch(/organi[sz]ation/i);
-    expect(read('docs/hosted/README.md')).not.toMatch(/organi[sz]ation/i);
     expect(read('site/src/data/llms.mjs')).not.toMatch(/organi[sz]ation/i);
+    const hosted = read('docs/hosted/README.md');
+    expect(hosted).toContain('an owner has turned Slotlock on for (the dashboard\'s Teams\npage)');
+    // What signing in reads, as the dashboard says it on Cloud, which serves no organization list
+    // (no SLOTLOCK_DASHBOARD_ORGS): GitHub's public profile, or Google's id, email address and name.
+    const flatHosted = hosted.replace(/\s+/g, ' ');
+    expect(flatHosted).toContain('With GitHub, Slotlock reads your public profile and keeps only your user id, login and profile name');
+    expect(flatHosted).toContain("With Google, it reads your account's id, email address and name, and keeps only those.");
   });
 
   it('lists the endpoints the hosted service page publishes', () => {

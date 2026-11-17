@@ -9,8 +9,10 @@
 #
 # In order:
 #   GitHub  tag-release.yml pushes release tags with a deploy key, which GitHub lets only an admin
-#           create. If the release-tag environment has no TAG_RELEASE_DEPLOY_KEY, or the Release tags
-#           ruleset no deploy-key bypass, this runs scripts/configure-github.sh (you must be an admin).
+#           create, and release.yml's go-module job the Go module's tags. If the release-tag or the
+#           go-module environment has no TAG_RELEASE_DEPLOY_KEY, or the Release tags ruleset no
+#           deploy-key bypass or no clients/go/v* tags, this runs scripts/configure-github.sh (you
+#           must be an admin).
 #   Tag     If the tag is not on GitHub yet, it re-runs tag-release.yml's failed run for main's head
 #           (or starts one) and waits for the tag. The tag's push starts Release, whose image job
 #           (image.yml) pushes the image and then publishes the MCP Registry entry once the suite
@@ -116,17 +118,22 @@ version_at_least() {
   return 0
 }
 
-# github_ready: the repository has what tag-release.yml needs: the deploy key secret in the
-# release-tag environment, and a deploy-key bypass on the Release tags ruleset.
+# github_ready: the repository has what tag-release.yml and the go-module job need: the deploy key
+# secret in the release-tag and go-module environments, and a Release tags ruleset that covers
+# clients/go/v* tags too, with a deploy-key bypass.
 github_ready() {
-  local secrets id
-  secrets=$(gh api "repos/$REPO/environments/release-tag/secrets" --jq '[.secrets[].name]' 2>/dev/null) ||
-    return 1
-  printf '%s' "$secrets" | jq -e --arg name "$TAG_KEY_SECRET" 'index($name) != null' >/dev/null || return 1
+  local secrets id env
+  for env in release-tag go-module; do
+    secrets=$(gh api "repos/$REPO/environments/$env/secrets" --jq '[.secrets[].name]' 2>/dev/null) ||
+      return 1
+    printf '%s' "$secrets" | jq -e --arg name "$TAG_KEY_SECRET" 'index($name) != null' >/dev/null || return 1
+  done
   id=$(gh api "repos/$REPO/rulesets?includes_parents=false&targets=tag" \
     --jq '[.[] | select(.name == "Release tags")][0].id // empty' 2>/dev/null) || return 1
   [ -n "$id" ] || return 1
-  [ "$(gh api "repos/$REPO/rulesets/$id" --jq 'any(.bypass_actors[]?; .actor_type == "DeployKey")' 2>/dev/null)" = true ]
+  [ "$(gh api "repos/$REPO/rulesets/$id" \
+    --jq 'any(.bypass_actors[]?; .actor_type == "DeployKey") and any(.conditions.ref_name.include[]?; . == "refs/tags/clients/go/v*")' \
+    2>/dev/null)" = true ]
 }
 
 github_setup() {
@@ -134,7 +141,7 @@ github_setup() {
     say "  the release-tag deploy key and the Release tags ruleset are in place"
     return 0
   fi
-  say "  tag-release.yml has no deploy key or ruleset bypass yet: running scripts/configure-github.sh"
+  say "  the release-tag deploy key or the Release tags ruleset is not set up yet: running scripts/configure-github.sh"
   if [ "$DRY_RUN" -eq 1 ]; then
     act bash "$CONFIGURE_GITHUB"
     return 0

@@ -6,9 +6,12 @@
 #
 # The registry pulls the image anonymously and compares its io.modelcontextprotocol.server.name
 # label with the server name, case-sensitively, and the io.github.<owner> part must equal the
-# token's repository_owner claim exactly (PILOTAAI). A version can be published once only. If
-# this job fails because the image is still private, scripts/bootstrap-release.sh <tag> names the
-# page that makes it public, waits for it, and re-runs this job.
+# token's repository_owner claim exactly (PILOTAAI). That grant is the organization's, not this
+# job's: a workflow in any PILOTAAI repository could publish to the name too, and neither this
+# environment nor the tag is anything the registry checks. SECURITY.md (Releases) says why that is
+# accepted. A version can be published once only. If this job fails because the image is still
+# private, scripts/bootstrap-release.sh <tag> names the page that makes it public, waits for it,
+# and re-runs this job.
 #
 # One-time setup by the repository owner:
 #   - A GitHub environment named `mcp-registry`, with deployment tags limited to v* and a required

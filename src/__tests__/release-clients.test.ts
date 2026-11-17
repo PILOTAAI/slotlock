@@ -202,21 +202,39 @@ describe('client publishing', () => {
   );
 
   it('uses each registry trusted publishing where it has one, and no long-lived token there', () => {
-    expect(job('pypi')).toMatch(/uses: pypa\/gh-action-pypi-publish@[0-9a-f]{40} # v1\.14\.3/);
+    // Pinned to a commit, on the major version these steps were written for: Dependabot moves the
+    // pin and its comment within it; a new major is a change to review here.
+    expect(job('pypi')).toMatch(/uses: pypa\/gh-action-pypi-publish@[0-9a-f]{40} # v1\.\d+\.\d+\n/);
     expect(job('pypi')).toContain('--require-hashes');
-    expect(job('crates-io')).toMatch(
-      /uses: rust-lang\/crates-io-auth-action@[0-9a-f]{40} # v1\.0\.5/,
-    );
+    expect(job('crates-io')).toMatch(/uses: rust-lang\/crates-io-auth-action@[0-9a-f]{40} # v1\.\d+\.\d+\n/);
     expect(job('crates-io')).toContain('CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}');
-    expect(job('nuget')).toMatch(/uses: NuGet\/login@[0-9a-f]{40} # v1\.2\.0/);
+    expect(job('nuget')).toMatch(/uses: NuGet\/login@[0-9a-f]{40} # v1\.\d+\.\d+\n/);
     expect(job('nuget')).toContain('--api-key "$NUGET_API_KEY"');
     for (const name of ['pypi', 'crates-io', 'nuget']) expect(job(name)).not.toContain('secrets.');
-    // Maven Central has no trusted publishing: a user token uploads a deployment that waits in the
-    // Central Portal until a maintainer publishes it.
+    // Maven Central has no trusted publishing: a user token uploads a deployment that publishes
+    // itself once validated; the environment's approval is the gate, as for the others.
     expect(job('maven-central')).toContain('scripts/central-bundle.sh');
-    expect(read('scripts/central-bundle.sh')).toContain('publishingType=USER_MANAGED');
+    expect(read('scripts/central-bundle.sh')).toContain('publishingType=AUTOMATIC');
+    expect(read('scripts/central-bundle.sh')).not.toContain('USER_MANAGED&');
     expect(job('go-module')).toContain('scripts/tag-go-module.sh');
-    expect(job('go-module')).toContain('contents: write');
+  });
+
+  // proxy.golang.org serves whatever commit a clients/go/v<version> tag names, so creating one
+  // publishes a version. GITHUB_TOKEN, and any other token that can write to the repository (the
+  // Slotlock CMS App's, say), must not be able to: the go-module job pushes it with the release
+  // deploy key, which only runs on main and an approved go-module job can read.
+  it('pushes the Go module tag with the release deploy key, not GITHUB_TOKEN', () => {
+    const go = job('go-module');
+    expect(go).toMatch(/ {4}permissions:\n(?: {6}#.*\n)* {6}contents: read\n {4}steps:/);
+    expect(go).not.toMatch(/(?:contents|actions): write/);
+    expect(go).toContain('ssh-key: ${{ secrets.TAG_RELEASE_DEPLOY_KEY }}');
+    expect(go).toContain("HAS_DEPLOY_KEY: ${{ secrets.TAG_RELEASE_DEPLOY_KEY != '' }}");
+    // The one action the job runs is set up before the key is on disk.
+    expect(go.indexOf('uses: actions/setup-go@')).toBeGreaterThan(0);
+    expect(go.indexOf('uses: actions/setup-go@')).toBeLessThan(go.indexOf('uses: actions/checkout@'));
+    // A clients/go/v* tag pushed with a deploy key starts no workflow: release.yml's v* does not
+    // match across a slash, and every other push trigger names branches only.
+    expect(release).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*'\]\n\n/m);
   });
 
   it("ships the licence in the Python sdist and wheel: a copy of the repository's, named in pyproject", () => {
@@ -225,15 +243,15 @@ describe('client publishing', () => {
     expect(read('clients/python/pyproject.toml')).toMatch(/^license-files = \["LICENSE"\]$/m);
   });
 
-  it('makes publishing the Central Portal deployment, then checking Maven Central, a numbered step', () => {
+  it('leaves nothing to click for Maven Central, and makes checking it a numbered step', () => {
     const steps = read('docs/release/clients.md').split('\n## After each release\n')[1] ?? '';
     expect(steps, 'canary: an "After each release" section').not.toBe('');
-    expect(steps).toMatch(/^2\. Publish the Central Portal deployment/m);
+    expect(steps).toMatch(/^2\. Nothing to click for Maven Central: the `maven-central` job publishes/m);
     expect(steps).toMatch(
       /^3\. Verify Maven Central serves it: `curl -sI https:\/\/repo1\.maven\.org\/maven2\/io\/pylota\/slotlock\/<v>\/`\n {3}returns 200/m,
     );
     expect(flat(read('clients/java/README.md'))).toContain(
-      'Java: published to Maven Central by hand after each release; if a version 404s there',
+      'Java: published to Maven Central with each release from 0.11.0;',
     );
   });
 
@@ -256,16 +274,27 @@ describe('client publishing', () => {
         ),
       );
     }
-    // A Go module version is its tag: once pushed, nobody but an admin moves or deletes it.
-    const permanent = [
+    // A Go module version is its tag: only an admin or a deploy key creates one, as for a v* tag,
+    // and once pushed, nobody but an admin moves or deletes it.
+    const rulesets = [
       ...result.stdout.matchAll(/^> (?:PUT|POST) \/\S+rulesets\S*\n(\{[\s\S]*?\n\})$/gm),
-    ]
-      .map(([, json]) => JSON.parse(json as string))
-      .find((body) => body.name === 'Release tags are permanent');
+    ].map(([, json]) => JSON.parse(json as string));
+    const created = rulesets.find((body) => body.name === 'Release tags');
+    expect(created.rules).toEqual([{ type: 'creation' }]);
+    expect(created.conditions.ref_name.include).toEqual(['refs/tags/v*', 'refs/tags/clients/go/v*']);
+    expect(created.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+      { actor_id: null, actor_type: 'DeployKey', bypass_mode: 'always' },
+    ]);
+    const permanent = rulesets.find((body) => body.name === 'Release tags are permanent');
     expect(permanent.conditions.ref_name.include).toEqual([
       'refs/tags/v*',
       'refs/tags/clients/go/v*',
     ]);
+    // The go-module job gets the deploy key that ruleset lets through.
+    expect(result.stdout).toContain(
+      'gh secret set TAG_RELEASE_DEPLOY_KEY --env go-module --repo PILOTAAI/slotlock',
+    );
   });
 });
 
@@ -361,33 +390,62 @@ describe('Maven Central bundle', () => {
     mkdirSync(bin);
     writeFileSync(
       join(bin, 'curl'),
-      // A stand-in for curl: it keeps its arguments, the header file it is given and the bundle.
-      `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/curl.args"\nfor a; do case "$a" in bundle=@*) cp "\${a#bundle=@}" "${dir}/uploaded.zip" ;; @*) cat "\${a#@}" >> "${dir}/curl.headers" ;; esac; done\necho deployment-42\n`,
+      // A stand-in for curl: it keeps each call's arguments, the header file it is given and the
+      // bundle. The upload answers with a deployment id (STUB_UPLOAD_ANSWER, if set); each status
+      // call answers, as Central does over several lines, with the next state in the states file,
+      // the last one repeating.
+      [
+        '#!/bin/sh',
+        `printf '%s\\n' "$@" '-----' >> "${dir}/curl.args"`,
+        `for a; do case "$a" in bundle=@*) cp "\${a#bundle=@}" "${dir}/uploaded.zip" ;; @*) cat "\${a#@}" >> "${dir}/curl.headers" ;; esac; done`,
+        'case "$*" in',
+        '  *publisher/status*)',
+        `    state=$(head -n 1 "${dir}/states")`,
+        `    [ "$(wc -l < "${dir}/states")" -gt 1 ] && tail -n +2 "${dir}/states" > "${dir}/states.next" && mv "${dir}/states.next" "${dir}/states"`,
+        `    printf '{\\n  "deploymentId": "deployment-42",\\n  "deploymentState": "%s",\\n  "errors": {"pom": ["%s"]}\\n}\\n' "$state" "\${STUB_ERROR:-}" ;;`,
+        '  *) echo "${STUB_UPLOAD_ANSWER:-deployment-42}" ;;',
+        'esac',
+        '',
+      ].join('\n'),
       { mode: 0o755 },
     );
-    const run = (...env: [string, string][]) =>
-      spawnSync('sh', [join(root, 'scripts', 'central-bundle.sh'), repo, '1.2.3'], {
+    const run = (states: string[], ...env: [string, string][]) => {
+      writeFileSync(join(dir, 'states'), `${states.join('\n')}\n`);
+      return spawnSync('sh', [join(root, 'scripts', 'central-bundle.sh'), repo, '1.2.3'], {
         encoding: 'utf8',
-        env: { PATH: `${bin}:${process.env.PATH ?? ''}`, ...Object.fromEntries(env) },
+        env: { PATH: `${bin}:${process.env.PATH ?? ''}`, CENTRAL_POLL_SECONDS: '0', ...Object.fromEntries(env) },
       });
-    return { dir, run };
+    };
+    /** Each curl call's arguments. */
+    const calls = () =>
+      (existsSync(join(dir, 'curl.args')) ? readFileSync(join(dir, 'curl.args'), 'utf8') : '')
+        .split('-----\n')
+        .filter((call) => call.trim())
+        .map((call) => call.trim().split('\n'));
+    return { dir, run, calls };
   }
 
-  it('uploads the signed, checksummed publication as a deployment a maintainer publishes', () => {
+  it('publishes the signed, checksummed publication, and waits until Maven Central has it', () => {
     const b = bundle();
-    const result = b.run(['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz']);
+    const result = b.run(['VALIDATING', 'PUBLISHING', 'PUBLISHED'], ['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz']);
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('deployment-42');
-    const args = readFileSync(join(b.dir, 'curl.args'), 'utf8').split('\n');
-    expect(args).toContain(
-      'https://central.sonatype.com/api/v1/publisher/upload?publishingType=USER_MANAGED&name=slotlock-1.2.3',
+    expect(result.stdout).toContain('Maven Central has slotlock 1.2.3');
+    // One upload that publishes itself once validated, then the status until PUBLISHED.
+    const [upload, ...statuses] = b.calls();
+    expect(upload).toContain(
+      'https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC&name=slotlock-1.2.3',
     );
+    expect(statuses).toHaveLength(3);
+    for (const status of statuses) {
+      expect(status).toEqual(expect.arrayContaining(['POST', 'https://central.sonatype.com/api/v1/publisher/status?id=deployment-42']));
+    }
     // The token reaches curl in a header file, never on its command line.
     expect(readFileSync(join(b.dir, 'curl.headers'), 'utf8')).toBe(
-      'Authorization: Bearer dXNlcjpwYXNz\n',
+      'Authorization: Bearer dXNlcjpwYXNz\n'.repeat(4),
     );
-    expect(args.join('\n')).not.toContain('dXNlcjpwYXNz');
+    expect(b.calls().flat().join('\n')).not.toContain('dXNlcjpwYXNz');
     const listing = execFileSync('unzip', ['-Z1', join(b.dir, 'uploaded.zip')], {
       encoding: 'utf8',
     })
@@ -404,16 +462,42 @@ describe('Maven Central bundle', () => {
       ['checksum', { checksums: false }],
     ] as const) {
       const b = bundle(options);
-      const result = b.run(['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz']);
+      const result = b.run(['PUBLISHED'], ['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz']);
       expect(result.status, what).toBe(1);
       expect(result.stderr, what).toMatch(/slotlock-1\.2\.3[\w.-]* has no \.(?:asc|md5)/);
       expect(existsSync(join(b.dir, 'curl.args')), what).toBe(false);
     }
   });
 
+  it('fails the job when Central refuses the deployment, with its reasons', () => {
+    const b = bundle();
+    const result = b.run(['VALIDATING', 'FAILED'], ['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz'], ['STUB_ERROR', 'Invalid signature']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Central refused deployment deployment-42');
+    expect(result.stderr).toContain('Invalid signature');
+  });
+
+  it('fails when publishing has not started in time, and succeeds once it has', () => {
+    const waiting = bundle().run(['VALIDATING'], ['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz'], ['CENTRAL_WAIT_MINUTES', '0']);
+    expect(waiting.status).toBe(1);
+    expect(waiting.stderr).toContain('deployment deployment-42 was still VALIDATING after 0 minutes');
+    // PUBLISHING cannot be stopped: the release has it, and the job says where to look.
+    const publishing = bundle().run(['PUBLISHING'], ['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz'], ['CENTRAL_WAIT_MINUTES', '0']);
+    expect(publishing.status).toBe(0);
+    expect(publishing.stdout).toContain('is publishing to Maven Central; it cannot be stopped now');
+  });
+
+  it('asks nothing more of an upload answered without a deployment id', () => {
+    const b = bundle();
+    const result = b.run(['PUBLISHED'], ['CENTRAL_PORTAL_TOKEN', 'dXNlcjpwYXNz'], ['STUB_UPLOAD_ANSWER', 'x&id=other']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('something other than a deployment id');
+    expect(b.calls()).toHaveLength(1);
+  });
+
   it('refuses to run without the Central Portal token', () => {
     const b = bundle();
-    const result = b.run();
+    const result = b.run([]);
     expect(result.status).toBe(2);
     expect(existsSync(join(b.dir, 'curl.args'))).toBe(false);
     expect(readdirSync(b.dir)).not.toContain('uploaded.zip');

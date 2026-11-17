@@ -1,5 +1,6 @@
 // The dashboard assistant without a database: the model is a real HTTP server on loopback, GitHub a
 // fake `fetch`.
+import { createRequire } from 'node:module';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   SlotlockAgentCalendarBackend,
@@ -8,12 +9,14 @@ import type {
 import type { SlotlockApiKeyStore } from '../api-keys.js';
 import {
   SLOTLOCK_ASSISTANT_MAX_STORED_BYTES,
+  SLOTLOCK_ASSISTANT_PRESETS,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantEntry,
   type SlotlockAssistantStore,
   boundSlotlockAssistantEntries,
   pruneSlotlockAssistantActions,
   createSlotlockMemoryAssistantStore,
+  listSlotlockAssistantModels,
   openSlotlockAssistantKey,
   readSlotlockAssistantBaseUrl,
   sealSlotlockAssistantKey,
@@ -35,6 +38,7 @@ import {
 import {
   type FakeModel,
   type FakeModelFormat,
+  type FakeModelRequest,
   startFakeModel,
   toolResultsSent,
   toolsOffered,
@@ -112,11 +116,18 @@ const noKeys: SlotlockApiKeyStore = {
   revoke: async () => null,
   authenticate: async () => null,
   erase: async () => 0,
+  setLimits: async () => false,
 };
 
 let backend: ReturnType<typeof fakeBackend>;
 let assistantStore: SlotlockAssistantStore;
 let reported: unknown[];
+
+/** A member's most recent conversation, as the store keeps it. */
+async function latestChat(tenantRef: string, memberRef: string) {
+  const [latest] = await assistantStore.listChats(tenantRef, memberRef);
+  return latest ? assistantStore.getChat(tenantRef, memberRef, latest.id) : null;
+}
 
 function dashboard(
   overrides: Partial<SlotlockDashboardOptions['assistant']> = {},
@@ -254,7 +265,9 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     const html = await page(target, bob);
     expect(html).toContain('What can we book?');
     expect(html).toContain('You have vehicle-1, in London.');
-    expect(html).toContain('Read: List calendar resources');
+    // The read is one step, folded under the reply, in words.
+    expect(html).toMatch(/<details class="steps"><summary>Read resources<\/summary>/);
+    expect(html).not.toContain('Read: List calendar resources');
   });
 
   it('proposes a write without running it, runs it once on approval, and never twice', async () => {
@@ -278,8 +291,10 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     expect(JSON.parse(told[0] as string)).toMatchObject({ status: 'proposed' });
 
     const proposed = await page(target, bob);
-    expect(proposed).toContain('Delete resource event');
-    expect(proposed).toContain('Waiting for you');
+    // A card to decide on, named by what it does: the verb approves it, Decline drops it.
+    expect(proposed).toContain('<div class="change">');
+    expect(proposed).toMatch(/<button class="danger" type="submit" data-busy="Deleting…">Delete booking<\/button>/);
+    expect(proposed).toContain('>Decline</button>');
     const actionId = /name="action" value="([A-Za-z0-9_-]{16})"/.exec(proposed)?.[1] as string;
     expect(actionId).toBeDefined();
 
@@ -302,7 +317,8 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
       expected_revision: 1,
       idempotency_key: `dashboard-assistant.${actionId}`,
     });
-    expect(await page(target, bob)).toContain('Done');
+    // Decided, the card folds into a receipt that says what happened.
+    expect(await page(target, bob)).toMatch(/<p class="receipt ok"><span>[^<]*<\/span><span class="why">Deleted<\/span><\/p>/);
 
     // Sent again, with a fresh form: already approved, nothing runs.
     const again = await post(target, '/dashboard/assistant/approve', { action: actionId }, bob);
@@ -329,7 +345,7 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     expect((await post(target, '/dashboard/assistant/dismiss', { action: actionId }, bob)).status).toBe(303);
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(409);
     expect(backend.deleteEvent).not.toHaveBeenCalled();
-    expect(await page(target, bob)).toContain('Dismissed');
+    expect(await page(target, bob)).toMatch(/<p class="receipt "><span>[^<]*<\/span><span class="why">Declined<\/span><\/p>/);
   });
 
   it('refuses a tool outside the list, whatever the model asks for', async () => {
@@ -395,7 +411,11 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] });
     const passed = await post(target, '/dashboard/settings/assistant/test', {}, alice);
     expect(passed.status).toBe(200);
-    expect(await passed.text()).toContain('called a tool correctly');
+    const passedPage = await passed.text();
+    expect(passedPage).toContain('called a tool correctly');
+    // A success is a status, never the red alert a failure is.
+    expect(passedPage).toMatch(/<p class="notice[^"]*" role="status">Connected: /);
+    expect(passedPage).not.toContain('role="alert">Connected');
     expect(model.requests).toHaveLength(1);
     expect(toolsOffered(format, model.requests[0])).toEqual(['slotlock_list_resources']);
     expect(backend.listResources).not.toHaveBeenCalled();
@@ -403,7 +423,399 @@ describe.each(['anthropic', 'openai'] as const)('the assistant over %s', (format
     model.script({ text: 'I would rather chat.' });
     const failed = await post(target, '/dashboard/settings/assistant/test', {}, alice);
     expect(failed.status).toBe(502);
-    expect(await failed.text()).toContain('did not call the tool');
+    expect(await failed.text()).toMatch(/role="alert">[^<]*did not call the tool/);
+  });
+});
+
+describe.each(['anthropic', 'openai'] as const)('the chat over %s', (format) => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel(format);
+  });
+  afterAll(() => model.close());
+  beforeEach(() => {
+    model.requests.length = 0;
+  });
+
+  it('renders a reply as Markdown, never as the raw asterisks it was written in', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'There are **no vans**.\n\n- Add one\n- Or rename one\n\n<b>not markup</b>' });
+    expect((await chat(target, alice, 'Find a van')).status).toBe(303);
+    const html = await page(target, alice);
+    expect(html).toContain('<li class="turn mine"><div class="bubble">Find a van</div></li>');
+    expect(html).toContain(
+      '<div class="prose"><p>There are <strong>no vans</strong>.</p><ul><li>Add one</li><li>Or rename one</li></ul><p>&lt;b&gt;not markup&lt;/b&gt;</p></div>',
+    );
+    expect(html).not.toContain('**no vans**');
+  });
+
+  it('lands a message sent twice on the conversation, run once, never on an error', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Hello.' });
+    const shown = await page(target, alice);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const send = () =>
+      target.fetch(
+        new Request(`${ORIGIN}/dashboard/assistant`, {
+          method: 'POST',
+          headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ csrf, once, message: 'hi' }).toString(),
+        }),
+      );
+    const first = await send();
+    const second = await send();
+    expect(first.status).toBe(303);
+    expect(second.status).toBe(303);
+    expect(second.headers.get('location')).toBe('/dashboard/assistant#latest');
+    expect(model.requests).toHaveLength(1);
+    expect((await page(target, alice)).match(/class="bubble">hi</g)).toHaveLength(1);
+  });
+
+  it('offers to send a failed message again, saying why it failed', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ status: 500, body: '{}' });
+    await chat(target, alice, 'Find a van tomorrow');
+    const html = await page(target, alice);
+    const failure = /<li class="turn error" role="alert"><span>([^<]+)<\/span><form method="post" action="\/dashboard\/assistant">.*?<\/form><\/li>/.exec(html);
+    expect(failure?.[1]).toContain('could not be reached');
+    expect(failure?.[0]).toContain('name="message" value="Find a van tomorrow"');
+    expect(failure?.[0]).toContain('>Retry</button>');
+    // A later reply ends the failure: only the last one offers to send again.
+    model.script({ text: 'Van 1 is free.' });
+    await chat(target, alice, 'Find a van tomorrow');
+    const after = await page(target, alice);
+    expect(after).not.toContain('>Retry</button>');
+    expect(after).toContain('<li class="turn note">');
+  });
+
+  it('streams a turn as it happens, one JSON line an event, ending with the turn as the page shows it', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Checking.', calls: [{ name: 'slotlock_list_resources', input: {} }] }, { text: 'You have **vehicle-1**.' });
+    const shown = await page(target, alice);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', accept: 'application/x-ndjson' },
+        body: new URLSearchParams({ csrf, once, message: 'What do I have?' }).toString(),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('application/x-ndjson; charset=utf-8');
+    expect(response.headers.get('content-security-policy')).toContain("connect-src 'self'");
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const events = (await response.text())
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, string>);
+    expect(events.map((event) => event.t)).toEqual(['text', 'step', 'step', 'text', 'done']);
+    expect(events[0]).toEqual({ t: 'text', d: 'Checking.' });
+    expect(events[1]).toMatchObject({ t: 'step', s: 'run', label: 'Reading resources…' });
+    expect(events[2]).toMatchObject({ t: 'step', s: 'ok', label: 'Read resources', id: events[1]?.id });
+    expect(events[3]).toEqual({ t: 'text', d: 'You have **vehicle-1**.' });
+    const done = events[4] as { html: string; once: string };
+    // The turn as a reload would render it, from the member's message on, with a fresh form value.
+    expect(done.html.startsWith('<li class="turn mine"><div class="bubble">What do I have?</div></li>')).toBe(true);
+    expect(done.html).toContain('<div class="prose"><p>You have <strong>vehicle-1</strong>.</p></div>');
+    expect(done.html).toContain('<summary>Read resources</summary>');
+    expect(done.once).toMatch(/^[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}$/);
+    expect(done.once).not.toBe(once);
+    // Kept, as the form's way keeps it.
+    expect(await page(target, alice)).toContain('<p>You have <strong>vehicle-1</strong>.</p>');
+  });
+
+  it('stops the turn when the stream is cancelled, though the request is never aborted, and settles the cancel once the turn is kept', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    let asked!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    model.script(async () => {
+      asked();
+      await held;
+      return { text: 'Too late.' };
+    });
+    try {
+      const shown = await page(target, alice);
+      const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+      const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+      // A Request made here has a signal nothing aborts, as on a runtime that does not abort it when
+      // the client goes: only the body's cancel can stop the turn.
+      const response = await target.fetch(
+        new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+          method: 'POST',
+          headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ csrf, once, message: 'What is free?' }).toString(),
+        }),
+      );
+      await reached;
+      await response.body?.cancel();
+      // By the time the cancel settles, the turn has stopped and is kept, with what it had.
+      const after = await page(target, alice);
+      expect(after).toContain('<div class="bubble">What is free?</div>');
+      expect(after).toContain('<li class="turn note">Stopped.</li>');
+      expect(after).not.toContain('Too late.');
+    } finally {
+      release();
+    }
+  });
+
+  it('tells the model the workspace\u2019s resources, with the ids tools take, leaving out private ones', async () => {
+    const fleet = [
+      { id: '11111111-1111-4111-8111-111111111111', externalRef: 'car-17', name: 'Mercedes-Benz 2025', kind: 'vehicle', timezone: 'Europe/London' },
+      { id: '22222222-2222-4222-8222-222222222222', externalRef: 'phase-b-exit-20261108T142642Z-3444', timezone: 'UTC' },
+      { id: '33333333-3333-4333-8333-333333333333', externalRef: 'owner-only', name: 'Private car', timezone: 'UTC', visibility: 'private' },
+    ];
+    const target = dashboard({}, { list: async () => fleet as never });
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Van 1.' });
+    await chat(target, alice, 'When is the Mercedes free?');
+    const request = model.requests.at(-1) as FakeModelRequest;
+    const system = String(
+      format === 'anthropic' ? request.body.system : (request.body.messages as { content: string }[])[0]?.content,
+    );
+    expect(system).toContain('{"id":"11111111-1111-4111-8111-111111111111","name":"Mercedes-Benz 2025","ref":"car-17","kind":"vehicle","timezone":"Europe/London"}');
+    expect(system).toContain('"ref":"phase-b-exit-20261108T142642Z-3444"');
+    expect(system).not.toContain('owner-only');
+    expect(system).toContain('Tools name a resource by its id');
+    // Past fifty, the rest are found by search.
+    const many = Array.from({ length: 60 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      externalRef: `desk-${String(index)}`,
+      timezone: 'UTC',
+    }));
+    const big = dashboard({}, { list: async () => many as never });
+    const bob = await signIn(big, 'alice');
+    await connect(big, bob, model, format);
+    await chat(big, bob, 'Any desk free?');
+    const second = model.requests.at(-1) as FakeModelRequest;
+    const listed = String(format === 'anthropic' ? second.body.system : (second.body.messages as { content: string }[])[0]?.content);
+    expect(listed).toContain('(50 of 60; find the others with slotlock_list_resources and query)');
+    expect(listed).toContain('desk-49');
+    expect(listed).not.toContain('desk-50');
+  });
+
+  it('sends a chip that asks through the box, so its reply streams, and only fills the box for one that writes', async () => {
+    const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
+      JSDOM: new (
+        html: string,
+        options: { url: string; runScripts: 'outside-only'; pretendToBeVisual: boolean },
+      ) => {
+        window: {
+          eval(code: string): void;
+          close(): void;
+          document: {
+            querySelectorAll(selector: string): Iterable<ChipButton>;
+            querySelector(selector: string): { value: string } | null;
+          };
+        };
+      };
+    };
+    type ChipButton = { value: string; hasAttribute(name: string): boolean; getAttribute(name: string): string | null; click(): void };
+    const target = dashboard({}, { list: async () => [{ id: RESOURCE.id, externalRef: 'Van 1', timezone: 'Europe/London' }] as never });
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const html = await page(target, alice);
+    const script = /<script src="([^"]*app\.js[^"]*)"/.exec(html)?.[1] as string;
+    const js = await (await get(target, script, alice)).text();
+    const dom = new JSDOM(html, { url: `${ORIGIN}/dashboard/assistant`, runScripts: 'outside-only', pretendToBeVisual: true });
+    const sent: { url: string; body: string }[] = [];
+    Object.assign(dom.window, {
+      TextDecoder,
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      fetch: async (url: string, init: { body: unknown }) => {
+        sent.push({ url: String(url), body: String(init.body) });
+        return new Response('{"t":"done","html":"","once":"a.b"}\n', { headers: { 'content-type': 'application/x-ndjson' } });
+      },
+    });
+    dom.window.eval(js);
+    const chips = [...dom.window.document.querySelectorAll('.chips button.chip')];
+    const asks = chips.find((chip) => !chip.hasAttribute('data-fill')) as ChipButton;
+    asks.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe('/dashboard/assistant/stream');
+    expect(new URLSearchParams(sent[0]?.body).get('message')).toBe(asks.value);
+    // A chip that writes fills the box and waits for the member.
+    const writes = chips.find((chip) => chip.hasAttribute('data-fill')) as ChipButton;
+    writes.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sent).toHaveLength(1);
+    expect(dom.window.document.querySelector('textarea')?.value).toBe(writes.getAttribute('data-fill'));
+    dom.window.close();
+  });
+
+  it('keeps each conversation as a chat: opened by its address, listed most recent first, and New chat starts another', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Van 1 is free.' });
+    const first = await chat(target, alice, 'Which vans are free tomorrow morning for the airport run?');
+    const firstUrl = first.headers.get('location') as string;
+    expect(firstUrl).toMatch(/^\/dashboard\/assistant\?c=[A-Za-z0-9_-]{16}#latest$/);
+    const firstId = /c=([A-Za-z0-9_-]{16})/.exec(firstUrl)?.[1] as string;
+    // A form with no chat continues the one the page opens; an empty one starts a new chat.
+    model.script({ text: 'Still free.' });
+    expect((await chat(target, alice, 'And after lunch?')).headers.get('location')).toBe(firstUrl);
+    model.script({ text: 'Room 2.' });
+    const second = await post(target, '/dashboard/assistant', { message: 'Book the boardroom', chat: '' }, alice);
+    const secondId = /c=([A-Za-z0-9_-]{16})/.exec(second.headers.get('location') as string)?.[1] as string;
+    expect(secondId).not.toBe(firstId);
+    const listed = await assistantStore.listChats('github-org:91', 'github:11');
+    expect(listed.map((chat) => [chat.id, chat.title])).toEqual([
+      [secondId, 'Book the boardroom'],
+      [firstId, 'Which vans are free tomorrow morning for the airport run?'],
+    ]);
+    // Each opens at its own address, with the others beside it; the page opens on the latest.
+    const opened = await (await get(target, `/dashboard/assistant?c=${firstId}`, alice)).text();
+    expect(opened).toContain('<h1>Which vans are free tomorrow morning for the airport run?</h1>');
+    expect(opened).toContain('And after lunch?');
+    expect(opened).not.toContain('Book the boardroom</div>');
+    expect(opened).toMatch(new RegExp(`<li class="chat-row current"><a class="chat-link" href="/dashboard/assistant\\?c=${firstId}" aria-current="page">`));
+    expect(opened).toContain('<h3 class="chat-group">Today</h3>');
+    expect(opened).toContain(`<input type="hidden" name="chat" value="${firstId}">`);
+    expect(await page(target, alice)).toContain('<h1>Book the boardroom</h1>');
+    const fresh = await (await get(target, '/dashboard/assistant?c=new', alice)).text();
+    expect(fresh).toContain('data-empty');
+    expect(fresh).toContain('<input type="hidden" name="chat" value="">');
+    // A chat that is not there (deleted, or another member's) opens a new one, saying so.
+    const missing = await get(target, '/dashboard/assistant?c=AAAAAAAAAAAAAAAA', alice);
+    expect(missing.status).toBe(404);
+    expect(await missing.text()).toContain('That chat is not here');
+    // On a narrow screen the list is a page of its own.
+    const list = await (await get(target, '/dashboard/assistant/chats', alice)).text();
+    expect(list).toContain('Which vans are free tomorrow morning for the airport run?');
+    expect(list).toContain('Book the boardroom');
+  });
+
+  it('renames and deletes a member\u2019s own chats, never another member\u2019s', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const bob = await signIn(target, 'bob');
+    model.script({ text: 'Fine.' });
+    const id = /c=([A-Za-z0-9_-]{16})/.exec((await chat(target, alice, 'Plan the week')).headers.get('location') as string)?.[1] as string;
+    // Another member of the same organization renames and deletes nothing of it.
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: 'Mine' }, bob)).status).toBe(404);
+    expect((await post(target, '/dashboard/assistant/delete', { chat: id }, bob)).status).toBe(303);
+    expect(await (await get(target, `/dashboard/assistant?c=${id}`, bob)).text()).not.toContain('Plan the week');
+    expect((await assistantStore.getChat('github-org:91', 'github:11', id))?.title).toBe('Plan the week');
+    // Its member does.
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: ' ' }, alice)).status).toBe(400);
+    expect((await post(target, '/dashboard/assistant/rename', { chat: id, title: '  Weekly   vans  ' }, alice)).headers.get('location')).toBe(
+      `/dashboard/assistant?c=${id}`,
+    );
+    expect((await assistantStore.getChat('github-org:91', 'github:11', id))?.title).toBe('Weekly vans');
+    expect((await post(target, '/dashboard/assistant/delete', { chat: id }, alice)).headers.get('location')).toBe('/dashboard/assistant?c=new');
+    expect(await assistantStore.getChat('github-org:91', 'github:11', id)).toBeNull();
+    expect(await (await get(target, '/dashboard/assistant?c=new', alice)).text()).toContain('No chats yet.');
+    // New conversation from a page of an earlier release starts a new chat, deleting nothing.
+    model.script({ text: 'Kept.' });
+    const kept = /c=([A-Za-z0-9_-]{16})/.exec((await chat(target, alice, 'Keep me')).headers.get('location') as string)?.[1] as string;
+    expect((await post(target, '/dashboard/assistant/reset', {}, alice)).headers.get('location')).toBe('/dashboard/assistant?c=new');
+    expect(await assistantStore.getChat('github-org:91', 'github:11', kept)).not.toBeNull();
+  });
+
+  it('tells a streaming page which chat its message went to, with its address and the list', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script({ text: 'Done.' });
+    const shown = await (await get(target, '/dashboard/assistant?c=new', alice)).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ csrf, once, chat: '', message: 'Start a new plan' }).toString(),
+      }),
+    );
+    const events = (await response.text()).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+    const done = events.at(-1) as Record<string, string>;
+    expect(done.t).toBe('done');
+    expect(done.chat).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(done.title).toBe('Start a new plan');
+    expect(done.url).toBe(`/dashboard/assistant?c=${done.chat}`);
+    expect(done.chats).toContain('<aside class="chats" aria-label="Chats">');
+    expect(done.chats).toContain(`<li class="chat-row current"><a class="chat-link" href="/dashboard/assistant?c=${done.chat}" aria-current="page"><span class="chat-title">Start a new plan</span>`);
+  });
+
+  it('answers a refused stream with one error line and a fresh form value', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const shown = await page(target, alice);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const once = /name="once" value="([^"]+)"/.exec(shown)?.[1] as string;
+    const response = await target.fetch(
+      new Request(`${ORIGIN}/dashboard/assistant/stream`, {
+        method: 'POST',
+        headers: { cookie: alice, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ csrf, once, message: 'x'.repeat(2_001) }).toString(),
+      }),
+    );
+    const [event, ...rest] = (await response.text()).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+    expect(rest).toEqual([]);
+    expect(event?.t).toBe('error');
+    expect(event?.html).toContain('Write a message of 1 to 2,000 characters.');
+    expect(event?.once).toMatch(/\./);
+    expect(model.requests).toHaveLength(0);
+  });
+
+  it('starts with the box and a few things to ask; a write only fills the box', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    const html = await page(target, alice);
+    expect(html).toMatch(/<div class="assistant" data-assistant data-stream="\/dashboard\/assistant\/stream" data-page="\/dashboard\/assistant" data-empty>/);
+    const chips = [...html.matchAll(/<button class="chip" type="submit" name="message" value="([^"]+)"( data-fill="[^"]+")?>([^<]+)<\/button>/g)];
+    expect(chips.map((chip) => chip[3])).toEqual(['What&#39;s on today', 'Find free time', 'Book', 'Move a booking', 'Cancel a booking']);
+    expect(chips.map((chip) => Boolean(chip[2]))).toEqual([false, false, true, true, true]);
+    // With no resource yet, it asks in general; with one, it asks by that resource's name.
+    expect(chips[1]?.[1]).toBe('What is free tomorrow morning?');
+    const named = dashboard({}, { list: async () => [{ id: RESOURCE.id, externalRef: RESOURCE.external_ref, timezone: RESOURCE.timezone } as never] });
+    const bob = await signIn(named, 'bob');
+    await connect(named, await signIn(named, 'alice'), model, format);
+    expect(await page(named, bob)).toContain('value="When is vehicle-1 free tomorrow morning?"');
+    // Each one its own form, so it works with no script.
+    expect(html.match(/<form method="post" action="\/dashboard\/assistant"><input type="hidden" name="csrf"/g)).toHaveLength(5);
+    expect(html).toContain('<form class="composer" method="post" action="/dashboard/assistant"><input type="hidden" name="csrf"');
+    expect(html).not.toContain('Ask about bookings and free time. Changes wait for your approval.');
+  });
+
+  it('folds a turn’s steps into one line, and says plainly which could not run and why', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, format);
+    model.script(
+      { calls: [{ name: 'slotlock_list_resources', input: {} }, { name: 'slotlock_find_available_slots', input: { nonsense: true } }] },
+      { text: 'Done.' },
+    );
+    await chat(target, alice, 'Find a slot');
+    const html = await page(target, alice);
+    const steps = /<details class="steps has-bad"><summary>([^<]+)<\/summary><ul class="step-list">(.*?)<\/ul><\/details>/.exec(html);
+    expect(steps?.[1]).toBe('Read resources, couldn&#39;t check availability');
+    expect(steps?.[2]).toContain('<li class="step ok">Read resources</li>');
+    expect(steps?.[2]).toMatch(/<li class="step bad">Couldn&#39;t check availability <span class="why">[^<]+<\/span><\/li>/);
+    expect(html).not.toContain('Could not run');
   });
 });
 
@@ -419,8 +831,9 @@ describe('assistant settings', () => {
     const alice = await signIn(target, 'alice');
     await connect(target, alice, model, 'openai');
     const settings = await (await get(target, '/dashboard/settings', alice)).text();
-    expect(settings).toContain('set, ending in <code>wxyz</code>');
-    expect(settings).toContain('are sent to this provider');
+    // The key's last four, masked, with Replace: never the key, never a placeholder that hides it.
+    expect(settings).toContain('<div class="key-set"><code>•••• wxyz</code><details><summary>Replace</summary>');
+    expect(settings).toMatch(/are sent to 127\.0\.0\.1:\d+\./);
     for (const path of ['/dashboard', '/dashboard/settings', '/dashboard/assistant']) {
       expect(await (await get(target, path, alice)).text()).not.toContain(API_KEY);
     }
@@ -440,14 +853,14 @@ describe('assistant settings', () => {
     const bob = await signIn(target, 'bob');
     const settings = await (await get(target, '/dashboard/settings', bob)).text();
     expect(settings).not.toContain('action="/dashboard/settings/assistant"');
-    for (const path of ['/dashboard/settings/assistant', '/dashboard/settings/assistant/test', '/dashboard/settings/assistant/remove']) {
+    for (const path of ['/dashboard/settings/assistant', '/dashboard/settings/assistant/test', '/dashboard/settings/assistant/models', '/dashboard/settings/assistant/remove']) {
       const refused = await post(target, path, { provider: 'openai', base_url: model.baseUrl, model: 'x', api_key: 'stolen-key' }, bob);
       expect(refused.status, path).toBe(403);
     }
     expect(await assistantStore.getSettings('github-org:91')).toBeNull();
     const nav = await (await get(target, '/dashboard', bob)).text();
     expect(nav).toContain('href="/dashboard/assistant"');
-    expect(await page(target, bob)).toContain('An admin of this organization can connect one');
+    expect(await page(target, bob)).toContain('An admin of this organization connects a model in Settings.');
   });
 
   it('accepts an https base URL, or http on this machine only with private URLs allowed', () => {
@@ -477,9 +890,82 @@ describe('assistant settings', () => {
     await expect(openSlotlockAssistantKey(`${ASSISTANT_SECRET}x`, 'github-org:91', sealed)).resolves.toBeNull();
   });
 
+  it('rotates the secret: a key sealed under a previous one opens, and is sealed again under the new one', async () => {
+    const NEW_SECRET = 'e8b2d4f6a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c0e2b4';
+    const before = dashboard();
+    await connect(before, await signIn(before, 'alice'), model, 'openai');
+    const sealedBefore = (await assistantStore.getSettings('github-org:91'))?.sealedKey as string;
+    await expect(openSlotlockAssistantKey(ASSISTANT_SECRET, 'github-org:91', sealedBefore)).resolves.toBe(API_KEY);
+
+    // The secret changed with no previous one listed: the key cannot be opened, and the page says so.
+    const lost = dashboard({ secret: NEW_SECRET });
+    const lostAlice = await signIn(lost, 'alice');
+    const refused = await chat(lost, lostAlice, 'Hello?');
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain('The stored API key cannot be opened');
+    expect((await assistantStore.getSettings('github-org:91'))?.sealedKey).toBe(sealedBefore);
+
+    // Listed as previous: the key opens, the model gets it, and it is sealed again under the new one.
+    const rotated = dashboard({ secret: NEW_SECRET, previousSecrets: [ASSISTANT_SECRET] });
+    const alice = await signIn(rotated, 'alice');
+    model.requests.length = 0;
+    model.script({ text: 'Hello.' });
+    expect((await chat(rotated, alice, 'Hello?')).status).toBe(303);
+    expect(model.requests[0]?.headers.authorization).toBe(`Bearer ${API_KEY}`);
+    expect(await page(rotated, alice)).toContain('Hello.');
+    const resealed = await assistantStore.getSettings('github-org:91');
+    expect(resealed?.sealedKey).not.toBe(sealedBefore);
+    expect(resealed?.keyHint).toBe('wxyz');
+    await expect(openSlotlockAssistantKey(NEW_SECRET, 'github-org:91', resealed?.sealedKey as string)).resolves.toBe(API_KEY);
+    await expect(openSlotlockAssistantKey(ASSISTANT_SECRET, 'github-org:91', resealed?.sealedKey as string)).resolves.toBeNull();
+    // So the new secret alone opens it from now on.
+    const after = dashboard({ secret: NEW_SECRET });
+    const afterAlice = await signIn(after, 'alice');
+    model.script({ text: 'Still here.' });
+    await chat(after, afterAlice, 'Again?');
+    expect(await page(after, afterAlice)).toContain('Still here.');
+
+    // A re-seal never overwrites a key an owner saved since the old one was read.
+    expect(await assistantStore.resealKey?.('github-org:91', sealedBefore, 'v1.stale.stale')).toBe(false);
+    expect((await assistantStore.getSettings('github-org:91'))?.sealedKey).toBe(resealed?.sealedKey);
+    expect(reported).toEqual([]);
+  });
+
+  it('reports each message the assistant answers for usage, and none it refuses', async () => {
+    const messages: string[] = [];
+    const usage: string[] = [];
+    const target = dashboard({
+      onMessage: (tenantRef) => {
+        messages.push(tenantRef);
+      },
+      onUsage: ({ principal, operation }) => {
+        usage.push(`${principal.tenantRef} ${operation}`);
+      },
+    });
+    const alice = await signIn(target, 'alice');
+    // No model yet: refused, not counted.
+    expect((await chat(target, alice, 'Hello?')).status).toBe(409);
+    expect(messages).toEqual([]);
+    await connect(target, alice, model, 'openai');
+    model.script({ text: 'Looking.', calls: [{ name: 'slotlock_list_resources', input: {} }] }, { text: 'One van.' });
+    expect((await chat(target, alice, 'What is there?')).status).toBe(303);
+    expect(messages).toEqual(['github-org:91']);
+    expect(usage).toEqual(['github-org:91 slotlock_list_resources']);
+  });
+
+  it('refuses previous secrets that are short, repeated, the current one, or too many', () => {
+    const other = (n: number) => `${String(n)}d4f6a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c0e2b4`;
+    expect(() => dashboard({ previousSecrets: [ASSISTANT_SECRET] })).toThrow('must differ');
+    expect(() => dashboard({ previousSecrets: ['too-short'] })).toThrow('at least 32 bytes');
+    expect(() => dashboard({ previousSecrets: [other(1), other(1)] })).toThrow('differ from each other');
+    expect(() => dashboard({ previousSecrets: [other(1), other(2), other(3), other(4)] })).toThrow('at most 3');
+    expect(() => dashboard({ previousSecrets: [other(1), other(2), other(3)] })).not.toThrow();
+  });
+
   it('offers reads to run and writes to propose, and nothing else', () => {
     const tools = slotlockAssistantTools();
     expect(tools.filter((tool) => tool.use === 'read').map((tool) => tool.name).sort()).toEqual([
+      'slotlock_find_available_ranges',
       'slotlock_find_available_slots',
       'slotlock_find_next_available',
       'slotlock_get_event',
@@ -492,6 +978,213 @@ describe('assistant settings', () => {
     expect(tools.map((tool) => tool.name)).not.toEqual(
       expect.arrayContaining([expect.stringMatching(/key|webhook|rule|pool_member|erase|coverage/)]),
     );
+  });
+});
+
+describe('provider presets and model lists (RFC 0003 A4)', () => {
+  let model: FakeModel;
+  beforeAll(async () => {
+    model = await startFakeModel('openai');
+  });
+  afterAll(() => model.close());
+  beforeEach(() => {
+    model.requests.length = 0;
+    model.models(['your-model']);
+  });
+
+  const loadModels = (target: Dashboard, cookie: string, fields: Record<string, string>) =>
+    post(target, '/dashboard/settings/assistant/models', { provider: 'openai', base_url: model.baseUrl, model: '', api_key: '', ...fields }, cookie);
+
+  it('offers presets whose URLs saving accepts, each with its API', () => {
+    expect(SLOTLOCK_ASSISTANT_PRESETS.map((preset) => preset.id)).toEqual([
+      'anthropic', 'openai', 'openrouter', 'google', 'mistral', 'groq', 'together', 'custom',
+    ]);
+    for (const preset of SLOTLOCK_ASSISTANT_PRESETS) {
+      if (preset.id === 'custom') {
+        expect(preset.baseUrl).toBe('');
+        continue;
+      }
+      expect(readSlotlockAssistantBaseUrl(preset.baseUrl), preset.id).toEqual({ ok: true, url: preset.baseUrl });
+      expect(preset.provider, preset.id).toBe(preset.id === 'anthropic' ? 'anthropic' : 'openai');
+    }
+  });
+
+  it('fills the form from a preset and saves nothing; an unknown preset fills nothing', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    const settings = await (await get(target, '/dashboard/settings', alice)).text();
+    // One tile a provider, in the form Save sends.
+    expect(settings).toContain('<label class="tile"><input type="radio" name="preset" value="openrouter">');
+    const filled = await (await get(target, '/dashboard/settings?preset=openrouter', alice)).text();
+    expect(filled).toContain('<input type="radio" name="preset" value="openrouter" checked>');
+    expect(filled).toContain('name="base_url" maxlength="2048" value="https://openrouter.ai/api/v1"');
+    expect(filled).toContain('<input type="radio" name="provider" value="openai" checked>');
+    const anthropic = await (await get(target, '/dashboard/settings?preset=anthropic', alice)).text();
+    expect(anthropic).toContain('value="https://api.anthropic.com"');
+    expect(anthropic).toContain('<input type="radio" name="preset" value="anthropic" checked>');
+    const unknown = await (await get(target, '/dashboard/settings?preset=%3Cscript%3E', alice)).text();
+    expect(unknown).toContain('name="base_url" maxlength="2048" value=""');
+    expect(unknown).not.toContain('<script>');
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it("saves a named provider's own URL and format, whatever a hidden Custom field still holds", async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    const saved = await post(
+      target,
+      '/dashboard/settings/assistant',
+      { preset: 'openrouter', provider: 'anthropic', base_url: 'https://elsewhere.example/v1', model: 'anthropic/claude-sonnet-4.6', api_key: API_KEY },
+      alice,
+    );
+    expect(saved.status).toBe(303);
+    expect(await assistantStore.getSettings('github-org:91')).toMatchObject({
+      provider: 'openai',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'anthropic/claude-sonnet-4.6',
+    });
+    const page = await (await get(target, '/dashboard/settings', alice)).text();
+    expect(page).toContain('<input type="radio" name="preset" value="openrouter" checked>');
+    expect(page).toMatch(/<div class="status-name"><strong>OpenRouter<\/strong><code>anthropic\/claude-sonnet-4\.6<\/code><\/div><span class="badge ok">Set up<\/span>/);
+    expect(page).toContain('are sent to OpenRouter.');
+  });
+
+  it('shows a connection test in the status card: Connected, or Failing with why', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, 'openai');
+    model.script({ calls: [{ name: 'slotlock_list_resources', input: {} }] });
+    const passed = await (await post(target, '/dashboard/settings/assistant/test', {}, alice)).text();
+    expect(passed).toMatch(/<span class="badge ok">Connected<\/span>.*?<p class="notice done" role="status">Connected: /s);
+    model.script({ status: 401, body: '{}' });
+    const failed = await (await post(target, '/dashboard/settings/assistant/test', {}, alice)).text();
+    expect(failed).toMatch(/<span class="badge bad">Failing<\/span>.*?<p class="notice" role="alert">[^<]*refused the API key/s);
+  });
+
+  it('gives each Settings section its own page, marked in the section list', async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    for (const [path, label] of [
+      ['/dashboard/settings', 'Assistant'],
+      ['/dashboard/settings/endpoints', 'Endpoints'],
+      ['/dashboard/settings/hours', 'Hours'],
+      ['/dashboard/settings/account', 'Account'],
+    ] as const) {
+      const html = await (await get(target, path, alice)).text();
+      expect(html, path).toMatch(new RegExp(`<a href="${path}" aria-current="page">${label}`));
+      expect(html.match(/aria-current="page"/g)?.length, path).toBe(2);
+    }
+  });
+
+  it("lists the provider's models for the Model field, with the saved key only for its own provider and URL", async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    await connect(target, alice, model, 'openai');
+    model.models(['b-model', 'a-model', 'a-model', 'not a model name', 'c/model:latest']);
+    const listed = await loadModels(target, alice, {});
+    expect(listed.status).toBe(200);
+    const html = await listed.text();
+    expect(html).toContain('3 models listed: choose one for Model, then Save.');
+    expect(html).toContain('list="assistant-models"');
+    const options = [...html.matchAll(/<option value="([^"]+)"><\/option>/g)].map((match) => match[1]);
+    expect(options).toEqual(['a-model', 'b-model', 'c/model:latest']);
+    expect(html).not.toContain(API_KEY);
+    expect(model.requests.at(-1)).toMatchObject({ path: '/v1/models', headers: { authorization: `Bearer ${API_KEY}` } });
+
+    // Another URL for the same server: the saved key is not sent there.
+    const elsewhere = model.baseUrl.replace('127.0.0.1', 'localhost');
+    expect((await loadModels(target, alice, { base_url: elsewhere })).status).toBe(200);
+    expect(model.requests.at(-1)?.headers.authorization).toBeUndefined();
+    // Another provider: not sent either. A key typed in the form is sent, and asked for again on Save.
+    expect((await loadModels(target, alice, { provider: 'anthropic' })).status).toBe(502);
+    expect(model.requests.at(-1)?.headers['x-api-key']).toBeUndefined();
+    const typed = await loadModels(target, alice, { base_url: elsewhere, api_key: 'sk-typed-key-0000' });
+    expect(await typed.text()).toContain('Enter the API key again when you save.');
+    expect(model.requests.at(-1)?.headers.authorization).toBe('Bearer sk-typed-key-0000');
+
+    // Nothing was saved by listing.
+    expect(await assistantStore.getSettings('github-org:91')).toMatchObject({ baseUrl: model.baseUrl, model: 'your-model', keyHint: 'wxyz' });
+  });
+
+  it("keeps the form's values and reads a refused list plainly, never with the key or the provider's body", async () => {
+    const target = dashboard();
+    const alice = await signIn(target, 'alice');
+    model.models({ status: 401, body: '{"error":"invalid key sk-leaked-SECRET"}' });
+    const refused = await loadModels(target, alice, { model: 'kept-model', api_key: API_KEY });
+    expect(refused.status).toBe(502);
+    const html = await refused.text();
+    expect(html).toContain('The model provider refused the API key.');
+    expect(html).toContain('value="kept-model"');
+    expect(html).not.toContain(API_KEY);
+    expect(html).not.toContain('sk-leaked-SECRET');
+    model.models([]);
+    const none = await loadModels(target, alice, { api_key: API_KEY });
+    expect(await none.text()).toContain('The provider listed no models. Type the model name.');
+    expect(await assistantStore.getSettings('github-org:91')).toBeNull();
+  });
+
+  it('checks the URL as saving does, and counts each list as a message', async () => {
+    const closed = dashboard({ privateUrls: false });
+    const alice = await signIn(closed, 'alice');
+    const refused = await loadModels(closed, alice, {});
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain('local or private network address');
+    const invalid = await loadModels(closed, alice, { base_url: 'http://models.example.com/v1' });
+    expect(invalid.status).toBe(400);
+    expect((await loadModels(closed, alice, { provider: 'other' })).status).toBe(400);
+    expect(model.requests).toHaveLength(0);
+
+    const limited = dashboard({ rate: { perSecond: 1 / 60, burst: 2 } });
+    const owner = await signIn(limited, 'alice');
+    expect((await loadModels(limited, owner, {})).status).toBe(200);
+    expect((await loadModels(limited, owner, {})).status).toBe(200);
+    expect((await loadModels(limited, owner, {})).status).toBe(429);
+    expect(model.requests).toHaveLength(2);
+  });
+
+  it('asks the Anthropic API for its models with its version and the key, never following a redirect', async () => {
+    const anthropic = await startFakeModel('anthropic');
+    try {
+      anthropic.models(['claude-model-b', 'claude-model-a']);
+      const listed = await listSlotlockAssistantModels({
+        provider: 'anthropic',
+        baseUrl: anthropic.baseUrl,
+        apiKey: API_KEY,
+        fetch,
+        timeoutMs: 5_000,
+      });
+      expect(listed).toEqual(['claude-model-a', 'claude-model-b']);
+      expect(anthropic.requests[0]).toMatchObject({
+        path: '/v1/models?limit=1000',
+        headers: { 'x-api-key': API_KEY, 'anthropic-version': expect.any(String) },
+      });
+      expect(anthropic.requests[0]?.headers.authorization).toBeUndefined();
+    } finally {
+      await anthropic.close();
+    }
+    // Together answers a bare array, not { data: [...] }; anything else is not a list.
+    const bare = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json([
+        { id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', object: 'model', type: 'chat' },
+        { id: 'mistralai/Mixtral-8x7B-Instruct-v0.1', object: 'model', type: 'chat' },
+      ]),
+    );
+    expect(
+      await listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.together.xyz/v1', apiKey: API_KEY, fetch: bare, timeoutMs: 5_000 }),
+    ).toEqual(['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'mistralai/Mixtral-8x7B-Instruct-v0.1']);
+    expect(bare.mock.calls[0]?.[0]).toBe('https://api.together.xyz/v1/models');
+    for (const answer of [{ models: [] }, 'models', null]) {
+      await expect(
+        listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: API_KEY, fetch: vi.fn(async () => Response.json(answer)), timeoutMs: 5_000 }),
+        JSON.stringify(answer),
+      ).rejects.toMatchObject({ reason: 'bad_answer' });
+    }
+    const redirecting = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.example.com/' } }));
+    await expect(
+      listSlotlockAssistantModels({ provider: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: API_KEY, fetch: redirecting, timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ reason: 'unavailable' });
+    expect(redirecting).toHaveBeenCalledTimes(1);
+    expect(redirecting.mock.calls[0]).toMatchObject([expect.any(String), { redirect: 'manual' }]);
   });
 });
 
@@ -516,7 +1209,7 @@ describe('the assistant across organizations', () => {
     const carol = await signIn(target, 'carol');
     const theirs = await page(target, carol);
     expect(theirs).not.toContain('acme');
-    expect(theirs).toContain('No model is connected');
+    expect(theirs).toContain('Connect a model to use the assistant.');
     expect((await chat(target, carol, 'hello')).status).toBe(409);
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, carol)).status).toBe(409);
     expect(backend.deleteEvent).not.toHaveBeenCalled();
@@ -694,7 +1387,10 @@ describe('security review fixes', () => {
       description: `Long notes ${'x'.repeat(5_000)} END-OF-DESCRIPTION`,
       attendees,
     });
-    expect(html).toContain('Waiting for you');
+    expect(html).toContain('<div class="change">');
+    expect(html).toContain('>Book</button>');
+    // When, in the time zone the change gives.
+    expect(html).toContain('<dt>When</dt><dd>Tue 2 Mar, 10:00–11:00 Europe/London</dd>');
     for (const { address } of attendees) expect(html, address).toContain(address);
     expect(html).toContain('END-OF-DESCRIPTION');
     expect(html).toContain('vehicle-1');
@@ -709,7 +1405,7 @@ describe('security review fixes', () => {
     await connect(target, await signIn(target, 'alice'), model, 'openai');
     const bob = await signIn(target, 'bob');
     const html = await proposeAndShow(target, bob, name, input);
-    const summary = /<p class="action-summary">([^<]+)<\/p>/.exec(html)?.[1] ?? '';
+    const summary = /<p class="change-title">([^<]+)<\/p>/.exec(html)?.[1] ?? '';
     expect(summary).toContain('vehicle-1');
     expect(summary).toContain('Ana pickup');
     expect(summary).toMatch(/10:00/);
@@ -736,6 +1432,58 @@ describe('security review fixes', () => {
     });
     expect(html).not.toContain('name="action"');
     expect(toolResultsSent('openai', model.requests[1])).toEqual([JSON.stringify({ error: { code: 'change_too_large_to_show' } })]);
+  });
+
+  it('never runs a proposal, dry or not: one sent with dry_run is refused before the backend', async () => {
+    const admitted: string[] = [];
+    const consulted: string[] = [];
+    const target = dashboard({
+      admit: async (args) => {
+        admitted.push(args.operation);
+      },
+      consumeRateLimit: async (args) => {
+        consulted.push(args.operation);
+        return true;
+      },
+    });
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script(
+      {
+        calls: [
+          {
+            name: 'slotlock_create_event',
+            input: {
+              resource_id: RESOURCE.id,
+              starts_at: '2027-03-02T10:00:00Z',
+              ends_at: '2027-03-02T11:00:00Z',
+              timezone: 'Europe/London',
+              recurrence_rule: 'FREQ=DAILY;COUNT=30',
+              dry_run: true,
+            },
+          },
+          { name: 'slotlock_update_event', input: { event_id: 'agent:abc', expected_revision: 1, title: 'x', dry_run: true } },
+          { name: 'slotlock_cancel', input: { event_id: 'agent:abc', expected_revision: 1, dry_run: false } },
+        ],
+      },
+      { text: 'Checked.' },
+    );
+    await chat(target, bob, 'Dry-run these');
+    for (const method of Object.values(backend)) expect(method).not.toHaveBeenCalled();
+    expect(admitted).toEqual([]);
+    expect(consulted).toEqual([]);
+    expect(toolResultsSent('openai', model.requests[1])).toEqual(
+      Array.from({ length: 3 }, () => JSON.stringify({ error: { code: 'invalid_arguments' } })),
+    );
+    expect(await page(target, bob)).not.toContain('name="action"');
+  });
+
+  it('offers the model no dry_run on a write it proposes', () => {
+    const proposed = slotlockAssistantTools().filter((tool) => tool.use === 'propose');
+    expect(proposed.length).toBeGreaterThan(0);
+    for (const tool of proposed) {
+      expect(Object.keys(tool.inputSchema.properties as object), tool.name).not.toContain('dry_run');
+    }
   });
 
   it("M2: lets another tenant's update_event through while a proposed one waits in a running turn", async () => {
@@ -879,7 +1627,7 @@ describe('security review fixes', () => {
     for (let turn = 0; turn < 25; turn += 1) {
       expect((await chat(target, bob, cjk.slice(0, 2_000))).status, `turn ${turn}`).toBe(303);
     }
-    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
+    const stored = await latestChat('github-org:91', 'github:12');
     expect(Buffer.byteLength(JSON.stringify(stored?.messages), 'utf8')).toBeLessThanOrEqual(SLOTLOCK_ASSISTANT_MAX_STORED_BYTES);
   });
 
@@ -946,7 +1694,7 @@ describe('re-review fixes', () => {
   });
   afterAll(() => model.close());
 
-  it('never puts back as pending a change approved, then reset, while a turn ran', async () => {
+  it('never puts back as pending a change approved while a turn ran, a New chat between them', async () => {
     const target = dashboard();
     await connect(target, await signIn(target, 'alice'), model, 'openai');
     const bob = await signIn(target, 'bob');
@@ -957,15 +1705,16 @@ describe('re-review fixes', () => {
     await chat(target, bob, 'Cancel it');
     const actionId = /name="action" value="([^"]+)"/.exec(await page(target, bob))?.[1] as string;
     model.script(async () => {
-      // While this turn runs: the member approves the change, then starts a new conversation.
+      // While this turn runs: the member approves the change, then opens a new chat.
       expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(303);
       expect((await post(target, '/dashboard/assistant/reset', {}, bob)).status).toBe(303);
       return { text: 'Anything else?' };
     });
     expect((await chat(target, bob, 'And now?')).status).toBe(303);
     expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
-    const stored = await assistantStore.getConversation('github-org:91', 'github:12');
-    expect(stored?.actions[actionId]).toBeUndefined();
+    // The turn kept its chat, and the change in it as it ran: done, never pending again.
+    const stored = await latestChat('github-org:91', 'github:12');
+    expect(stored?.actions[actionId]?.status).toBe('done');
     expect(await page(target, bob)).not.toContain('name="action"');
     expect((await post(target, '/dashboard/assistant/approve', { action: actionId }, bob)).status).toBe(409);
     expect(backend.deleteEvent).toHaveBeenCalledTimes(1);
@@ -986,6 +1735,25 @@ describe('re-review fixes', () => {
       return { text: 'Anything else?' };
     });
     await chat(target, bob, 'And now?');
-    expect((await assistantStore.getConversation('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
+    expect((await latestChat('github-org:91', 'github:12'))?.actions[actionId]?.status).toBe('done');
+  });
+
+  it('keeps a chat deleted while its turn ran deleted, and says so where it was', async () => {
+    const target = dashboard();
+    await connect(target, await signIn(target, 'alice'), model, 'openai');
+    const bob = await signIn(target, 'bob');
+    model.script({ text: 'Hello.' });
+    await chat(target, bob, 'Hi');
+    const id = (await assistantStore.listChats('github-org:91', 'github:12'))[0]?.id as string;
+    model.script(async () => {
+      // While this turn runs, the member deletes the chat it continues.
+      expect((await post(target, '/dashboard/assistant/delete', { chat: id }, bob)).status).toBe(303);
+      return { text: 'Too late.' };
+    });
+    const sent = await post(target, '/dashboard/assistant', { message: 'And now?', chat: id }, bob);
+    expect(sent.headers.get('location')).toBe(`/dashboard/assistant?c=${id}#latest`);
+    expect(await assistantStore.getChat('github-org:91', 'github:12', id)).toBeNull();
+    expect(await assistantStore.listChats('github-org:91', 'github:12')).toEqual([]);
+    expect(await (await get(target, `/dashboard/assistant?c=${id}`, bob)).text()).toContain('That chat is not here: it was deleted.');
   });
 });

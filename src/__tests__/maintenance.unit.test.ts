@@ -3,8 +3,11 @@
 import type { Sql } from 'postgres';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  type SlotlockMaintenanceRecord,
   type SlotlockMaintenanceResult,
+  type SlotlockMaintenanceRound,
   maintainSlotlockTenant,
+  slotlockMaintenanceError,
   startSlotlockMaintenance,
   withSlotlockMaintenanceLock,
 } from '../maintenance.js';
@@ -54,10 +57,14 @@ function fakeStore() {
     params: Record<string, unknown>;
   }[] = [];
   let gate: Promise<void> | null = null;
-  const sweeps = { count: 0 };
+  const sweeps = { count: 0, invitations: 0 };
   const store = {
     async sweepAssistantConversations() {
       sweeps.count += 1;
+      return 0;
+    },
+    async sweepDashboardRecords() {
+      sweeps.invitations += 1;
       return 0;
     },
     async withTenant(tenantRef: string, callback: (tenant: unknown) => Promise<unknown>) {
@@ -83,8 +90,23 @@ function fakeStore() {
         async releaseNoShows() {
           return 0;
         },
+        async completeEndedBookings() {
+          return 0;
+        },
+        async dueReminders() {
+          return 0;
+        },
+        async expireApprovals() {
+          return { expired: 0 };
+        },
         async pruneAssistantConversations() {
           return 0;
+        },
+        async pruneAuditEvents() {
+          return 0;
+        },
+        async pruneTenantExports() {
+          return { deleted: 0, pending: [] };
         },
         async offerWaitlist() {
           return { offered: 0, expired: 0, next: null };
@@ -161,6 +183,10 @@ const result = (overrides: Partial<SlotlockMaintenanceResult> = {}): SlotlockMai
   staleSources: 0,
   noShows: 0,
   waitlistOffers: 0,
+  approvalsExpired: 0,
+      bookingsCompleted: 0,
+      remindersDue: 0,
+      holidayCalendarsImported: 0,
   extended: 0,
   conflicts: 0,
   refused: 0,
@@ -350,16 +376,18 @@ describe('startSlotlockMaintenance', () => {
     await scheduler.close();
   });
 
-  it("sweeps every tenant's expired assistant conversations at once, then every quarter hour, with no tenant of its own", async () => {
+  it("sweeps every tenant's expired assistant conversations, and finished team invitations, at once, then every quarter hour, with no tenant of its own", async () => {
     const fake = fakeStore();
     const scheduler = startSlotlockMaintenance({ store: fake.store, sql: fakeSql().sql, tenants: [], intervalMs: HOUR });
     const sweeps = () => fake.sweeps.count;
     await settle();
     expect(sweeps()).toBe(1);
+    expect(fake.sweeps.invitations).toBe(1);
     await vi.advanceTimersByTimeAsync(14 * 60_000);
     expect(sweeps()).toBe(1);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(sweeps()).toBe(2);
+    expect(fake.sweeps.invitations).toBe(2);
     await scheduler.close();
   });
 
@@ -615,3 +643,108 @@ describe('startSlotlockMaintenance', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('what maintenance tells the admin console (RFC 0006, M11)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: Date.UTC(2027, 0, 1) });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const HOUR = 3_600_000;
+  const recorder = () => {
+    const failed: [string, ReturnType<typeof slotlockMaintenanceError>][] = [];
+    const ran: string[] = [];
+    const rounds: SlotlockMaintenanceRound[] = [];
+    const record: SlotlockMaintenanceRecord = {
+      failed: async (tenantRef, error) => {
+        failed.push([tenantRef, error]);
+      },
+      ran: async (tenantRef) => {
+        ran.push(tenantRef);
+      },
+      round: async (round) => {
+        rounds.push(round);
+      },
+    };
+    return { record, failed, ran, rounds };
+  };
+
+  it('records each failed pass with its tenant, clears it when a pass runs, and counts an hour of passes without a tenant', async () => {
+    const fake = fakeStore();
+    fake.fail('fleet-b', Object.assign(new Error("Could not roll 'Standup with Ada'"), { code: '23P01' }));
+    const { record, failed, ran, rounds } = recorder();
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store, sql: fakeSql().sql, tenants: ['fleet-a', 'fleet-b'], intervalMs: HOUR, record,
+    });
+    await settle();
+    expect(ran).toEqual(['fleet-a']);
+    expect(failed).toEqual([['fleet-b', { name: 'Error', code: '23P01', message: 'Could not roll …' }]]);
+    // Nothing counted yet: an hour has not passed.
+    expect(rounds).toEqual([]);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    await settle();
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]).toMatchObject({ passes: 1, failed: 1, startedAt: new Date(Date.UTC(2027, 0, 1)) });
+    expect(JSON.stringify(rounds[0])).not.toContain('fleet');
+    await scheduler.close();
+    // Closing records what ran since: the hour's second passes.
+    expect(rounds).toHaveLength(2);
+    expect(rounds[1]).toMatchObject({ passes: 1, failed: 1 });
+  });
+
+  it('records nothing for an hour in which no pass ran, and reports a record that failed without stopping', async () => {
+    const fake = fakeStore();
+    const onError = vi.fn();
+    const scheduler = startSlotlockMaintenance({
+      store: fake.store, sql: fakeSql().sql, tenants: ['fleet'], intervalMs: HOUR, onError,
+      record: {
+        failed: async () => undefined,
+        ran: async () => {
+          throw new Error('database away');
+        },
+        round: async () => undefined,
+      },
+    });
+    await settle();
+    expect(tenantsMaintainedOf(fake)).toEqual(['fleet']);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'database away' }));
+    await scheduler.close();
+    expect(() => startSlotlockMaintenance({ store: fake.store, sql: fakeSql().sql, tenants: [], intervalMs: HOUR, recordEveryMs: 59_999 }))
+      .toThrow(RangeError);
+  });
+
+  it('keeps an error to its class, code and first line up to its first quotation mark', () => {
+    expect(slotlockMaintenanceError(Object.assign(new Error('Key (title)=("Board meeting") clashes\nDETAIL: more'), { code: '23505' })))
+      .toEqual({ name: 'Error', code: '23505', message: 'Key (title)=( …' });
+    // A quoted value that holds its own quotes, runs past the cut, or mixes its marks: all of it goes.
+    for (const leaky of [
+      'uuid: "Lunch with "Bob Smith" re: divorce"',
+      `uuid: "${'Jane Doe, jane@example.com, '.repeat(200)}"`,
+      'Could not extend “Weekly standup with Ada" past 2027',
+      "Could not extend 'Ada's standup' past 2027",
+    ]) {
+      const kept = slotlockMaintenanceError(new Error(leaky)).message ?? '';
+      expect(kept, leaky).not.toMatch(/Bob|Jane|Ada|standup/);
+    }
+    expect(slotlockMaintenanceError(new Error("Can't roll the series: the horizon moved")).message).toBe("Can't roll the series: the horizon moved");
+    expect(slotlockMaintenanceError(new RangeError(`Invalid time zone for ${'x'.repeat(300)}`)).message).toMatch(/^Invalid time zone for x+…$/);
+    expect([...(slotlockMaintenanceError(new Error('y'.repeat(500))).message ?? '')]).toHaveLength(200);
+    expect(slotlockMaintenanceError(Object.assign(new Error(''), { name: 'Not a name!', code: 'has space' })))
+      .toEqual({ name: 'Error', code: null, message: null });
+    expect(slotlockMaintenanceError('thrown string')).toEqual({ name: 'Error', code: null, message: null });
+    // A message of nothing but opening quotes: cut first, and scanned once, never quadratically.
+    const started = performance.now();
+    for (const mark of ['“', '‘', '"']) {
+      expect([...(slotlockMaintenanceError(new Error(mark.repeat(200_000))).message ?? '')].length).toBeLessThanOrEqual(200);
+    }
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
+const tenantsMaintainedOf = (fake: ReturnType<typeof fakeStore>) =>
+  fake.calls.filter(({ task }) => task === 'prune').map(({ tenantRef }) => tenantRef);

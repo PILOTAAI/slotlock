@@ -4,6 +4,8 @@
 import {
   COMMON_ERRORS,
   CONFIRMATION_ERRORS,
+  APPROVAL_ERRORS,
+  APPROVAL_TOOLS,
   DETAILS,
   INPUT_NOTES,
   OBJECTS,
@@ -172,7 +174,15 @@ export function renderToolsPage({ operations, facts, sources, fail }) {
     if (!TOOL_ERRORS[name]) fail(`${name} has no TOOL_ERRORS entry in tool-notes.mjs`);
   }
   // A documented code must be a code the server or the store can produce.
-  const allCodes = [...COMMON_ERRORS, ...CONFIRMATION_ERRORS, ...Object.values(TOOL_ERRORS).flat()];
+  const allCodes = [
+    ...COMMON_ERRORS,
+    ...CONFIRMATION_ERRORS,
+    ...APPROVAL_ERRORS,
+    ...Object.values(TOOL_ERRORS).flat(),
+  ];
+  for (const name of APPROVAL_TOOLS) {
+    if (!names.includes(name)) fail(`APPROVAL_TOOLS in tool-notes.mjs names ${name}, which is not a tool`);
+  }
   for (const errorCode of new Set(allCodes)) {
     if (!sources.some((text) => text.includes(`'${errorCode}'`))) {
       fail(`error code ${errorCode} in tool-notes.mjs is not a code in src/`);
@@ -210,6 +220,11 @@ export function renderToolsPage({ operations, facts, sources, fail }) {
         ...(writes
           ? [
               `When the server asks a person to confirm this tool: ${CONFIRMATION_ERRORS.map(code).join(', ')} ([confirmation before writes](/docs/security/#confirmation-before-writes)).`,
+            ]
+          : []),
+        ...(APPROVAL_TOOLS.includes(operation.name)
+          ? [
+              `When an approval policy covers the booking: ${APPROVAL_ERRORS.map(code).join(', ')} (retry with the same \`idempotency_key\` to learn how a person decided).`,
             ]
           : []),
       ];

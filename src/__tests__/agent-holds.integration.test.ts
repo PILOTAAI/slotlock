@@ -92,8 +92,16 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     expect(held.refused).toEqual([]);
     expect((await liveHolds(id)).sort()).toEqual(held.holds.map(({ hold_id }) => hold_id).sort());
 
-    // Held time is busy for everyone else, this agent's plain create included.
-    await expect(create(id, at(0, 11), at(0, 12))).rejects.toMatchObject({ code: 'overlap' });
+    // Held time is busy for everyone else, this agent's plain create included. Its own hold is
+    // named, so it can book it or let it go; another agent is told only when the time is busy.
+    const ownHold = held.holds[1]?.hold_id as string;
+    await expect(create(id, at(0, 11), at(0, 12))).rejects.toMatchObject({
+      code: 'overlap',
+      details: { conflicting_hold_id: ownHold, busy_start: at(0, 11), busy_end: at(0, 12) },
+    });
+    const foreign = await create(id, at(0, 11), at(0, 12), undefined, 'other-agent').catch((error: unknown) => error);
+    expect(foreign).toMatchObject({ code: 'overlap', details: { busy_start: at(0, 11), busy_end: at(0, 12) } });
+    expect((foreign as { details: Record<string, string> }).details).not.toHaveProperty('conflicting_hold_id');
 
     const chosen = held.holds[1]?.hold_id as string;
     const booked = (await create(id, at(0, 11), at(0, 12), chosen)) as { event: { id: string } };
@@ -101,6 +109,13 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     expect(await liveHolds(id)).toEqual([]);
     // The freed alternatives are bookable at once.
     await expect(create(id, at(0, 9), at(0, 10))).resolves.toBeTruthy();
+    // Its own event in the way is named by the event's id; another agent's is not.
+    await expect(create(id, at(0, 11), at(0, 12))).rejects.toMatchObject({
+      code: 'overlap',
+      details: { conflicting_event_id: booked.event.id },
+    });
+    const other = await create(id, at(0, 11), at(0, 12), undefined, 'other-agent').catch((error: unknown) => error);
+    expect((other as { details: Record<string, string> }).details).not.toHaveProperty('conflicting_event_id');
   });
 
   it('answers a retry with the same holds, and refuses a taken candidate by index', async () => {
@@ -154,10 +169,39 @@ describe.skipIf(!url)('agent holds (real Postgres)', () => {
     expect(await liveHolds(id)).toEqual([holdId]);
 
     await sql`UPDATE slotlock.reservations SET expires_at = now() - interval '1 second' WHERE id = ${holdId}`;
+    // Its own lapsed hold is named as the application API's confirm names it; another agent's
+    // stays not found, so a hold's existence is never told to anyone but its holder.
+    await expect(create(id, at(3, 9), at(3, 10), holdId)).rejects.toMatchObject({
+      code: 'hold_expired',
+      status: 409,
+    });
+    await expect(create(id, at(3, 9), at(3, 10), holdId, 'other-agent')).rejects.toMatchObject({
+      code: 'hold_not_found',
+      status: 404,
+    });
+    await sql`DELETE FROM slotlock.reservations WHERE id = ${holdId}`;
     await expect(create(id, at(3, 9), at(3, 10), holdId)).rejects.toMatchObject({
       code: 'hold_not_found',
       status: 404,
     });
+  });
+
+  it("releases a group's other holds when one is confirmed through the application API", async () => {
+    const id = await van();
+    const held = await hold([
+      { resource_id: id, start: at(4, 9), end: at(4, 10) },
+      { resource_id: id, start: at(4, 11), end: at(4, 12) },
+      { resource_id: id, start: at(4, 13), end: at(4, 14) },
+    ]);
+    expect(held.holds).toHaveLength(3);
+    const chosen = held.holds[1]?.hold_id as string;
+    const confirmed = await store.confirmHold(chosen, { tenantRef });
+    expect(confirmed).toMatchObject({ ok: true });
+    // Only the confirmed one is left, and it is a booking now.
+    expect(await liveHolds(id)).toEqual([]);
+    expect(
+      await sql`SELECT status FROM slotlock.reservations WHERE resource_id = ${id} ORDER BY starts_at`,
+    ).toEqual([{ status: 'confirmed' }]);
   });
 
   it('does not judge notice again when a hold is booked', async () => {

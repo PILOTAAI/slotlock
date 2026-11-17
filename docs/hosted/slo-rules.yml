@@ -1,0 +1,59 @@
+# Prometheus rules for hosted Slotlock's objectives (docs/hosted/status.md#objectives), from the
+# metrics `slotlock serve` exposes at /metrics. Load with `rule_files:`; tests check that every
+# metric named here is one Slotlock exports.
+groups:
+  - name: slotlock-slo-recording
+    rules:
+      # Calls the server failed: an internal error, or a 5xx a REST call answered. Refusals that are
+      # the caller's (forbidden, overlap, quota_exceeded, 4xx) are not failures.
+      - record: slotlock:call_errors:ratio_rate5m
+        expr: |
+          sum(rate(slotlock_calls_total{outcome=~"internal_error|unavailable|5.."}[5m]))
+          / clamp_min(sum(rate(slotlock_calls_total[5m])), 1e-9)
+      - record: slotlock:call_errors:ratio_rate30m
+        expr: |
+          sum(rate(slotlock_calls_total{outcome=~"internal_error|unavailable|5.."}[30m]))
+          / clamp_min(sum(rate(slotlock_calls_total[30m])), 1e-9)
+      - record: slotlock:call_errors:ratio_rate1h
+        expr: |
+          sum(rate(slotlock_calls_total{outcome=~"internal_error|unavailable|5.."}[1h]))
+          / clamp_min(sum(rate(slotlock_calls_total[1h])), 1e-9)
+      - record: slotlock:call_errors:ratio_rate6h
+        expr: |
+          sum(rate(slotlock_calls_total{outcome=~"internal_error|unavailable|5.."}[6h]))
+          / clamp_min(sum(rate(slotlock_calls_total[6h])), 1e-9)
+      # Calls that took longer than a second at the server.
+      - record: slotlock:calls_slow:ratio_rate1h
+        expr: |
+          1 - sum(rate(slotlock_call_duration_seconds_bucket{le="1"}[1h]))
+              / clamp_min(sum(rate(slotlock_call_duration_seconds_count[1h])), 1e-9)
+
+  - name: slotlock-slo-alerts
+    rules:
+      # 99.5% of calls a month succeed: a 0.5% error budget. Burning it 14.4 times too fast spends
+      # 2% of the month's budget in an hour; 6 times, 5% in six hours (the multiwindow pairs from
+      # Google's SRE workbook).
+      - alert: SlotlockErrorBudgetFastBurn
+        expr: |
+          slotlock:call_errors:ratio_rate1h > (14.4 * 0.005)
+          and slotlock:call_errors:ratio_rate5m > (14.4 * 0.005)
+        labels:
+          severity: page
+        annotations:
+          summary: Slotlock is failing calls fast enough to spend the month's error budget in two days
+      - alert: SlotlockErrorBudgetSlowBurn
+        expr: |
+          slotlock:call_errors:ratio_rate6h > (6 * 0.005)
+          and slotlock:call_errors:ratio_rate30m > (6 * 0.005)
+        labels:
+          severity: ticket
+        annotations:
+          summary: Slotlock is failing calls fast enough to spend the month's error budget in five days
+      # 95% of calls under a second at the server.
+      - alert: SlotlockSlowCalls
+        expr: slotlock:calls_slow:ratio_rate1h > 0.05
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: More than 5% of Slotlock calls took over a second in the last hour

@@ -12,17 +12,34 @@ export const GROUPS = [
     operations: [
       'slotlock_list_resources',
       'slotlock_create_resource',
+      'slotlock_update_resource',
       'slotlock_get_resource',
       'slotlock_archive_resource',
       'slotlock_restore_resource',
       'slotlock_delete_resource',
       'slotlock_set_resource_booking_rules',
       'slotlock_set_resource_pool',
+      'slotlock_set_resource_parent',
       'slotlock_list_pools',
+      'slotlock_set_pool_order',
       'slotlock_get_booking_rule_defaults',
       'slotlock_set_tenant_booking_rules',
       'slotlock_set_pool_booking_rules',
       'slotlock_get_resource_history',
+    ],
+  },
+  {
+    name: 'Locations and groups',
+    operations: [
+      'slotlock_list_locations',
+      'slotlock_create_location',
+      'slotlock_update_location',
+      'slotlock_delete_location',
+      'slotlock_list_groups',
+      'slotlock_create_group',
+      'slotlock_add_group_member',
+      'slotlock_remove_group_member',
+      'slotlock_delete_group',
     ],
   },
   {
@@ -31,34 +48,51 @@ export const GROUPS = [
       'slotlock_get_free_busy',
       'slotlock_find_next_available',
       'slotlock_find_available_slots',
+      'slotlock_find_available_ranges',
       'slotlock_get_pool_availability',
       'slotlock_list_busy',
       'slotlock_set_resource_availability',
       'slotlock_set_tenant_availability',
+      'slotlock_get_availability_defaults',
+      'slotlock_set_location_availability',
+      'slotlock_list_availability_exceptions',
+      'slotlock_create_availability_exception',
+      'slotlock_delete_availability_exception',
+      'slotlock_import_holidays',
+      'slotlock_list_holiday_calendars',
+      'slotlock_delete_holiday_calendar',
       'slotlock_export_resource_availability',
       'slotlock_import_resource_availability',
       'slotlock_record_coverage',
       'slotlock_get_coverage',
       'slotlock_record_coverage_failure',
       'slotlock_delete_coverage',
+      'slotlock_put_source_busy',
+      'slotlock_report_coverage_conflict',
     ],
   },
   {
     name: 'Events',
     operations: [
       'slotlock_hold_slots',
+      'slotlock_hold_together',
       'slotlock_release_slots',
+      'slotlock_confirm_slot',
       'slotlock_book_together',
       'slotlock_book_pool',
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',
       'slotlock_update_event',
+      'slotlock_reschedule',
       'slotlock_delete_event',
+      'slotlock_cancel',
       'slotlock_list_tenant_events',
       'slotlock_get_tenant_event',
       'slotlock_export_tenant_event',
       'slotlock_cancel_tenant_event',
+      'slotlock_tenant_book_together',
+      'slotlock_tenant_book_pool',
       'slotlock_get_tenant_event_history',
     ],
   },
@@ -69,6 +103,7 @@ export const GROUPS = [
       'slotlock_get_hold',
       'slotlock_list_holds',
       'slotlock_confirm_hold',
+      'slotlock_mark_hold_paid',
       'slotlock_release_hold',
     ],
   },
@@ -85,7 +120,11 @@ export const GROUPS = [
   },
   {
     name: 'Waitlist',
-    operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist'],
+    operations: ['slotlock_join_waitlist', 'slotlock_list_waitlist', 'slotlock_leave_waitlist', 'slotlock_decline_waitlist_offer'],
+  },
+  {
+    name: 'Contacts',
+    operations: ['slotlock_put_contact', 'slotlock_get_contact', 'slotlock_list_contacts', 'slotlock_delete_contact'],
   },
   {
     name: 'Changes and webhooks',
@@ -98,8 +137,54 @@ export const GROUPS = [
     ],
   },
   {
+    name: 'Approvals',
+    operations: [
+      'slotlock_list_approval_policies',
+      'slotlock_put_approval_policy',
+      'slotlock_delete_approval_policy',
+      'slotlock_list_approvals',
+      'slotlock_get_approval',
+      'slotlock_decide_approval',
+    ],
+  },
+  {
+    name: 'Sandbox',
+    operations: ['slotlock_sandbox_seed', 'slotlock_sandbox_race', 'slotlock_sandbox_fast_forward', 'slotlock_sandbox_reset'],
+  },
+  {
     name: 'Tenant',
-    operations: ['slotlock_get_tenant', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
+    operations: ['slotlock_get_tenant', 'slotlock_get_usage', 'slotlock_run_maintenance', 'slotlock_erase_tenant'],
+  },
+  {
+    name: 'Audit and privacy',
+    operations: [
+      'slotlock_list_audit_events',
+      'slotlock_verify_audit_log',
+      'slotlock_export_subject',
+      'slotlock_erase_subject',
+      'slotlock_create_tenant_export',
+      'slotlock_list_tenant_exports',
+      'slotlock_get_tenant_export',
+      'slotlock_get_tenant_export_part',
+      'slotlock_delete_tenant_export',
+    ],
+  },
+  {
+    name: 'Partner accounts',
+    operations: [
+      'slotlock_partner_put_account',
+      'slotlock_partner_list_accounts',
+      'slotlock_partner_get_account',
+      'slotlock_partner_list_keys',
+      'slotlock_partner_create_key',
+      'slotlock_partner_rotate_key',
+      'slotlock_partner_revoke_key',
+      'slotlock_partner_suspend_account',
+      'slotlock_partner_unsuspend_account',
+      'slotlock_partner_erase_account',
+      'slotlock_partner_get_usage',
+      'slotlock_partner_reconcile_usage',
+    ],
   },
 ];
 
@@ -333,8 +418,11 @@ function withRunVariables(operationId, args) {
  */
 const CLEAN_UP = new Set([
   'slotlock_delete_event',
+  'slotlock_cancel',
   'slotlock_delete_resource',
   'slotlock_erase_tenant',
+  'slotlock_erase_subject',
+  'slotlock_delete_tenant_export',
 ]);
 
 /** Split example arguments into path values, query pairs and a JSON body. */
@@ -374,6 +462,42 @@ function curlExample(operation, parts) {
   return lines.join('\n');
 }
 
+/**
+ * What a search result shows for a route (docs/rfc/0005-search.md 1.3): the summary with the method
+ * and path developers search for, and the description cut to whole sentences within 155
+ * characters. The page keeps the full description as its lede.
+ */
+export function searchTitle(operation) {
+  const route = `${operation.summary}: ${operation.method.toUpperCase()} ${operation.path}`;
+  if (route.length <= 65) return route;
+  const named = `${operation.summary} | Slotlock REST API`;
+  return named.length <= 65 ? named : `${operation.summary} | Slotlock`;
+}
+
+export function searchDescription(text, operation = {}) {
+  const flat = text.replace(/\s+/g, ' ').replace(/`/g, '').trim();
+  let out = '';
+  for (const sentence of flat.match(/[^.!?]+[.!?]+(?=\s|$)/g) ?? [flat]) {
+    if ((out + sentence).trim().length > 155) break;
+    out += sentence;
+  }
+  out = out.trim();
+  if (out.length >= 70) return out;
+  // Never a sentence cut off with "…" (results show it, and Bing flags it): the opening sentences
+  // that fit, or the summary, then what the page is, as whole sentences of 70 to 155 characters.
+  const where = operation.method && operation.path ? `${operation.method.toUpperCase()} ${operation.path}` : '';
+  const lead = out || (operation.summary ? `${operation.summary}.` : '');
+  for (const candidate of [
+    `${lead} ${where ? `${where} in` : 'In'} the Slotlock REST API, with its fields, errors and a curl example.`,
+    `${lead} ${where ? `${where} in the` : 'The'} Slotlock REST API.`,
+    `${operation.summary ?? lead}: ${where ? `${where}, ` : ''}fields, errors and a curl example for the Slotlock REST API.`,
+  ]) {
+    const whole = candidate.replace(/\s+/g, ' ').trim();
+    if (whole.length >= 70 && whole.length <= 155) return whole;
+  }
+  return `${operation.summary ?? 'An operation'} in the Slotlock REST API, with its fields, errors and a curl example.`;
+}
+
 const methodBadge = (method) =>
   `<span class="api-method api-method-${method}">${method.toUpperCase()}</span>`;
 
@@ -400,6 +524,8 @@ function renderPage(operation, { order, group, toolNames }) {
     '---',
     `title: ${JSON.stringify(operation.summary)}`,
     `description: ${JSON.stringify(operation.description)}`,
+    `seoTitle: ${JSON.stringify(searchTitle(operation))}`,
+    `seoDescription: ${JSON.stringify(searchDescription(operation.description, operation))}`,
     'sidebar:',
     `  order: ${order}`,
     `  label: ${JSON.stringify(operation.summary)}`,

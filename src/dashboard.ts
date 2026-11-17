@@ -13,15 +13,78 @@
 // once) and signed-out sessions (a copied cookie stays signed out). `createSlotlockDashboardState`
 // keeps these in Postgres, so they hold on every server that shares the database; the resource cap
 // is held in the database too.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Sql } from 'postgres';
-import type { SlotlockApiKey, SlotlockApiKeyScope, SlotlockApiKeyStore } from './api-keys.js';
+import type { SlotlockDashboardTeams } from './teams.js';
+import {
+  SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES,
+  SLOTLOCK_DASHBOARD_POST_CAPABILITIES,
+  SLOTLOCK_FRESH_CAPABILITIES,
+  SLOTLOCK_ROLE_CAPABILITIES,
+  SLOTLOCK_SCOPED_DASHBOARD_PAGES,
+  SLOTLOCK_SCOPED_DASHBOARD_POSTS,
+  SLOTLOCK_WORKSPACE_ROLE_NAMES,
+  SLOTLOCK_WORKSPACE_ROLES,
+  type SlotlockWorkspaceCapability,
+  type SlotlockWorkspaceRole,
+  isSlotlockWorkspaceRole,
+  slotlockMemberCan,
+  slotlockRoleCan,
+  slotlockRoleMayGrant,
+} from './workspace-roles.js';
+import {
+  SLOTLOCK_ANNOUNCEMENT_BANNER_CSS,
+  SLOTLOCK_BANNER_CSS,
+  SLOTLOCK_DASHBOARD_TOKENS,
+  slotlockAnnouncementBannerParts,
+  slotlockCssVars,
+} from './design-tokens.js';
+import type {
+  SlotlockDashboardNotices,
+  SlotlockDashboardWorkspaces,
+  SlotlockSuspensionNotice,
+  SlotlockTeamRefusal,
+  SlotlockTeamWorkspace,
+} from './workspaces.js';
+import { SLOTLOCK_DOMAIN_RECORD_LABEL, type SlotlockDnsResolver, slotlockDomainRecord, slotlockEmailDomain } from './domains.js';
+import {
+  SLOTLOCK_GOOGLE_ISSUERS,
+  type SlotlockSecretBox,
+  createSlotlockJwksCache,
+  discoverSlotlockOidc,
+  slotlockEntraIssuer,
+  slotlockOidcUrlAllowed,
+  slotlockReadJsonBody,
+  verifySlotlockIdToken,
+} from './oidc.js';
+import type { SlotlockSsoKind, SlotlockSsoRefusal } from './workspace-sso.js';
+import { handleSlotlockScimRequest } from './scim-server.js';
+import type { SlotlockScimRefusal } from './workspace-scim.js';
+import {
+  type SlotlockDomainChangeRefusal,
+  type SlotlockDomainCheckOutcome,
+  type SlotlockDomainJoinPolicy,
+  type SlotlockJoinEvidence,
+  SLOTLOCK_DOMAIN_AUDIT_ACTIONS,
+  slotlockDomainCheckEvent,
+  slotlockJoinRole,
+} from './workspace-domains.js';
+import { SLOTLOCK_WORKSPACE_DOMAIN_LIMIT } from './ddl-identity.js';
+import type { SlotlockAuditEvent, SlotlockAuditEventInput } from './store.js';
+import {
+  SLOTLOCK_TEST_TENANT_SUFFIX,
+  type SlotlockApiKey,
+  type SlotlockApiKeyLimits,
+  type SlotlockApiKeyScope,
+  type SlotlockApiKeyStore,
+} from './api-keys.js';
 import {
   type SlotlockAgentCalendarBackend,
   type SlotlockAgentOperation,
   type SlotlockAgentOperationDispatchOptions,
   type SlotlockAgentOperationDispatchResult,
   type SlotlockAgentPrincipal,
+  type SlotlockAgentUsage,
   type SlotlockAgentWriteOperation,
   describeSlotlockAgentWrite,
   invokeSlotlockAgentOperation,
@@ -32,15 +95,18 @@ import {
   SLOTLOCK_ASSISTANT_MAX_ACTION_BYTES,
   SLOTLOCK_ASSISTANT_MAX_MESSAGE,
   SLOTLOCK_ASSISTANT_MAX_PENDING,
+  SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS,
   SLOTLOCK_ASSISTANT_MODEL_NAME,
+  SLOTLOCK_ASSISTANT_PRESETS,
   SLOTLOCK_ASSISTANT_TOOL_USE,
   type SlotlockAssistantAction,
   type SlotlockAssistantEntry,
   type SlotlockAssistantModel,
   type SlotlockAssistantStore,
+  type SlotlockAssistantTurnEvent,
   boundSlotlockAssistantEntries,
   createSlotlockAssistantStore,
-  openSlotlockAssistantKey,
+  openSlotlockAssistantKeyWithAny,
   pendingSlotlockAssistantActions,
   pruneSlotlockAssistantActions,
   checkSlotlockAssistantHost,
@@ -50,26 +116,91 @@ import {
   runSlotlockAssistantTurn,
   sealSlotlockAssistantKey,
   slotlockAssistantProviderMessage,
+  SLOTLOCK_ASSISTANT_DIRECTORY_SIZE,
   slotlockAssistantSystemPrompt,
   testSlotlockAssistantModel,
+  listSlotlockAssistantModels,
 } from './assistant.js';
 import { SLOTLOCK_DASHBOARD_NAME_PATTERN, type SlotlockRate } from './config.js';
 import { createSlotlockRateLimiter } from './rate-limit.js';
 import { createSlotlockGuardedFetch } from './webhooks.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { SLOTLOCK_DASHBOARD_FORM_LIMIT } from './ddl.js';
+import { SLOTLOCK_ASSISTANT_CHAT_ID, SLOTLOCK_DASHBOARD_FORM_LIMIT, SLOTLOCK_INVITATIONS_PER_ADDRESS } from './ddl.js';
 import { ignoreRejection } from './hooks.js';
 import { SLOTLOCK_BOOKING_RULE_LIMITS, type SlotlockBookingRules } from './booking-rules.js';
+import { SLOTLOCK_DASHBOARD_ICON_SVG } from './dashboard-icon.js';
+import {
+  runSlotlockDashboardRequest,
+  setSlotlockDashboardRequestScope,
+  slotlockDashboardRequestScope,
+} from './dashboard-scope.js';
+import { SLOTLOCK_SETTINGS_CSS } from './dashboard-settings-ui.js';
+import { renderSlotlockMarkdown } from './dashboard-markdown.js';
+import {
+  SLOTLOCK_ASSISTANT_CSS,
+  slotlockAssistantActionVerb,
+  slotlockAssistantScript,
+  slotlockAssistantStepLabel,
+} from './dashboard-assistant-ui.js';
+import { SLOTLOCK_PLAN_LIMITS, SLOTLOCK_PLAN_QUOTAS, type SlotlockPlan, type SlotlockTenantPlan } from './plans.js';
+import {
+  SLOTLOCK_MAX_GROUPS_PER_RESOURCE,
+  SLOTLOCK_MAX_LOCATION_DEPTH,
+  SLOTLOCK_MAX_LOCATIONS,
+  SLOTLOCK_MAX_RESOURCE_GROUPS,
+  SLOTLOCK_RESOURCE_KINDS,
+  SLOTLOCK_RESOURCE_PROFILE_LIMITS,
+  type SlotlockLocation,
+  type SlotlockResourceGroup,
+  type SlotlockResourceKind,
+  type SlotlockResourceProfileInput,
+  type SlotlockResourceScope,
+  SLOTLOCK_MAX_KEY_SCOPE_REFS,
+  isSlotlockResourceScope,
+} from './resource-profile.js';
+import { type SlotlockQuotas, checkSlotlockBookingQuota, slotlockQuotaPeriod } from './quotas.js';
+import { type SlotlockUsageRow, slotlockUsageMonthToDate, summarizeSlotlockUsage } from './usage.js';
 import {
   type CreateWebhookEndpointResult,
   SLOTLOCK_CHANGE_TYPES,
   type SlotlockChange,
   type SlotlockWebhookEndpoint,
 } from './event-feed.js';
-import type { SlotlockSql, SlotlockStore, SlotlockWaitlistEntry } from './store.js';
+import {
+  type SlotlockAssistantChatSummary,
+  type SlotlockSql,
+  type SlotlockStore,
+  type SlotlockTenantStore,
+  type SlotlockSubject,
+  type SlotlockSubjectErasure,
+  type SlotlockSubjectExport,
+  type SlotlockTenantExport,
+  type SlotlockTenantExportPartResult,
+  buildSlotlockTenantExport,
+} from './store.js';
+import type {
+  SlotlockAvailabilityDefaults,
+  SlotlockAvailabilityExceptionInput,
+  SlotlockHolidayCalendar,
+  SlotlockOverrideResources,
+} from './availability-store.js';
+import { type SlotlockAvailabilityException, dayToDate, epochDay } from './hours.js';
+import { SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES } from './holidays.js';
+import { type SlotlockHolidaySource, readSlotlockHolidayCalendar } from './holiday-import.js';
+import { SlotlockAgentOperationError } from './agent-server.js';
+import { runSlotlockApprovalGrant } from './agent-store-backend.js';
+import {
+  SLOTLOCK_SANDBOX_SCENARIOS,
+  type SlotlockSandboxScenario,
+  fastForwardSlotlockSandbox,
+  resetSlotlockSandbox,
+  seedSlotlockSandbox,
+} from './sandbox.js';
 import type {
   Interval,
   SlotlockAgendaEntry,
+  SlotlockApproval,
+  SlotlockContact,
   SlotlockResource,
   SlotlockBookingRuleDefaults,
   WeeklyAvailabilityRule,
@@ -84,12 +215,25 @@ import {
 } from './weekly-hours.js';
 
 /** Resources one dashboard tenant may hold. */
-export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 100;
+export const SLOTLOCK_DASHBOARD_MAX_RESOURCES = 500;
+/** Closures the Closures page shows. */
+const SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS = 200;
+/** Contacts the Contacts page shows at once. */
+const SLOTLOCK_DASHBOARD_CONTACTS_PAGE = 100;
 const SESSION_TTL_MS = 12 * 3_600_000;
 const SIGN_IN_TTL_MS = 10 * 60_000;
+/**
+ * How recent a sign-in must be to turn an organization on or off: who owns it is read from GitHub
+ * as one signs in, so a change of owners reaches the dashboard by signing in again.
+ */
+const FRESH_SIGN_IN_MS = 15 * 60_000;
+/** How long Google's signing keys are kept when its answer does not say (Cache-Control max-age). */
+const GOOGLE_KEYS_DEFAULT_TTL_MS = 3_600_000;
 const MAX_FORM_BYTES = 8_192;
 /** A message to the assistant: 2,000 characters, each up to 9 bytes as a form encodes it. */
 const MAX_ASSISTANT_FORM_BYTES = 24_576;
+/** A holiday calendar import's form: the calendar (SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES) and its fields. */
+const MAX_IMPORT_FORM_BYTES = SLOTLOCK_MAX_HOLIDAY_CALENDAR_BYTES + 65_536;
 /**
  * Sign-ins (record, then GitHub's token and user) one instance runs at once; more are told to retry.
  * This also bounds how fast unauthenticated callbacks can write sign-in records.
@@ -103,30 +247,167 @@ const MAX_REMEMBERED = 10_000;
 const FORM_NONCE = /^([A-Za-z0-9_-]{24})\.([A-Za-z0-9_-]{43})$/;
 const POST_ROUTES: ReadonlySet<string> = new Set([
   '/sign-out',
+  '/sign-out-everywhere',
+  '/sessions/end',
   '/keys',
   '/keys/rotate',
   '/keys/revoke',
+  '/keys/limits',
   '/resources',
   '/resources/rules',
   '/resources/pool',
+  '/resources/profile',
+  '/resources/place',
+  '/resources/parent',
+  '/locations',
+  '/locations/delete',
+  '/groups',
+  '/groups/delete',
   '/webhooks',
   '/webhooks/delete',
   '/webhooks/enable',
-  '/waitlist/leave',
+  '/approvals/decide',
+  '/sandbox/seed',
+  '/sandbox/reset',
+  '/sandbox/fast-forward',
   '/hours',
+  '/closures',
+  '/closures/delete',
+  '/closures/import',
+  '/closures/calendars/delete',
+  '/contacts/forget',
   '/organization',
+  '/environment',
+  '/teams/enable',
+  '/teams/disable',
+  '/teams/create',
+  '/teams/delete',
+  '/teams/restore',
+  '/invite/accept',
+  '/members/invite',
+  '/members/resend',
+  '/members/revoke',
+  '/members/role',
+  '/members/scope',
+  '/members/remove',
+  '/members/leave',
+  '/members/requests',
+  '/join/request',
+  '/identity/domains',
+  '/identity/domains/verify',
+  '/identity/domains/remove',
+  '/identity/domains/policy',
+  '/identity/invites',
+  '/identity/sso',
+  '/identity/sso/test',
+  '/identity/sso/status',
+  '/identity/sso/delete',
+  '/identity/sso/provisioning',
+  '/identity/sso/mapping',
+  '/identity/sso/require',
+  '/identity/scim/enable',
+  '/identity/scim/disable',
+  '/identity/scim/token',
+  '/identity/scim/token/revoke',
+  '/identity/scim/group',
+  '/sso/proof',
+  '/sso/bypass',
   '/assistant',
+  '/assistant/stream',
   '/assistant/approve',
   '/assistant/dismiss',
   '/assistant/reset',
+  '/assistant/rename',
+  '/assistant/delete',
   '/settings/assistant',
   '/settings/assistant/test',
+  '/settings/assistant/models',
   '/settings/assistant/remove',
+  '/plan/upgrade',
+  '/plan/manage',
+  '/settings/privacy/export',
+  '/settings/privacy/export/delete',
+  '/settings/privacy/person',
+  '/settings/privacy/person/export',
+  '/settings/privacy/person/erase',
+]);
+/** The forms whose success the audit log records, by the action it records. */
+const AUDITED_ROUTES: Readonly<Record<string, string>> = Object.freeze({
+  '/keys': 'api_key.created',
+  '/keys/rotate': 'api_key.rotated',
+  '/keys/revoke': 'api_key.revoked',
+  '/keys/limits': 'api_key.limits_changed',
+  '/webhooks': 'webhook.created',
+  '/webhooks/delete': 'webhook.deleted',
+  '/webhooks/enable': 'webhook.enabled',
+  '/contacts/forget': 'contact.forgotten',
+  '/settings/assistant': 'assistant.settings_saved',
+  '/settings/assistant/remove': 'assistant.settings_removed',
+  '/plan/upgrade': 'billing.checkout_started',
+  '/plan/manage': 'billing.portal_opened',
+  '/teams/enable': 'organization.enabled',
+  '/teams/disable': 'organization.disabled',
+  '/sandbox/reset': 'sandbox.reset',
+  '/sign-out-everywhere': 'session.signed_out_everywhere',
+  '/sessions/end': 'session.ended',
+});
+/** What each capability lets a person do, as a refusal says it. */
+const CAPABILITY_WORDS: Readonly<Record<SlotlockWorkspaceCapability, string>> = Object.freeze({
+  'account.use': 'use this account',
+  'workspace.read': 'see this workspace',
+  'usage.read': 'see its usage',
+  'assistant.chat': 'chat with the assistant',
+  'operations.run': 'change bookings, hours or closures',
+  'resources.manage': 'change resources',
+  'sandbox.manage': 'change the test environment',
+  'keys.manage_own': 'create or change API keys',
+  'keys.full': 'create or change Full-access keys',
+  'keys.manage_any': "change a key someone else created",
+  'webhooks.manage': 'change webhooks',
+  'contacts.forget': 'forget contacts',
+  'assistant.settings': "change the assistant's model",
+  'members.manage': 'manage members',
+  'audit.read': 'read the audit log',
+  'privacy.manage': "export the workspace's data or erase a person",
+  'billing.manage': 'change the plan or billing',
+  'workspace.own': 'change who owns this workspace',
+  'identity.manage': "change the team's domains",
+});
+/** What a session signed in through a team's provider alone may not do: anything beyond its team. */
+const SSO_SCOPED_REFUSED: ReadonlySet<string> = new Set([
+  '/organization',
+  '/teams/create',
+  '/teams/enable',
+  '/teams/disable',
+  '/invite/accept',
+  '/join/request',
+  '/sso/proof',
+  '/sso/bypass',
+  '/sessions/end',
+  '/sign-out-everywhere',
+]);
+/** The pages a sign-in may come back to: one made to confirm it's you, or to open an invitation. */
+const STEP_UP_PAGES: ReadonlySet<string> = new Set([
+  '/settings/privacy',
+  '/keys',
+  '/webhooks',
+  '/plan',
+  '/settings',
+  '/settings/members',
+  '/settings/team',
+  '/settings/identity',
+  '/teams',
+  '/contacts',
+  '/invite',
 ]);
 const SIGN_IN_AGAIN = 'That sign-in did not finish here, or took too long. Sign in again.';
 const GITHUB_ERROR_CODE = /^[a-z0-9_]{1,64}$/;
 const MAX_COOKIE_CHARACTERS = 4_096;
 const GITHUB_TIMEOUT_MS = 10_000;
+/** The most a team's token endpoint may answer: an ID token and its companions fit well within. */
+const SSO_TOKEN_ANSWER_BYTES = 65_536;
+/** A Google account's subject: ASCII, at most 255 characters (OpenID Connect); Google's are digits. */
+const GOOGLE_SUBJECT = /^[A-Za-z0-9._-]{1,255}$/;
 /** The REST API version GitHub documents for GET /user (docs.github.com, read 2026-10-10). */
 const GITHUB_API_VERSION = '2026-03-10';
 const USER_AGENT = 'slotlock-dashboard';
@@ -137,6 +418,215 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY_MS = 86_400_000;
+/** The invitation link being opened, for the sign-in that accepts it: sealed, for 30 minutes. */
+const INVITE_COOKIE = '__Host-slotlock-invite';
+/** A sign-in through a team's identity provider, until its callback. */
+const SSO_COOKIE = '__Host-slotlock-sso';
+const INVITE_LINK_TTL_MS = 30 * 60_000;
+/** An invitation's token: 32 random bytes, base64url. Only its SHA-256 digest is stored. */
+const INVITE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+/** How long an invitation stays open, and how many a team workspace may send in a day. */
+const INVITATION_DAYS = 7;
+const INVITATION_DAILY_LIMIT = 50;
+/** People in a team workspace on the Free plan, its Owner and open invitations included. */
+const FREE_TEAM_MEMBERS = 3;
+/** Team workspaces on the Free plan each person may create, where plans apply. */
+const FREE_TEAMS_PER_PERSON = 1;
+/** A team workspace's id, as its tenant names it (`team:<id>`). */
+const TEAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const EMAIL_ADDRESS = /^[^@\s<>"]{1,64}@[^@\s<>"]+\.[^@\s<>"]+$/;
+/** Audit events a page of the audit log shows, and an export holds at most. */
+const AUDIT_PAGE = 50;
+const AUDIT_EXPORT_MOST = 10_000;
+const AUDIT_EXPORT_EMPTY = Object.freeze({
+  occurred_at: '', action: '', outcome: '', actor_type: '', actor_ref: '', actor_role: '', target_type: '',
+  target_ref: '', reason: '', ip_address: '', user_agent: '', metadata: '', chain_index: '', hash: '',
+});
+
+/** A CSV cell, quoted; one a spreadsheet would read as a formula starts with an apostrophe. */
+function csvCell(value: string): string {
+  const safe = /^[\s]*[=+\-@]|^[\t\r\n]/.test(value) ? `'${value}` : value;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+/** What each audited action did, as the audit log says it. */
+const AUDIT_ACTION_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  'api_key.created': 'created an API key',
+  'api_key.rotated': 'rotated an API key',
+  'api_key.revoked': 'revoked an API key',
+  'api_key.limits_changed': "changed an API key's limits",
+  'webhook.created': 'added a webhook',
+  'webhook.deleted': 'removed a webhook',
+  'webhook.enabled': 'turned a webhook back on',
+  'contact.forgotten': 'forgot a contact',
+  'subject.erased': 'erased a person',
+  'export.created': 'exported the account',
+  'export.downloaded': 'downloaded an export of the account',
+  'subject.exported': "exported a person's data",
+  'assistant.settings_saved': "changed the assistant's model",
+  'assistant.settings_removed': "removed the assistant's model",
+  'billing.checkout_started': 'started a checkout',
+  'billing.portal_opened': 'opened billing',
+  'organization.enabled': 'turned the organization on',
+  'organization.disabled': 'turned the organization off',
+  'sandbox.reset': 'reset the test environment',
+  'session.signed_in': 'signed in',
+  'session.signed_out_everywhere': 'signed out everywhere',
+  'session.ended': 'signed a device out',
+  'audit.exported': 'exported the audit log',
+  'workspace.created': 'created the team',
+  'workspace.deletion_scheduled': 'asked for the team to be deleted',
+  'workspace.deletion_cancelled': 'kept the team',
+  'member.invited': 'invited someone',
+  'invitation.resent': 'sent an invitation again',
+  'invitation.revoked': 'revoked an invitation',
+  'member.joined': 'joined',
+  'member.role_changed': "changed a member's role",
+  'member.scope_changed': 'changed what a member reaches',
+  'member.removed': 'removed a member',
+  'member.left': 'left',
+  'member.join_requested': 'asked to join',
+  'member.join_approved': 'let someone join',
+  'member.join_declined': 'declined a request to join',
+  'domain.claimed': 'added a domain',
+  'domain.verified': 'verified a domain',
+  'domain.record_missing': "found a domain's record gone",
+  'domain.lapsing': 'found a domain lapsing',
+  'domain.restored': 'verified a domain again',
+  'domain.lapsed': 'found a domain lapsed',
+  'domain.released': 'removed a domain',
+  'domain.join_policy_changed': 'changed who may join through a domain',
+  'workspace.invites_restricted': 'held invitations to verified domains',
+  'workspace.invites_unrestricted': 'let invitations go to any address',
+  'sso.connection_saved': 'saved the single sign-on connection',
+  'sso.connection_tested': 'tested single sign-on',
+  'sso.connection_activated': 'turned single sign-on on',
+  'sso.connection_disabled': 'turned single sign-on off',
+  'sso.connection_deleted': 'deleted the single sign-on connection',
+  'sso.provisioning_changed': 'changed who single sign-on adds',
+  'sso.mapping_changed': 'changed a group’s role',
+  'sso.required': 'required single sign-on',
+  'sso.not_required': 'stopped requiring single sign-on',
+  'sso.bypass_used': 'bypassed single sign-on',
+  'sso.signed_in': 'signed in with single sign-on',
+  'sso.linked': 'linked a single sign-on account',
+  'authz.denied': 'was refused',
+  'staff.account_suspended': 'suspended the account',
+  'staff.account_unsuspended': "lifted the account's suspension",
+  'staff.key_revoked': 'revoked an API key',
+  'staff.sessions_ended': 'signed a person out',
+  'staff.plan_overridden': "changed the account's plan or limits until a date",
+  'staff.plan_override_ended': "ended a change to the account's plan or limits",
+  'staff.notice_sent': 'sent the account a notice',
+  'staff.feature_changed': 'turned a feature on or off for the account',
+});
+/** What the Teams page says where staff turned off creating teams for the person's account (M11). */
+const TEAM_CREATION_OFF = 'Creating team workspaces is turned off for your account, or it is suspended. Teams you are in work as before.';
+const AUDIT_ACTION_GROUPS: readonly (readonly [string, readonly string[]])[] = Object.freeze([
+  ['API keys', ['api_key.created', 'api_key.rotated', 'api_key.revoked', 'api_key.limits_changed']],
+  ['Webhooks', ['webhook.created', 'webhook.deleted', 'webhook.enabled']],
+  ['People', ['workspace.created', 'workspace.deletion_scheduled', 'workspace.deletion_cancelled', 'member.invited', 'invitation.resent', 'invitation.revoked', 'member.joined', 'member.role_changed', 'member.scope_changed', 'member.removed', 'member.left', 'member.join_requested', 'member.join_approved', 'member.join_declined', 'organization.enabled', 'organization.disabled']],
+  ['Identity', [
+    ...SLOTLOCK_DOMAIN_AUDIT_ACTIONS,
+    'sso.connection_saved', 'sso.connection_tested', 'sso.connection_activated', 'sso.connection_disabled',
+    'sso.connection_deleted', 'sso.provisioning_changed', 'sso.mapping_changed', 'sso.required', 'sso.not_required',
+    'sso.bypass_used', 'sso.signed_in', 'sso.linked',
+  ]],
+  ['Billing', ['billing.checkout_started', 'billing.portal_opened']],
+  ['Sessions', ['session.signed_in', 'session.signed_out_everywhere', 'session.ended']],
+  ['Slotlock staff', [
+    'staff.account_suspended', 'staff.account_unsuspended', 'staff.key_revoked', 'staff.sessions_ended',
+    'staff.plan_overridden', 'staff.plan_override_ended', 'staff.notice_sent', 'staff.feature_changed',
+  ]],
+  ['Other', ['contact.forgotten', 'subject.erased', 'subject.exported', 'export.created', 'export.downloaded', 'assistant.settings_saved', 'assistant.settings_removed', 'sandbox.reset', 'audit.exported', 'authz.denied']],
+]);
+const AUDIT_ACTION_NAMES: ReadonlySet<string> = new Set(AUDIT_ACTION_GROUPS.flatMap(([, actions]) => actions));
+
+/** What a team change refused says, and its status. */
+const TEAM_REFUSALS: Readonly<Record<SlotlockTeamRefusal, { status: number; text: string }>> = Object.freeze({
+  invalid_handle: { status: 400, text: 'That name gives no usable handle. Try another.' },
+  invalid_name: { status: 400, text: 'Name the team: 1 to 80 characters.' },
+  handle_taken: { status: 409, text: 'That name is taken. Try another.' },
+  team_limit: {
+    status: 403,
+    text: `Each person may create ${String(FREE_TEAMS_PER_PERSON)} team on the Free plan. A team being deleted counts until it goes. Upgrade yours to create another.`,
+  },
+  not_found: { status: 404, text: 'That is no longer here.' },
+  not_allowed: { status: 403, text: 'Your role can’t give that role, or change that member.' },
+  already_member: { status: 409, text: 'They are already a member.' },
+  invitation_limit: {
+    status: 429,
+    text: `This team sent ${String(INVITATION_DAILY_LIMIT)} invitations in the last day. Try again tomorrow.`,
+  },
+  recipient_limit: {
+    status: 429,
+    text: `That address was sent ${String(SLOTLOCK_INVITATIONS_PER_ADDRESS)} invitations in the last day. Try again tomorrow.`,
+  },
+  member_cap: {
+    status: 403,
+    text: `A team on the Free plan has up to ${String(FREE_TEAM_MEMBERS)} people, open invitations included. Upgrade it to add more.`,
+  },
+  revoked: { status: 409, text: 'This invitation was withdrawn.' },
+  accepted: { status: 409, text: 'This invitation was already used.' },
+  expired: { status: 409, text: 'This invitation expired. Ask for a new one.' },
+  not_for_you: { status: 403, text: 'This invitation is for another account.' },
+  last_owner: { status: 409, text: 'A team keeps at least one owner. Make someone else an owner first.' },
+  sso_owner: { status: 409, text: 'An owner signs in with GitHub or Google too, for when the team’s provider is down. Ask them to link it first.' },
+  confirm: { status: 400, text: "Type the team's handle to confirm." },
+  subscription_live: { status: 409, text: 'Cancel its Team plan on Usage first.' },
+  owner: { status: 409, text: 'An owner reaches the whole workspace. Change their role first.' },
+  domain_restricted: { status: 403, text: 'Invitations go only to addresses at this team’s verified domains.' },
+});
+
+/** A handle from a team's name: lower-case letters, digits and dashes; later attempts add a random end. */
+function teamHandleFrom(name: string, attempt: number): string {
+  const base =
+    name
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+/, '')
+      .slice(0, 30)
+      .replace(/-+$/, '') || 'team';
+  return attempt === 0 ? base : `${base}-${randomBytes(3).toString('hex')}`;
+}
+
+/** A browser as people name it, from its User-Agent: `Firefox on macOS`. */
+function deviceOf(agent: string | null): string {
+  if (!agent) return 'A browser';
+  const browser = /Edg\//.test(agent)
+    ? 'Edge'
+    : /OPR\//.test(agent)
+      ? 'Opera'
+      : /Firefox\//.test(agent)
+        ? 'Firefox'
+        : /Chrome\//.test(agent)
+          ? 'Chrome'
+          : /Safari\//.test(agent)
+            ? 'Safari'
+            : 'A browser';
+  const system = /iPhone|iPad/.test(agent)
+    ? 'iOS'
+    : /Android/.test(agent)
+      ? 'Android'
+      : /Mac OS X|Macintosh/.test(agent)
+        ? 'macOS'
+        : /Windows/.test(agent)
+          ? 'Windows'
+          : /Linux/.test(agent)
+            ? 'Linux'
+            : '';
+  return system ? `${browser} on ${system}` : browser;
+}
+
+/** An address as an invitation shows it before anyone signs in: its first letter and domain. */
+function maskedEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  if (at < 1) return email;
+  return `${email.slice(0, 1)}${'•'.repeat(Math.min(3, at - 1))}${email.slice(at)}`;
+}
+
+const tokenDigest = (raw: string | Buffer) => createHash('sha256').update(raw).digest();
 const KEY_ACCESS: Readonly<Record<string, SlotlockApiKeyScope[]>> = Object.freeze({
   read: ['read'],
   read_write: ['read', 'write'],
@@ -155,14 +645,44 @@ const KEY_EXPIRY_DAYS: Readonly<Record<string, number | null>> = Object.freeze({
  */
 const REFERRER_POLICY = 'same-origin';
 const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/** The policy, with billing's origins allowed as form targets so Upgrade and Manage can redirect. */
+function policyFor(billing: SlotlockDashboardBilling | undefined): string {
+  if (!billing) return CONTENT_SECURITY_POLICY;
+  const contact = new URL(billing.contact);
+  if (contact.protocol !== 'https:' && contact.protocol !== 'mailto:') {
+    throw new Error('billing.contact must be an https or mailto URL');
+  }
+  const origins = billing.formOrigins.map((value) => {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.origin !== value.replace(/\/$/, '')) {
+      throw new Error(`billing.formOrigins must be https origins: ${value}`);
+    }
+    return parsed.origin;
+  });
+  return CONTENT_SECURITY_POLICY.replace(
+    "form-action 'self'",
+    ["form-action 'self'", ...origins].join(' '),
+  );
+}
 
 /**
  * A tenant's calendar resources, as the dashboard lists and adds them. Each write takes, last, the
  * person who made it (`github:<user id>`) as `actor`, to record on the event feed.
  */
 export interface SlotlockDashboardResources {
+  /**
+   * These adapters keep each request to the locations and groups its member is limited to (RFC
+   * 0004 D1), as createSlotlockDashboardResources's do (dashboard-scope.ts). Without it, a limited
+   * member reaches only their own account.
+   */
+  keepsToScope?: boolean;
   list(tenantRef: string): Promise<SlotlockResource[]>;
+  /** How many resources the tenant has, archived ones included, as a resource limit counts them. */
+  count?(tenantRef: string): Promise<number>;
+  /** The tenant's metered usage from `from` to `to`, UTC days inclusive (usage.ts). */
+  usage?(tenantRef: string, from: string, to: string): Promise<SlotlockUsageRow[]>;
   /**
    * Create the resource, or re-zone the tenant's resource with that reference. Refuse a new one
    * (an error with `code: 'resource_limit_reached'`) once the tenant has
@@ -175,16 +695,65 @@ export interface SlotlockDashboardResources {
     actor?: string,
   ): Promise<SlotlockResource>;
   /**
-   * Set the bookable hours of one of the tenant's resources (`{ id }`) or of all of them; `null`
-   * hands them back to the server's and `[]` closes. Returns how many resources changed: 0 for an
-   * id that is not the tenant's.
+   * Set the bookable hours of one of the tenant's resources (`{ id }`), one of its locations
+   * (`{ location }`), or the tenant's own (`'all'`), which every resource without its own inherits
+   * (RFC 0004 B2); `null` hands them to what is above and `[]` closes. For the tenant's, `override`
+   * says what becomes of resources' own hours (SlotlockOverrideResources: `none` keeps them).
+   * Returns 0 for an id or location that is not the tenant's, else at least 1 (for the tenant's, how
+   * many resources they now apply to).
    */
   setHours(
     tenantRef: string,
-    target: { id: string } | 'all',
+    target: { id: string } | { location: string } | 'all',
     rules: WeeklyAvailabilityRule[] | null,
     actor?: string,
+    override?: SlotlockOverrideResources,
   ): Promise<number>;
+  /**
+   * What the tenant keeps, exported whole, and what it keeps about one person, exported or erased
+   * (RFC 0004 D3): Settings, Privacy.
+   */
+  privacy?: {
+    /** Ask for an export, built in the background; refused while one is built, or with five kept. */
+    createExport(tenantRef: string, actor?: string): Promise<SlotlockTenantExport>;
+    listExports(tenantRef: string): Promise<SlotlockTenantExport[]>;
+    exportPart(tenantRef: string, exportId: string, part: number): Promise<SlotlockTenantExportPartResult>;
+    deleteExport(tenantRef: string, exportId: string): Promise<boolean>;
+    exportSubject(tenantRef: string, subject: SlotlockSubject): Promise<SlotlockSubjectExport>;
+    eraseSubject(tenantRef: string, subject: SlotlockSubject, actor?: string): Promise<SlotlockSubjectErasure>;
+  };
+  /** The people the tenant keeps to tell about bookings (RFC 0004 P3), and forgetting one. */
+  contacts?: {
+    list(tenantRef: string, limit: number, after?: string): Promise<SlotlockContact[]>;
+    forget(tenantRef: string, ref: string, actor?: string): Promise<{ deleted: boolean; bookings: number }>;
+  };
+  /** The tenant's stored hours and its closures and special hours (RFC 0004 B1, B2). */
+  hours?: {
+    defaults(tenantRef: string): Promise<SlotlockAvailabilityDefaults>;
+    exceptions(tenantRef: string, limit: number): Promise<SlotlockAvailabilityException[]>;
+    addException(
+      tenantRef: string,
+      exception: Omit<SlotlockAvailabilityExceptionInput, 'tenantRef'>,
+      actor?: string,
+    ): Promise<SlotlockAvailabilityException>;
+    deleteException(tenantRef: string, id: string, actor?: string): Promise<boolean>;
+    /**
+     * Import a holiday calendar (its text, or a URL with `byUrl`): each all-day event closes its
+     * days for the next two years. Kept by name at its scope, so importing it again updates it and
+     * removes the holidays it dropped; `subscribe` imports a URL again every 30 days.
+     */
+    importHolidays(
+      tenantRef: string,
+      source: SlotlockHolidaySource,
+      scope: { location?: string; resourceId?: string },
+      actor?: string,
+    ): Promise<{ imported: number; skipped: number; removed: number }>;
+    /** Whether importHolidays reads calendars by URL. */
+    byUrl?: boolean;
+    /** The tenant's holiday calendars, and deleting one with its closures (false: not the tenant's). */
+    calendars?(tenantRef: string): Promise<SlotlockHolidayCalendar[]>;
+    deleteCalendar?(tenantRef: string, id: string, actor?: string): Promise<boolean>;
+  };
   /** What occupies the tenant's resources in `window`, by start: the overview's agenda. */
   agenda?(tenantRef: string, window: Interval, limit: number): Promise<SlotlockAgendaEntry[]>;
   /** The tenant's latest changes, newest first: the overview's activity. */
@@ -201,6 +770,22 @@ export interface SlotlockDashboardResources {
   ): Promise<SlotlockResource | null>;
   /** The tenant's default booking rules and its pools', which a resource's own rules overlay. */
   ruleDefaults?(tenantRef: string): Promise<SlotlockBookingRuleDefaults>;
+  /**
+   * Change one of the tenant's resources' profile (resource-profile.ts): the fields given, keeping
+   * the rest. As setRules; `code: 'invalid_resource_profile'`, with the `field`.
+   */
+  setProfile?(
+    tenantRef: string,
+    id: string,
+    profile: SlotlockResourceProfileInput,
+    actor?: string,
+  ): Promise<SlotlockResource | null>;
+  /**
+   * Make one of the tenant's resources a part of a composite (RFC 0003 G8), or no part. A refusal
+   * carries the store's `code`: `parent_not_found`, `composite_too_deep`, `composite_parts_limit`
+   * or `composite_busy`.
+   */
+  setParent?(tenantRef: string, id: string, parentId: string | null, actor?: string): Promise<SlotlockResource | null>;
   /** Put one of the tenant's resources in a pool, or none: as setRules; `code: 'invalid_pool'`. */
   setPool?(
     tenantRef: string,
@@ -208,13 +793,82 @@ export interface SlotlockDashboardResources {
     pool: string | null,
     actor?: string,
   ): Promise<SlotlockResource | null>;
-  /** The tenant's waitlist, oldest first, and leaving it (false when the entry is not the tenant's). */
-  waitlist?: {
-    list(tenantRef: string, limit: number): Promise<SlotlockWaitlistEntry[]>;
-    leave(tenantRef: string, id: string, actor?: string): Promise<boolean>;
+  /**
+   * The tenant's locations and groups (RFC 0003 G2, G3), and where each resource is in them. A
+   * refusal carries the store's `code`: `invalid_location` or `invalid_group` (with the `field`),
+   * `location_not_found`, `location_too_deep`, `location_cycle`, `location_limit_reached`,
+   * `location_in_use`, `group_not_found`, `group_limit_reached` or `resource_group_limit_reached`.
+   */
+  grouping?: {
+    /** Each under its parent, depth first, with how many resources are at each. */
+    locations(tenantRef: string): Promise<SlotlockLocation[]>;
+    /** Create the location with this reference, or change its name, parent and time zone. */
+    putLocation(
+      tenantRef: string,
+      location: { ref: string; name: string; parentRef: string | null; timezone: string | null },
+      actor?: string,
+    ): Promise<SlotlockLocation>;
+    /** False when the tenant has no such location. */
+    deleteLocation(tenantRef: string, ref: string, actor?: string): Promise<boolean>;
+    /** By reference, with how many resources are in each. */
+    groups(tenantRef: string): Promise<SlotlockResourceGroup[]>;
+    /** Create the group with this reference, or change its name and description. */
+    putGroup(
+      tenantRef: string,
+      group: { ref: string; name: string; description: string | null },
+      actor?: string,
+    ): Promise<SlotlockResourceGroup>;
+    /** Delete a group, its resources left as they are: false when the tenant has no such group. */
+    deleteGroup(tenantRef: string, ref: string, actor?: string): Promise<boolean>;
+    /**
+     * Put one of the tenant's resources at a location (or none) and in exactly these groups, in one
+     * transaction: the resource as it then is, or null when it is not the tenant's.
+     */
+    place(
+      tenantRef: string,
+      id: string,
+      place: { location: string | null; groups: readonly string[] },
+      actor?: string,
+    ): Promise<SlotlockResource | null>;
+  };
+  /**
+   * The tenant's approvals (RFC 0004 A4), newest first, and deciding one: a grant makes the booking
+   * as the agent asked for it; a refusal says why (approval_not_pending, overlap, a booking rule).
+   */
+  approvals?: {
+    list(tenantRef: string, limit: number): Promise<SlotlockApproval[]>;
+    decide(
+      tenantRef: string,
+      id: string,
+      decision: 'grant' | 'decline',
+      actor?: string,
+      reason?: string,
+    ): Promise<{ ok: true } | { ok: false; code: string }>;
+  };
+  /**
+   * The sandbox (RFC 0004 A6), for a test environment only: fill it with a scenario, empty it, and
+   * make what would lapse within some minutes lapse now. Each refuses a live tenant.
+   */
+  sandbox?: {
+    seed(tenantRef: string, scenario: SlotlockSandboxScenario): Promise<{ resources: number; bookings: number }>;
+    reset(tenantRef: string): Promise<void>;
+    fastForward(tenantRef: string, minutes: number): Promise<{ holds: number; approvals: number }>;
   };
   /** The tenant's assistant settings and its members' conversations (assistant.ts). */
   assistant?: SlotlockAssistantStore;
+  /**
+   * The tenant's audit log (slotlock.audit_events): who changed keys, webhooks, billing and
+   * settings, and every refusal. Append-only: record, and read newest first.
+   */
+  audit?: {
+    /** Whether the workspace's chain holds from its oldest event kept (store verifyAuditChain). */
+    verify?(tenantRef: string): Promise<{ checked: number; brokenAt: number | null }>;
+    record(tenantRef: string, event: SlotlockAuditEventInput): Promise<void>;
+    list(
+      tenantRef: string,
+      params?: { limit?: number; before?: { occurredAt: Date; id: string }; action?: string; actorRef?: string },
+    ): Promise<SlotlockAuditEvent[]>;
+  };
   /** The tenant's webhook endpoints, as the event feed keeps them. */
   webhooks?: {
     list(tenantRef: string): Promise<SlotlockWebhookEndpoint[]>;
@@ -244,8 +898,9 @@ export interface SlotlockDashboardState {
    * Record a sign-in or form `value` until `expiresAt` (ms since the epoch). True only the first
    * time, and never for a value whose expiry has passed or that claims to outlive a day, by the
    * state's own clock (the database's, for createSlotlockDashboardState). A form names its `owner`,
-   * the GitHub user id: past SLOTLOCK_DASHBOARD_FORM_LIMIT live forms of one owner, `use` throws an
-   * error with `code: 'dashboard_form_limit'`.
+   * whose budget it draws on (the person, or a team's provider signing in as them): past
+   * SLOTLOCK_DASHBOARD_FORM_LIMIT live forms of one owner, `use` throws an error with
+   * `code: 'dashboard_form_limit'`.
    */
   use(kind: 'sign_in' | 'form', value: string, expiresAt: number, owner?: string): Promise<boolean>;
   /** Record that the session `sid` signed out, until `expiresAt`. */
@@ -267,6 +922,18 @@ export interface SlotlockDashboardState {
 export interface SlotlockDashboardAssistantOptions {
   /** Seals each tenant's API key (SLOTLOCK_ASSISTANT_SECRET): 32+ random characters. */
   secret: string;
+  /**
+   * Secrets keys may still be sealed under (SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS), newest first, at
+   * most SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS: a key one of them opens is used, and sealed again
+   * under `secret` in the same request, so changing the secret makes no owner enter a key again.
+   * Drop an old secret once every tenant has used the assistant since the change, or keys still
+   * sealed under it stop opening.
+   */
+  previousSecrets?: readonly string[];
+  /** Each operation the assistant runs, for usage metering (the agent server's `onUsage`). */
+  onUsage?: (usage: SlotlockAgentUsage) => void;
+  /** Each message a member sends that the assistant answers, for usage metering. Never awaited. */
+  onMessage?: (tenantRef: string) => void;
   backend: SlotlockAgentCalendarBackend;
   /**
    * As the agent server's: false refuses an operation. Every offered operation by default. It also
@@ -308,8 +975,98 @@ export interface SlotlockDashboardAssistantOptions {
   turnTimeoutMs?: number;
   /** Model calls one message may make (8 by default, at most 20). */
   maxSteps?: number;
-  /** How long a conversation is kept after its last message: 2 hours by default. */
+  /**
+   * How long a conversation is kept after its last message (1 second to 3,650 days). Without it, a
+   * member keeps each conversation until they delete it, up to SLOTLOCK_ASSISTANT_MAX_CHATS.
+   */
   conversationTtlMs?: number;
+}
+
+/**
+ * Hosted Slotlock's plans (plans.ts) and their billing: a Usage page with the tenant's plan and use,
+ * Upgrade (to a checkout page) and Manage (to a billing portal). Off unless set.
+ */
+/**
+ * The tenant's plan and the deployment's default, read whether or not anything sells plans: with it
+ * the dashboard shows a Usage page (plan, limits and this month's use) and puts a tenant new to
+ * plans on the default before it adds what plans limit.
+ */
+export interface SlotlockDashboardPlans {
+  /** The tenant's plan (its own, or the default once it applies), or null (the server's limits apply). */
+  plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
+  /** Puts a tenant new to plans on the default plan before it adds a key, resource or webhook endpoint. */
+  enrol?(tenantRef: string): Promise<void>;
+  /** The deployment's default plan and the date it applies to every tenant, or null. */
+  planDefault?(): Promise<{ plan: SlotlockPlan; limits: SlotlockTenantPlan['limits']; appliesFrom: Date } | null>;
+  /**
+   * Where asking for another plan goes (an https or mailto URL) when nothing sells plans here: with
+   * it, the Usage page offers Developer or Team by asking.
+   */
+  contact?: string;
+}
+
+export interface SlotlockDashboardBilling {
+  /** The tenant's plan (its own, or the default), or null when it has none (the server's limits apply). */
+  plan(tenantRef: string): Promise<SlotlockTenantPlan | null>;
+  /**
+   * Puts a tenant new to plans on the default plan before it adds a key, resource or webhook
+   * endpoint, while the default does not yet apply to every tenant (plans.ts).
+   */
+  enrol?(tenantRef: string): Promise<void>;
+  /** A checkout URL for the Developer plan, or the Team plan for an organization (with `teamPrices`). */
+  checkout(input: {
+    tenantRef: string;
+    interval: 'month' | 'year';
+    plan?: 'developer' | 'team';
+    customer: string | null;
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<string>;
+  /** A billing portal URL for the tenant's customer, in the portal configuration of its kind of plan. */
+  portal(input: { customer: string; returnUrl: string; plan?: 'developer' | 'team' }): Promise<string>;
+  /**
+   * The Developer plan's prices as shown, such as `£5`: what the page shows when `shownPrices` is
+   * not given or does not answer.
+   */
+  prices: { month: string; year: string };
+  /**
+   * The plans' prices as the payment provider holds them (billing.ts), shown in place of `prices`
+   * and `teamPrices` whenever it answers, so the page never shows a price it does not charge.
+   */
+  shownPrices?(): Promise<{ prices: { month: string; year: string }; teamPrices?: { month: string; year: string } }>;
+  /**
+   * When the plan's subscription is set to end (cancelled at the end of the period, as the billing
+   * portal cancels), or null when it renews: the Usage page then says when the plan ends, not that
+   * it renews. Read from the payment provider, so it needs no column of the database's.
+   */
+  ending?(subscription: string): Promise<Date | null>;
+  /**
+   * The Team plan's prices as shown (Teams on Cloud). A shared workspace (an organization's or a
+   * team's) is offered Team only, never Developer: without them it is offered Team by asking.
+   */
+  teamPrices?: { month: string; year: string };
+  /**
+   * Metered overage on Developer (SLOTLOCK_OVERAGE, overage.ts): its price as shown, such as `$2
+   * per 10,000 operations`, and the percent of the quota where use is refused.
+   */
+  overage?: { price: string; stopPercent: number };
+  /** Where a Custom (self-hosted) enquiry goes: an https or mailto URL. */
+  contact: string;
+  /** The https origins Upgrade and Manage redirect to, allowed in the policy's form-action. */
+  formOrigins: readonly string[];
+}
+
+/** Sends an invitation's link by email (hosted Slotlock); without one, the person inviting sends it. */
+export interface SlotlockInvitationSender {
+  send(invitation: {
+    to: string;
+    /** The team workspace's name, and how the person inviting is shown. */
+    workspace: string;
+    inviter: string;
+    role: string;
+    link: string;
+    expiresAt: Date;
+  }): Promise<void>;
 }
 
 export interface SlotlockDashboardOptions {
@@ -317,6 +1074,18 @@ export interface SlotlockDashboardOptions {
   publicUrl: string;
   /** What the deployment is called in the dashboard: 1-60 characters. Defaults to `Slotlock`. */
   name?: string;
+  /**
+   * The terms people accept by signing in, an https URL. The sign-in page links them beside the
+   * button; without it, the page names no terms.
+   */
+  termsUrl?: string;
+  /** The privacy notice the sign-in page links, an https URL. */
+  privacyUrl?: string;
+  /**
+   * The Slotlock version the dashboard runs, sent as X-Slotlock-Version on its pages so the staff
+   * console's System page can say what is deployed (the Worker passes package.json's).
+   */
+  version?: string;
   /**
    * Where agents reach the server's MCP and A2A endpoints, which the dashboard shows, when it is
    * served from another origin (on Cloudflare Workers, with the server elsewhere). Defaults to
@@ -335,9 +1104,25 @@ export interface SlotlockDashboardOptions {
     userUrl?: string;
     membershipsUrl?: string;
   };
+  /**
+   * Sign-in with Google (OpenID Connect), beside GitHub, for people without a GitHub account: each
+   * is their own tenant, `google:<subject>`. Not offered with a fixed list of `organizations`,
+   * which are GitHub's. Its redirect URI is the same `<publicUrl>/dashboard/callback`.
+   */
+  google?: {
+    clientId: string;
+    clientSecret: string;
+    authorizeUrl?: string;
+    tokenUrl?: string;
+    /** Google's signing keys (JWKS); https://www.googleapis.com/oauth2/v3/certs by default. */
+    jwksUrl?: string;
+  };
   /** Seals sessions and sign-in state and derives CSRF tokens: 32+ random characters. */
   sessionSecret: string;
-  /** GitHub user ids (numbers, as strings) that may sign in, or `'*'` for every GitHub account. */
+  /**
+   * GitHub user ids (numbers, as strings) and Google accounts (`google:<subject>`) that may sign in,
+   * or `'*'` for every account.
+   */
   allowedUsers: '*' | readonly string[];
   /**
    * GitHub organization ids (numbers, as strings) this dashboard serves. With them, a tenant is an
@@ -348,8 +1133,48 @@ export interface SlotlockDashboardOptions {
    * ends access at the next sign-in, at most a session (12 hours) later, and removing an
    * organization from this list signs its sessions out at once. Without it, each person is their
    * own tenant (`github:<id>`).
+   *
+   * `'enabled'` (Teams on Cloud, with `teams`): each person signs in to their own tenant and may
+   * switch to any organization they belong to that an owner turned on, on the Teams page; turning
+   * one off ends its use at once.
    */
-  organizations?: readonly string[];
+  organizations?: readonly string[] | 'enabled';
+  /** The organizations turned on, with `organizations: 'enabled'` (teams.ts). */
+  teams?: SlotlockDashboardTeams;
+  /**
+   * Who belongs to which workspace, and as what (workspaces.ts, workspace-roles.ts): read on every
+   * request, so a role changed or a membership ended applies at the next one, and "Sign out
+   * everywhere" ends every session. Without it, a person is the Owner of their own workspace, and an
+   * organization's GitHub owners are its Owners and its other members Developers, as read at sign-in.
+   */
+  workspaces?: SlotlockDashboardWorkspaces;
+  /**
+   * Team workspaces (`team:<id>`): anyone signed in creates one, invites people to it by email with
+   * a role, and changes or removes them (workspaces.ts teams). Needs `workspaces` with its
+   * database, and no fixed list of organizations. Off unless set.
+   */
+  teamWorkspaces?: boolean;
+  /**
+   * Verified domains (workspace-domains.ts): a team's Owner proves a domain with a DNS record, and
+   * the people whose verified address is at it may ask to join. Needs team workspaces. The resolvers
+   * look the record up when an Owner asks (domains.ts slotlockDomainResolvers); the daily check runs
+   * in the server's maintenance. Off unless set.
+   */
+  domains?: { resolvers: readonly SlotlockDnsResolver[] };
+  /**
+   * Single sign-on through each team's own identity provider (OpenID Connect; workspace-sso.ts,
+   * oidc.ts): needs verified domains. `secretBox` seals the teams' client secrets; `fetch` reaches
+   * the URLs a team's Owner gives (on Node, one that refuses private addresses). Off unless set.
+   */
+  sso?: { secretBox: SlotlockSecretBox; fetch?: typeof fetch };
+  /**
+   * SCIM 2.0 provisioning (workspace-scim.ts, scim-server.ts): each team's identity provider adds,
+   * deactivates and groups its people at `<dashboard>/scim/v2/<team id>`, with a token an Owner
+   * makes on Settings, Identity. Needs verified domains. Off unless set.
+   */
+  scim?: boolean;
+  /** Sends invitations by email; the person inviting is shown each link either way. */
+  invitations?: SlotlockInvitationSender;
   keys: SlotlockApiKeyStore;
   resources: SlotlockDashboardResources;
   /** Shared by every server behind this origin: see SlotlockDashboardState. */
@@ -358,6 +1183,20 @@ export interface SlotlockDashboardOptions {
   availability?: readonly WeeklyAvailabilityRule[];
   /** The chat assistant; off unless set. */
   assistant?: SlotlockDashboardAssistantOptions;
+  /** Plans (hosted Slotlock): a Usage page, and enrolment on the default plan. Off unless set. */
+  plans?: SlotlockDashboardPlans;
+  /** Paying for plans through Stripe (hosted Slotlock); off unless set. Implies `plans` from its own. */
+  billing?: SlotlockDashboardBilling;
+  /**
+   * The deployment meters usage (SLOTLOCK_USAGE=on): the Usage page shows this month's, from the
+   * resources adapter's `usage`.
+   */
+  usage?: boolean;
+  /**
+   * The deployment holds tenants to their plans' monthly quotas (SLOTLOCK_QUOTAS=on): the Usage page
+   * shows this month's use against them, and warns from 80%. Needs `usage`.
+   */
+  quotas?: boolean;
   fetch?: typeof fetch;
   now?: () => number;
   /**
@@ -383,15 +1222,121 @@ export interface SlotlockDashboard {
  * The dashboard's resources, in the store under each tenant's row-level security. Adds hold the cap
  * in the database (a READ COMMITTED transaction, under a per-tenant lock).
  */
-export function createSlotlockDashboardResources(store: SlotlockStore): SlotlockDashboardResources {
+export function createSlotlockDashboardResources(
+  given: SlotlockStore,
+  options: {
+    /**
+     * The agent backend (`createSlotlockStoreAgentBackend`) a granted approval's booking is made
+     * through: with it, the dashboard lists approvals and decides them.
+     */
+    agentBackend?: SlotlockAgentCalendarBackend;
+    /**
+     * Fetches holiday calendars by URL (the guarded fetch under `serve`): with it, Closures imports
+     * and subscribes to a calendar's address.
+     */
+    holidayFetch?: typeof fetch;
+    /**
+     * The tenants' monthly quotas (SLOTLOCK_QUOTAS=on, quotas.ts): with them, granting an approval,
+     * which books, is refused `quota_exceeded` once the tenant's bookings this month reach its stop,
+     * as the API's grant is. Declining is not.
+     */
+    quotas?: SlotlockQuotas;
+  } = {},
+): SlotlockDashboardResources {
+  // Every transaction keeps to the resources the request's member is limited to, if any.
+  const store: SlotlockStore = {
+    ...given,
+    withTenant(tenantRef, callback, options) {
+      const scope = slotlockDashboardRequestScope();
+      return given.withTenant(tenantRef, callback, scope ? { ...options, resourceScope: scope } : options);
+    },
+  };
   // Every change here is the dashboard's, made by the person signed in (actor) when known.
   const by = (actor: string | undefined) =>
     actor === undefined ? { origin: 'dashboard' as const } : { origin: 'dashboard' as const, actor };
+  const agentBackend = options.agentBackend;
+  /**
+   * Approvals the request's member may see: every one, or under a scope those whose every resource
+   * the scope reaches (approvals are the tenant's, not a resource's, so the database cannot tell).
+   */
+  const reachable = async (tenant: SlotlockTenantStore, tenantRef: string, approvals: SlotlockApproval[]) => {
+    if (!slotlockDashboardRequestScope()) return approvals;
+    const reached = new Set<string>();
+    for (const id of new Set(approvals.flatMap((approval) => approval.resourceIds))) {
+      if (await tenant.getResource({ tenantRef, id })) reached.add(id);
+    }
+    return approvals.filter((approval) => approval.resourceIds.every((id) => reached.has(id)));
+  };
   return {
+    keepsToScope: true,
+    sandbox: {
+      seed: (tenantRef, scenario) => seedSlotlockSandbox(store, tenantRef, scenario),
+      async reset(tenantRef) {
+        await resetSlotlockSandbox(store, tenantRef);
+      },
+      async fastForward(tenantRef, minutes) {
+        const forward = await fastForwardSlotlockSandbox(store, tenantRef, minutes);
+        return { holds: forward.holds, approvals: forward.approvals };
+      },
+    },
+    ...(agentBackend
+      ? {
+          approvals: {
+            list: (tenantRef: string, limit: number) =>
+              store.withTenant(tenantRef, async (tenant) => reachable(tenant, tenantRef, await tenant.listApprovals({ tenantRef, limit }))),
+            async decide(tenantRef: string, id: string, decision: 'grant' | 'decline', actor?: string, reason?: string) {
+              const decidedBy = actor ?? 'dashboard';
+              // A member limited to some resources decides only what asks for theirs alone.
+              if (slotlockDashboardRequestScope()) {
+                const found = await store.withTenant(tenantRef, async (tenant) => {
+                  const approval = await tenant.getApproval({ tenantRef, id });
+                  return approval ? (await reachable(tenant, tenantRef, [approval])).length > 0 : false;
+                });
+                if (!found) return { ok: false as const, code: 'approval_not_found' };
+              }
+              if (decision === 'decline') {
+                const declined = await store.withTenant(
+                  tenantRef,
+                  (tenant) => tenant.declineApproval({ tenantRef, id, decidedBy, ...(reason ? { reason } : {}) }),
+                  by(actor),
+                );
+                if (!declined.ok) return declined;
+                // Its held time is free: offer it to the waitlist, as a release does.
+                await store
+                  .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), { origin: 'maintenance' })
+                  .catch(() => undefined);
+                return { ok: true as const };
+              }
+              const approval = await store.withTenant(tenantRef, (tenant) => tenant.getApproval({ tenantRef, id }));
+              if (!approval) return { ok: false as const, code: 'approval_not_found' };
+              if (approval.status !== 'pending') return { ok: false as const, code: 'approval_not_pending' };
+              if (options.quotas && !(await checkSlotlockBookingQuota(options.quotas, tenantRef)).ok) {
+                return { ok: false as const, code: 'quota_exceeded' };
+              }
+              try {
+                await runSlotlockApprovalGrant(agentBackend, approval, {
+                  tenantRef,
+                  decidedBy,
+                  signal: new AbortController().signal,
+                  origin: 'dashboard',
+                });
+              } catch (error) {
+                if (error instanceof SlotlockAgentOperationError) return { ok: false as const, code: error.code };
+                throw error;
+              }
+              return { ok: true as const };
+            },
+          },
+        }
+      : {}),
     list: (tenantRef) =>
       store.withTenant(tenantRef, (tenant) =>
         tenant.listResources({ tenantRef, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES + 1 }),
       ),
+    count: (tenantRef) =>
+      store.withTenant(tenantRef, (tenant) => tenant.countResources({ tenantRef })),
+    usage: (tenantRef, from, to) =>
+      store.withTenant(tenantRef, (tenant) => tenant.readUsage({ tenantRef, from, to })),
     add: (tenantRef, externalRef, timezone, actor) =>
       store.withTenant(
         tenantRef,
@@ -404,16 +1349,91 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
           }),
         { isolation: 'read committed', ...by(actor) },
       ),
-    setHours: (tenantRef, target, rules, actor) =>
+    setHours: (tenantRef, target, rules, actor, override) =>
       store.withTenant(
         tenantRef,
         async (tenant) => {
-          if (target === 'all') return tenant.setTenantAvailability({ tenantRef, rules });
+          if (target === 'all') {
+            return (await tenant.storeTenantAvailability({ tenantRef, rules, overrideResources: override ?? 'none' })).inheriting;
+          }
+          if ('location' in target) {
+            const result = await tenant.setLocationAvailability({ tenantRef, location: target.location, rules });
+            return result === null ? 0 : Math.max(1, result.inheriting);
+          }
           const updated = await tenant.setResourceAvailability({ tenantRef, id: target.id, rules });
           return updated ? 1 : 0;
         },
         by(actor),
       ),
+    privacy: {
+      async createExport(tenantRef, actor) {
+        const made = await store.withTenant(
+          tenantRef,
+          (tenant) => tenant.createTenantExport({ tenantRef, ...(actor ? { requestedBy: actor } : {}) }),
+          { isolation: 'read committed', ...by(actor) },
+        );
+        // Built after the answer; maintenance builds one a stopped server left pending.
+        void buildSlotlockTenantExport(store, tenantRef, made.id);
+        return made;
+      },
+      listExports: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listTenantExports({ tenantRef })),
+      exportPart: (tenantRef, exportId, part) =>
+        store.withTenant(tenantRef, (tenant) => tenant.getTenantExportPart({ tenantRef, exportId, part })),
+      deleteExport: (tenantRef, exportId) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteTenantExport({ tenantRef, exportId })),
+      exportSubject: (tenantRef, subject) =>
+        store.withTenant(tenantRef, (tenant) => tenant.exportSubject({ tenantRef, subject, limit: 1_000 })),
+      eraseSubject: (tenantRef, subject, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.eraseSubject({ tenantRef, subject }), {
+          isolation: 'read committed',
+          ...by(actor),
+        }),
+    },
+    contacts: {
+      list: (tenantRef, limit, after) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listContacts({ tenantRef, limit, ...(after ? { after } : {}) })),
+      forget: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteContact({ tenantRef, ref }), { isolation: 'read committed', ...by(actor) }),
+    },
+    hours: {
+      defaults: (tenantRef) =>
+        store.withTenant(tenantRef, (tenant) => tenant.getAvailabilityDefaults({ tenantRef })),
+      exceptions: (tenantRef, limit) =>
+        store.withTenant(tenantRef, (tenant) =>
+          tenant.listAvailabilityExceptions({
+            tenantRef,
+            from: dayToDate(Math.floor(Date.now() / 86_400_000) - 1),
+            limit,
+          }),
+        ),
+      addException: (tenantRef, exception, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.createAvailabilityException({ ...exception, tenantRef }), by(actor)),
+      deleteException: (tenantRef, id, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteAvailabilityException({ tenantRef, id }), by(actor)),
+      importHolidays: async (tenantRef, source, scope, actor) => {
+        // Read (a URL fetched) before the transaction opens.
+        const read = await readSlotlockHolidayCalendar(source, options.holidayFetch);
+        return store.withTenant(
+          tenantRef,
+          async (tenant) => {
+            const result = await tenant.importHolidayCalendar({
+              tenantRef,
+              ...scope,
+              name: read.name,
+              ...(read.url !== undefined ? { url: read.url } : {}),
+              holidays: read.holidays,
+              span: read.span,
+            });
+            return { imported: result.imported, skipped: read.skipped, removed: result.removed };
+          },
+          by(actor),
+        );
+      },
+      byUrl: options.holidayFetch !== undefined,
+      calendars: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listHolidayCalendars({ tenantRef })),
+      deleteCalendar: (tenantRef, id, actor) =>
+        store.withTenant(tenantRef, async (tenant) => (await tenant.deleteHolidayCalendar({ tenantRef, id })) !== null, by(actor)),
+    },
     agenda: (tenantRef, window, limit) =>
       store.withTenant(tenantRef, (tenant) => tenant.listAgenda({ tenantRef, window, limit })),
     recentChanges: (tenantRef, limit) =>
@@ -428,25 +1448,51 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
       store.withTenant(tenantRef, (tenant) => tenant.getBookingRuleDefaults({ tenantRef })),
     setPool: (tenantRef, id, pool, actor) =>
       store.withTenant(tenantRef, (tenant) => tenant.setResourcePool({ tenantRef, id, pool }), by(actor)),
-    waitlist: {
-      list: (tenantRef, limit) =>
-        store.withTenant(tenantRef, (tenant) => tenant.listWaitlist({ tenantRef, limit })),
-      async leave(tenantRef, id, actor) {
-        const left = await store.withTenant(
+    setParent: (tenantRef, id, parentId, actor) =>
+      store.withTenant(tenantRef, (tenant) => tenant.setResourceParent({ tenantRef, id, parentId }), by(actor)),
+    setProfile: (tenantRef, id, profile, actor) =>
+      store.withTenant(
+        tenantRef,
+        (tenant) => tenant.updateResourceProfile({ tenantRef, id, profile }),
+        by(actor),
+      ),
+    grouping: {
+      locations: (tenantRef) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listLocations({ tenantRef })),
+      putLocation: (tenantRef, location, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.putLocation({ tenantRef, ...location }), by(actor)),
+      deleteLocation: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteLocation({ tenantRef, ref }), by(actor)),
+      groups: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.listGroups({ tenantRef })),
+      putGroup: (tenantRef, group, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.putGroup({ tenantRef, ...group }), by(actor)),
+      deleteGroup: (tenantRef, ref, actor) =>
+        store.withTenant(tenantRef, (tenant) => tenant.deleteGroup({ tenantRef, ref }), by(actor)),
+      place: (tenantRef, id, place, actor) =>
+        store.withTenant(
           tenantRef,
-          (tenant) => tenant.leaveWaitlist({ tenantRef, id }),
+          async (tenant) => {
+            // The location first, which finds the resource (null when it is not the tenant's);
+            // then its groups, in the same transaction, so a refused group moves nothing.
+            const moved = await tenant.updateResourceProfile({
+              tenantRef,
+              id,
+              profile: {},
+              location: place.location,
+            });
+            if (!moved) return null;
+            const wanted = new Set(place.groups);
+            const current = new Set(moved.groups ?? []);
+            for (const group of current) {
+              if (!wanted.has(group)) await tenant.removeGroupMember({ tenantRef, group, resourceId: id });
+            }
+            for (const group of wanted) {
+              if (!current.has(group)) await tenant.addGroupMember({ tenantRef, group, resourceId: id });
+            }
+            return tenant.getResource({ tenantRef, id });
+          },
           by(actor),
-        );
-        // An offered entry's hold went with it: offer that time to the next, as the API does.
-        if (left) {
-          await store
-            .withTenant(tenantRef, (tenant) => tenant.offerWaitlist({ tenantRef, limit: 20 }), {
-              origin: 'maintenance',
-            })
-            .catch(() => undefined);
-        }
-        return left;
-      },
+        ),
     },
     webhooks: {
       list: (tenantRef) =>
@@ -478,6 +1524,12 @@ export function createSlotlockDashboardResources(store: SlotlockStore): Slotlock
         ),
     },
     assistant: createSlotlockAssistantStore(store),
+    audit: {
+      verify: (tenantRef) => store.withTenant(tenantRef, (tenant) => tenant.verifyAuditChain({ tenantRef })),
+      record: (tenantRef, event) => store.withTenant(tenantRef, (tenant) => tenant.recordAuditEvent({ tenantRef, event })),
+      list: (tenantRef, params = {}) =>
+        store.withTenant(tenantRef, (tenant) => tenant.listAuditEvents({ tenantRef, ...params })),
+    },
   };
 }
 
@@ -629,6 +1681,26 @@ interface Session {
   /** With organizations: the served ones the person belongs to, read at sign-in, and the one in use. */
   orgs?: Organization[];
   org?: string;
+  /** The test environment (RFC 0003 G9): the workspace's `<tenant>~test`. Live when absent. */
+  env?: 'test';
+  /**
+   * Signed in with Google (`uid` the Google subject, `login` the account's email), or through a team's
+   * identity provider as a person it made (`sso`: `uid` the person's id). GitHub when absent.
+   */
+  idp?: 'google' | 'sso';
+  /** Signed in through a team's identity provider alone: that connection's id. The session acts in its team only. */
+  sc?: string;
+  /** The person's session epoch when sealed (workspaces): "Sign out everywhere" moves it on. */
+  ep?: number;
+  /** The team workspace in use, by its id (`team:<id>`), with team workspaces; never with `org`. */
+  team?: string;
+  /** Addresses GitHub verified, kept only for the invitation being opened: at most its own. */
+  em?: string[];
+  /**
+   * With Google: the Google Workspace domain the account belongs to (the ID token's `hd`), so its
+   * address is one the company controls now, not one it verified once.
+   */
+  hd?: string;
 }
 
 interface Organization {
@@ -678,7 +1750,8 @@ const AGENDA_DAYS = 7;
 const AGENDA_LIMIT = 200;
 const AGENDA_SHOWN = 30;
 const ACTIVITY_LIMIT = 20;
-const WAITLIST_SHOWN = 200;
+/** Approvals the dashboard lists, pending and recent decided together, newest first. */
+const APPROVALS_SHOWN = 100;
 const RESOURCE_PAGE = /^\/resources\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 /** How the booking rules form names each rule. */
 const RULE_LIMITS = SLOTLOCK_BOOKING_RULE_LIMITS;
@@ -690,6 +1763,11 @@ const RULE_NAMES = Object.freeze({
   bufferBeforeMinutes: 'Buffer before',
   turnaroundMinutes: 'Turnaround',
   checkInMinutes: 'Check-in release',
+  minDurationMinutes: 'Shortest booking',
+  maxDurationMinutes: 'Longest booking',
+  defaultDurationMinutes: 'Usual length',
+  cancelCutoffMinutes: 'Cancel cutoff',
+  rescheduleCutoffMinutes: 'Move cutoff',
 } as const);
 /** The booking rules form's fields, by rule. */
 const RULE_FIELDS = Object.freeze({
@@ -700,6 +1778,11 @@ const RULE_FIELDS = Object.freeze({
   bufferBeforeMinutes: 'buffer_before_minutes',
   turnaroundMinutes: 'turnaround_minutes',
   checkInMinutes: 'check_in_minutes',
+  minDurationMinutes: 'min_duration_minutes',
+  maxDurationMinutes: 'max_duration_minutes',
+  defaultDurationMinutes: 'default_duration_minutes',
+  cancelCutoffMinutes: 'cancel_cutoff_minutes',
+  rescheduleCutoffMinutes: 'reschedule_cutoff_minutes',
 } as const);
 
 /** How the inherited-rules note names each rule, with its unit. */
@@ -708,9 +1791,36 @@ const INHERITED_NAMES: Readonly<Record<keyof SlotlockBookingRules, string>> = Ob
   maxAdvanceDays: 'Book up to (days ahead)',
   enforceHours: 'Only inside bookable hours',
   requireCertain: 'Only in time its calendar syncs have read today',
+  allowedDurations: 'Lengths (min)',
+  pickupTimes: 'Pick-up times',
+  returnTimes: 'Return times',
+  cancellationFee: 'Cancellation fee',
+  holdPrice: 'Hold price',
+  hoursApply: 'Hours hold a hire at',
 });
 
-type InheritedRules = Map<keyof SlotlockBookingRules, { value: number | boolean; from: string }>;
+type RuleValue =
+  | number
+  | boolean
+  | string
+  | readonly number[]
+  | readonly { startMinutes: number; durationMinutes: number }[]
+  | { amountMinor: number; currency: string; withinMinutes?: number };
+type InheritedRules = Map<keyof SlotlockBookingRules, { value: RuleValue; from: string }>;
+
+/** A rule's value as the dashboard shows it. */
+function ruleValueText(value: RuleValue): string {
+  if (typeof value === 'number') return value.toLocaleString('en');
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  if (typeof value === 'string') return value === 'ends' ? 'its start and end' : 'all of it';
+  if (!Array.isArray(value)) {
+    const fee = value as { amountMinor: number; currency: string; withinMinutes?: number };
+    return `${(fee.amountMinor / 100).toFixed(2)} ${fee.currency}${fee.withinMinutes !== undefined ? ` within ${fee.withinMinutes.toLocaleString('en')} min` : ''}`;
+  }
+  return (value as readonly (number | { startMinutes: number; durationMinutes: number })[])
+    .map((item) => (typeof item === 'number' ? item.toLocaleString('en') : hoursOf(item.startMinutes, item.durationMinutes)))
+    .join(', ');
+}
 
 /**
  * The rules a resource takes from defaults, each with where it comes from: a rule its pool's
@@ -727,7 +1837,7 @@ function inheritedRules(resource: SlotlockResource, defaults: SlotlockBookingRul
     : [['defaults', resource.effectiveBookingRules]];
   const inherited: InheritedRules = new Map();
   for (const [from, rules] of levels) {
-    for (const [name, value] of Object.entries(rules ?? {}) as [keyof SlotlockBookingRules, number | boolean][]) {
+    for (const [name, value] of Object.entries(rules ?? {}) as [keyof SlotlockBookingRules, RuleValue][]) {
       if (own[name] === undefined) inherited.set(name, { value, from });
     }
   }
@@ -739,7 +1849,7 @@ function inheritedNote(inherited: InheritedRules): Html {
   const parts = [...inherited].map(([name, { value, from }]) =>
     typeof value === 'boolean'
       ? `${INHERITED_NAMES[name]}${value ? '' : ': off'} (${from})`
-      : `${INHERITED_NAMES[name]} ${value.toLocaleString('en')} (${from})`,
+      : `${INHERITED_NAMES[name]} ${ruleValueText(value)} (${from})`,
   );
   return html`<p class="fine">Inherited: ${parts.join('; ')}.</p>`;
 }
@@ -750,25 +1860,147 @@ const icon = (paths: string) =>
   );
 const ICONS = Object.freeze({
   mark: new Html(
-    // The Slotlock mark: a padlock whose body holds one booked slot (the site's logo, without the wordmark).
-    '<svg class="mark" viewBox="0 0 85.32 77.12" aria-hidden="true" focusable="false"><path class="mark-ink" d="M13.13 34.46L72.2 34.46C79.45 34.46 85.32 40.33 85.32 47.58L85.32 63.99C85.32 71.24 79.45 77.12 72.2 77.12L13.13 77.12C5.88 77.12 0 71.24 0 63.99L0 47.58C0 40.33 5.88 34.46 13.13 34.46ZM22.97 39.38L22.97 19.69C22.97 8.82 31.79 0 42.66 0C53.54 0 62.35 8.82 62.35 19.69L62.35 39.38L56.61 39.38L56.61 19.69C56.61 11.99 50.36 5.74 42.66 5.74C34.96 5.74 28.71 11.99 28.71 19.69L28.71 39.38Z"></path><path class="mark-slot" d="M19.69 52.51L65.63 52.51C67.45 52.51 68.91 53.98 68.91 55.79C68.91 57.6 67.45 59.07 65.63 59.07L19.69 59.07C17.88 59.07 16.41 57.6 16.41 55.79C16.41 53.98 17.88 52.51 19.69 52.51Z"></path></svg>',
+    // The Slotlock mark (the design system's lock, without the wordmark): ink with a lime slot on a
+    // light surface, lime with the slot cut out on a dark one.
+    '<svg class="mark" viewBox="0 0 48 55.5" aria-hidden="true" focusable="false"><g transform="translate(-8 -4.5)"><path class="mark-shackle" d="M20 30V20a12 12 0 0 1 24 0V30"></path><rect class="mark-body" x="8" y="28" width="48" height="32" rx="9"></rect><path class="mark-cut" fill-rule="evenodd" d="M17 28h30a9 9 0 0 1 9 9v14a9 9 0 0 1-9 9H17a9 9 0 0 1-9-9V37a9 9 0 0 1 9-9ZM32 37a3 3 0 0 0-3 3v9a3 3 0 0 0 6 0v-9a3 3 0 0 0-3-3Z"></path><rect class="mark-slot" x="29" y="37" width="6" height="15" rx="3"></rect></g></svg>',
   ),
   overview: icon('<path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-3H4zM14 7h6V4h-6z"/>'),
   resources: icon('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
   keys: icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>'),
-  waitlist: icon('<path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/>'),
   webhooks: icon('<path d="M9 7a3 3 0 1 1 4 2.8L16 15M6.5 13.5A3 3 0 1 0 9 18h6M15 18a3 3 0 1 0 1.5-5.6"/>'),
   assistant: icon('<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'),
+  plan: icon('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>'),
+  teams: icon('<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3.3 2.7-5 6-5s6 1.7 6 5M15 14.5c3 0 6 1.4 6 4.5"/>'),
   settings: icon(
     '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   ),
   check: icon('<path d="M5 12l5 5L20 7"/>'),
+  chevron: icon('<path d="M9 6l6 6-6 6"/>'),
+  approvals: icon('<circle cx="12" cy="12" r="8"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'),
   signOut: icon('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
   plus: icon('<path d="M12 5v14M5 12h14"/>'),
+  google: new Html(
+    '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M15.68 8.18c0-.57-.05-1.11-.15-1.64H8v3.1h4.3a3.68 3.68 0 0 1-1.6 2.41v2h2.58c1.51-1.39 2.4-3.44 2.4-5.87zM8 16c2.16 0 3.97-.72 5.29-1.94l-2.58-2c-.72.48-1.63.76-2.71.76-2.08 0-3.85-1.41-4.48-3.3H.86v2.07A8 8 0 0 0 8 16zM3.52 9.52a4.8 4.8 0 0 1 0-3.04V4.41H.86a8 8 0 0 0 0 7.18zM8 3.18c1.17 0 2.23.4 3.06 1.2l2.29-2.3A8 8 0 0 0 .86 4.41l2.66 2.07C4.15 4.59 5.92 3.18 8 3.18z"/></svg>',
+  ),
   github: new Html(
     '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
   ),
 });
+
+/** How the dashboard names each kind of resource. */
+const KIND_NAMES: Readonly<Record<SlotlockResourceKind, string>> = Object.freeze({
+  person: 'Person',
+  room: 'Room',
+  desk: 'Desk',
+  space: 'Space',
+  vehicle: 'Vehicle',
+  machine: 'Machine',
+  equipment: 'Equipment',
+  service: 'Service',
+  other: 'Not said',
+});
+
+/** What a profile field it could not keep must be, in a person's words. */
+const PROFILE_PROBLEMS = Object.freeze({
+  name: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.`,
+  description: `A description is at most ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description.toLocaleString('en')} characters.`,
+  kind: 'Choose a kind from the list.',
+  capacity: `Capacity is a whole number from 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity.toLocaleString('en')}. Leave it empty for none.`,
+  labels: `Up to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.labels} labels, each 1 to 64 letters, digits, dots, dashes or underscores.`,
+  attributes: 'Those attributes are not ones Slotlock can keep.',
+  other: 'That profile is not one Slotlock can keep.',
+});
+
+const GROUPING_REF_RULE =
+  'A reference is 1 to 100 lowercase letters, digits, dots, dashes or underscores, starting with a letter or digit.';
+/** What a person is told when a location or group change is refused, by the store's code. */
+const GROUPING_PROBLEMS: Readonly<Record<string, { status: number; text: string }>> = Object.freeze({
+  location_ref: { status: 400, text: GROUPING_REF_RULE },
+  location_name: { status: 400, text: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.` },
+  location_parent: { status: 400, text: 'Choose where it is from the list, or nowhere.' },
+  location_timezone: {
+    status: 400,
+    text: 'A time zone is a name such as Europe/London. Leave it empty to take the one of the location it is in.',
+  },
+  location_other: { status: 400, text: 'That location is not one Slotlock can keep.' },
+  location_not_found: { status: 404, text: 'That location is not one of yours.' },
+  location_too_deep: { status: 409, text: `Locations go ${SLOTLOCK_MAX_LOCATION_DEPTH} levels deep at most.` },
+  location_cycle: { status: 409, text: 'A location cannot be inside itself, or inside a location that is inside it.' },
+  location_limit_reached: {
+    status: 409,
+    text: `You have ${SLOTLOCK_MAX_LOCATIONS.toLocaleString('en')} locations, the most there can be.`,
+  },
+  location_in_use: {
+    status: 409,
+    text: 'Move its resources, and the locations inside it, somewhere else first.',
+  },
+  group_ref: { status: 400, text: GROUPING_REF_RULE },
+  group_name: { status: 400, text: `A name is 1 to ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.name} characters on one line.` },
+  group_description: {
+    status: 400,
+    text: `A description is at most ${SLOTLOCK_RESOURCE_PROFILE_LIMITS.description.toLocaleString('en')} characters.`,
+  },
+  group_other: { status: 400, text: 'That group is not one Slotlock can keep.' },
+  group_not_found: { status: 404, text: 'That group is not one of yours.' },
+  group_limit_reached: {
+    status: 409,
+    text: `You have ${SLOTLOCK_MAX_RESOURCE_GROUPS.toLocaleString('en')} groups, the most there can be.`,
+  },
+  resource_group_limit_reached: {
+    status: 409,
+    text: `A resource is in ${SLOTLOCK_MAX_GROUPS_PER_RESOURCE} groups at most.`,
+  },
+});
+
+/** The sentence for a refused location or group change, or null when it is not one. */
+function groupingProblem(error: unknown): { status: number; text: string } | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'invalid_location' || code === 'invalid_group') {
+    const kind = code === 'invalid_location' ? 'location' : 'group';
+    const field = (error as { field?: unknown }).field;
+    return GROUPING_PROBLEMS[`${kind}_${typeof field === 'string' ? field : 'other'}`] ?? GROUPING_PROBLEMS[`${kind}_other`] ?? null;
+  }
+  return typeof code === 'string' ? (GROUPING_PROBLEMS[code] ?? null) : null;
+}
+
+/** Each location's place from the top, as "London › Floor 3", by reference. */
+function locationPaths(locations: readonly SlotlockLocation[]): Map<string, string> {
+  const byRef = new Map(locations.map((location) => [location.ref, location]));
+  const paths = new Map<string, string>();
+  for (const location of locations) {
+    const names: string[] = [];
+    let at: SlotlockLocation | undefined = location;
+    for (let steps = 0; at && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+      names.unshift(at.name);
+      at = at.parentRef === null ? undefined : byRef.get(at.parentRef);
+    }
+    paths.set(location.ref, names.join(' › '));
+  }
+  return paths;
+}
+
+/** Whether `ref` is `ancestor`, or a location inside it. */
+function locationWithin(locations: ReadonlyMap<string, SlotlockLocation>, ref: string, ancestor: string): boolean {
+  let at: string | null = ref;
+  for (let steps = 0; at !== null && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+    if (at === ancestor) return true;
+    at = locations.get(at)?.parentRef ?? null;
+  }
+  return false;
+}
+
+/** The time zone a location gives a resource: its own, or the nearest one above it, and where from. */
+function locationZone(
+  locations: ReadonlyMap<string, SlotlockLocation>,
+  location: SlotlockLocation,
+): { timezone: string; from: SlotlockLocation } | null {
+  let at: SlotlockLocation | undefined = location;
+  for (let steps = 0; at && steps <= SLOTLOCK_MAX_LOCATION_DEPTH; steps += 1) {
+    if (at.timezone !== null) return { timezone: at.timezone, from: at };
+    at = at.parentRef === null ? undefined : locations.get(at.parentRef);
+  }
+  return null;
+}
 
 type Tone = 'good' | 'bad' | 'neutral';
 /** How the overview names each change the feed records. */
@@ -791,7 +2023,26 @@ const CHANGE_LABELS: Readonly<Record<string, { text: string; tone: Tone }>> = Ob
   'coverage.stale': { text: 'Calendar sync is behind', tone: 'bad' },
   'waitlist.offered': { text: 'Waitlist offer sent', tone: 'good' },
   'waitlist.expired': { text: 'Waitlist offer lapsed', tone: 'neutral' },
+  'approval.requested': { text: 'Waiting for approval', tone: 'neutral' },
+  'approval.granted': { text: 'Approved and booked', tone: 'good' },
+  'approval.declined': { text: 'Approval declined', tone: 'bad' },
+  'approval.expired': { text: 'Approval not decided in time', tone: 'bad' },
   'webhook.disabled': { text: 'Webhook disabled', tone: 'bad' },
+  'usage.threshold_reached': { text: 'Monthly quota nearly or fully used', tone: 'bad' },
+  'usage.period_closed': { text: 'Month of use closed', tone: 'neutral' },
+  'resource.created': { text: 'Resource added', tone: 'good' },
+  'resource.updated': { text: 'Resource changed', tone: 'neutral' },
+  'resource.archived': { text: 'Resource archived', tone: 'neutral' },
+  'resource.restored': { text: 'Resource restored', tone: 'good' },
+  'resource.deleted': { text: 'Resource deleted', tone: 'bad' },
+  'key.created': { text: 'API key created', tone: 'good' },
+  'key.rotated': { text: 'API key rotated', tone: 'neutral' },
+  'key.revoked': { text: 'API key revoked', tone: 'bad' },
+  'webhook.created': { text: 'Webhook added', tone: 'good' },
+  'webhook.enabled': { text: 'Webhook enabled', tone: 'good' },
+  'webhook.deleted': { text: 'Webhook deleted', tone: 'neutral' },
+  'coverage.recorded': { text: 'Calendar synced', tone: 'neutral' },
+  'coverage.deleted': { text: 'Calendar sync removed', tone: 'neutral' },
 });
 
 const zoned = (zone: string, parts: Intl.DateTimeFormatOptions) => {
@@ -866,7 +2117,7 @@ function readCookies(request: Request): Map<string, string> {
     const index = part.indexOf('=');
     if (index <= 0) continue;
     const name = part.slice(0, index).trim();
-    if (name === SESSION_COOKIE || name === SIGN_IN_COOKIE) {
+    if (name === SESSION_COOKIE || name === SIGN_IN_COOKIE || name === INVITE_COOKIE || name === SSO_COOKIE) {
       cookies.set(name, part.slice(index + 1).trim());
     }
   }
@@ -895,6 +2146,11 @@ function asset(body: string, type: string, url: URL, version: string): Response 
 function formatDate(date: Date | null): string {
   if (!date) return '—';
   return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/** A UTC day as people write it: `9 Dec 2026`. */
+function dayOf(date: Date): string {
+  return zoned('UTC', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
@@ -1033,16 +2289,40 @@ function weekFromForm(form: WeekForm): WeeklyHours {
   return week;
 }
 
+/** Minutes after midnight for `HH:MM`, or null. */
+function minutesOf(value: string): number | null {
+  const match = TIME.exec(value);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+/**
+ * A resource's hours in one line: its own, or what it inherits and from where (RFC 0004 B2), or the
+ * server's.
+ */
+function resourceHours(resource: SlotlockResource, server: readonly WeeklyAvailabilityRule[]): string {
+  if (resource.availabilityRules !== undefined) return hoursSummary(resource.availabilityRules);
+  const inherited = resource.inheritedAvailability;
+  if (inherited) {
+    const from = inherited.source === 'location' ? `${inherited.location ?? 'Location'}'s hours` : 'Your hours';
+    return `${from}: ${hoursSummary(inherited.rules)}`;
+  }
+  return server.length === 0 ? "Server's hours (none)" : `Server's hours: ${hoursSummary(server)}`;
+}
+
 export function createSlotlockDashboard(options: SlotlockDashboardOptions): SlotlockDashboard {
   const publicUrl = new URL(options.publicUrl);
   const origin = publicUrl.origin;
   const base = publicUrl.pathname.replace(/\/$/, '');
   const root = `${base}/dashboard`;
   const callbackUrl = `${origin}${root}/callback`;
+  const publicRoot = `${origin}${root}`;
+  const contentSecurityPolicy = policyFor(options.billing);
   // Its cookies are Secure, but a first visit over http:// could still be answered by someone else:
   // a browser that has seen this goes straight to https:// for a year. Not for a local http one.
   const hsts: Record<string, string> =
     publicUrl.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+  const versionHeader: Record<string, string> =
+    options.version && /^[0-9A-Za-z.+-]{1,40}$/.test(options.version) ? { 'X-Slotlock-Version': options.version } : {};
   const service = new URL(options.serviceUrl ?? options.publicUrl);
   const serviceRoot = `${service.origin}${service.pathname.replace(/\/$/, '')}`;
   const mcpUrl = `${serviceRoot}/mcp`;
@@ -1053,13 +2333,75 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const membershipsUrl =
     options.github.membershipsUrl ??
     'https://api.github.com/user/memberships/orgs?state=active&per_page=100';
-  const served = options.organizations ? new Set(options.organizations) : null;
+  const served = Array.isArray(options.organizations) ? new Set<string>(options.organizations) : null;
   if (served && (served.size === 0 || [...served].some((id) => !ORGANIZATION_ID.test(id)))) {
     throw new Error('Slotlock dashboard organizations must be GitHub organization ids');
   }
+  // Teams on Cloud: organizations turned on in the database, beside every person's own tenant.
+  const teams = options.organizations === 'enabled' ? (options.teams ?? null) : null;
+  const workspaces = options.workspaces ?? null;
+  // Team workspaces: with the membership store's database, where people have workspaces of their own.
+  const teamStore = options.teamWorkspaces && !served ? (workspaces?.teams ?? null) : null;
+  /** Verified domains: a team workspace's, with the database. */
+  const domainStore = teamStore && options.domains ? (workspaces?.domains ?? null) : null;
+  const domainResolvers = options.domains?.resolvers ?? [];
+  /** Single sign-on: with verified domains and the database. */
+  const ssoStore = domainStore && options.sso ? (workspaces?.sso ?? null) : null;
+  const scimStore = domainStore && options.scim ? (workspaces?.scim ?? null) : null;
+  const ssoFetch: typeof fetch = (input, init) => (options.sso?.fetch ?? fetchImpl)(input, init);
+  /** Teams' providers' keys, fetched as their Owners' URLs are: through ssoFetch. */
+  const ssoJwks = createSlotlockJwksCache({ fetch: ssoFetch, now: () => now() });
+  /** A session's team that requires single sign-on, met while it held no proof: to say so. */
+  const ssoRequiredOf = new WeakMap<Session, { tenantRef: string; mayBypass: boolean }>();
+  /** Each session's role in the workspace it acts in, as the database said when it was read. */
+  const roles = new WeakMap<Session, SlotlockWorkspaceRole>();
+  /** Where each request came from, for the audit log. */
+  const origins = new WeakMap<Session, { ipAddress?: string; userAgent?: string }>();
+  // Plans whether or not billing sells them; billing's own reader when only it is given.
+  const plans: SlotlockDashboardPlans | undefined =
+    options.plans ??
+    (options.billing
+      ? {
+          plan: options.billing.plan,
+          ...(options.billing.enrol ? { enrol: options.billing.enrol } : {}),
+          contact: options.billing.contact,
+        }
+      : undefined);
+  if (plans?.contact) {
+    const protocol = new URL(plans.contact).protocol;
+    if (protocol !== 'https:' && protocol !== 'mailto:') throw new Error('plans.contact must be an https or mailto URL');
+  }
+  if (options.organizations === 'enabled' && !teams) {
+    throw new Error('Slotlock dashboard organizations "enabled" needs the teams store');
+  }
+  /** Sign-in reads the person's organizations: a fixed list, or those turned on. */
+  const readsOrganizations = served !== null || teams !== null;
+  /** Each session's organizations turned on, read with it (teams mode). */
+  const enabledOf = new WeakMap<Session, ReadonlySet<string>>();
+  /** The team workspaces the session's person is a member of, read with their standing. */
+  const teamListOf = new WeakMap<Session, readonly SlotlockTeamWorkspace[]>();
+  /** When the session's team, being deleted, goes. */
+  const deletingOf = new WeakMap<Session, Date>();
+  /** The workspace's suspension notice, read with its standing: shown on every page while it lasts. */
+  const suspendedOf = new WeakMap<Session, SlotlockSuspensionNotice>();
+  /**
+   * What staff put in front of the workspace (RFC 0006, M10 and M11), read with its standing: the
+   * announcements shown on every page, and the features turned on or off for it.
+   */
+  const noticesOf = new WeakMap<Session, SlotlockDashboardNotices>();
+  /** The locations and groups each session's member is limited to (RFC 0004 D1), read with their standing. */
+  const scopes = new WeakMap<Session, SlotlockResourceScope>();
   const brandName = options.name ?? 'Slotlock';
   if (!SLOTLOCK_DASHBOARD_NAME_PATTERN.test(brandName) || brandName.trim() !== brandName) {
     throw new Error('Slotlock dashboard name must be 1-60 characters, without <, > or control or invisible characters');
+  }
+  for (const [label, url] of [
+    ['termsUrl', options.termsUrl],
+    ['privacyUrl', options.privacyUrl],
+  ] as const) {
+    if (url !== undefined && !/^https:\/\/[^\s"'<>`]+$/.test(url)) {
+      throw new Error(`Slotlock dashboard ${label} must be an https URL`);
+    }
   }
   const fetchImpl = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
@@ -1068,9 +2410,12 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   }
   const secret = Buffer.from(options.sessionSecret, 'utf8');
   // A list, or exactly '*': any other string would match ids by substring.
-  const allowed = (uid: string) =>
+  // A GitHub person by their bare id, a Google one as google:<subject>.
+  const allowed = (uid: string, idp?: 'google' | 'sso') =>
     options.allowedUsers === '*' ||
-    (Array.isArray(options.allowedUsers) && options.allowedUsers.includes(uid));
+    // A person a team's provider made is no account a list names: only where everyone may sign in.
+    (idp !== 'sso' && Array.isArray(options.allowedUsers) && options.allowedUsers.includes(idp === 'google' ? `google:${uid}` : uid));
+  const google = served ? null : (options.google ?? null);
   let signInsInFlight = 0;
   /** Sign-ins in flight by client address. */
   const signInsByClient = new Map<string, number>();
@@ -1083,8 +2428,12 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     }
   }
 
-  // Bound to the organization too: a page opened before a switch cannot write into the new one.
-  const formMac = (session: Session, nonce: string, org = session.org ?? '') =>
+  /** The workspace a form is bound to: its organization's id, `team:<id>`, or '' for one's own. */
+  function workspaceKeyOf(session: Session): string {
+    return session.team !== undefined ? `team:${session.team}` : (session.org ?? '');
+  }
+  // Bound to the workspace too: a page opened before a switch cannot write into the new one.
+  const formMac = (session: Session, nonce: string, org = workspaceKeyOf(session)) =>
     createHmac('sha256', secret)
       .update(`slotlock-dashboard-form-v2.${session.sid}.${org}.${nonce}`)
       .digest('base64url');
@@ -1100,10 +2449,13 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     const [, nonce, mac] = match as unknown as [string, string, string];
     // Compared as text, like the cookie MACs: decoding would drop the last character's spare bits.
     if (safeEqual(mac, formMac(session, nonce))) return 'ok';
-    const other = session.orgs?.some(
-      (org) => org.id !== session.org && safeEqual(mac, formMac(session, nonce, org.id)),
-    );
-    return other ? 'other_org' : 'bad';
+    const current = workspaceKeyOf(session);
+    const others = [
+      ...(session.orgs ?? []).map((org) => org.id),
+      ...(teamListOf.get(session) ?? []).map((ws) => ws.tenantRef),
+      ...(teamStore ? [''] : []),
+    ].filter((other) => other !== current);
+    return others.some((other) => safeEqual(mac, formMac(session, nonce, other))) ? 'other_org' : 'bad';
   };
 
   function seal(context: string, payload: Record<string, unknown>): string {
@@ -1145,20 +2497,172 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       typeof payload.uid !== 'string' ||
       typeof payload.login !== 'string' ||
       typeof payload.sid !== 'string' ||
-      !allowed(payload.uid) ||
+      (payload.idp !== undefined && !((payload.idp === 'google' && google) || (payload.idp === 'sso' && ssoStore))) ||
+      (payload.sc !== undefined && (!ssoStore || typeof payload.sc !== 'string' || !UUID_PATTERN.test(payload.sc))) ||
+      !allowed(payload.uid, payload.idp as 'google' | 'sso' | undefined) ||
       !organizationsHold(payload) ||
+      !teamHolds(payload) ||
+      (payload.env !== undefined && payload.env !== 'test') ||
       (await options.state.sessionEnded(payload.sid, payload.exp as number))
     ) {
       return null;
     }
-    return payload as unknown as Session;
+    let session = payload as unknown as Session;
+    if (teams) {
+      // Which of the person's organizations are on now: one turned off since is left at once.
+      const enabled = session.orgs?.length ? await teams.enabled(session.orgs.map((org) => org.id)) : new Set<string>();
+      if (session.org !== undefined && !enabled.has(session.org)) {
+        const { org: _, ...personal } = session;
+        session = personal;
+      }
+      enabledOf.set(session, enabled);
+    }
+    return await withStanding(session);
   }
+
+  /**
+   * The session with the person's role in its workspace as the database says now (workspaces): one
+   * signed out everywhere since it was sealed is refused, and one whose membership ended falls back
+   * to the person's own workspace or, where there is none (a fixed list of organizations), ends.
+   */
+  async function withStanding(session: Session): Promise<Session | null> {
+    if (!workspaces) {
+      roles.set(session, derivedRole(session));
+      return session;
+    }
+    const person = personOf(session);
+    const [standing, listed, alive, deleting, scope, suspension, notices] = await Promise.all([
+      workspaces.standing(tenantOf(session), person, session.sid),
+      teamStore ? teamStore.workspacesOf(person) : Promise.resolve([]),
+      workspaces.sessions ? workspaces.sessions.seen(person, session.sid) : Promise.resolve(true),
+      teamStore && session.team !== undefined ? teamStore.deleteAfter(`team:${session.team}`) : Promise.resolve(null),
+      workspaces.scope && sharedWorkspace(session) ? workspaces.scope(tenantOf(session), person) : Promise.resolve(null),
+      workspaces.suspension ? workspaces.suspension(tenantOf(session)) : Promise.resolve(null),
+      workspaces.notices ? workspaces.notices(tenantOf(session)) : Promise.resolve(null),
+    ]);
+    if (deleting) deletingOf.set(session, deleting);
+    if (suspension) suspendedOf.set(session, suspension);
+    if (notices) noticesOf.set(session, notices);
+    // Sealed under the person's current epoch, or refused: one from before Sign out everywhere,
+    // from before this store, or of a person erased since (no record, no epoch) never passes; nor
+    // one the person signed out from another device.
+    if (!alive || session.ep === undefined || standing.sessionEpoch === null || session.ep !== standing.sessionEpoch) return null;
+    if (standing.role !== null) {
+      roles.set(session, standing.role);
+      // A session through a team's provider alone knows of no other team the person is in.
+      teamListOf.set(session, session.sc === undefined ? listed : listed.filter((team) => team.tenantRef === `team:${session.team}`));
+      // Limited to some resources: what this request reads for them from now on keeps to those.
+      const limited = scope && standing.role !== 'owner' ? scope : null;
+      if (limited) scopes.set(session, limited);
+      setSlotlockDashboardRequestScope(limited);
+      return session;
+    }
+    // Signed in through a team's provider alone, or as a person it made: no workspace to fall back to.
+    if ((session.org === undefined && session.team === undefined) || served || session.sc !== undefined || session.idp === 'sso') return null;
+    const { org: _, team: _team, ...personal } = session;
+    if (standing.refusal === 'sso_required' && session.team !== undefined) {
+      ssoRequiredOf.set(personal, { tenantRef: `team:${session.team}`, mayBypass: standing.mayBypass === true });
+    }
+    const enabled = enabledOf.get(session);
+    if (enabled) enabledOf.set(personal, enabled);
+    teamListOf.set(personal, listed);
+    roles.set(personal, 'owner');
+    // The person's own workspace, read for itself: its suspension and what staff turned on or off
+    // apply here as they would after a switch (RFC 0006, M11).
+    const own = tenantOf(personal);
+    const [ownSuspension, ownNotices] = await Promise.all([
+      workspaces.suspension ? workspaces.suspension(own) : Promise.resolve(null),
+      workspaces.notices ? workspaces.notices(own) : Promise.resolve(null),
+    ]);
+    if (ownSuspension) suspendedOf.set(personal, ownSuspension);
+    if (ownNotices) noticesOf.set(personal, ownNotices);
+    setSlotlockDashboardRequestScope(null);
+    return personal;
+  }
+
+  /** A team workspace only with team workspaces on, never beside an organization; addresses as kept. */
+  function teamHolds(payload: Record<string, unknown>): boolean {
+    if (
+      payload.team !== undefined &&
+      (!teamStore || typeof payload.team !== 'string' || !TEAM_ID.test(payload.team) || payload.org !== undefined)
+    ) {
+      return false;
+    }
+    if (payload.hd !== undefined && (payload.idp !== 'google' || typeof payload.hd !== 'string' || payload.hd.length > 253)) return false;
+    if (payload.em === undefined) return true;
+    return (
+      Array.isArray(payload.em) &&
+      payload.em.length <= 3 &&
+      payload.em.every((email) => typeof email === 'string' && email.length <= 254)
+    );
+  }
+
+  /** A workspace people share (an organization's or a team's), not a person's own. */
+  const sharedWorkspace = (session: Session) => session.org !== undefined || session.team !== undefined;
+  /** The team workspace the session acts in (`team:<id>`, Live), or undefined. */
+  const teamTenantOf = (session: Session) => (session.team !== undefined ? `team:${session.team}` : undefined);
+  const currentTeam = (session: Session) =>
+    session.team === undefined ? undefined : teamListOf.get(session)?.find((ws) => ws.tenantRef === `team:${session.team}`);
+  /** Addresses the person holds verified: their Google account's, or those GitHub confirmed for an invitation. */
+  const verifiedEmails = (session: Session): string[] =>
+    // A session through a team's provider alone holds no address verified for anything else.
+    session.sc !== undefined
+      ? []
+      : session.idp === 'google'
+        ? session.login.includes('@')
+          ? [session.login.toLowerCase()]
+          : []
+        : (session.em ?? []);
+  /**
+   * How those addresses were verified, for joining through a domain: by a Google Workspace account
+   * of the address's own domain (the company controls it now), or once, by Google or GitHub.
+   */
+  const joinEvidence = (session: Session): SlotlockJoinEvidence => {
+    if (session.idp !== 'google') return 'github';
+    const domain = slotlockEmailDomain(session.login);
+    return session.hd !== undefined && domain !== null && domain === slotlockEmailDomain(`x@${session.hd}`) ? 'google_workspace' : 'google';
+  };
+
+  /**
+   * Without a membership store: the Owner of one's own workspace; in an organization's, its GitHub
+   * owners are Owners and its other members Developers, as GitHub said at sign-in.
+   */
+  function derivedRole(session: Session): SlotlockWorkspaceRole {
+    if (session.org === undefined) return 'owner';
+    return session.orgs?.find((org) => org.id === session.org)?.role === 'admin' ? 'owner' : 'developer';
+  }
+  const roleOf = (session: Session): SlotlockWorkspaceRole => roles.get(session) ?? derivedRole(session);
+  /**
+   * What the person may do: their role's capabilities, and limited to some resources only those
+   * SLOTLOCK_SCOPED_CAPABILITIES keeps, and only their own account's where the resource adapters
+   * cannot keep a request to their resources.
+   */
+  const can = (session: Session, capability: SlotlockWorkspaceCapability) => {
+    const limited = scopes.has(session);
+    if (limited && !options.resources.keepsToScope && capability !== 'account.use') return false;
+    return slotlockMemberCan(roleOf(session), limited, capability);
+  };
+  /** Whether the person reaches a page: its capability, and limited, the pages a limited member has. */
+  const reaches = (session: Session, page: string) => {
+    const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[page];
+    return capability !== undefined && can(session, capability) && (!scopes.has(session) || SLOTLOCK_SCOPED_DASHBOARD_PAGES.has(page));
+  };
+  /** Signed in within the last 15 minutes: what a fresh capability needs. */
+  const freshlySignedIn = (session: Session) => now() - (session.exp - SESSION_TTL_MS) <= FRESH_SIGN_IN_MS;
 
   /**
    * With organizations, the session names one the server still serves, from its own list; without
    * them, it names none. A session from the other mode is signed out.
    */
   function organizationsHold(payload: Record<string, unknown>): boolean {
+    if (teams) {
+      if (payload.orgs === undefined) return payload.org === undefined;
+      if (!Array.isArray(payload.orgs)) return false;
+      const listed = (payload.orgs as unknown[]).filter(
+        (org): org is Organization => isRecord(org) && typeof org.id === 'string' && typeof org.login === 'string',
+      );
+      return payload.org === undefined || (typeof payload.org === 'string' && listed.some((org) => org.id === payload.org));
+    }
     if (!served) return payload.org === undefined && payload.orgs === undefined;
     if (typeof payload.org !== 'string' || !served.has(payload.org) || !Array.isArray(payload.orgs)) {
       return false;
@@ -1172,10 +2676,22 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
     createHmac('sha256', secret)
       .update(`slotlock-dashboard-csrf-v1.${session.sid}`)
       .digest('base64url');
+  /** The tenant the session acts in: the workspace's, or its test environment's (`~test`). */
   const tenantOf = (session: Session) =>
-    served ? `github-org:${session.org as string}` : `github:${session.uid}`;
+    `${
+      session.team !== undefined
+        ? `team:${session.team}`
+        : session.org !== undefined
+          ? `github-org:${session.org}`
+          : personOf(session)
+    }${session.env === 'test' ? SLOTLOCK_TEST_TENANT_SUFFIX : ''}`;
   /** Who did something, for the record: the person, whatever tenant they act in. */
-  const personOf = (session: Session) => `github:${session.uid}`;
+  function personOf(session: Session): string {
+    return session.idp === 'google' ? `google:${session.uid}` : session.idp === 'sso' ? `sso:${session.uid}` : `github:${session.uid}`;
+  }
+  /** How the dashboard shows the person: their GitHub login, their Google account's email, or their provider's. */
+  const shownAs = (session: Session) =>
+    session.idp === 'google' || session.idp === 'sso' || session.sc !== undefined ? session.login : `@${session.login}`;
 
   function respond(
     status: number,
@@ -1187,13 +2703,14 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
       status,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': CONTENT_SECURITY_POLICY,
+        'Content-Security-Policy': contentSecurityPolicy,
         'Cache-Control': 'no-store',
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': REFERRER_POLICY,
         'Cross-Origin-Opener-Policy': 'same-origin',
         ...hsts,
+        ...versionHeader,
         ...headers,
       },
     });
@@ -1204,31 +2721,56 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
   const redirect = (status: number, location: string, cookies: string[] = []) =>
     respond(status, '', { Location: location }, cookies);
 
-  type Section = 'overview' | 'resources' | 'waitlist' | 'keys' | 'webhooks' | 'assistant' | 'settings';
-  // Pages for what the adapter offers, so a custom one without a waitlist shows none. Read per
+  type Section =
+    | 'overview'
+    | 'resources'
+    | 'approvals'
+    | 'keys'
+    | 'webhooks'
+    | 'assistant'
+    | 'plan'
+    | 'teams'
+    | 'settings';
+  // Pages for what the adapter offers, so a custom one without approvals shows none. Read per
   // request: on Workers the adapter exists only inside one.
-  const nav = (): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
+  const nav = (session: Session): ReadonlyArray<{ section: Section; label: string; path: string; icon: Html }> => [
     { section: 'overview', label: 'Overview', path: '', icon: ICONS.overview },
     { section: 'resources', label: 'Resources', path: '/resources', icon: ICONS.resources },
-    ...(options.resources.waitlist
-      ? [{ section: 'waitlist' as const, label: 'Waitlist', path: '/waitlist', icon: ICONS.waitlist }]
+    ...(options.resources.approvals
+      ? [{ section: 'approvals' as const, label: 'Approvals', path: '/approvals', icon: ICONS.approvals }]
       : []),
     { section: 'keys', label: 'API keys', path: '/keys', icon: ICONS.keys },
     ...(options.resources.webhooks
       ? [{ section: 'webhooks' as const, label: 'Webhooks', path: '/webhooks', icon: ICONS.webhooks }]
       : []),
-    ...(assistantStore()
+    ...(assistantStore(session)
       ? [{ section: 'assistant' as const, label: 'Assistant', path: '/assistant', icon: ICONS.assistant }]
       : []),
+    ...(plans ? [{ section: 'plan' as const, label: 'Usage', path: '/plan', icon: ICONS.plan }] : []),
+    ...(teams || teamStore ? [{ section: 'teams' as const, label: 'Teams', path: '/teams', icon: ICONS.teams }] : []),
     { section: 'settings', label: 'Settings', path: '/settings', icon: ICONS.settings },
   ];
+
+  /** Live or Test (RFC 0003 G9): the same workspace, a tenant of its own for trying things. */
+  function environmentSwitch(session: Session): Html {
+    const choice = (value: 'live' | 'test', label: string) =>
+      html`<button type="submit" name="environment" value="${value}"${(session.env === 'test') === (value === 'test') ? html` aria-pressed="true"` : html` aria-pressed="false"`}>${label}</button>`;
+    return html`<form class="environment" method="post" action="${root}/environment" aria-label="Environment"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">${choice('live', 'Live')}${choice('test', 'Test')}</form>`;
+  }
 
   /** The workspace the session acts in: its organization, or the person themselves. */
   function workspace(session: Session): Html {
     const current = session.orgs?.find((org) => org.id === session.org);
+    const team = currentTeam(session);
     const choices = (session.orgs ?? []).filter((org) => served?.has(org.id));
-    const name = current?.login ?? session.login;
+    const name = team?.name ?? current?.login ?? session.login;
     const badge = html`<span class="avatar" aria-hidden="true">${name.slice(0, 1).toUpperCase()}</span>`;
+    const enabled = teams ? (session.orgs ?? []).filter((org) => enabledOf.get(session)?.has(org.id)) : [];
+    const listed = teamListOf.get(session) ?? [];
+    if (enabled.length > 0 || listed.length > 0) {
+      const personal = !current && !team;
+      return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Workspace</label><select id="organization" name="organization" title="${name}"><option value=""${personal ? html` selected` : html``}>${shownAs(session)}</option>${enabled.map((org) => html`<option value="${org.id}"${org.id === current?.id ? html` selected` : html``}>${org.login}</option>`)}${listed.map((ws) => html`<option value="${ws.tenantRef}"${ws.tenantRef === team?.tenantRef ? html` selected` : html``}>${ws.name}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
+    }
     if (current && choices.length > 1) {
       return html`<form class="workspace" method="post" action="${root}/organization">${badge}<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="organization">Organization</label><select id="organization" name="organization" title="${current.login}">${choices.map((org) => html`<option value="${org.id}"${org.id === current.id ? html` selected` : html``}>${org.login}</option>`)}</select><button class="quiet" type="submit">Switch</button></form>`;
     }
@@ -1244,10 +2786,12 @@ export function createSlotlockDashboard(options: SlotlockDashboardOptions): Slot
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="${REFERRER_POLICY}">
 <title>${title} · ${brandName}</title>
+<link rel="icon" href="${root}/favicon.svg?v=${ASSET_VERSIONS.icon}" type="image/svg+xml">
 <link rel="stylesheet" href="${root}/style.css?v=${ASSET_VERSIONS.css}">
 <script src="${root}/app.js?v=${ASSET_VERSIONS.js}" defer></script>
 </head>`;
-    const brand = html`<a class="brand" href="${root}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
+    // Named by its label too: on a phone the name is hidden and the mark alone shows.
+    const brand = html`<a class="brand" href="${root}" aria-label="${brandName}">${ICONS.mark}<span class="name">${brandName}</span></a>`;
     const skip = html`<a class="skip" href="#main">Skip to content</a>`;
     // Copy buttons say what they did here, for screen readers (app.js).
     const live = html`<p class="visually-hidden" id="live" aria-live="polite"></p>`;
@@ -1261,7 +2805,9 @@ ${live}
 </body>
 </html>`;
     }
-    const links = nav().map(
+    const links = nav(session)
+      .filter((item) => reaches(session, item.path || '/'))
+      .map(
       (item) =>
         html`<a href="${root}${item.path}"${item.section === section ? html` aria-current="page"` : html``}>${item.icon}<span>${item.label}</span></a>`,
     );
@@ -1270,51 +2816,123 @@ ${live}
 ${skip}
 <div class="app">
 <header class="side">
-<div class="side-top">${brand}${workspace(session)}</div>
+<div class="side-top">${brand}${workspace(session)}${environmentSwitch(session)}</div>
 <nav class="nav" aria-label="Dashboard">${links}</nav>
-<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="@${session.login}">@${session.login}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
+<div class="me"><span class="avatar me-avatar" aria-hidden="true">${session.login.slice(0, 1).toUpperCase()}</span><span class="login" title="${shownAs(session)}">${shownAs(session)}</span><form method="post" action="${root}/sign-out"><input type="hidden" name="csrf" value="${csrfToken(session)}"><button class="quiet sign-out" type="submit" title="Sign out">${ICONS.signOut}<span class="sign-out-label">Sign out</span></button></form></div>
 </header>
-<main class="page" id="main">${content}</main>
+<main class="page" id="main">${
+      session.env === 'test'
+        ? html`<p class="test-banner">Test environment: its own resources, keys, webhooks and history, on your plan's limits and never billed. Its keys start <code>slk_test_</code>.</p>`
+        : html``
+    }${
+      suspendedOf.has(session)
+        ? html`<p class="test-banner suspended-banner" role="status"><strong>This account is suspended.</strong> Its data can be seen, not changed, and its API keys are refused.${
+            suspendedOf.get(session)?.message ? html` ${brandName} says: ${suspendedOf.get(session)?.message ?? ''}` : html``
+          }</p>`
+        : html``
+    }${announcementBanners(session)}${
+      deletingOf.has(session)
+        ? html`<p class="test-banner deleting-banner">This team is deleted on ${formatDate(deletingOf.get(session) as Date)}; its keys are refused.${
+            can(session, 'workspace.own') ? html` <a href="${root}/settings/team">Keep it</a>` : html``
+          }</p>`
+        : html``
+    }${content}</main>
 </div>
 ${live}
 </body>
 </html>`;
   }
 
-  const noticeOf = (notice?: string) =>
-    notice ? html`<p class="notice" role="alert">${notice}</p>` : html``;
+  // A notice is an alert only when the page answers with an error: a done or saved message is a
+  // status, so success is never painted in the error colour.
+  /**
+   * The announcements running for the session's workspace (RFC 0006, M10): one line each, above
+   * every page, with a link to more where staff gave one.
+   */
+  const announcementBanners = (session: Session): Html => {
+    const shown = noticesOf.get(session)?.announcements ?? [];
+    return html`${shown.map(
+      (announcement) =>
+        html`<p class="${slotlockAnnouncementBannerParts(announcement.kind).className}" role="status"><strong>${slotlockAnnouncementBannerParts(announcement.kind).label}</strong> ${announcement.message}${
+          announcement.link ? html` <a href="${announcement.link}" rel="noopener noreferrer">${slotlockAnnouncementBannerParts(announcement.kind).more}</a>` : html``
+        }</p>`,
+    )}`;
+  };
+  const noticeOf = (notice?: string | Html, status = 200) =>
+    notice
+      ? status >= 400
+        ? html`<p class="notice" role="alert">${notice}</p>`
+        : html`<p class="notice done" role="status">${notice}</p>`
+      : html``;
 
   function signedOutPage(status: number, notice?: string, cookies: string[] = []): Response {
     const content = html`<section class="sign-in">
 <span class="sign-in-mark">${ICONS.mark}</span>
 <h1>Sign in to ${brandName}</h1>
 <p>Create keys for your agents, add what they book, and watch what they do.</p>
-${noticeOf(notice)}
-<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>
+${noticeOf(notice, status)}
+<a class="button primary wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
+      google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
+    }${ssoStore ? html`<a class="button wide" href="${root}/sso">Continue with single sign-on</a>` : html``}
+${
+      options.termsUrl
+        ? html`<p class="fine">By continuing you agree to the <a href="${options.termsUrl}">Terms of Service</a>.${
+            options.privacyUrl
+              ? html` The <a href="${options.privacyUrl}">Privacy notice</a> says what is kept.`
+              : html``
+          }</p>`
+        : html``
+    }
 <p class="fine">${
-      served
+      teams
+        ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and up to ${String(MAX_SESSION_ORGANIZATIONS)} of those organizations, for you to work in the ones turned on.`
+        : served
         ? `${brandName} reads your GitHub profile and which organizations you belong to, and keeps only your user id, login and the organizations it serves.`
         : `${brandName} reads only your public GitHub profile, and keeps only your user id and login.`
-    }</p>
+    }${google ? ` With Google, it reads your account's id and email address, and keeps only those.` : ''}</p>
 </section>`;
     return respond(status, layout('Sign in', content, null), {}, cookies);
   }
 
-  function keyRows(keys: SlotlockApiKey[], token: string, session: Session): Html[] {
+  /** A key's own limits (RFC 0004 A5) as fields, filled with what it has. */
+  const keyLimitFields = (limits?: SlotlockApiKeyLimits) =>
+    html`<label>Live holds at most<input name="max_holds" inputmode="numeric" pattern="[0-9]*" maxlength="5" value="${limits?.maxHolds !== undefined ? String(limits.maxHolds) : ''}" placeholder="Server's"></label>
+<label>Hours held at most<input name="max_held_hours" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${limits?.maxHeldHours !== undefined ? String(limits.maxHeldHours) : ''}" placeholder="Server's"></label>
+<label>Requests a minute<input name="requests_per_minute" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${limits?.requestsPerMinute !== undefined ? String(limits.requestsPerMinute) : ''}" placeholder="Server's"></label>
+<label class="choice"><input type="checkbox" name="requires_approval" value="on"${limits?.requiresApproval ? html` checked` : html``}> Its bookings wait for approval</label>`;
+
+  /** A key's limits in words, for its row. */
+  const keyLimitsText = (limits: SlotlockApiKeyLimits) =>
+    [
+      limits.maxHolds !== undefined ? `${String(limits.maxHolds)} live holds` : '',
+      limits.maxHeldHours !== undefined ? `${String(limits.maxHeldHours)} hours held` : '',
+      limits.requestsPerMinute !== undefined ? `${String(limits.requestsPerMinute)} requests a minute` : '',
+      limits.requiresApproval ? 'bookings need approval' : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+
+  function keyRows(keys: SlotlockApiKey[], token: string, session: Session, names: ReadonlyMap<string, string> = new Map()): Html[] {
     return keys.map((key) => {
       const expired = key.expiresAt !== null && key.expiresAt.getTime() <= now();
       const status = key.revokedAt ? 'Revoked' : expired ? 'Expired' : 'Active';
       const actions =
         status === 'Active'
-          ? html`<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
+          ? html`<details class="act"><summary>Limits</summary><div class="pop"><p>Hold this key below the server's limits. Empty is the server's.</p>
+<form method="post" action="${root}/keys/limits"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}">${keyLimitFields(key.limits)}<button type="submit">Save limits</button></form></div></details>
+<details class="act"><summary>Rotate</summary><div class="pop"><p>A new secret replaces this one at once. The key keeps its name, access and bookings.</p>
 <form method="post" action="${root}/keys/rotate"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button type="submit">Rotate key</button></form></div></details>
 <details class="act danger"><summary>Revoke</summary><div class="pop"><p>Requests with this key fail at once. What it booked stays on the calendar.</p>
 <form method="post" action="${root}/keys/revoke"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${key.id}"><button class="danger" type="submit">Revoke key</button></form></div></details>`
           : html``;
       return html`<tr>
-<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${served ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : 'someone unknown'}</span>` : html``}</span></td>
+<td data-label="Name" class="strong"><span class="cell"><span class="truncate" title="${key.name}">${key.name}</span>${sharedWorkspace(session) ? html`<span class="meta">Created by ${key.createdBy === personOf(session) ? 'you' : (key.createdBy && names.get(key.createdBy)) ?? (key.createdBy?.startsWith('github:') ? `GitHub user ${key.createdBy.slice(7)}` : key.createdBy?.startsWith('google:') ? 'a Google user' : 'someone unknown')}</span>` : html``}</span></td>
 <td data-label="Key"><code class="chip">${key.prefix}…</code></td>
-<td data-label="Access">${key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only'}</td>
+<td data-label="Access">${
+        key.resourceScope || key.limits
+          ? html`<span class="cell"><span>${accessOf(key)}</span>${key.resourceScope ? html`<span class="meta wrap">Only ${[...key.resourceScope.locations, ...key.resourceScope.groups.map((group) => `group ${group}`)].join(', ')}</span>` : html``}${key.limits ? html`<span class="meta wrap">At most ${keyLimitsText(key.limits)}</span>` : html``}</span>`
+          : accessOf(key)
+      }</td>
 <td data-label="Created">${dateCell(key.createdAt)}</td>
 <td data-label="Last used">${key.lastUsedAt ? dateCell(key.lastUsedAt) : html`<span class="muted">Never</span>`}</td>
 <td data-label="Expires">${key.expiresAt ? dateCell(key.expiresAt) : html`<span class="muted">Never</span>`}</td>
@@ -1334,8 +2952,9 @@ ${noticeOf(notice)}
     }</div>`;
 
   /** A resource as people name it: its reference, else the start of its id. */
+  // Its profile's name, else its reference, else the start of its id.
   const resourceName = (resource: SlotlockResource | undefined, id: string) =>
-    resource?.externalRef ?? `${id.slice(0, 8)}…`;
+    resource?.name ?? resource?.externalRef ?? `${id.slice(0, 8)}…`;
 
   function agendaPanel(
     entries: readonly SlotlockAgendaEntry[],
@@ -1374,6 +2993,53 @@ ${noticeOf(notice)}
     )}${more ? html`<p class="fine">Showing the first ${String(AGENDA_SHOWN)}.</p>` : html``}`;
   }
 
+  /**
+   * What each change says in the feed, as a sentence: who did it (`verb` then the resource), or what
+   * happened (`passive`, the resource in place of {X}). Every change type the feed records has one,
+   * so the feed never shows a raw type such as resource.updated.
+   */
+  const ACTIVITY: Readonly<Record<string, { verb?: string; after?: string; passive?: string }>> = Object.freeze({
+    'hold.created': { verb: 'held' },
+    'hold.updated': { verb: 'changed the hold on' },
+    'hold.confirmed': { verb: 'booked', after: ' from a hold' },
+    'hold.released': { verb: 'released the hold on' },
+    'hold.expired': { passive: 'The hold on {X} expired' },
+    'reservation.created': { verb: 'booked' },
+    'reservation.updated': { verb: 'moved a booking on' },
+    'reservation.cancelled': { verb: 'cancelled a booking on' },
+    'reservation.checked_in': { verb: 'checked in to' },
+    'reservation.no_show': { passive: '{X} was released after a no-show' },
+    'event.created': { verb: 'added an event on' },
+    'event.updated': { verb: 'changed an event on' },
+    'event.cancelled': { verb: 'cancelled an event on' },
+    'event.timezone_shifted': { passive: 'An event on {X} moved with a time zone change' },
+    'event.timezone_conflict': { passive: 'An event on {X} clashes after a time zone change' },
+    'coverage.stale': { passive: 'The calendar sync for {X} is behind' },
+    'coverage.recorded': { passive: 'The calendar for {X} synced' },
+    'coverage.deleted': { verb: 'removed the calendar sync for' },
+    'waitlist.offered': { passive: 'A waitlist offer went out for {X}' },
+    'waitlist.expired': { passive: 'A waitlist offer for {X} lapsed' },
+    'approval.requested': { passive: 'A booking on {X} waits for approval' },
+    'approval.granted': { verb: 'approved a booking on' },
+    'approval.declined': { verb: 'declined a booking on' },
+    'approval.expired': { passive: 'A booking on {X} was not approved in time' },
+    'resource.created': { verb: 'added' },
+    'resource.updated': { verb: 'edited' },
+    'resource.archived': { verb: 'archived' },
+    'resource.restored': { verb: 'restored' },
+    'resource.deleted': { verb: 'deleted' },
+    'key.created': { verb: 'created an API key' },
+    'key.rotated': { verb: 'rotated an API key' },
+    'key.revoked': { verb: 'revoked an API key' },
+    'webhook.created': { verb: 'added a webhook' },
+    'webhook.enabled': { verb: 'turned a webhook back on' },
+    'webhook.disabled': { passive: 'A webhook was turned off' },
+    'webhook.deleted': { verb: 'deleted a webhook' },
+    'usage.period_closed': { passive: 'A month of use closed' },
+  });
+  /** Changes about a resource, which name it; the rest stand alone. */
+  const ABOUT_A_RESOURCE = /^(hold|reservation|event|coverage|waitlist|approval|resource)\./;
+
   function activityPanel(
     changes: readonly SlotlockChange[],
     byId: ReadonlyMap<string, SlotlockResource>,
@@ -1384,40 +3050,86 @@ ${noticeOf(notice)}
       return html`<p class="empty">No activity yet. What agents book, move and cancel shows here.</p>`;
     }
     const keyNames = new Map(keys.map((key) => [`api_key:${key.id}`, key.name]));
-    return html`<ol class="feed">${changes.map((change) => {
-      const label = CHANGE_LABELS[change.type] ?? { text: change.type, tone: 'neutral' };
-      const who =
-        change.actor === null
-          ? brandName
-          : change.actor === personOf(session)
-            ? 'You'
-            : (keyNames.get(change.actor) ??
-              (change.actor.startsWith('api_key:')
-                ? 'A deleted key'
-                : /^github:\d+$/.test(change.actor)
-                  ? `GitHub user ${change.actor.slice(7)}`
-                  : /^dashboard-assistant:github:\d+$/.test(change.actor)
-                    ? change.actor === assistantActor(session)
-                      ? `Assistant for @${session.login}`
-                      : `Assistant for GitHub user ${change.actor.slice(27)}`
-                    : change.actor.slice(0, 60)));
-      const where = change.resourceId
-        ? resourceName(byId.get(change.resourceId), change.resourceId)
-        : null;
-      return html`<li class="event"><span class="dot ${label.tone}" aria-hidden="true"></span><span class="what" title="${where ? `${label.text} on ${where}` : label.text}"><span class="title">${label.text}${where ? html` <span class="on">on</span> ${where}` : html``}</span><span class="meta">${who} · <time datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></span></span></li>`;
+    const whoOf = (actor: string | null) =>
+      actor === null
+        ? brandName
+        : actor === personOf(session)
+          ? 'You'
+          : (keyNames.get(actor) ??
+            (actor.startsWith('api_key:')
+              ? 'A deleted key'
+              : /^github:\d+$/.test(actor)
+                ? `GitHub user ${actor.slice(7)}`
+                : /^google:/.test(actor)
+                  ? 'A Google user'
+                  : /^dashboard-assistant:(github|google):/.test(actor)
+                    ? actor === assistantActor(session)
+                      ? `Assistant for ${shownAs(session)}`
+                      : actor.startsWith('dashboard-assistant:google:')
+                        ? 'Assistant for a Google user'
+                        : `Assistant for GitHub user ${actor.slice(27)}`
+                    : actor.slice(0, 60)));
+    // Repeats in a row (one actor, one change, one resource) read as one line with a count.
+    const runs: { change: SlotlockChange; times: number }[] = [];
+    for (const change of changes) {
+      const last = runs.at(-1);
+      if (last && last.change.actor === change.actor && last.change.type === change.type && last.change.resourceId === change.resourceId) {
+        last.times += 1;
+      } else {
+        runs.push({ change, times: 1 });
+      }
+    }
+    // Own entries only: a type such as `constructor` names nothing here.
+    const own = <T,>(map: Readonly<Record<string, T>>, type: string) => (Object.hasOwn(map, type) ? map[type] : undefined);
+    return html`<ol class="feed">${runs.map(({ change, times }) => {
+      const tone = own(CHANGE_LABELS, change.type)?.tone ?? 'neutral';
+      const where = change.resourceId ? resourceName(byId.get(change.resourceId), change.resourceId) : null;
+      const object = where ?? (ABOUT_A_RESOURCE.test(change.type) ? 'a resource' : null);
+      const words = own(ACTIVITY, change.type);
+      let sentence: Html;
+      if (change.type === 'usage.threshold_reached') {
+        const metric = typeof change.data.metric === 'string' ? change.data.metric : 'use';
+        const percent = typeof change.data.percent === 'number' ? change.data.percent : null;
+        sentence = html`${percent === null ? 'A monthly quota' : `${String(percent)}% of this month's ${metric}`} used`;
+      } else if (words?.verb) {
+        sentence = html`<strong>${whoOf(change.actor)}</strong> ${words.verb}${object ? html` <strong>${object}</strong>` : html``}${words.after ?? ''}`;
+      } else if (words?.passive) {
+        const [before, rest] = words.passive.split('{X}') as [string, string | undefined];
+        sentence = rest === undefined ? html`${before}` : html`${before}<strong>${object ?? 'a resource'}</strong>${rest}`;
+      } else {
+        // A change this dashboard has no words for (a newer server's): its label, never its type.
+        const label = own(CHANGE_LABELS, change.type)?.text;
+        sentence = label
+          ? html`${label}${object ? html` <span class="on">on</span> <strong>${object}</strong>` : html``}`
+          : html`Something changed${where ? html` on <strong>${where}</strong>` : html``}`;
+      }
+      return html`<li class="event"><span class="dot ${tone}" aria-hidden="true"></span><span class="what"><span class="title">${sentence}${
+        times > 1 ? html` <span class="times">${times === 2 ? 'twice' : `${String(times)} times`}</span>` : html``
+      }</span></span><time class="when" datetime="${change.occurredAt.toISOString()}" title="${formatDate(change.occurredAt)}">${ago(change.occurredAt, now())}</time></li>`;
     })}</ol>`;
   }
+
+  /** The MCP and A2A endpoints with Copy, and the command that adds Slotlock to an MCP client. */
+  const connectAgent = () =>
+    html`${endpoints()}<details class="command"><summary>Claude Code command</summary><div class="copy-block"><pre><code id="mcp-command">claude mcp add --transport http slotlock ${mcpUrl} --header "Authorization: Bearer YOUR_KEY"</code></pre><button class="quiet" type="button" data-copy="mcp-command">Copy</button></div></details>`;
 
   async function overviewPage(session: Session, status = 200, notice?: string): Promise<Response> {
     const tenantRef = tenantOf(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const [keys, resources, agenda, changes] = await Promise.all([
-      options.keys.list({ tenantRef }),
+    const assistant = assistantStore(session);
+    // A member limited to some resources sees theirs: no keys, plan or setup, which are the workspace's.
+    const limited = scopes.has(session);
+    const [keys, resources, agenda, changes, approvals, model] = await Promise.all([
+      limited ? Promise.resolve([]) : options.keys.list({ tenantRef }),
       options.resources.list(tenantRef),
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, ACTIVITY_LIMIT),
+      options.resources.approvals?.list(tenantRef, APPROVALS_SHOWN),
+      assistant?.getSettings(tenantRef),
     ]);
+    // The plan is Live's: the test environment has none of its own.
+    const standing = plans && session.env !== 'test' && !limited ? await planStanding(session, 'overview', keys) : null;
     const byId = new Map(resources.map((resource) => [resource.id, resource]));
     const active = keys.filter(
       (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
@@ -1426,44 +3138,169 @@ ${noticeOf(notice)}
       agenda && agenda.length >= AGENDA_LIMIT ? `${count}+` : String(count);
     const booked = agenda?.filter((entry) => entry.kind !== 'hold').length ?? 0;
     const held = agenda?.filter((entry) => entry.kind === 'hold').length ?? 0;
-    const stat = (label: string, value: string, href: string) =>
-      html`<a class="stat" href="${href}"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></a>`;
-    const steps = [
-      { done: resources.length > 0, text: 'Add what your agents book', href: `${root}/resources` },
-      { done: active.length > 0, text: 'Create a key for an agent', href: `${root}/keys` },
-      { done: (changes?.length ?? 0) > 0, text: 'Connect the agent and book', href: `${root}/keys` },
+    const waiting = approvals?.filter((approval) => approval.status === 'pending').length ?? 0;
+    const attention = [
+      ...(standing?.attention ?? []),
+      ...(waiting > 0
+        ? [
+            attentionItem('info', `${String(waiting)} ${waiting === 1 ? 'booking waits' : 'bookings wait'} for your approval.`, {
+              href: `${root}/approvals`,
+              label: 'Review',
+            }),
+          ]
+        : []),
     ];
-    const content = html`${noticeOf(notice)}
-${pageHead('Overview')}
-${
-  steps.every((step) => step.done)
-    ? html``
-    : html`<section class="panel setup"><h2>Get started</h2><ol class="steps">${steps.map(
-        (step) =>
-          html`<li class="${step.done ? 'done' : ''}"><span class="check" aria-hidden="true">${step.done ? ICONS.check : html``}</span>${step.done ? html`<span>${step.text}</span>` : html`<a href="${step.href}">${step.text}</a>`}${step.done ? html`<span class="visually-hidden">(done)</span>` : html``}</li>`,
-      )}</ol></section>`
-}
-<div class="stats">
-${agenda ? stat(`Booked, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`) : html``}
-${agenda ? stat('Live holds', counted(held), `${root}#upcoming`) : html``}
-${stat('Resources', String(resources.length), `${root}/resources`)}
-${stat('Active keys', String(active.length), `${root}/keys`)}
-</div>
+    const admin = isAdmin(session);
+    const steps: { done: boolean; title: string; action: { href: string; label: string } }[] = limited ? [] : [
+      { done: resources.length > 0, title: 'Add a resource', action: { href: `${root}/resources`, label: 'Add resource' } },
+      { done: active.length > 0, title: 'Create an API key', action: { href: `${root}/keys#new-key`, label: 'Create key' } },
+      // Done once an agent has used a key.
+      { done: active.some((key) => key.lastUsedAt !== null), title: 'Connect an agent', action: { href: `${root}#connect`, label: 'Connect' } },
+      ...(assistant
+        ? [
+            admin
+              ? { done: Boolean(model), title: 'Connect a model to the assistant', action: { href: `${root}/settings`, label: 'Connect' } }
+              : { done: Boolean(model), title: 'Try the assistant', action: { href: `${root}/assistant`, label: 'Open' } },
+          ]
+        : []),
+    ];
+    const done = steps.filter((step) => step.done).length;
+    const next = steps.findIndex((step) => !step.done);
+    // Nothing made and nothing happened yet: only the way in.
+    const fresh = !limited && resources.length === 0 && active.length === 0 && (changes?.length ?? 0) === 0;
+    const setupCard =
+      next === -1
+        ? html``
+        : html`<section class="panel setup-card"><div class="panel-head"><h2>Get started</h2><span class="meta">${String(done)} of ${String(steps.length)}</span></div><div class="segments" aria-hidden="true">${steps.map(
+            (step) => html`<span${step.done ? html` class="done"` : html``}></span>`,
+          )}</div><ol class="setup-steps">${steps.map(
+            (step, index) =>
+              html`<li class="${step.done ? 'done' : index === next ? 'next' : ''}"><span class="check" aria-hidden="true">${step.done ? ICONS.check : html``}</span><span class="step-title">${step.title}${
+                step.done ? html`<span class="visually-hidden"> (done)</span>` : html``
+              }</span>${index === next ? html`<a class="button primary" href="${step.action.href}">${step.action.label}</a>` : html``}</li>`,
+          )}</ol></section>`;
+    // Mostly set up: one line that leads to the next step.
+    const setupRow =
+      next === -1
+        ? html``
+        : html`<a class="setup-row" href="${steps[next]?.action.href ?? root}"><span class="segments" aria-hidden="true">${steps.map(
+            (step) => html`<span${step.done ? html` class="done"` : html``}></span>`,
+          )}</span><span>Get started · ${String(done)} of ${String(steps.length)} · <strong>${steps[next]?.title ?? ''}</strong></span></a>`;
+    const stat = (label: string, value: string, href: string, tone = '') =>
+      html`<a class="stat${tone}" href="${href}"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></a>`;
+    const tiles: Html[] = [
+      ...(agenda ? [stat(`Bookings, next ${AGENDA_DAYS} days`, counted(booked), `${root}#upcoming`), stat('Live holds', counted(held), `${root}#upcoming`)] : []),
+      ...(approvals ? [stat('Waiting for approval', String(waiting), `${root}/approvals`, waiting > 0 ? ' attention-stat' : '')] : []),
+      stat('Resources', String(resources.length), `${root}/resources`),
+      ...(limited ? [] : [stat('Active keys', String(active.length), `${root}/keys`)]),
+    ].slice(0, 4);
+    const planCard = standing
+      ? html`<section class="panel plan-card"><div class="panel-head"><h2>${standing.name}</h2><a href="${root}/plan">Usage</a></div><div class="meters stacked">${standing.meters}</div>${
+          standing.canUpgrade && standing.pressing
+            ? html`<a class="button primary" href="${root}/plan#upgrade">Upgrade</a>`
+            : html``
+        }</section>`
+      : html``;
+    const connectCard = limited ? html`` : html`<section class="panel" id="connect"><h2>Connect an agent</h2>${connectAgent()}</section>`;
+    const body = fresh
+      ? standing
+        ? html`<div class="split">${setupCard}<div class="column">${planCard}</div></div>`
+        : setupCard
+      : html`${done * 2 >= steps.length ? setupRow : setupCard}
+<div class="stats">${tiles}</div>
+${session.env === 'test' && options.resources.sandbox && can(session, 'sandbox.manage') ? sandboxPanel(session, resources.length) : html``}
 <div class="split">
+<div class="column">
 ${agenda ? html`<section class="panel" id="upcoming"><h2>Upcoming</h2>${agendaPanel(agenda, byId, agenda.length > AGENDA_SHOWN)}</section>` : html``}
-${changes ? html`<section class="panel"><h2>Agent activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
+${changes ? html`<section class="panel"><h2>Activity</h2>${activityPanel(changes, byId, keys, session)}</section>` : html``}
+</div>
+<div class="column">${planCard}${connectCard}</div>
 </div>`;
+    const content = html`${noticeOf(notice, status)}
+${pageHead('Overview')}
+${attentionList(attention)}
+${fresh && session.env === 'test' && options.resources.sandbox && can(session, 'sandbox.manage') ? sandboxPanel(session, resources.length) : html``}
+${body}`;
     return respond(status, layout('Overview', content, session, 'overview'));
+  }
+
+  /** In Test: load a scenario to try an agent against, move waiting forward, or start again (RFC 0004 A6). */
+  function sandboxPanel(session: Session, resourceCount: number): Html {
+    const token = csrfToken(session);
+    const hidden = html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const names: Record<SlotlockSandboxScenario, string> = { 'car-rental': 'Car rental', clinic: 'Clinic', desks: 'Desks and a hall' };
+    return html`<section class="panel" id="sandbox"><h2>Sandbox</h2>
+<p class="fine">Test only. Try an agent against sample data, make holds and approvals that would lapse lapse now, or start again. Keys and webhooks stay.</p>
+${
+  resourceCount === 0
+    ? html`<form class="create" method="post" action="${root}/sandbox/seed">${hidden}<label>Sample data<select name="scenario">${SLOTLOCK_SANDBOX_SCENARIOS.map(
+        (scenario) => html`<option value="${scenario}">${names[scenario]}</option>`,
+      )}</select></label><button class="primary" type="submit">Load it</button></form>`
+    : html`<form class="create" method="post" action="${root}/sandbox/fast-forward">${hidden}<label>Move waiting forward<select name="minutes"><option value="15">15 minutes</option><option value="60">An hour</option><option value="1440">A day</option></select></label><button type="submit">Move forward</button></form>
+<details class="act danger"><summary>Start again</summary><div class="pop"><p>Every resource, booking, hold and policy in Test goes. Keys and webhooks stay.</p><form method="post" action="${root}/sandbox/reset">${hidden}<button class="danger" type="submit">Empty Test</button></form></div></details>`
+}
+</section>`;
+  }
+
+  async function sandboxAction(session: Session, form: URLSearchParams, action: 'seed' | 'reset' | 'fast-forward'): Promise<Response> {
+    const sandbox = options.resources.sandbox;
+    if (!sandbox || session.env !== 'test') return overviewPage(session, 400, 'The sandbox is in Test only.');
+    const tenantRef = tenantOf(session);
+    try {
+      if (action === 'seed') {
+        const scenario = form.get('scenario') as SlotlockSandboxScenario;
+        if (!SLOTLOCK_SANDBOX_SCENARIOS.includes(scenario)) return overviewPage(session, 400, 'Choose a sample from the list.');
+        const seeded = await sandbox.seed(tenantRef, scenario);
+        return overviewPage(session, 200, `Loaded ${String(seeded.resources)} resources and ${String(seeded.bookings)} bookings for tomorrow.`);
+      }
+      if (action === 'reset') {
+        await sandbox.reset(tenantRef);
+        return redirect(303, `${root}#sandbox`);
+      }
+      const minutes = Number(form.get('minutes'));
+      if (![15, 60, 1440].includes(minutes)) return overviewPage(session, 400, 'Choose how far from the list.');
+      const moved = await sandbox.fastForward(tenantRef, minutes);
+      return overviewPage(session, 200, `${String(moved.holds)} holds and ${String(moved.approvals)} approvals lapsed.`);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 'sandbox_not_empty') {
+        return overviewPage(session, 409, 'Test has resources already. Start again first.');
+      }
+      throw error;
+    }
   }
 
   function endpoints(): Html {
     return html`<dl class="endpoints"><dt>MCP</dt><dd><code id="mcp-url">${mcpUrl}</code><button class="quiet" type="button" data-copy="mcp-url">Copy</button></dd><dt>A2A</dt><dd><code id="a2a-url">${a2aUrl}</code><button class="quiet" type="button" data-copy="a2a-url">Copy</button></dd></dl>`;
   }
 
-  async function keysPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const keys = await options.keys.list({ tenantRef: tenantOf(session) });
+  const accessOf = (key: SlotlockApiKey) =>
+    key.scopes.includes('admin') ? 'Full' : key.scopes.includes('write') ? 'Read and write' : 'Read only';
+
+  async function keysPage(session: Session, status = 200, notice?: string | Html): Promise<Response> {
+    const tenantRef = tenantOf(session);
+    const grouping = options.resources.grouping;
+    const team = teamTenantOf(session);
+    const [keys, locations, groups, members] = await Promise.all([
+      options.keys.list({ tenantRef }),
+      grouping?.locations(tenantRef),
+      grouping?.groups(tenantRef),
+      teamStore && team !== undefined ? teamStore.members(team) : Promise.resolve([]),
+    ]);
+    const names = new Map(members.map((member) => [member.person, memberName(member)]));
     const token = csrfToken(session);
-    const content = html`${noticeOf(notice)}
+    const paths = locationPaths(locations ?? []);
+    // A key limited to locations or groups (RFC 0003 G6), when the tenant has any to choose.
+    const limitChoices =
+      (locations?.length ?? 0) + (groups?.length ?? 0) > 0
+        ? html`<details class="types"><summary>Limit to locations or groups (optional)</summary><div class="checks">${(locations ?? []).map(
+            (location) =>
+              html`<label class="choice"><input type="checkbox" name="limit_location" value="${location.ref}"> ${paths.get(location.ref) ?? location.name}</label>`,
+          )}${(groups ?? []).map(
+            (group) =>
+              html`<label class="choice"><input type="checkbox" name="limit_group" value="${group.ref}"> Group: ${group.name}</label>`,
+          )}</div><p class="fine">The key then reaches only the resources there (a location with every location in it), read and write only. Developer plan and up.</p></details>`
+        : html``;
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('API keys')}
 <section class="panel">
 <h2>Connect an agent</h2>
@@ -1479,22 +3316,53 @@ ${endpoints()}
 <label>Access<select name="access"><option value="read_write">Read and write</option><option value="read">Read only</option><option value="full">Full, with the application API</option></select></label>
 <label>Expires<select name="expires"><option value="90">In 90 days</option><option value="30">In 30 days</option><option value="365">In a year</option><option value="never">Never</option></select></label>
 <button class="primary" type="submit">Create key</button>
+${limitChoices}
+<details class="types"><summary>Agent limits (optional)</summary><div class="checks">${keyLimitFields()}</div><p class="fine">Below the server's own limits, never above them. A key whose bookings wait for approval sends each to the Approvals page.</p></details>
 </form>
 </section>
 ${
   keys.length === 0
     ? emptyState(ICONS.keys, 'No keys yet. Give every agent its own, with the least access it needs.', { href: '#key-name', label: 'Create a key' })
-    : html`${served ? html`<p class="fine">Each key acts in this organization only, and every member can rotate or revoke it.</p>` : html``}<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-<tbody>${keyRows(keys, token, session)}</tbody></table></div>`
+    : html`<div class="table"><table><thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+<tbody>${keyRows(keys, token, session, names)}</tbody></table></div>`
 }`;
     return respond(status, layout('API keys', content, session, 'keys'));
   }
 
-  async function resourcesPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const resources = await options.resources.list(tenantOf(session));
+  /**
+   * How many resources the tenant may have here, and how many it has as that limit counts them: the
+   * dashboard's own limit, or its plan's when lower (archived resources count against a plan).
+   */
+  async function resourceAllowance(
+    tenantRef: string,
+    resources: readonly SlotlockResource[],
+  ): Promise<{ used: number; limit: number; planned: boolean; archived: number }> {
+    const plan = plans ? await plans.plan(tenantRef) : null;
+    if (!plan || plan.limits.resources >= SLOTLOCK_DASHBOARD_MAX_RESOURCES) {
+      return { used: resources.length, limit: SLOTLOCK_DASHBOARD_MAX_RESOURCES, planned: false, archived: 0 };
+    }
+    const counted = options.resources.count ? await options.resources.count(tenantRef) : resources.length;
+    return {
+      used: counted,
+      limit: plan.limits.resources,
+      planned: true,
+      archived: Math.max(0, counted - resources.length),
+    };
+  }
+
+  async function resourcesPage(session: Session, status = 200, notice?: string | Html, ownHoursOnly = false): Promise<Response> {
+    const every = await options.resources.list(tenantOf(session));
+    const allowance = await resourceAllowance(tenantOf(session), every);
+    // `?hours=own`: those that keep hours of their own, which the tenant's hours do not reach.
+    const resources = ownHoursOnly
+      ? every.filter((resource) => resource.archivedAt === undefined && resource.availabilityRules !== undefined)
+      : every;
     const token = csrfToken(session);
-    const content = html`${noticeOf(notice)}
-${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${root}/hours">Set hours for every resource</a>` : undefined)}
+    const content = html`${noticeOf(notice, status)}
+${pageHead(
+  'Resources',
+  html`<div class="row-actions">${options.resources.grouping ? html`<a class="button" href="${root}/locations">Locations and groups</a>` : html``}<a class="button" href="${root}/hours">Your hours</a>${options.resources.hours ? html`<a class="button" href="${root}/closures">Closures</a>` : html``}${options.resources.contacts ? html`<a class="button" href="${root}/contacts">Contacts</a>` : html``}</div>`,
+)}
 <section class="panel" id="add-resource">
 <h2>Add a resource</h2>
 <form class="create" method="post" action="${root}/resources">
@@ -1504,52 +3372,246 @@ ${pageHead('Resources', resources.length > 0 ? html`<a class="button" href="${ro
 <label>Time zone<input name="timezone" required maxlength="64" value="UTC" placeholder="Europe/London"></label>
 <button class="primary" type="submit">Add resource</button>
 </form>
-<p class="fine">${String(resources.length)} of ${String(SLOTLOCK_DASHBOARD_MAX_RESOURCES)}. Adding a reference you have changes its time zone.</p>
+<p class="fine">${String(allowance.used)} of ${String(allowance.limit)}${allowance.planned ? html` on your plan${allowance.archived > 0 ? html`, ${String(allowance.archived)} of them archived (archived resources count until deleted)` : html``}` : html``}. Adding a reference you have changes its time zone.</p>
 </section>
 ${
-  resources.length === 0
+  ownHoursOnly
+    ? html`<p class="notice" role="status">${String(resources.length)} ${resources.length === 1 ? 'resource keeps hours of its own' : 'resources keep hours of their own'}, so <a href="${root}/hours">your hours</a> do not reach ${resources.length === 1 ? 'it' : 'them'}. <a href="${root}/resources">Show every resource</a></p>`
+    : html``
+}${
+  resources.length === 0 && !ownHoursOnly
     ? emptyState(ICONS.resources, 'No resources yet. Agents can only book what is listed here.', { href: '#reference', label: 'Add a resource' })
     : html`<div class="table"><table><thead><tr><th>Reference</th><th>Time zone</th><th>Bookable hours</th><th>Resource id</th></tr></thead><tbody>${resources.map(
         (resource) =>
-          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${hoursSummary(resource.availabilityRules)}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
+          html`<tr><td data-label="Reference" class="strong"><span class="cell"><a class="truncate" href="${root}/resources/${resource.id}" title="${resourceName(resource, resource.id)}">${resourceName(resource, resource.id)}</a>${resource.name && resource.externalRef ? html`<span class="meta" title="Reference ${resource.externalRef}">${resource.externalRef}</span>` : html``}${resource.pool ? html`<span class="meta" title="Pool ${resource.pool}">Pool ${resource.pool}</span>` : html``}</span></td><td data-label="Time zone">${resource.timezone}</td><td data-label="Bookable hours"><span class="cell"><span>${resourceHours(resource, options.availability ?? [])}</span><a class="meta-link" href="${root}/hours?resource=${resource.id}">Set hours</a></span></td><td data-label="Resource id"><code class="muted truncate id" title="${resource.id}">${resource.id}</code></td></tr>`,
       )}</tbody></table></div>`
 }`;
     return respond(status, layout('Resources', content, session, 'resources'));
   }
 
-  async function settingsPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const rules = options.availability ?? [];
-    const current = session.orgs?.find((org) => org.id === session.org);
-    const content = html`${noticeOf(notice)}
-${pageHead('Settings')}
-${await assistantSettingsPanel(session)}
-<section class="panel">
-<h2>Endpoints</h2>
-${endpoints()}
-</section>
-<section class="panel">
-<h2>Server hours</h2>
+  /** The tenant's locations and groups (RFC 0003 G2, G3): what they are, and adding and changing them. */
+  async function locationsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    const [locations, groups] = await Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]);
+    const token = csrfToken(session);
+    const byRef = new Map(locations.map((location) => [location.ref, location]));
+    const paths = locationPaths(locations);
+    const sent = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    // Where a location may be: nowhere, or any location but itself and those inside it.
+    const insideChoices = (selected: string | null, except?: string) =>
+      html`<option value=""${selected === null ? html` selected` : html``}>Nowhere (at the top)</option>${locations
+        .filter((location) => except === undefined || !locationWithin(byRef, location.ref, except))
+        .map(
+          (location) =>
+            html`<option value="${location.ref}"${location.ref === selected ? html` selected` : html``}>${paths.get(location.ref) ?? location.name}</option>`,
+        )}`;
+    const nameLimit = String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name);
+    const locationRows = locations.map((location) => {
+      const parent = location.parentRef === null ? undefined : paths.get(location.parentRef);
+      const zone = locationZone(byRef, location);
+      return html`<tr>
+<td data-label="Location" class="strong"><span class="cell"><span class="truncate" title="${paths.get(location.ref) ?? location.name}">${location.name}</span><span class="meta">${location.ref}${parent ? ` · in ${parent}` : ''}</span></span></td>
+<td data-label="Time zone">${zone ? (zone.from === location ? zone.timezone : html`<span class="cell"><span>${zone.timezone}</span><span class="meta">from ${zone.from.name}</span></span>`) : html`<span class="muted">None</span>`}</td>
+<td data-label="Resources">${String(location.resources)}</td>
+<td class="actions">${options.resources.hours ? html`<a class="button" href="${root}/hours?location=${location.ref}">Hours</a>` : html``}<details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/locations">${sent()}<input type="hidden" name="ref" value="${location.ref}">
+<label>Name<input name="name" required maxlength="${nameLimit}" value="${location.name}"></label>
+<label>Inside<select name="parent">${insideChoices(location.parentRef, location.ref)}</select></label>
+<label>Time zone<input name="timezone" maxlength="100" value="${location.timezone ?? ''}" placeholder="As where it is"></label>
+<button type="submit">Save location</button></form></div></details><details class="act danger"><summary>Delete</summary><div class="pop"><p>${location.resources > 0 ? 'Move its resources somewhere else first.' : 'Locations inside it must be moved or deleted first.'}</p>
+<form method="post" action="${root}/locations/delete">${sent()}<input type="hidden" name="ref" value="${location.ref}"><button class="danger" type="submit">Delete location</button></form></div></details></td>
+</tr>`;
+    });
+    const groupRows = groups.map(
+      (group) => html`<tr>
+<td data-label="Group" class="strong"><span class="cell"><span class="truncate" title="${group.name}">${group.name}</span><span class="meta">${group.ref}</span></span></td>
+<td data-label="Description" class="wrap">${group.description ?? ''}</td>
+<td data-label="Resources">${String(group.members)}</td>
+<td class="actions"><details class="act"><summary>Edit</summary><div class="pop"><form method="post" action="${root}/groups">${sent()}<input type="hidden" name="ref" value="${group.ref}">
+<label>Name<input name="name" required maxlength="${nameLimit}" value="${group.name}"></label>
+<label>Description<textarea name="description" rows="2" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}">${group.description ?? ''}</textarea></label>
+<button type="submit">Save group</button></form></div></details><details class="act danger"><summary>Delete</summary><div class="pop"><p>Its resources stay as they are, in no group of this name.</p>
+<form method="post" action="${root}/groups/delete">${sent()}<input type="hidden" name="ref" value="${group.ref}"><button class="danger" type="submit">Delete group</button></form></div></details></td>
+</tr>`,
+    );
+    const content = html`${noticeOf(notice, status)}
+<p><a class="back" href="${root}/resources">Resources</a></p>
+${pageHead('Locations and groups')}
+<section class="panel" id="locations">
+<h2>Locations</h2>
+<form class="create" method="post" action="${root}/locations">${sent()}
+<label>Reference<input id="location-ref" name="ref" required maxlength="100" placeholder="floor-3"></label>
+<label class="grow">Name<input name="name" required maxlength="${nameLimit}" placeholder="Floor 3"></label>
+<label>Inside<select name="parent">${insideChoices(null)}</select></label>
+<label>Time zone<input name="timezone" maxlength="100" placeholder="As where it is"></label>
+<button class="primary" type="submit">Add location</button>
+</form>
+<p class="fine">Where resources are: a site, a building, a floor, up to ${String(SLOTLOCK_MAX_LOCATION_DEPTH)} levels. Agents searching a location search every location inside it too. A resource added at a location over the API without a time zone takes the location's, or the nearest one above it. Adding a reference you have changes that location.</p>
 ${
-  rules.length === 0
-    ? html`<p class="empty">None: agents find a free slot only on resources with hours of their own.</p>`
-    : html`<ul class="hours">${rules.map(
-        (rule) =>
-          html`<li>${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}</li>`,
-      )}</ul>`
+  locations.length === 0
+    ? html`<p class="empty">No locations yet.</p>`
+    : html`<div class="table"><table><thead><tr><th>Location</th><th>Time zone</th><th>Resources</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${locationRows}</tbody></table></div>`
 }
-<p class="fine">For resources without hours of their own, in each resource's time zone. Set by the server's operator.</p>
 </section>
-<section class="panel">
-<h2>Account</h2>
-<dl class="facts"><dt>Signed in as</dt><dd>@${session.login}</dd>${
-      current
-        ? html`<dt>Organization</dt><dd>${current.login}</dd>${(session.orgs?.length ?? 0) > 1 ? html`<dt>Also a member of</dt><dd>${(session.orgs ?? []).filter((org) => org.id !== current.id).map((org) => org.login).join(', ')}</dd>` : html``}`
-        : html`<dt>Workspace</dt><dd>Personal</dd>`
-    }<dt>Session ends</dt><dd>${formatDate(new Date(session.exp))}</dd></dl>
-${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}
+<section class="panel" id="groups">
+<h2>Groups</h2>
+<form class="create" method="post" action="${root}/groups">${sent()}
+<label>Reference<input id="group-ref" name="ref" required maxlength="100" placeholder="video-rooms"></label>
+<label class="grow">Name<input name="name" required maxlength="${nameLimit}" placeholder="Rooms with video"></label>
+<label class="grow">Description<input name="description" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}" placeholder="Optional"></label>
+<button class="primary" type="submit">Add group</button>
+</form>
+<p class="fine">Any set of resources, such as a team or the rooms with video, wherever they are. A resource is in up to ${String(SLOTLOCK_MAX_GROUPS_PER_RESOURCE)} groups; choose them on its page. Adding a reference you have changes that group.</p>
+${
+  groups.length === 0
+    ? html`<p class="empty">No groups yet.</p>`
+    : html`<div class="table"><table><thead><tr><th>Group</th><th>Description</th><th>Resources</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${groupRows}</tbody></table></div>`
+}
 </section>`;
+    return respond(status, layout('Locations and groups', content, session, 'resources'));
+  }
+
+  type SettingsSection = 'assistant' | 'members' | 'team' | 'identity' | 'audit' | 'privacy' | 'endpoints' | 'hours' | 'account';
+  /** An invitation's link, shown once to the person who made it. */
+  type InvitationShown = { link: string; to: string; expiresAt: Date };
+
+  /** Resources with hours of their own the tenant's hours page names; the rest are counted. */
+  const OWN_HOURS_NAMED = 8;
+
+  /** Settings' sections, each its own page: the assistant's form apart from what is only read. */
+  const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string; path: string }[] = Object.freeze([
+    { id: 'assistant', label: 'Assistant', path: '/settings' },
+    { id: 'members', label: 'Members', path: '/settings/members' },
+    { id: 'team', label: 'Team', path: '/settings/team' },
+    { id: 'identity', label: 'Identity', path: '/settings/identity' },
+    { id: 'audit', label: 'Audit log', path: '/settings/audit' },
+    { id: 'privacy', label: 'Privacy', path: '/settings/privacy' },
+    { id: 'endpoints', label: 'Endpoints', path: '/settings/endpoints' },
+    { id: 'hours', label: 'Hours', path: '/settings/hours' },
+    { id: 'account', label: 'Account', path: '/settings/account' },
+  ]);
+
+  async function settingsPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    draft?: AssistantDraft,
+    section: SettingsSection = 'assistant',
+    invitation?: InvitationShown,
+    query?: URLSearchParams,
+    found?: PersonFound,
+  ): Promise<Response> {
+    const store = assistantStore(session);
+    // Members are a team workspace's: its people come from invitations, not from GitHub.
+    const sections = SETTINGS_SECTIONS.filter(
+      (entry) =>
+        (entry.id !== 'assistant' || store) &&
+        (entry.id !== 'members' || (teamStore && session.team !== undefined)) &&
+        (entry.id !== 'team' || (teamStore && session.team !== undefined && can(session, 'workspace.own'))) &&
+        (entry.id !== 'identity' || (domainStore && session.team !== undefined && can(session, 'identity.manage'))) &&
+        (entry.id !== 'audit' || (options.resources.audit && can(session, 'audit.read'))) &&
+        (entry.id !== 'privacy' || (options.resources.privacy && can(session, 'privacy.manage'))) &&
+        // Limited to some resources: one's account and the team's people, nothing of the workspace's.
+        (!scopes.has(session) || entry.id === 'account' || entry.id === 'members'),
+    );
+    const shown: SettingsSection =
+      scopes.has(session) && !sections.some((entry) => entry.id === section)
+        ? 'account'
+        : section === 'assistant' && !store
+        ? 'endpoints'
+        : (section === 'members' || section === 'audit' || section === 'team' || section === 'privacy' || section === 'identity') &&
+            !sections.some((entry) => entry.id === section)
+          ? 'account'
+          : section;
+    const connected = store ? Boolean(await store.getSettings(tenantOf(session))) : false;
+    const nav = html`<nav class="subnav" aria-label="Settings">${sections.map(
+      (entry) =>
+        html`<a href="${root}${entry.path}"${entry.id === shown ? html` aria-current="page"` : html``}>${entry.label}${
+          entry.id === 'assistant' && connected ? html`<span class="nav-dot" aria-hidden="true"></span>` : html``
+        }</a>`,
+    )}</nav>`;
+    let body: Html;
+    if (shown === 'assistant') {
+      body = await assistantSettingsSection(session, status, notice, draft);
+    } else if (shown === 'members') {
+      body = await membersSection(session, status, notice, invitation);
+    } else if (shown === 'team') {
+      body = await teamSection(session, status, notice);
+    } else if (shown === 'identity') {
+      body = await identitySection(session, status, notice);
+    } else if (shown === 'audit') {
+      body = await auditSection(session, status, notice, query ?? new URLSearchParams());
+    } else if (shown === 'privacy') {
+      body = await privacySection(session, status, notice, found);
+    } else if (shown === 'endpoints') {
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">MCP</span><div class="row-value">${copyField('mcp-url', mcpUrl)}</div></div><div class="row"><span class="row-label">A2A</span><div class="row-value">${copyField('a2a-url', a2aUrl)}</div></div></div>`;
+    } else if (shown === 'hours') {
+      const rules = options.availability ?? [];
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Default hours</span><div class="row-value${rules.length === 0 ? ' muted' : ''}">${
+        rules.length === 0
+          ? "None. Agents find free time only on resources with hours of their own, their location's or yours."
+          : html`${rules.map(
+              (rule, index) =>
+                html`${index > 0 ? html`<br>` : html``}${daysOf(rule.rrule)}: ${hoursOf(rule.startMinutes, rule.durationMinutes)}`,
+            )}`
+      }</div></div></div><p class="fine">In each resource's own time zone, for resources with no hours of their own, their location's or <a href="${root}/hours">yours</a>. Set by the server's operator.</p>`;
+    } else {
+      const current = session.orgs?.find((org) => org.id === session.org);
+      const team = currentTeam(session);
+      const others = (session.orgs ?? []).filter((org) => org.id !== current?.id);
+      body = html`${noticeOf(notice, status)}<div class="set-card"><div class="row"><span class="row-label">Signed in as</span><div class="row-value">${shownAs(session)}</div></div><div class="row"><span class="row-label">${current ? 'Organization' : team ? 'Team' : 'Workspace'}</span><div class="row-value">${current ? current.login : team ? team.name : 'Personal'}</div></div>${
+        current && others.length > 0
+          ? html`<div class="row"><span class="row-label">Also a member of</span><div class="row-value">${others.map((org) => org.login).join(', ')}</div></div>`
+          : html``
+      }<div class="row"><span class="row-label">Role</span><div class="row-value">${SLOTLOCK_WORKSPACE_ROLE_NAMES[roleOf(session)]}</div></div><div class="row"><span class="row-label">Session ends</span><div class="row-value">${formatDate(new Date(session.exp))}</div></div>${
+        workspaces && session.sc === undefined
+          ? html`<div class="row"><span class="row-label">Sessions</span><div class="row-value"><form method="post" action="${root}/sign-out-everywhere"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Sign out everywhere</button></form></div></div>`
+          : html``
+      }</div>${current ? html`<p class="fine">Membership is read from GitHub when you sign in.</p>` : html``}${await sessionsList(session)}`;
+    }
+    const content = html`${pageHead('Settings')}<div class="settings">${nav}<div class="settings-body">${body}</div></div>`;
     return respond(status, layout('Settings', content, session, 'settings'));
   }
+
+  /** Where the person is signed in, each but this one with Sign out. */
+  async function sessionsList(session: Session): Promise<Html> {
+    const kept = workspaces?.sessions;
+    if (!kept) return html``;
+    const person = personOf(session);
+    const mine = kept.idOf(session.sid);
+    // A session through a team's provider alone sees only itself: the person's other sessions (and
+    // where they were signed in from) are beyond its team.
+    const listed = (await kept.list(person)).filter((entry) => session.sc === undefined || entry.id === mine);
+    if (listed.length === 0) return html``;
+    const rows = listed.map(
+      (entry) =>
+        html`<tr><td data-label="Device" class="strong">${deviceOf(entry.userAgent)}${entry.id === mine ? html` <span class="pill active">This device</span>` : html``}</td><td data-label="Address">${entry.ipAddress ?? '—'}</td><td data-label="Signed in">${formatDate(entry.startedAt)}</td><td data-label="Last seen">${formatDate(entry.lastSeenAt)}</td><td class="actions">${
+          entry.id === mine
+            ? html``
+            : html`<form class="inline" method="post" action="${root}/sessions/end"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button type="submit">Sign out<span class="visually-hidden"> ${deviceOf(entry.userAgent)}, signed in ${formatDate(entry.startedAt)}</span></button></form>`
+        }</td></tr>`,
+    );
+    return html`<h2 class="sessions-head">Signed in</h2><div class="table"><table><thead><tr><th>Device</th><th>Address</th><th>Signed in</th><th>Last seen</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  async function endSession(session: Session, form: URLSearchParams): Promise<Response> {
+    const kept = workspaces?.sessions;
+    if (!kept) return nothingHere(session);
+    const id = (form.get('id') ?? '').toLowerCase();
+    if (id === kept.idOf(session.sid)) {
+      return settingsPage(session, 400, 'To sign out of this device, use Sign out.', undefined, 'account');
+    }
+    if (!(await kept.end(personOf(session), id))) {
+      return settingsPage(session, 404, 'That session has ended already.', undefined, 'account');
+    }
+    return settingsPage(session, 200, 'Signed out of that device.', undefined, 'account');
+  }
+
+  /** A value to copy: monospace, cut with an ellipsis, with a Copy button (app.js). */
+  const copyField = (id: string, value: string) =>
+    html`<dl class="endpoints"><dd><code id="${id}">${value}</code><button class="quiet" type="button" data-copy="${id}">Copy</button></dd></dl>`;
 
   /** The tenant's resource with that id and every resource (for names), or null for anything else. */
   async function resourceDetailPage(
@@ -1563,12 +3625,24 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
     if (!resource) return notFound(session);
     const start = new Date(now());
     const window = { start, end: new Date(start.getTime() + AGENDA_DAYS * DAY_MS) };
-    const [agenda, changes, keys, defaults] = await Promise.all([
+    const grouping = options.resources.grouping;
+    const [agenda, changes, keys, defaults, locations, groups, everyResource] = await Promise.all([
       options.resources.agenda?.(tenantRef, window, AGENDA_LIMIT),
       options.resources.recentChanges?.(tenantRef, 100),
       options.keys.list({ tenantRef }),
       options.resources.ruleDefaults?.(tenantRef),
+      grouping?.locations(tenantRef),
+      grouping?.groups(tenantRef),
+      // For a composite: its parts, or the wholes it can be a part of.
+      options.resources.setParent ? options.resources.list(tenantRef) : undefined,
     ]);
+    const parts = (everyResource?.filter((other) => other.parentId === resource.id) ?? []).sort(
+      (one, other) => (one.partIndex ?? 0) - (other.partIndex ?? 0),
+    );
+    const wholes =
+      everyResource?.filter((other) => other.id !== resource.id && other.parentId === undefined && other.archivedAt === undefined) ?? [];
+    const paths = locationPaths(locations ?? []);
+    const groupNames = new Map((groups ?? []).map((group) => [group.ref, group.name]));
     const byId = new Map([[resource.id, resource]]);
     const mine = agenda?.filter((entry) => entry.resourceId === resource.id);
     const activity = changes?.filter((change) => change.resourceId === resource.id).slice(0, 10);
@@ -1590,10 +3664,11 @@ ${current ? html`<p class="fine">Membership is read from GitHub when you sign in
       const fallback = from ? `As its default (${from.value ? 'on' : 'off'}, ${from.from})` : 'Off';
       return html`<label>${label}<select name="${key}"><option value=""${chosen(undefined)}>${fallback}</option><option value="1"${chosen(true)}>On</option><option value="0"${chosen(false)}>Off</option></select></label>`;
     };
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 <p><a class="back" href="${root}/resources">Resources</a></p>
 ${pageHead(resourceName(resource, resource.id))}
-<dl class="facts"><dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${hoursSummary(resource.availabilityRules)} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
+${resource.description ? html`<p>${resource.description}</p>` : html``}
+<dl class="facts">${resource.name && resource.externalRef ? html`<dt>Reference</dt><dd>${resource.externalRef}</dd>` : html``}${resource.kind ? html`<dt>Kind</dt><dd>${KIND_NAMES[resource.kind]}</dd>` : html``}${resource.capacity !== undefined ? html`<dt>Capacity</dt><dd>${String(resource.capacity)}</dd>` : html``}${resource.labels ? html`<dt>Labels</dt><dd>${resource.labels.join(', ')}</dd>` : html``}${resource.location ? html`<dt>Location</dt><dd>${paths.get(resource.location) ?? resource.locationName ?? resource.location}</dd>` : html``}${resource.groups ? html`<dt>Groups</dt><dd>${resource.groups.map((ref) => groupNames.get(ref) ?? ref).join(', ')}</dd>` : html``}<dt>Time zone</dt><dd>${resource.timezone}</dd><dt>Bookable hours</dt><dd>${resourceHours(resource, options.availability ?? [])} <a href="${root}/hours?resource=${resource.id}">Set hours</a></dd><dt>Resource id</dt><dd><code class="muted">${resource.id}</code></dd></dl>
 <div class="split">
 <div class="stack">
 ${
@@ -1612,12 +3687,48 @@ ${field('stepOffsetMinutes', 'Steps start past each step by', 'min')}
 ${field('bufferBeforeMinutes', 'Kept free before each booking', 'min')}
 ${field('turnaroundMinutes', 'Turnaround after each booking', 'min')}
 ${field('checkInMinutes', 'Release if not checked in after', 'min')}
+${field('minDurationMinutes', 'Shortest booking', 'min')}
+${field('maxDurationMinutes', 'Longest booking', 'min')}
+${field('defaultDurationMinutes', 'Usual length, offered when none is asked', 'min')}
+${field('cancelCutoffMinutes', 'Cancel up to, before the start', 'min')}
+${field('rescheduleCutoffMinutes', 'Move up to, before the start', 'min')}
 </div>
+${resource.bookingRules?.allowedDurations || resource.bookingRules?.pickupTimes || resource.bookingRules?.returnTimes || resource.bookingRules?.cancellationFee || resource.bookingRules?.holdPrice ? html`<p class="fine">Set through the API, and kept when you save: ${[
+      resource.bookingRules.allowedDurations ? `lengths ${ruleValueText(resource.bookingRules.allowedDurations)} min` : '',
+      resource.bookingRules.pickupTimes ? `pick-up ${ruleValueText(resource.bookingRules.pickupTimes)}` : '',
+      resource.bookingRules.returnTimes ? `return ${ruleValueText(resource.bookingRules.returnTimes)}` : '',
+      resource.bookingRules.cancellationFee ? `cancellation fee ${ruleValueText(resource.bookingRules.cancellationFee)}` : '',
+      resource.bookingRules.holdPrice ? `hold price ${ruleValueText(resource.bookingRules.holdPrice)}` : '',
+    ].filter(Boolean).join('; ')}.</p>` : html``}
 ${toggle('enforceHours', 'enforce_hours', 'Only inside bookable hours')}
 ${toggle('requireCertain', 'require_certain', 'Only in time its calendar syncs have read today')}
 ${inheritedNote(inherited)}
 <p class="fine">Leave a field empty for no rule${inherited.size > 0 ? ' of its own' : ''}.</p>
 <button class="primary" type="submit">Save rules</button>
+</form>
+</section>`
+    : html``
+}
+${
+  options.resources.setProfile
+    ? html`<section class="panel">
+<h2>Profile</h2>
+<form method="post" action="${root}/resources/profile">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<div class="grid-form">
+<label>Name<input name="name" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.name)}" value="${resource.name ?? ''}" placeholder="${resource.externalRef ?? ''}"></label>
+<label>Kind<select name="kind">${SLOTLOCK_RESOURCE_KINDS.map(
+        (kind) =>
+          html`<option value="${kind}"${(resource.kind ?? 'other') === kind ? html` selected` : html``}>${KIND_NAMES[kind]}</option>`,
+      )}</select></label>
+<label>Capacity<span class="unit-input"><input type="number" inputmode="numeric" min="1" max="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.capacity)}" name="capacity" value="${resource.capacity === undefined ? '' : String(resource.capacity)}"><span>people or seats</span></span></label>
+<label>Labels<input name="labels" value="${(resource.labels ?? []).join(', ')}" placeholder="video, accessible"></label>
+</div>
+<label>Description<textarea name="description" rows="3" maxlength="${String(SLOTLOCK_RESOURCE_PROFILE_LIMITS.description)}">${resource.description ?? ''}</textarea></label>
+<p class="fine">Agents and people see the name instead of the reference. Kind, capacity and labels help them find it, and change nothing about how it is booked.${resource.attributes ? html` Its attributes (${Object.keys(resource.attributes).join(', ')}) are set over the API.` : html``}</p>
+<button class="primary" type="submit">Save profile</button>
 </form>
 </section>`
     : html``
@@ -1634,6 +3745,58 @@ ${
 <button type="submit">Save pool</button>
 </form>
 <p class="fine">Agents can book any free member of a pool. Leave it empty for none.</p>
+</section>`
+    : html``
+}
+${
+  options.resources.setParent && everyResource
+    ? html`<section class="panel" id="composite">
+<h2>Composite</h2>
+${
+  parts.length > 0
+    ? html`<p>A whole of ${String(parts.length)} part${parts.length === 1 ? '' : 's'}: ${parts.map((part, index) => html`${index > 0 ? ', ' : ''}<a href="${root}/resources/${part.id}">${resourceName(part, part.id)}</a>`)}. Booking it takes every part, and a booking of any part keeps it from being booked.</p>`
+    : html`<form class="create" method="post" action="${root}/resources/parent">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Part of<select name="parent"><option value=""${resource.parentId ? html`` : html` selected`}>Nothing: it stands alone</option>${wholes.map(
+        (whole) =>
+          html`<option value="${whole.id}"${resource.parentId === whole.id ? html` selected` : html``}>${resourceName(whole, whole.id)}</option>`,
+      )}</select></label>
+<button type="submit">Save</button>
+</form>
+<p class="fine">A room of a hall, a half of a court: booking the whole then takes every part, and two parts never get in each other's way. It changes only while neither has a booking or hold to come.</p>`
+}
+</section>`
+    : html``
+}
+${
+  grouping && locations && groups
+    ? html`<section class="panel" id="place">
+<h2>Location and groups</h2>
+${
+  locations.length === 0 && groups.length === 0
+    ? html`<p class="empty">No locations or groups yet. <a href="${root}/locations">Add them</a>, then choose them here.</p>`
+    : html`<form method="post" action="${root}/resources/place">
+<input type="hidden" name="csrf" value="${token}">
+<input type="hidden" name="once" value="${formNonce(session)}">
+<input type="hidden" name="id" value="${resource.id}">
+<label>Location<select name="location"><option value=""${resource.location ? html`` : html` selected`}>None</option>${locations.map(
+        (location) =>
+          html`<option value="${location.ref}"${resource.location === location.ref ? html` selected` : html``}>${paths.get(location.ref) ?? location.name}</option>`,
+      )}</select></label>
+${
+  groups.length > 0
+    ? html`<fieldset class="choices"><legend>Groups</legend><div class="checks">${groups.map(
+        (group) =>
+          html`<label class="choice"><input type="checkbox" name="group" value="${group.ref}"${resource.groups?.includes(group.ref) ? html` checked` : html``}> ${group.name}</label>`,
+      )}</div></fieldset>`
+    : html``
+}
+<button class="primary" type="submit">Save location and groups</button>
+</form>
+<p class="fine">Agents can search a location, with every location inside it, or a group, in one call. <a href="${root}/locations">Locations and groups</a></p>`
+}
 </section>`
     : html``
 }
@@ -1674,6 +3837,11 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     if (enforceHours !== undefined) rules.enforceHours = enforceHours;
     const requireCertain = choice('require_certain');
     if (requireCertain !== undefined) rules.requireCertain = requireCertain;
+    // Rules the form does not edit (set through the API) are kept.
+    for (const name of ['allowedDurations', 'pickupTimes', 'returnTimes', 'cancellationFee', 'holdPrice'] as const) {
+      const kept = resource.bookingRules?.[name];
+      if (kept !== undefined) (rules as Record<string, unknown>)[name] = kept;
+    }
     try {
       await options.resources.setRules(
         tenantOf(session),
@@ -1684,6 +3852,166 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'invalid_booking_rules') throw error;
       return resourceDetailPage(session, id, 400, 'Those rules are not ones Slotlock can keep.');
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  async function saveProfile(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setProfile) return notFound(session);
+    const text = (key: string) => optionalField(form, key);
+    const capacity = text('capacity');
+    if (capacity !== null && !/^\d{1,6}$/.test(capacity)) {
+      return resourceDetailPage(session, id, 400, PROFILE_PROBLEMS.capacity);
+    }
+    const kind = form.get('kind') ?? 'other';
+    try {
+      await options.resources.setProfile(
+        tenantOf(session),
+        id,
+        {
+          name: text('name'),
+          description: text('description'),
+          kind: kind as SlotlockResourceKind,
+          capacity: capacity === null ? null : Number(capacity),
+          // Commas or spaces between them; a person may type them in capitals.
+          labels: (form.get('labels') ?? '')
+            .split(/[\s,]+/)
+            .map((label) => label.trim().toLowerCase())
+            .filter((label) => label !== ''),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'invalid_resource_profile') throw error;
+      const field = (error as { field?: unknown }).field;
+      return resourceDetailPage(
+        session,
+        id,
+        400,
+        PROFILE_PROBLEMS[typeof field === 'string' && field in PROFILE_PROBLEMS ? (field as keyof typeof PROFILE_PROBLEMS) : 'other'],
+      );
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  /** Text from a form, trimmed, or null when empty. */
+  function optionalField(form: URLSearchParams, key: string): string | null {
+    const value = (form.get(key) ?? '').trim();
+    return value === '' ? null : value;
+  }
+
+  async function saveLocation(session: Session, form: URLSearchParams): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    try {
+      await grouping.putLocation(
+        tenantOf(session),
+        {
+          // A person may type a reference in capitals; references are lowercase.
+          ref: (form.get('ref') ?? '').trim().toLowerCase(),
+          name: (form.get('name') ?? '').trim(),
+          parentRef: optionalField(form, 'parent'),
+          timezone: optionalField(form, 'timezone'),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations`);
+  }
+
+  async function saveGroup(session: Session, form: URLSearchParams): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    try {
+      await grouping.putGroup(
+        tenantOf(session),
+        {
+          ref: (form.get('ref') ?? '').trim().toLowerCase(),
+          name: (form.get('name') ?? '').trim(),
+          description: optionalField(form, 'description'),
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations#groups`);
+  }
+
+  async function deleteGrouping(
+    session: Session,
+    form: URLSearchParams,
+    kind: 'location' | 'group',
+  ): Promise<Response> {
+    const grouping = options.resources.grouping;
+    if (!grouping) return nothingHere(session);
+    const ref = form.get('ref') ?? '';
+    let deleted: boolean;
+    try {
+      deleted =
+        kind === 'location'
+          ? await grouping.deleteLocation(tenantOf(session), ref, personOf(session))
+          : await grouping.deleteGroup(tenantOf(session), ref, personOf(session));
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return locationsPage(session, problem.status, problem.text);
+    }
+    if (!deleted) {
+      const problem = GROUPING_PROBLEMS[`${kind}_not_found`] as { status: number; text: string };
+      return locationsPage(session, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/locations${kind === 'group' ? '#groups' : ''}`);
+  }
+
+  async function savePlace(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    const grouping = options.resources.grouping;
+    if (!resource || !grouping) return notFound(session);
+    const groups = [...new Set(form.getAll('group'))];
+    if (groups.length > SLOTLOCK_MAX_GROUPS_PER_RESOURCE) {
+      const problem = GROUPING_PROBLEMS.resource_group_limit_reached as { status: number; text: string };
+      return resourceDetailPage(session, id, problem.status, problem.text);
+    }
+    try {
+      const placed = await grouping.place(
+        tenantOf(session),
+        id,
+        { location: optionalField(form, 'location'), groups },
+        personOf(session),
+      );
+      if (!placed) return notFound(session);
+    } catch (error) {
+      const problem = groupingProblem(error);
+      if (!problem) throw error;
+      return resourceDetailPage(session, id, problem.status, problem.text);
+    }
+    return redirect(303, `${root}/resources/${id}`);
+  }
+
+  async function saveParent(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    const resource = await ownResource(session, id);
+    if (!resource || !options.resources.setParent) return notFound(session);
+    const wanted = (form.get('parent') ?? '').trim();
+    const parent = wanted === '' ? null : await ownResource(session, wanted);
+    if (wanted !== '' && !parent) return resourceDetailPage(session, id, 400, 'That is not one of your resources.');
+    try {
+      const changed = await options.resources.setParent(tenantOf(session), id, parent?.id ?? null, personOf(session));
+      if (!changed) return notFound(session);
+    } catch (error) {
+      const text = COMPOSITE_PROBLEMS[String((error as { code?: unknown } | null)?.code)];
+      if (!text) throw error;
+      return resourceDetailPage(session, id, 409, text);
     }
     return redirect(303, `${root}/resources/${id}`);
   }
@@ -1712,13 +4040,25 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
     return redirect(303, `${root}/resources/${id}`);
   }
 
+  /** An endpoint's filter (set over the API), in a few words. */
+  function webhookFilterText(filter: NonNullable<SlotlockWebhookEndpoint['filter']>): string {
+    return [
+      filter.resourceIds ? `${filter.resourceIds.length} resource${filter.resourceIds.length === 1 ? '' : 's'}` : null,
+      filter.pools ? `pools ${filter.pools.join(', ')}` : null,
+      filter.locations ? `locations ${filter.locations.join(', ')}` : null,
+      filter.groups ? `groups ${filter.groups.join(', ')}` : null,
+    ]
+      .filter((part) => part !== null)
+      .join('; ');
+  }
+
   function endpointState(endpoint: SlotlockWebhookEndpoint): { text: string; tone: string } {
     if (endpoint.disabledAt) return { text: 'Disabled', tone: 'revoked' };
     if (endpoint.failingSince) return { text: 'Failing', tone: 'held' };
     return { text: 'Delivering', tone: 'active' };
   }
 
-  async function webhooksPage(session: Session, status = 200, notice?: string): Promise<Response> {
+  async function webhooksPage(session: Session, status = 200, notice?: string | Html): Promise<Response> {
     const hooks = options.resources.webhooks;
     if (!hooks) return notFound(session);
     const endpoints = await hooks.list(tenantOf(session));
@@ -1734,7 +4074,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
           : '';
       return html`<tr>
 <td data-label="URL" class="strong"><code class="truncate url" title="${endpoint.url}">${endpoint.url}</code></td>
-<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}</td>
+<td data-label="Events" class="wrap">${endpoint.eventTypes ? endpoint.eventTypes.join(', ') : 'All'}${endpoint.filter ? html`<span class="meta">Only ${webhookFilterText(endpoint.filter)}</span>` : html``}</td>
 <td data-label="Status"><span class="cell"><span class="pill ${state.tone}">${state.text}</span>${problem ? html`<span class="meta wrap">${problem}</span>` : html``}</span></td>
 <td data-label="Added">${dateCell(endpoint.createdAt)}</td>
 <td class="actions">${
@@ -1745,7 +4085,7 @@ ${activity ? html`<section class="panel"><h2>Activity</h2>${activityPanel(activi
 <form method="post" action="${root}/webhooks/delete"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${endpoint.id}"><button class="danger" type="submit">Delete webhook</button></form></div></details></td>
 </tr>`;
     });
-    const content = html`${noticeOf(notice)}
+    const content = html`${noticeOf(notice, status)}
 ${pageHead('Webhooks')}
 <div class="stats">
 <div class="stat"><span class="stat-label">Endpoints</span><span class="stat-value">${String(endpoints.length)}</span></div>
@@ -1787,7 +4127,9 @@ ${
     if (!created.ok) {
       const message =
         created.code === 'webhook_limit_reached'
-          ? `You have ${String(created.limit)} webhooks, as many as Slotlock allows. Delete one first.`
+          ? plans
+            ? html`You have ${String(created.limit)} webhooks, as many as your plan allows. Delete one first, or ${await pastLimit(session)}.`
+            : `You have ${String(created.limit)} webhooks, as many as Slotlock allows. Delete one first.`
           : created.code === 'invalid_webhook_url'
             ? 'Give an https URL, with no user name, password or #fragment.'
             : 'Choose events from the list.';
@@ -1830,69 +4172,120 @@ ${
     return redirect(303, `${root}/webhooks`);
   }
 
-  async function waitlistPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const waitlist = options.resources.waitlist;
-    if (!waitlist) return notFound(session);
+  // ---- Approvals (RFC 0004 A4) ----
+
+  async function approvalsPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const approvals = options.resources.approvals;
+    if (!approvals) return notFound(session);
     const tenantRef = tenantOf(session);
     const [entries, resources] = await Promise.all([
-      waitlist.list(tenantRef, WAITLIST_SHOWN),
+      approvals.list(tenantRef, APPROVALS_SHOWN),
       options.resources.list(tenantRef),
     ]);
     const byId = new Map(resources.map((resource) => [resource.id, resource]));
     const token = csrfToken(session);
-    const rows = entries.map((entry) => {
-      const resource = entry.resourceId ? byId.get(entry.resourceId) : undefined;
-      const zone = resource?.timezone ?? 'UTC';
+    const pending = entries.filter((entry) => entry.status === 'pending' && entry.expiresAt.getTime() > now());
+    const decided = entries.filter((entry) => !pending.includes(entry));
+    const what = (entry: SlotlockApproval) =>
+      entry.resourceIds.map((id) => resourceName(byId.get(id), id)).join(', ');
+    const when = (entry: SlotlockApproval) => {
+      const zone = byId.get(entry.resourceIds[0] ?? '')?.timezone ?? 'UTC';
       const day = dayLabel(entry.start, zone, now());
-      const what = entry.resourceId
-        ? resourceName(resource, entry.resourceId)
-        : `Pool ${entry.pool ?? ''}`;
-      const offered = entry.offeredResourceId
-        ? resourceName(byId.get(entry.offeredResourceId), entry.offeredResourceId)
-        : null;
-      const tone = entry.status === 'offered' ? 'active' : entry.status === 'expired' ? 'revoked' : 'held';
-      return html`<tr>
-<td data-label="When" class="strong">${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}</td>
-<td data-label="For"><span class="truncate" title="${what}">${what}</span></td>
-<td data-label="Holder"><code class="truncate" title="${entry.holderRef}">${entry.holderRef}</code></td>
-<td data-label="Status"><span class="cell"><span class="pill ${tone}">${entry.status === 'offered' ? 'Offered' : entry.status === 'expired' ? 'Expired' : 'Waiting'}</span>${offered && entry.offeredAt ? html`<span class="meta" title="${offered}">${offered}, ${ago(entry.offeredAt, now())}</span>` : html``}</span></td>
-<td data-label="Joined">${ago(entry.createdAt, now())}</td>
-<td class="actions"><details class="act danger"><summary>Remove</summary><div class="pop"><p>${entry.status === 'offered' ? 'Its offered hold is released and offered to the next.' : 'It stops waiting.'}</p>
-<form method="post" action="${root}/waitlist/leave"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><button class="danger" type="submit">Remove entry</button></form></div></details></td>
-</tr>`;
-    });
-    const waiting = entries.filter((entry) => entry.status === 'waiting').length;
-    const offered = entries.filter((entry) => entry.status === 'offered').length;
-    const content = html`${noticeOf(notice)}
-${pageHead('Waitlist')}
+      return `${day.label} ${clock(entry.start, zone)}–${clock(entry.end, zone)}`;
+    };
+    const KINDS: Record<SlotlockApproval['operation'], string> = {
+      slotlock_create_event: 'Booking',
+      slotlock_book_together: 'Bundle',
+      slotlock_update_event: 'Move',
+    };
+    const form = (entry: SlotlockApproval, decision: 'grant' | 'decline', body: Html) =>
+      html`<form method="post" action="${root}/approvals/decide"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="id" value="${entry.id}"><input type="hidden" name="decision" value="${decision}">${body}</form>`;
+    const pendingRows = pending.map(
+      (entry) => html`<tr>
+<td data-label="When" class="strong">${when(entry)}</td>
+<td data-label="What"><span class="cell"><span class="truncate" title="${what(entry)}">${what(entry)}</span><span class="meta">${KINDS[entry.operation]}, policy ${entry.policyRef}</span></span></td>
+<td data-label="Asked by"><code class="truncate" title="${entry.requestedBy ?? ''}">${entry.requestedBy ?? 'unknown'}</code></td>
+<td data-label="Decide by">${clock(entry.expiresAt, 'UTC')} UTC, ${dayLabel(entry.expiresAt, 'UTC', now()).label}</td>
+<td class="actions">${form(entry, 'grant', html`<button type="submit">Approve</button>`)}<details class="act danger"><summary>Decline</summary><div class="pop"><p>The held time is freed. The agent is told on its next try.</p>${form(entry, 'decline', html`<label>Reason (optional)<input name="reason" maxlength="500" autocomplete="off"></label><button class="danger" type="submit">Decline</button>`)}</div></details></td>
+</tr>`,
+    );
+    const STATUS: Record<SlotlockApproval['status'], { text: string; tone: string }> = {
+      pending: { text: 'Lapsed', tone: 'revoked' },
+      granted: { text: 'Approved', tone: 'active' },
+      declined: { text: 'Declined', tone: 'revoked' },
+      expired: { text: 'Expired', tone: 'revoked' },
+    };
+    const decidedRows = decided.map(
+      (entry) => html`<tr>
+<td data-label="When" class="strong">${when(entry)}</td>
+<td data-label="What"><span class="truncate" title="${what(entry)}">${what(entry)}</span></td>
+<td data-label="Status"><span class="cell"><span class="pill ${STATUS[entry.status].tone}">${STATUS[entry.status].text}</span>${entry.reason ? html`<span class="meta" title="${entry.reason}">${entry.reason}</span>` : html``}</span></td>
+<td data-label="Decided by"><code class="truncate" title="${entry.decidedBy ?? ''}">${entry.decidedBy ?? '—'}</code></td>
+<td data-label="Asked">${ago(entry.createdAt, now())}</td>
+</tr>`,
+    );
+    const content = html`${noticeOf(notice, status)}
+${pageHead('Approvals')}
+<p class="fine">Bookings an approval policy holds for a person. Their time stays held until you decide or the wait ends. Policies are set through the API (slotlock_put_approval_policy).</p>
 <div class="stats">
-<div class="stat"><span class="stat-label">Waiting</span><span class="stat-value">${String(waiting)}</span></div>
-<div class="stat"><span class="stat-label">Offered</span><span class="stat-value">${String(offered)}</span></div>
+<div class="stat"><span class="stat-label">Waiting for you</span><span class="stat-value">${String(pending.length)}</span></div>
 </div>
 ${
-  entries.length === 0
-    ? emptyState(ICONS.waitlist, 'Nobody is waiting. Agents add entries when the time they want is taken.')
-    : html`<div class="table"><table><thead><tr><th>When</th><th>For</th><th>Holder</th><th>Status</th><th>Joined</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>${entries.length >= WAITLIST_SHOWN ? html`<p class="fine">Showing the first ${String(WAITLIST_SHOWN)}.</p>` : html``}`
+  pending.length === 0
+    ? emptyState(ICONS.approvals, 'Nothing is waiting. A policy that holds bookings for a person sends them here.')
+    : html`<div class="table"><table><thead><tr><th>When</th><th>What</th><th>Asked by</th><th>Decide by</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${pendingRows}</tbody></table></div>`
+}
+${
+  decided.length === 0
+    ? html``
+    : html`<h2>Decided</h2><div class="table"><table><thead><tr><th>When</th><th>What</th><th>Status</th><th>Decided by</th><th>Asked</th></tr></thead><tbody>${decidedRows}</tbody></table></div>`
 }`;
-    return respond(status, layout('Waitlist', content, session, 'waitlist'));
+    return respond(status, layout('Approvals', content, session, 'approvals'));
   }
 
-  async function leaveWaitlist(session: Session, form: URLSearchParams): Promise<Response> {
-    const waitlist = options.resources.waitlist;
-    if (!waitlist) return notFound(session);
-    if (!(await waitlist.leave(tenantOf(session), form.get('id') ?? '', personOf(session)))) {
-      return waitlistPage(session, 404, 'That entry is not on your waitlist.');
+  async function decideApproval(session: Session, form: URLSearchParams): Promise<Response> {
+    const approvals = options.resources.approvals;
+    if (!approvals) return notFound(session);
+    const decision = form.get('decision');
+    if (decision !== 'grant' && decision !== 'decline') return approvalsPage(session, 400, 'Choose approve or decline.');
+    const reason = (form.get('reason') ?? '').trim().slice(0, 500);
+    const decided = await approvals.decide(tenantOf(session), form.get('id') ?? '', decision, personOf(session), reason || undefined);
+    if (!decided.ok && decided.code === 'quota_exceeded') {
+      const resets = formatDate(slotlockQuotaPeriod(now()).resetsAt);
+      return approvalsPage(
+        session,
+        429,
+        `This month's bookings are used up: Slotlock refuses new bookings, approvals included, with quota_exceeded until ${resets}. Decline it to free its time.`,
+      );
     }
-    return redirect(303, `${root}/waitlist`);
+    if (!decided.ok) {
+      const messages: Record<string, string> = {
+        approval_not_found: 'That approval is not one of yours.',
+        approval_not_pending: 'That approval was already decided.',
+        approval_expired: 'The wait for that approval ended: its time is no longer held.',
+        overlap: 'That time is taken now, so it cannot be booked. Decline it instead.',
+        revision_conflict: 'The agent changed that event since it asked. Decline this one; it can ask again.',
+      };
+      return approvalsPage(session, 409, messages[decided.code] ?? `That booking cannot be made now (${decided.code}). Decline it instead.`);
+    }
+    return redirect(303, `${root}/approvals`);
   }
 
 
   // ---- The assistant ----
 
   const assistantOptions = options.assistant;
-  /** The assistant's records, when the assistant is on and the adapter keeps them. Per request (Workers). */
-  const assistantStore = (): SlotlockAssistantStore | undefined =>
-    assistantOptions ? options.resources.assistant : undefined;
+  /**
+   * The assistant's records, when the assistant is on and the adapter keeps them, and staff have not
+   * turned it off for the workspace's plan or account (RFC 0006, M11). Per request (Workers).
+   */
+  const assistantStore = (session: Session): SlotlockAssistantStore | undefined => {
+    if (!assistantOptions) return undefined;
+    const notices = noticesOf.get(session);
+    // Where staff can turn it off, a session whose workspace was not read for that gets none.
+    if (!notices && options.workspaces?.notices) return undefined;
+    return notices?.features.assistant === false ? undefined : options.resources.assistant;
+  };
   const privateUrls = assistantOptions?.privateUrls === true;
   const assistantFetch =
     assistantOptions?.fetch ?? createSlotlockGuardedFetch({ allowPrivateNetworks: privateUrls });
@@ -1910,13 +4303,66 @@ ${
     'That URL is this Slotlock deployment’s own address. Give the address of the model’s API.';
   const assistantTimeout = assistantOptions?.timeoutMs ?? 30_000;
   const assistantTurnTimeout = assistantOptions?.turnTimeoutMs ?? 90_000;
-  const conversationTtl = assistantOptions?.conversationTtlMs ?? 2 * 3_600_000;
+  // Kept until the member deletes a conversation, unless the deployment gives them a lifetime.
+  const conversationTtl: number | null = assistantOptions?.conversationTtlMs ?? null;
+  /** How recently a conversation was used for the assistant page to open on it rather than a new one. */
+  const CHAT_RESUME_MS = 2 * 3_600_000;
+  const newChatId = () => randomBytes(12).toString('base64url');
+  /** The conversation a page or form names, or null for a new one. */
+  const chatOf = (value: string | null | undefined): string | null =>
+    value && SLOTLOCK_ASSISTANT_CHAT_ID.test(value) ? value : null;
+  const chatUrl = (id: string | null) => `${root}/assistant?c=${id ?? 'new'}`;
+  /**
+   * The conversation a form goes to: the one its `chat` names, a new one when it is empty, and with
+   * no `chat` at all (a page of an earlier release), the one the page would open: the member's most
+   * recent, used in the past two hours (`anyAge`: however long ago).
+   */
+  async function chatOfForm(
+    store: SlotlockAssistantStore,
+    session: Session,
+    form: URLSearchParams,
+    anyAge = false,
+  ): Promise<string | null> {
+    if (form.has('chat')) return chatOf(form.get('chat'));
+    const [latest] = await store.listChats(tenantOf(session), personOf(session), 1);
+    return latest && (anyAge || now() - latest.updatedAt.getTime() < CHAT_RESUME_MS) ? latest.id : null;
+  }
+  /** A conversation's first title: its first message on one line, cut at a word near 60 characters. */
+  const chatTitle = (text: string): string => {
+    const line = text.replace(/\s+/gu, ' ').trim();
+    const chars = [...line];
+    if (chars.length <= 60) return line || 'New chat';
+    const cut = chars.slice(0, 60).join('');
+    const space = cut.lastIndexOf(' ');
+    return `${(space > 30 ? cut.slice(0, space) : cut).replace(/[\s.,;:!?-]+$/u, '')}…`;
+  };
   if (assistantOptions && Buffer.byteLength(assistantOptions.secret, 'utf8') < 32) {
     throw new Error('Slotlock dashboard assistant secret must be at least 32 bytes');
   }
   if (assistantOptions && assistantOptions.secret === options.sessionSecret) {
     throw new Error('Slotlock dashboard assistant secret must differ from the session secret');
   }
+  const previousSecrets = [...(assistantOptions?.previousSecrets ?? [])];
+  if (previousSecrets.length > SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS) {
+    throw new Error(
+      `Slotlock dashboard assistant takes at most ${String(SLOTLOCK_ASSISTANT_MAX_PREVIOUS_SECRETS)} previous secrets`,
+    );
+  }
+  for (const previous of previousSecrets) {
+    if (Buffer.byteLength(previous, 'utf8') < 32) {
+      throw new Error('Slotlock dashboard assistant previous secrets must each be at least 32 bytes');
+    }
+    if (previous === assistantOptions?.secret || previous === options.sessionSecret) {
+      throw new Error(
+        'Slotlock dashboard assistant previous secrets must differ from the assistant and session secrets',
+      );
+    }
+  }
+  if (new Set(previousSecrets).size !== previousSecrets.length) {
+    throw new Error('Slotlock dashboard assistant previous secrets must differ from each other');
+  }
+  /** The current secret, then the previous ones: a stored key is tried with each in turn. */
+  const assistantSecrets = assistantOptions ? [assistantOptions.secret, ...previousSecrets] : [];
   const memberMessages = createSlotlockRateLimiter(
     assistantOptions?.rate ?? { perSecond: 10 / 60, burst: 10 },
     now,
@@ -1945,7 +4391,7 @@ ${
    * Who the assistant acts as, for the record and for ownership: the member by GitHub user id,
    * which a rename does not change. Shown as "Assistant for @login".
    */
-  const assistantActor = (session: Session) => `dashboard-assistant:github:${session.uid}`;
+  const assistantActor = (session: Session) => `dashboard-assistant:${personOf(session)}`;
   const CONFIRMED_WRITES: ReadonlySet<string> = new Set<SlotlockAgentWriteOperation>([
     'slotlock_create_event',
     'slotlock_update_event',
@@ -1985,6 +4431,12 @@ ${
       text = `Hold ${slots.join('; ')} for ${String(input.ttl_seconds ?? '')} seconds, as alternatives.`;
     } else if (operation === 'slotlock_release_slots') {
       text = `Release the hold ${String(input.hold_id)} and every slot held with it.`;
+    } else if (operation === 'slotlock_confirm_slot') {
+      text = `Book the time held by ${String(input.hold_id)}${input.title ? `, as "${String(input.title)}"` : ''}, and release the other holds made with it.`;
+    } else if (operation === 'slotlock_reschedule') {
+      text = `Move the event ${String(input.event_id)} to ${String(input.starts_at)} to ${String(input.ends_at)}${input.resource_id ? ` on resource ${String(input.resource_id)}` : ''}.`;
+    } else if (operation === 'slotlock_cancel') {
+      text = `Cancel the event ${String(input.event_id)}.`;
     } else {
       text = '';
     }
@@ -1993,12 +4445,18 @@ ${
   }
 
   /** Owners of the organization in use may change its assistant; a person always may their own. */
-  const isAdmin = (session: Session) =>
-    !served || session.orgs?.find((org) => org.id === session.org)?.role === 'admin';
+  /** An owner of the workspace: the person in their own, an organization's owner in its. */
+  /** May connect or change the assistant's model (Owner, Admin). */
+  const isAdmin = (session: Session) => can(session, 'assistant.settings');
+  /** May change the plan and open billing (Owner, Billing). */
+  const mayBill = (session: Session) => can(session, 'billing.manage');
+  /** Never more than the person may do: a Viewer's assistant only reads; it never holds admin. */
   const assistantPrincipal = (session: Session): SlotlockAgentPrincipal => ({
     subject: assistantActor(session),
     tenantRef: tenantOf(session),
-    scopes: ['read', 'write'],
+    scopes: can(session, 'operations.run') ? ['read', 'write'] : ['read'],
+    // Limited to some resources, as a key limited to them: nothing outside is found.
+    ...(scopes.has(session) ? { resourceScope: scopes.get(session) as SlotlockResourceScope } : {}),
   });
   /** The fixed list, then the embedder's check: nothing the model sends adds to it. */
   const assistantAuthorize: SlotlockAgentOperationDispatchOptions['authorize'] = async (args) =>
@@ -2038,6 +4496,8 @@ ${
           ? { consumeRateLimit: assistant.consumeRateLimit }
           : {}),
         ...(confirm ? { confirm } : {}),
+        // A proposal halts at `confirm` and never reaches the backend, so only what runs counts.
+        ...(assistant.onUsage ? { onUsage: assistant.onUsage } : {}),
         onError: (error) => {
           try {
             ignoreRejection(options.onError?.(error));
@@ -2052,7 +4512,7 @@ ${
   async function assistantModel(
     session: Session,
   ): Promise<{ model: SlotlockAssistantModel } | { problem: string } | null> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     const settings = store ? await store.getSettings(tenantOf(session)) : null;
     if (!settings || !assistantOptions) return null;
     if (namesOwnHost(settings.baseUrl)) return { problem: OWN_HOST_REFUSAL };
@@ -2064,12 +4524,27 @@ ${
     }
     let apiKey: string | null = null;
     if (settings.sealedKey !== null) {
-      apiKey = await openSlotlockAssistantKey(assistantOptions.secret, tenantOf(session), settings.sealedKey);
-      if (apiKey === null) {
+      const tenantRef = tenantOf(session);
+      const opened = await openSlotlockAssistantKeyWithAny(assistantSecrets, tenantRef, settings.sealedKey);
+      if (opened === null) {
         return {
           problem:
             'The stored API key cannot be opened: the server’s assistant secret changed. An admin can enter the key again in Settings.',
         };
+      }
+      apiKey = opened.apiKey;
+      // Sealed under a previous secret: sealed again under the current one, unless an owner saved
+      // another key meanwhile. Best effort: the key opened either way.
+      if (opened.secretIndex > 0 && store?.resealKey) {
+        try {
+          const resealed = await sealSlotlockAssistantKey(assistantOptions.secret, tenantRef, apiKey);
+          await store.resealKey(tenantRef, settings.sealedKey, resealed);
+        } catch (error) {
+          // A suspended tenant reads and writes nothing, this included: it opens the old way.
+          if ((error as { code?: unknown } | null)?.code !== 'tenant_suspended') {
+            ignoreRejection(options.onError?.(error));
+          }
+        }
       }
     }
     return {
@@ -2077,46 +4552,139 @@ ${
     };
   }
 
+  /** When a change happens, in its resource's time zone when the card knows it, else UTC. */
+  function whenOf(start: unknown, end: unknown, zone: string | undefined): string | null {
+    if (typeof start !== 'string') return null;
+    const from = new Date(start);
+    if (Number.isNaN(from.getTime())) return null;
+    const timeZone = zone ?? 'UTC';
+    let day: Intl.DateTimeFormat;
+    let time: Intl.DateTimeFormat;
+    try {
+      day = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone });
+      time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone });
+    } catch {
+      return null;
+    }
+    const to = typeof end === 'string' ? new Date(end) : null;
+    const span =
+      to && !Number.isNaN(to.getTime())
+        ? day.format(from) === day.format(to)
+          ? `${time.format(from)}–${time.format(to)}`
+          : `${time.format(from)} – ${day.format(to)}, ${time.format(to)}`
+        : time.format(from);
+    return `${day.format(from)}, ${span} ${timeZone}`;
+  }
+
+  /** What a proposed change's fields are called on its card. */
+  const FACT_NAMES: Readonly<Record<string, string>> = Object.freeze({
+    resource_id: 'Resource',
+    resource_ids: 'Resources',
+    pool_id: 'Pool',
+    title: 'Title',
+    external_ref: 'Reference',
+    event_id: 'Booking',
+    hold_id: 'Hold',
+    hold_group_id: 'Held together',
+    ttl_seconds: 'Held for',
+    notes: 'Note',
+    description: 'Note',
+    metadata: 'Details',
+    slots: 'Times',
+  });
+
   /**
-   * A field of a proposed change, as the card shows it: all of it, wrapped, never cut (the
-   * proposal is bounded instead). A resource is named, with its id beside the name.
+   * A field of a proposed change, as the card shows it: all of it, wrapped, never cut (the proposal
+   * is bounded instead). A resource is named; its id is the name's title.
    */
   function fieldValue(name: string, value: unknown, names: ReadonlyMap<string, string>): Html {
-    const named = (id: string) => (names.has(id) ? `${names.get(id) as string} (${id})` : id);
-    if (typeof value === 'string') {
-      return html`<span class="wrap">${name === 'resource_id' ? named(value) : value}</span>`;
+    const named = (id: string) =>
+      names.has(id) ? html`<span title="${id}">${names.get(id) as string}</span>` : html`<code>${id}</code>`;
+    if (name === 'resource_id' && typeof value === 'string') return named(value);
+    if (name === 'resource_ids' && Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+      return html`${(value as string[]).map((id, index) => html`${index > 0 ? ', ' : ''}${named(id)}`)}`;
     }
+    if (name === 'ttl_seconds' && typeof value === 'number') {
+      return html`${value >= 60 ? `${Math.round(value / 60)} min` : `${value} s`}`;
+    }
+    if ((name === 'event_id' || name === 'hold_id' || name === 'hold_group_id') && typeof value === 'string') return html`<code>${value}</code>`;
+    if (typeof value === 'string') return html`<span class="wrap">${value}</span>`;
     if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
-      return html`<span class="wrap">${(value as string[]).map((item) => (name === 'resource_ids' ? named(item) : item)).join(', ')}</span>`;
+      return html`<span class="wrap">${(value as string[]).join(', ')}</span>`;
     }
-    if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
-      return html`${String(value)}`;
-    }
-    return html`<pre class="wrap">${JSON.stringify(value, null, 2)}</pre>`;
+    if (typeof value === 'number' || typeof value === 'boolean' || value === null) return html`${String(value)}`;
+    return html`<pre>${JSON.stringify(value, null, 2)}</pre>`;
   }
+
+  /** Why a change or a step was refused, in words, for the codes a member meets. */
+  const REFUSALS: Readonly<Record<string, string>> = Object.freeze({
+    overlap: 'that time was just taken',
+    pool_full: 'the pool is full then',
+    not_found: 'it no longer exists',
+    resource_not_found: 'the resource no longer exists',
+    event_not_found: 'the booking no longer exists',
+    invalid_input: 'the request was incomplete',
+    invalid_arguments: 'the request was incomplete',
+    validation_error: 'the request was incomplete',
+    turn_read_budget_exceeded: 'one message may read only so much',
+    too_many_pending_changes: 'too many changes are waiting for you',
+    change_too_large_to_show: 'the change was too large to show',
+    tool_not_available: 'the assistant may not do that',
+    too_many_calls: 'too many at once',
+    quota_exceeded: "this month's allowance is used up",
+    approval_pending: 'it is waiting for an approval',
+  });
+  const refusal = (code: string) => REFUSALS[code] ?? code.replaceAll('_', ' ');
 
   function actionCard(
     session: Session,
     action: SlotlockAssistantAction,
     names: ReadonlyMap<string, string>,
+    zones: ReadonlyMap<string, string>,
+    chatId: string | null,
   ): Html {
+    const verb = slotlockAssistantActionVerb(action.operation);
+    const title = action.summary || `${verb.verb}: ${toolTitles.get(action.operation) ?? action.operation}`;
+    if (action.status !== 'pending') {
+      const [tone, word] =
+        action.status === 'done'
+          ? ['ok', verb.done]
+          : action.status === 'dismissed'
+            ? ['', 'Declined']
+            : action.status === 'approved'
+              ? ['', 'Running…']
+              : ['bad', `Refused: ${refusal(action.outcome ?? 'failed')}`];
+      return html`<li class="turn action" id="action-${action.id}"><p class="receipt ${tone}"><span>${title}</span><span class="why">${word}</span></p></li>`;
+    }
     const token = csrfToken(session);
-    const fields = Object.entries(action.input).filter(([name]) => name !== 'idempotency_key');
-    const summary = action.summary ? html`<p class="action-summary">${action.summary}</p>` : html``;
-    const state = {
-      pending: { text: 'Waiting for you', tone: 'held' },
-      approved: { text: 'Running', tone: 'held' },
-      dismissed: { text: 'Dismissed', tone: 'revoked' },
-      done: { text: 'Done', tone: 'active' },
-      failed: { text: 'Failed', tone: 'revoked' },
-    }[action.status] ?? { text: action.status, tone: 'revoked' };
-    const buttons =
-      action.status === 'pending'
-        ? html`<div class="action-buttons"><form class="inline" method="post" action="${root}/assistant/approve"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button class="primary" type="submit">Approve</button></form><form class="inline" method="post" action="${root}/assistant/dismiss"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="action" value="${action.id}"><button type="submit">Dismiss</button></form></div>`
-        : html``;
-    return html`<li class="action-card" id="action-${action.id}"><div class="action-head"><span class="title">${toolTitles.get(action.operation) ?? action.operation}</span><span class="pill ${state.tone}">${state.text}</span></div>${summary}<dl class="facts">${fields.map(
-      ([name, value]) => html`<dt>${name.replaceAll('_', ' ')}</dt><dd>${fieldValue(name, value, names)}</dd>`,
-    )}</dl>${action.status === 'failed' && action.outcome ? html`<p class="fine">Refused: <code>${action.outcome}</code></p>` : html``}${buttons}</li>`;
+    const input = Object.entries(action.input).filter(([name]) => name !== 'idempotency_key');
+    // The change's own time zone when it gives one, else its resource's.
+    const zone =
+      typeof action.input.timezone === 'string'
+        ? action.input.timezone
+        : typeof action.input.resource_id === 'string'
+          ? zones.get(action.input.resource_id)
+          : undefined;
+    const when = whenOf(action.input.starts_at, action.input.ends_at, zone);
+    const facts: Html[] = [];
+    const more: Html[] = [];
+    if (when) facts.push(html`<dt>When</dt><dd>${when}</dd>`);
+    for (const [name, value] of input) {
+      if (when && (name === 'starts_at' || name === 'ends_at' || name === 'timezone')) continue;
+      const label = FACT_NAMES[name] ?? name.charAt(0).toUpperCase() + name.slice(1).replaceAll('_', ' ');
+      (name in FACT_NAMES || name === 'attendees' ? facts : more).push(
+        html`<dt>${label}</dt><dd>${fieldValue(name, value, names)}</dd>`,
+      );
+    }
+    const hidden = (id: string) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${chatId ?? ''}"><input type="hidden" name="action" value="${id}">`;
+    return html`<li class="turn action" id="action-${action.id}"><div class="change"><p class="change-title">${title}</p>${
+      facts.length > 0 ? html`<dl class="facts">${facts}</dl>` : html``
+    }${
+      more.length > 0
+        ? html`<details class="more"><summary>All details</summary><dl class="facts">${more}</dl></details>`
+        : html``
+    }<div class="change-buttons"><form method="post" action="${root}/assistant/approve">${hidden(action.id)}<button class="${verb.danger ? 'danger' : 'primary'}" type="submit" data-busy="${verb.busy}">${verb.verb}</button></form><form method="post" action="${root}/assistant/dismiss">${hidden(action.id)}<button class="ghost" type="submit">Decline</button></form></div></div></li>`;
   }
 
   function readAction(id: string, value: unknown): SlotlockAssistantAction | null {
@@ -2131,111 +4699,366 @@ ${
     };
   }
 
-  async function assistantPage(session: Session, status = 200, notice?: string): Promise<Response> {
-    const store = assistantStore();
-    if (!store) return notFound(session);
-    const tenantRef = tenantOf(session);
-    const [settings, conversation] = await Promise.all([
-      store.getSettings(tenantRef),
-      store.getConversation(tenantRef, personOf(session)),
-    ]);
-    const entries = readSlotlockAssistantEntries(conversation?.messages);
-    const actions = conversation?.actions ?? {};
-    const names = new Map<string, string>();
-    if (Object.keys(actions).length > 0) {
-      for (const resource of await options.resources.list(tenantRef)) {
-        names.set(resource.id, resourceName(resource, resource.id));
-      }
+  /** The code a tool result was refused with, from the JSON the model was given. */
+  function refusedCode(content: string): string | null {
+    try {
+      const parsed = JSON.parse(content) as unknown;
+      const error = isRecord(parsed) && isRecord(parsed.error) ? parsed.error : null;
+      return error && typeof error.code === 'string' ? error.code : null;
+    } catch {
+      return null;
     }
-    const token = csrfToken(session);
+  }
+
+  /** Notes the turn ends with that are not a failure: a member's Stop, and the step bound. */
+  const quietNote = (text: string) => text === 'Stopped.' || text.startsWith('The assistant stopped after');
+
+  /**
+   * The conversation as the thread shows it: the member's messages as bubbles, the replies as
+   * rendered Markdown, each run of tool steps folded into one line, proposed changes as cards, and
+   * a failure that ends it with a way to send the last message again.
+   */
+  function assistantItems(
+    session: Session,
+    entries: readonly SlotlockAssistantEntry[],
+    actions: Record<string, unknown>,
+    names: ReadonlyMap<string, string>,
+    zones: ReadonlyMap<string, string>,
+    chatId: string | null,
+  ): Html[] {
     const items: Html[] = [];
-    for (const entry of entries) {
-      if (entry.role === 'user') items.push(html`<li class="msg mine"><p>${entry.text}</p></li>`);
-      else if (entry.role === 'assistant' && entry.text.trim() !== '') {
-        items.push(html`<li class="msg bot"><p>${entry.text}</p></li>`);
-      } else if (entry.role === 'note') items.push(html`<li class="notice">${entry.text}</li>`);
-      else if (entry.role === 'tool') {
+    let steps: { label: string; ok: boolean; why: string | null }[] = [];
+    let cards: Html[] = [];
+    const flush = () => {
+      if (steps.length > 0) {
+        const bad = steps.some((step) => !step.ok);
+        const seen: string[] = [];
+        for (const step of steps) if (!seen.includes(step.label)) seen.push(step.label);
+        const summary = seen.map((label, index) => (index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1))).join(', ');
+        items.push(
+          html`<li class="turn steps"><details class="steps${bad ? ' has-bad' : ''}"><summary>${summary}</summary><ul class="step-list">${steps.map(
+            (step) =>
+              html`<li class="step ${step.ok ? 'ok' : 'bad'}">${step.label}${step.why ? html` <span class="why">${step.why}</span>` : html``}</li>`,
+          )}</ul></details></li>`,
+        );
+        steps = [];
+      }
+      items.push(...cards);
+      cards = [];
+    };
+    const lastUser = [...entries].reverse().find((entry) => entry.role === 'user');
+    for (const [index, entry] of entries.entries()) {
+      if (entry.role === 'user') {
+        flush();
+        items.push(html`<li class="turn mine"><div class="bubble">${entry.text}</div></li>`);
+      } else if (entry.role === 'assistant') {
+        if (entry.text.trim() === '') continue;
+        flush();
+        items.push(html`<li class="turn bot"><div class="prose">${new Html(renderSlotlockMarkdown(entry.text))}</div></li>`);
+      } else if (entry.role === 'tool') {
         for (const result of entry.results) {
+          const write = SLOTLOCK_ASSISTANT_TOOL_USE[result.name as SlotlockAgentOperation] === 'propose';
           const action = result.action ? readAction(result.action, actions[result.action]) : null;
-          if (action) items.push(actionCard(session, action, names));
-          else {
-            items.push(
-              html`<li class="tool-line">${result.error ? 'Could not run' : 'Read'}: ${toolTitles.get(result.name) ?? result.name}</li>`,
-            );
+          if (action) {
+            cards.push(actionCard(session, action, names, zones, chatId));
+            continue;
           }
+          const title = toolTitles.get(result.name) ?? result.name;
+          const code = result.error ? refusedCode(result.content) : null;
+          steps.push({
+            label: slotlockAssistantStepLabel(result.name, title, result.error ? 'bad' : 'ok', write),
+            ok: !result.error,
+            why: code ? refusal(code) : null,
+          });
+        }
+      } else if (entry.role === 'note') {
+        flush();
+        const last = index === entries.length - 1;
+        if (last && !quietNote(entry.text) && lastUser?.role === 'user') {
+          items.push(
+            html`<li class="turn error" role="alert"><span>${entry.text}</span><form method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${chatId ?? ''}"><input type="hidden" name="message" value="${lastUser.text}"><button class="text-button" type="submit">Retry</button></form></li>`,
+          );
+        } else {
+          items.push(html`<li class="turn note">${entry.text}</li>`);
         }
       }
     }
-    const composer = html`<form class="composer" method="post" action="${root}/assistant"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><label class="visually-hidden" for="message">Message</label><textarea id="message" name="message" rows="3" maxlength="${String(SLOTLOCK_ASSISTANT_MAX_MESSAGE)}" required placeholder="Find a free van tomorrow morning and book it for Ana"></textarea><button class="primary" type="submit">Send</button></form>`;
-    const reset =
-      entries.length > 0
-        ? html`<form class="inline" method="post" action="${root}/assistant/reset"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">New conversation</button></form>`
-        : undefined;
-    const content = html`${noticeOf(notice)}
-${pageHead('Assistant', reset)}
-${
-  settings
-    ? html`<section class="panel chat">${
-        items.length === 0
-          ? html`<p class="empty">Ask about bookings and free time. Changes wait for your approval.</p>`
-          : html`<ol class="thread">${items}</ol>`
-      }<span id="latest"></span>${composer}</section>`
-    : html`<p class="empty">${
-        isAdmin(session)
-          ? html`No model is connected. <a href="${root}/settings#assistant">Connect one in Settings</a>.`
-          : 'No model is connected. An admin of this organization can connect one in Settings.'
-      }</p>`
-}`;
+    flush();
+    return items;
+  }
+
+  /** The tenant's resources as a proposed change's card names them, and each one's time zone. */
+  async function resourceLookups(tenantRef: string) {
+    const resources = await options.resources.list(tenantRef);
+    return {
+      resources,
+      names: new Map(resources.map((resource) => [resource.id, resourceName(resource, resource.id)])),
+      zones: new Map(resources.flatMap((resource) => (resource.timezone ? [[resource.id, resource.timezone] as const] : []))),
+    };
+  }
+
+  const ASSISTANT_ICONS = {
+    send: new Html('<svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'),
+    stop: new Html('<svg class="stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'),
+    down: new Html('<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg>'),
+    plus: new Html('<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>'),
+    more: new Html('<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>'),
+    chats: new Html('<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h6"/></svg>'),
+  };
+
+  /** How long ago a chat was used, as briefly as the list has room for: 4m, 3h, 5d, then the date. */
+  function chatSince(at: Date): string {
+    const minutes = Math.max(0, Math.floor((now() - at.getTime()) / 60_000));
+    if (minutes < 1) return 'now';
+    if (minutes < 60) return `${String(minutes)}m`;
+    if (minutes < 24 * 60) return `${String(Math.floor(minutes / 60))}h`;
+    if (minutes < 7 * 24 * 60) return `${String(Math.floor(minutes / (24 * 60)))}d`;
+    return zoned('UTC', { day: 'numeric', month: 'short' }).format(at);
+  }
+
+  /** When a conversation was last used, as the Chats list groups them: by day, in UTC. */
+  function chatGroup(at: Date): string {
+    const day = (ms: number) => Math.floor(ms / DAY_MS);
+    const daysAgo = day(now()) - day(at.getTime());
+    if (daysAgo <= 0) return 'Today';
+    if (daysAgo === 1) return 'Yesterday';
+    if (daysAgo < 7) return 'Previous 7 days';
+    if (daysAgo < 30) return 'Previous 30 days';
+    return 'Older';
+  }
+
+  /**
+   * A member's conversations, the most recent first, grouped by when they were last used: each
+   * opens with a link, and has Rename and Delete behind its menu. `current` is the one shown.
+   */
+  function chatsPanel(session: Session, chats: readonly SlotlockAssistantChatSummary[], current: string | null): Html {
+    const token = csrfToken(session);
+    const hidden = (id: string) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${id}">`;
+    const groups: { label: string; rows: Html[] }[] = [];
+    for (const chat of chats) {
+      const label = chatGroup(chat.updatedAt);
+      let group = groups.at(-1);
+      if (!group || group.label !== label) {
+        group = { label, rows: [] };
+        groups.push(group);
+      }
+      const here = chat.id === current;
+      group.rows.push(html`<li class="chat-row${here ? ' current' : ''}"><a class="chat-link" href="${chatUrl(chat.id)}"${here ? html` aria-current="page"` : html``}><span class="chat-title">${chat.title}</span><time class="chat-when" datetime="${chat.updatedAt.toISOString()}" title="${formatDate(chat.updatedAt)}">${chatSince(chat.updatedAt)}</time></a><details class="chat-menu"><summary aria-label="Options for ${chat.title}">${ASSISTANT_ICONS.more}</summary><div class="pop"><form class="chat-rename" method="post" action="${root}/assistant/rename">${hidden(chat.id)}<label class="visually-hidden" for="title-${chat.id}">Title</label><input id="title-${chat.id}" name="title" value="${chat.title}" maxlength="120" required><button type="submit">Rename</button></form><form method="post" action="${root}/assistant/delete">${hidden(chat.id)}<button class="danger" type="submit">Delete chat</button></form></div></details></li>`);
+    }
+    const list =
+      groups.length === 0
+        ? html`<p class="empty chats-empty">No chats yet.</p>`
+        : html`${groups.map((group) => html`<h3 class="chat-group">${group.label}</h3><ul class="chat-rows">${group.rows}</ul>`)}`;
+    return html`<aside class="chats" aria-label="Chats"><div class="chats-head"><h2>Chats</h2><a class="icon-button" href="${chatUrl(null)}" aria-label="New chat" title="New chat">${ASSISTANT_ICONS.plus}</a></div><label class="visually-hidden" for="chats-filter">Search chats</label><input id="chats-filter" class="chats-filter" type="search" placeholder="Search chats" autocomplete="off" hidden><nav class="chat-list" aria-label="Your chats">${list}</nav></aside>`;
+  }
+
+  /**
+   * The assistant: a conversation, with the member's others beside it. `requested` is the page's
+   * `c`: a conversation's id, `new` for a new one, or nothing for the last one used in the past two
+   * hours (else a new one).
+   */
+  async function assistantPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    requested?: string,
+  ): Promise<Response> {
+    const store = assistantStore(session);
+    if (!store) return notFound(session);
+    const tenantRef = tenantOf(session);
+    const member = personOf(session);
+    const [settings, chats] = await Promise.all([store.getSettings(tenantRef), store.listChats(tenantRef, member)]);
+    if (!settings) {
+      const content = html`${noticeOf(notice, status)}${pageHead('Assistant')}${emptyState(
+        ICONS.assistant,
+        isAdmin(session) ? 'Connect a model to use the assistant.' : 'An admin of this organization connects a model in Settings.',
+        isAdmin(session) ? { href: `${root}/settings#assistant`, label: 'Connect a model' } : undefined,
+      )}`;
+      return respond(status, layout('Assistant', content, session, 'assistant'));
+    }
+    let chatId = chatOf(requested);
+    if (requested === undefined) {
+      const latest = chats[0];
+      if (latest && now() - latest.updatedAt.getTime() < CHAT_RESUME_MS) chatId = latest.id;
+    }
+    const conversation = chatId ? await store.getChat(tenantRef, member, chatId) : null;
+    if (chatId && !conversation) {
+      // Deleted, or never this member's: a new one instead, saying so.
+      chatId = null;
+      if (requested !== undefined && notice === undefined) {
+        notice = 'That chat is not here: it was deleted.';
+        status = 404;
+      }
+    }
+    const entries = readSlotlockAssistantEntries(conversation?.messages);
+    const actions = conversation?.actions ?? {};
+    const empty = entries.length === 0;
+    const { resources, names, zones } =
+      empty || Object.keys(actions).length > 0
+        ? await resourceLookups(tenantRef)
+        : { resources: [], names: new Map<string, string>(), zones: new Map<string, string>() };
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="chat" value="${chatId ?? ''}">`;
+    const first = resources.find((resource) => !resource.archivedAt);
+    const named = first ? resourceName(first, first.id) : null;
+    // A read chip asks at once; a write chip fills the box to finish (app.js), or asks (no script).
+    const prompts: { label: string; message: string; fill?: true }[] = [
+      { label: "What's on today", message: "What's booked today?" },
+      { label: 'Find free time', message: named ? `When is ${named} free tomorrow morning?` : 'What is free tomorrow morning?' },
+      { label: 'Book', message: named ? `Book ${named} tomorrow 9:00–10:00` : 'Book ', fill: true },
+      { label: 'Move a booking', message: 'Move the next booking one hour later', fill: true },
+      { label: 'Cancel a booking', message: 'Cancel the next booking', fill: true },
+    ];
+    const chips = html`<div class="assistant-start"><div class="chips">${prompts.map(
+      (prompt) =>
+        html`<form method="post" action="${root}/assistant">${hidden()}<button class="chip" type="submit" name="message" value="${prompt.message}"${
+          prompt.fill ? html` data-fill="${prompt.message}"` : html``
+        }>${prompt.label}</button></form>`,
+    )}</div></div>`;
+    const composer = html`<div class="dock"><button class="jump" type="button" hidden aria-label="Jump to the latest message">${ASSISTANT_ICONS.down}</button><form class="composer" method="post" action="${root}/assistant">${hidden()}<label class="visually-hidden" for="message">Message</label><textarea id="message" name="message" rows="2" maxlength="${String(SLOTLOCK_ASSISTANT_MAX_MESSAGE)}" required placeholder="${empty ? 'Ask about bookings' : 'Reply…'}"></textarea><div class="composer-bar"><span class="count" hidden></span><button class="send" type="submit" aria-label="Send">${ASSISTANT_ICONS.send}${ASSISTANT_ICONS.stop}</button></div></form></div>`;
+    const actionsHead = html`<div class="assistant-actions"><a class="button ghost chats-link" href="${root}/assistant/chats">${ASSISTANT_ICONS.chats}Chats</a><a class="button ghost new-chat" href="${chatUrl(null)}">${ASSISTANT_ICONS.plus}New chat</a></div>`;
+    const flag = empty ? new Html(' data-empty') : html``;
+    const content = html`${noticeOf(notice, status)}<div class="assistant-shell">${chatsPanel(session, chats, chatId)}<div class="assistant-page"${flag}>${pageHead(
+      conversation?.title ?? 'Assistant',
+      actionsHead,
+    )}<div class="assistant" data-assistant data-stream="${root}/assistant/stream" data-page="${root}/assistant"${flag}><ol class="thread">${assistantItems(
+      session,
+      entries,
+      actions,
+      names,
+      zones,
+      chatId,
+    )}</ol><span id="latest"></span>${chips}${composer}</div></div></div>`;
     return respond(status, layout('Assistant', content, session, 'assistant'));
   }
 
-  async function assistantSettingsPanel(session: Session): Promise<Html> {
-    const store = assistantStore();
-    if (!store) return html``;
+  /** The member's conversations on a page of their own: the Chats list where the page is narrow. */
+  async function chatsPage(session: Session): Promise<Response> {
+    const store = assistantStore(session);
+    if (!store) return notFound(session);
+    const chats = await store.listChats(tenantOf(session), personOf(session));
+    const content = html`<div class="chats-page">${pageHead('Chats', html`<a class="button ghost" href="${chatUrl(null)}">${ASSISTANT_ICONS.plus}New chat</a>`)}${chatsPanel(session, chats, null)}</div>`;
+    return respond(200, layout('Chats', content, session, 'assistant'));
+  }
+
+  /** The assistant form as a preset or a model list leaves it, not yet saved. */
+  type AssistantDraft = {
+    provider: 'anthropic' | 'openai';
+    baseUrl: string;
+    model?: string;
+    /** The models the provider listed, offered for the Model field. */
+    models?: readonly string[];
+  };
+
+  /** The named provider a provider and base URL are, or none (Custom). */
+  const presetOf = (provider: string, baseUrl: string) =>
+    SLOTLOCK_ASSISTANT_PRESETS.find(
+      (preset) => preset.id !== 'custom' && preset.provider === provider && preset.baseUrl === baseUrl,
+    );
+
+  /**
+   * The assistant's settings: what is connected and whether it answers (Test, its result in place),
+   * then the form, one provider chosen from tiles, and Disconnect apart. A member sees only what is
+   * connected, and where their messages go.
+   */
+  async function assistantSettingsSection(
+    session: Session,
+    status: number,
+    notice: string | undefined,
+    draft?: AssistantDraft,
+  ): Promise<Html> {
+    const store = assistantStore(session) as SlotlockAssistantStore;
     const settings = await store.getSettings(tenantOf(session));
-    const sentTo = html`<p class="fine">Members' messages, and the bookings and resources the assistant reads for them, are sent to this provider.</p>`;
-    if (!isAdmin(session)) {
-      return html`<section class="panel" id="assistant"><h2>Assistant</h2>${
-        settings
-          ? html`<dl class="facts"><dt>Provider</dt><dd>${settings.provider === 'anthropic' ? 'Anthropic' : 'OpenAI-compatible'}</dd><dt>Model</dt><dd>${settings.model}</dd></dl>${sentTo}`
-          : html`<p class="empty">No model is connected. An admin can connect one.</p>`
-      }</section>`;
-    }
     const token = csrfToken(session);
-    const selected = (provider: string) => (settings?.provider === provider ? html` selected` : html``);
-    return html`<section class="panel" id="assistant">
-<h2>Assistant</h2>
-<form method="post" action="${root}/settings/assistant">
-<input type="hidden" name="csrf" value="${token}">
-<input type="hidden" name="once" value="${formNonce(session)}">
-<div class="grid-form">
-<label>Provider<select name="provider"><option value="anthropic"${selected('anthropic')}>Anthropic Messages API</option><option value="openai"${selected('openai')}>OpenAI-compatible</option></select></label>
-<label>Base URL<input name="base_url" required maxlength="2048" value="${settings?.baseUrl ?? ''}" placeholder="https://api.anthropic.com"></label>
-<label>Model<input name="model" required maxlength="200" value="${settings?.model ?? ''}" placeholder="your-model"></label>
-<label>API key<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="${settings?.keyHint ? 'Leave empty to keep it' : 'Optional for a local model'}"></label>
-</div>
-<p class="fine">Key: ${settings?.keyHint ? html`set, ending in <code>${settings.keyHint}</code>` : 'none'}. OpenAI-compatible covers OpenAI, OpenRouter, vLLM, Ollama and LM Studio; give the URL that ends in <code>/v1</code>.</p>
-${settings?.keyHint ? html`<label class="choice"><input type="checkbox" name="clear_key" value="1"> Remove the key</label>` : html``}
-<button class="primary" type="submit">Save</button>
-</form>
-${sentTo}
-${
-  settings
-    ? html`<div class="row-actions"><form class="inline" method="post" action="${root}/settings/assistant/test"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button type="submit">Test connection</button></form><details class="act danger"><summary>Disconnect</summary><div class="pop"><p>Members can no longer chat. The key is deleted.</p><form method="post" action="${root}/settings/assistant/remove"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><button class="danger" type="submit">Disconnect</button></form></div></details></div>`
-    : html``
-}
-</section>`;
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const savedName = settings ? (presetOf(settings.provider, settings.baseUrl)?.name ?? 'Custom') : null;
+    // Where messages go, in words: the provider's name, or a custom one's host.
+    const hostOf = (url: string) => {
+      try {
+        return new URL(url).host;
+      } catch {
+        return url;
+      }
+    };
+    const savedTo = settings ? (savedName === 'Custom' ? hostOf(settings.baseUrl) : savedName) : null;
+    const admin = isAdmin(session);
+    const badge = !settings
+      ? html`<span class="badge">Not set up</span>`
+      : notice && status === 200 && notice.startsWith('Connected')
+        ? html`<span class="badge ok">Connected</span>`
+        : notice && status === 502
+          ? html`<span class="badge bad">Failing</span>`
+          : html`<span class="badge ok">Set up</span>`;
+    const test =
+      settings && admin
+        ? html`<form method="post" action="${root}/settings/assistant/test">${hidden()}<button type="submit">Test</button></form>`
+        : html``;
+    const statusCard = html`<div class="set-card status-card" id="assistant"><div class="status-head"><span class="mono-tile" aria-hidden="true">${
+      savedName ? savedName.charAt(0) : '–'
+    }</span><div class="status-name"><strong>${savedName ?? 'No model connected'}</strong>${
+      settings ? html`<code>${settings.model}</code>` : html``
+    }</div>${badge}${test}</div>${noticeOf(notice, status)}</div>`;
+    const sentTo = (name: string | null) =>
+      html`<p class="fine">Members' messages, and the bookings they ask about, are sent to ${name ?? 'the provider you choose'}.</p>`;
+    if (!admin) {
+      return html`${statusCard}${settings ? sentTo(savedTo) : html`<p class="fine">An admin of this organization connects a model here.</p>`}`;
+    }
+    // What the form shows: a draft (a preset, or a model list) over what is saved.
+    const provider = draft?.provider ?? settings?.provider ?? 'anthropic';
+    const baseUrl = draft ? draft.baseUrl : (settings?.baseUrl ?? '');
+    const model = draft?.model ?? settings?.model ?? '';
+    const chosen = settings || draft ? (presetOf(provider, baseUrl)?.id ?? 'custom') : 'anthropic';
+    const chosenName =
+      chosen === 'custom' ? (baseUrl ? hostOf(baseUrl) : null) : (SLOTLOCK_ASSISTANT_PRESETS.find((preset) => preset.id === chosen)?.name ?? null);
+    const models = draft?.models ?? [];
+    const tiles = html`<div class="tiles" role="radiogroup" aria-label="Provider">${SLOTLOCK_ASSISTANT_PRESETS.map(
+      (preset) =>
+        html`<label class="tile"><input type="radio" name="preset" value="${preset.id}"${
+          preset.id === chosen ? html` checked` : html``
+        }><span class="tile-mark" aria-hidden="true">${preset.name.charAt(0)}</span>${preset.name}</label>`,
+    )}</div>`;
+    const format = (value: 'anthropic' | 'openai', label: string) =>
+      html`<label><input type="radio" name="provider" value="${value}"${provider === value ? html` checked` : html``}>${label}</label>`;
+    const keyField = settings?.keyHint
+      ? html`<div class="key-set"><code>•••• ${settings.keyHint}</code><details><summary>Replace</summary><input id="api-key" name="api_key" type="password" autocomplete="off" maxlength="4096" aria-label="New API key"></details></div>`
+      : html`<input id="api-key" name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="Optional for a local model">`;
+    const form = html`<form class="set-card provider-form" method="post" action="${root}/settings/assistant">${hidden()}<div class="row stack"><span class="row-label">Provider</span>${tiles}</div><div class="row custom-only"><span class="row-label">API format</span><div class="segmented">${format(
+      'anthropic',
+      'Anthropic Messages',
+    )}${format('openai', 'OpenAI-compatible')}</div></div><div class="row custom-only"><label class="row-label" for="base-url">Base URL</label><input id="base-url" class="mono" name="base_url" maxlength="2048" value="${baseUrl}" placeholder="https://host/v1"></div><div class="row"><label class="row-label" for="model">Model</label><div class="field-with-button"><input id="model" class="mono" name="model" required maxlength="200" value="${model}" placeholder="Model name"${
+      models.length > 0 ? html` list="assistant-models"` : html``
+    }><button type="submit" formaction="${root}/settings/assistant/models" formnovalidate>Load models</button></div>${
+      models.length > 0
+        ? html`<datalist id="assistant-models">${models.map((id) => html`<option value="${id}"></option>`)}</datalist>`
+        : html``
+    }</div><div class="row"><label class="row-label" for="api-key">API key</label>${keyField}</div><div class="card-foot">${sentTo(
+      chosenName,
+    )}<button class="primary" type="submit">Save</button></div></form>`;
+    const disconnect = settings
+      ? html`<div class="set-card"><div class="danger-row"><strong>Disconnect ${savedName}</strong><details class="act danger"><summary>Disconnect…</summary><div class="pop"><p>The key is deleted. Members can't use the assistant until a model is connected again.</p><form method="post" action="${root}/settings/assistant/remove">${hidden()}<button class="danger" type="submit">Disconnect</button></form></div></details></div></div>`
+      : html``;
+    return html`${statusCard}${form}${disconnect}`;
+  }
+
+  /** The provider and base URL a form names: a named provider's own, or Custom's two fields. */
+  function formEndpoint(form: URLSearchParams): { provider: string | null; baseUrl: string } {
+    const preset = SLOTLOCK_ASSISTANT_PRESETS.find((candidate) => candidate.id === form.get('preset'));
+    if (preset && preset.id !== 'custom') return { provider: preset.provider, baseUrl: preset.baseUrl };
+    return { provider: form.get('provider'), baseUrl: (form.get('base_url') ?? '').trim() };
   }
 
   const adminOnly = (session: Session) =>
-    settingsPage(session, 403, 'Only an owner of this organization can change the assistant.');
+    settingsPage(session, 403, 'Only an owner or an admin of this workspace can change the assistant.');
 
   async function saveAssistantSettings(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
-    const provider = form.get('provider');
-    const checkedUrl = readSlotlockAssistantBaseUrl(form.get('base_url') ?? '', { privateUrls });
+    const { provider, baseUrl: givenUrl } = formEndpoint(form);
+    const checkedUrl = readSlotlockAssistantBaseUrl(givenUrl, { privateUrls });
     const model = (form.get('model') ?? '').trim();
     const apiKey = (form.get('api_key') ?? '').trim();
     if (provider !== 'anthropic' && provider !== 'openai') {
@@ -2281,8 +5104,80 @@ ${
     return redirect(303, `${root}/settings#assistant`);
   }
 
+  /**
+   * The provider's models for the Model field (Load models): the form's provider and base URL,
+   * checked as saving checks them, with the key given, or the saved one when it is for that same
+   * provider and URL. Saves nothing; counted as a message to the assistant.
+   */
+  async function loadAssistantModels(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore(session);
+    if (!store || !assistantOptions) return notFound(session);
+    if (!isAdmin(session)) return adminOnly(session);
+    if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
+      return tooManyMessages(session, settingsPage);
+    }
+    const { provider, baseUrl: givenUrl } = formEndpoint(form);
+    if (provider !== 'anthropic' && provider !== 'openai') {
+      return settingsPage(session, 400, 'Choose a provider from the list.');
+    }
+    const typedModel = (form.get('model') ?? '').trim();
+    const draft: AssistantDraft = {
+      provider,
+      baseUrl: givenUrl,
+      ...(typedModel !== '' ? { model: typedModel } : {}),
+    };
+    const checkedUrl = readSlotlockAssistantBaseUrl(draft.baseUrl, { privateUrls });
+    if (!checkedUrl.ok) {
+      return settingsPage(
+        session,
+        400,
+        checkedUrl.reason === 'private'
+          ? PRIVATE_URL_REFUSAL
+          : 'Give an https base URL (http only for localhost or 127.0.0.1), with no user name, query or #fragment.',
+        draft,
+      );
+    }
+    const baseUrl = checkedUrl.url;
+    if (namesOwnHost(baseUrl)) return settingsPage(session, 400, OWN_HOST_REFUSAL, draft);
+    if (!(await checkSlotlockAssistantHost(baseUrl, { privateUrls, resolve: resolveHost }))) {
+      return settingsPage(session, 400, PRIVATE_URL_REFUSAL, draft);
+    }
+    const typedKey = (form.get('api_key') ?? '').trim();
+    if (typedKey !== '' && !SLOTLOCK_ASSISTANT_API_KEY.test(typedKey)) {
+      return settingsPage(session, 400, 'An API key is up to 4,096 characters without spaces.', draft);
+    }
+    // The saved key only for the provider and URL it was entered for, as a model call sends it.
+    let apiKey: string | null = typedKey !== '' ? typedKey : null;
+    if (apiKey === null) {
+      const found = await assistantModel(session);
+      if (found && !('problem' in found) && found.model.provider === provider && found.model.baseUrl === baseUrl) {
+        apiKey = found.model.apiKey;
+      }
+    }
+    try {
+      const listed = await listSlotlockAssistantModels({
+        provider,
+        baseUrl,
+        apiKey,
+        fetch: assistantFetch,
+        timeoutMs: assistantTimeout,
+      });
+      return settingsPage(
+        session,
+        200,
+        listed.length > 0
+          ? `${listed.length.toLocaleString('en')} model${listed.length === 1 ? '' : 's'} listed: choose one for Model, then Save.${typedKey !== '' ? ' Enter the API key again when you save.' : ''}`
+          : 'The provider listed no models. Type the model name.',
+        { ...draft, baseUrl, models: listed },
+      );
+    } catch (error) {
+      report(error instanceof Error ? error.message : 'assistant model list failed');
+      return settingsPage(session, 502, slotlockAssistantProviderMessage(error), { ...draft, baseUrl });
+    }
+  }
+
   async function removeAssistantSettings(session: Session): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     await store.deleteSettings(tenantOf(session), personOf(session));
@@ -2293,7 +5188,7 @@ ${
     page(session, 429, 'You have sent the assistant a lot in the last minute. Wait a moment and try again.');
 
   async function testAssistant(session: Session): Promise<Response> {
-    if (!assistantStore()) return notFound(session);
+    if (!assistantStore(session)) return notFound(session);
     if (!isAdmin(session)) return adminOnly(session);
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
       return tooManyMessages(session, settingsPage);
@@ -2320,26 +5215,56 @@ ${
     }
   }
 
-  async function sendToAssistant(session: Session, form: URLSearchParams): Promise<Response> {
-    const store = assistantStore();
-    if (!store || !assistantOptions) return notFound(session);
+  type AssistantRun =
+    | { ok: false; status: number; message: string }
+    | { ok: true; messages: SlotlockAssistantEntry[]; actions: Record<string, unknown>; chatId: string; title: string };
+
+  /**
+   * One member message: check it, run the turn (streaming its text and steps to `onEvent` when
+   * given, stopping when `signal` aborts), and keep the conversation. Both ways to send share it.
+   */
+  async function runAssistantMessage(
+    session: Session,
+    form: URLSearchParams,
+    hooks: { onEvent?: (event: SlotlockAssistantTurnEvent) => void; signal?: AbortSignal } = {},
+  ): Promise<AssistantRun> {
+    const store = assistantStore(session);
+    if (!store || !assistantOptions) return { ok: false, status: 404, message: 'Nothing is here.' };
     const text = (form.get('message') ?? '').trim();
     if (text === '' || text.length > SLOTLOCK_ASSISTANT_MAX_MESSAGE) {
-      return assistantPage(
-        session,
-        400,
-        `Write a message of 1 to ${SLOTLOCK_ASSISTANT_MAX_MESSAGE.toLocaleString('en')} characters.`,
-      );
+      return {
+        ok: false,
+        status: 400,
+        message: `Write a message of 1 to ${SLOTLOCK_ASSISTANT_MAX_MESSAGE.toLocaleString('en')} characters.`,
+      };
     }
     if (!memberMessages.take(`${tenantOf(session)}\0${session.uid}`)) {
-      return tooManyMessages(session, assistantPage);
+      return {
+        ok: false,
+        status: 429,
+        message: 'You have sent the assistant a lot in the last minute. Wait a moment and try again.',
+      };
     }
     const found = await assistantModel(session);
-    if (found === null) return assistantPage(session, 409, 'No model is connected.');
-    if ('problem' in found) return assistantPage(session, 409, found.problem);
+    if (found === null) return { ok: false, status: 409, message: 'No model is connected.' };
+    if ('problem' in found) return { ok: false, status: 409, message: found.problem };
     const tenantRef = tenantOf(session);
     const member = personOf(session);
-    const stored = await store.getConversation(tenantRef, member);
+    try {
+      ignoreRejection(assistantOptions?.onMessage?.(tenantRef));
+    } catch {
+      // Metering never changes an answer.
+    }
+    // The conversation the form continues (a new one when it names none, or one deleted meanwhile),
+    // and the resources agents may see, so a name is matched to its id without a lookup.
+    const asked = await chatOfForm(store, session, form);
+    const [stored, listed] = await Promise.all([
+      asked ? store.getChat(tenantRef, member, asked) : Promise.resolve(null),
+      options.resources.list(tenantRef).catch(() => [] as SlotlockResource[]),
+    ]);
+    const chatId = stored?.id ?? newChatId();
+    const title = stored?.title ?? chatTitle(text);
+    const bookable = listed.filter((resource) => resource.visibility !== 'private' && resource.archivedAt === undefined);
     const entries = boundSlotlockAssistantEntries([
       ...readSlotlockAssistantEntries(stored?.messages),
       { role: 'user', text },
@@ -2356,12 +5281,25 @@ ${
         workspace: current?.login ?? session.login,
         login: session.login,
         now: new Date(now()),
+        resources: bookable.slice(0, SLOTLOCK_ASSISTANT_DIRECTORY_SIZE).map((resource) => ({
+          id: resource.id,
+          ...(resource.name !== undefined ? { name: resource.name } : {}),
+          ...(resource.externalRef ? { ref: resource.externalRef } : {}),
+          ...(resource.kind !== undefined ? { kind: resource.kind } : {}),
+          ...(resource.locationName !== undefined || resource.location !== undefined
+            ? { location: (resource.locationName ?? resource.location) as string }
+            : {}),
+          timezone: resource.timezone,
+        })),
+        resourceCount: bookable.length,
       }),
       entries,
       fetch: assistantFetch,
       timeoutMs: assistantTimeout,
       turnTimeoutMs: assistantTurnTimeout,
       ...(assistantOptions.maxSteps !== undefined ? { maxSteps: assistantOptions.maxSteps } : {}),
+      ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+      ...(hooks.signal ? { signal: hooks.signal } : {}),
       read: async (operation, input) => {
         // A turn's reads share one budget of resource-days, so 8 steps of wide reads cannot each
         // scan a hundred resources over years.
@@ -2376,6 +5314,11 @@ ${
           : { ok: false, code: outcome.code, ...(outcome.details ? { details: outcome.details } : {}) };
       },
       propose: async (operation, input) => {
+        // A dry run skips the halt below and would reach the backend from here, past admission,
+        // the rate limit and the turn's read budget. A proposal never runs, dry or not.
+        if (isRecord(input) && Object.hasOwn(input, 'dry_run')) {
+          return { ok: false, code: 'invalid_arguments' };
+        }
         if (pendingBefore + Object.keys(proposed).length >= SLOTLOCK_ASSISTANT_MAX_PENDING) {
           return { ok: false, code: 'too_many_pending_changes' };
         }
@@ -2414,17 +5357,133 @@ ${
     // Only this turn's proposals are added; the rest are kept as the row holds them now, so one
     // approved (or a conversation reset) while the turn ran is never put back as it stood.
     const kept = pruneSlotlockAssistantActions(messages, { ...(stored?.actions ?? {}), ...proposed });
-    await store.putConversation(
+    await store.putChat(
       tenantRef,
       member,
+      chatId,
       {
+        title,
         messages,
         added: Object.fromEntries(Object.entries(proposed).filter(([id]) => id in kept)),
         keep: Object.keys(kept),
+        // A chat it continued, only while it is still there: deleted during the turn, it stays so.
+        create: stored === null,
       },
       conversationTtl,
     );
-    return redirect(303, `${root}/assistant#latest`);
+    return { ok: true, messages, actions: kept, chatId, title };
+  }
+
+  /** The form's way (no script): run the turn, then show the conversation at its latest message. */
+  async function sendToAssistant(session: Session, form: URLSearchParams): Promise<Response> {
+    const run = await runAssistantMessage(session, form);
+    if (!run.ok) {
+      return run.status === 404
+        ? notFound(session)
+        : assistantPage(session, run.status, run.message, chatOf(form.get('chat')) ?? 'new');
+    }
+    return redirect(303, `${chatUrl(run.chatId)}#latest`);
+  }
+
+  /**
+   * app.js's way: the same turn, answered as it happens, one JSON object a line. `text` carries a
+   * piece of the reply, `step` a tool step as it starts and ends, and the last line is `done` (the
+   * turn as the page renders it, which replaces what was streamed) or `error`, each with a fresh
+   * single-use value for the next send. The member's Stop aborts the request, and the turn with it.
+   */
+  async function streamToAssistant(session: Session, form: URLSearchParams, request: Request): Promise<Response> {
+    const encoder = new TextEncoder();
+    // Stop, or a client gone, cancels the body. That stops the turn, which keeps what it had, and
+    // the cancel settles only once it has: a Worker closes the request's connection then, and a
+    // runtime that never aborts request.signal on a disconnect stops the turn all the same.
+    const stop = new AbortController();
+    let open = true;
+    let sink: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let work: Promise<void> = Promise.resolve();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        sink = controller;
+      },
+      cancel() {
+        open = false;
+        stop.abort();
+        return work;
+      },
+    });
+    const write = (event: Record<string, unknown>) => {
+      if (!open) return;
+      try {
+        sink?.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      } catch {
+        open = false;
+      }
+    };
+    const label = (name: string, state: 'run' | 'ok' | 'bad') =>
+      slotlockAssistantStepLabel(
+        name,
+        toolTitles.get(name) ?? name,
+        state,
+        SLOTLOCK_ASSISTANT_TOOL_USE[name as SlotlockAgentOperation] === 'propose',
+      );
+    const failed = (message: string) =>
+      write({
+        t: 'error',
+        html: html`<li class="turn error" role="alert"><span>${message}</span></li>`.value,
+        once: formNonce(session),
+      });
+    work = (async () => {
+      try {
+        const run = await runAssistantMessage(session, form, {
+          signal: AbortSignal.any([request.signal, stop.signal]),
+          onEvent: (event) => {
+            if (event.type === 'text') write({ t: 'text', d: event.delta });
+            else if (event.type === 'call') write({ t: 'step', id: event.id, s: 'run', label: label(event.name, 'run') });
+            else write({ t: 'step', id: event.id, s: event.ok ? 'ok' : 'bad', label: label(event.name, event.ok ? 'ok' : 'bad') });
+          },
+        });
+        if (!run.ok) {
+          failed(run.message);
+          return;
+        }
+        // The turn from the member's message on, as a reload would show it.
+        const start = run.messages.map((entry) => entry.role).lastIndexOf('user');
+        const turn = run.messages.slice(Math.max(0, start));
+        const lookups =
+          Object.keys(run.actions).length > 0
+            ? await resourceLookups(tenantOf(session))
+            : { names: new Map<string, string>(), zones: new Map<string, string>() };
+        const chats = await assistantStore(session)?.listChats(tenantOf(session), personOf(session));
+        write({
+          t: 'done',
+          html: assistantItems(session, turn, run.actions, lookups.names, lookups.zones, run.chatId).join(''),
+          once: formNonce(session),
+          // The conversation it went to (a new one has its id now), its address, and the list again.
+          chat: run.chatId,
+          title: run.title,
+          url: chatUrl(run.chatId),
+          chats: chats ? chatsPanel(session, chats, run.chatId).value : undefined,
+        });
+      } catch (error) {
+        report(error instanceof Error ? error.message : 'assistant stream failed');
+        failed('Something went wrong. Reload the page and try again.');
+      } finally {
+        if (open) {
+          open = false;
+          try {
+            sink?.close();
+          } catch {
+            // Cancelled meanwhile.
+          }
+        }
+      }
+    })();
+    ignoreRejection(work);
+    const page = respond(200, '');
+    const headers = new Headers(page.headers);
+    headers.set('Content-Type', 'application/x-ndjson; charset=utf-8');
+    // Proxies that buffer (nginx) send each line as it is written.
+    headers.set('X-Accel-Buffering', 'no');
+    return new Response(body, { status: 200, headers });
   }
 
   async function settleAction(
@@ -2432,28 +5491,32 @@ ${
     form: URLSearchParams,
     decision: 'approve' | 'dismiss',
   ): Promise<Response> {
-    const store = assistantStore();
+    const store = assistantStore(session);
     if (!store || !assistantOptions) return notFound(session);
     const id = form.get('action') ?? '';
+    const chatId = await chatOfForm(store, session, form, true);
     const tenantRef = tenantOf(session);
     const member = personOf(session);
-    const claimed = ACTION_ID.test(id)
+    const claimed = ACTION_ID.test(id) && chatId
       ? await store.settleAction(
           tenantRef,
           member,
+          chatId,
           id,
           'pending',
           decision === 'approve' ? { status: 'approved' } : { status: 'dismissed', input: {} },
         )
       : null;
     const action = claimed ? readAction(id, claimed) : null;
-    if (!action) return assistantPage(session, 409, 'That change was already approved or dismissed.');
+    if (!action || !chatId) {
+      return assistantPage(session, 409, 'That change was already approved or dismissed.', chatId ?? undefined);
+    }
     const title = toolTitles.get(action.operation) ?? action.operation;
     let event: string;
     if (decision === 'dismiss') {
       event = `The member dismissed the proposed change ${id} (${title}); it did not run.`;
     } else if (SLOTLOCK_ASSISTANT_TOOL_USE[action.operation] !== 'propose') {
-      await store.settleAction(tenantRef, member, id, 'approved', { status: 'failed', outcome: 'tool_not_available', input: {} });
+      await store.settleAction(tenantRef, member, chatId, id, 'approved', { status: 'failed', outcome: 'tool_not_available', input: {} });
       event = `The proposed change ${id} (${title}) could not run: tool_not_available.`;
     } else {
       const outcome = await dispatch(session, action.operation, action.input, 'run');
@@ -2461,6 +5524,7 @@ ${
       await store.settleAction(
         tenantRef,
         member,
+        chatId,
         id,
         'approved',
         outcome.ok ? { status: 'done', input: {} } : { status: 'failed', outcome: outcome.code, input: {} },
@@ -2468,59 +5532,872 @@ ${
       const result = JSON.stringify(outcome.ok ? outcome.data : { error: { code: outcome.code } });
       event = `The member approved the proposed change ${id} (${title}). ${outcome.ok ? 'It ran' : 'It was refused'}: ${result.length > 4_000 ? `${result.slice(0, 4_000)} …[truncated]` : result}`;
     }
-    const stored = await store.getConversation(tenantRef, member);
+    const stored = await store.getChat(tenantRef, member, chatId);
     if (stored) {
       const entries: SlotlockAssistantEntry[] = [
         ...readSlotlockAssistantEntries(stored.messages),
         { role: 'event', text: event },
       ];
       const messages = boundSlotlockAssistantEntries(entries);
-      await store.putConversation(
+      await store.putChat(
         tenantRef,
         member,
-        { messages, added: {}, keep: Object.keys(pruneSlotlockAssistantActions(messages, stored.actions)) },
+        chatId,
+        {
+          title: stored.title,
+          messages,
+          added: {},
+          keep: Object.keys(pruneSlotlockAssistantActions(messages, stored.actions)),
+          create: false,
+        },
         conversationTtl,
       );
     }
-    return redirect(303, `${root}/assistant#action-${id}`);
+    return redirect(303, `${chatUrl(chatId)}#action-${id}`);
   }
 
+  /** A new conversation: the others are kept, in Chats. (A form of an earlier release posts here.) */
   async function resetAssistant(session: Session): Promise<Response> {
-    const store = assistantStore();
+    if (!assistantStore(session)) return notFound(session);
+    return redirect(303, chatUrl(null));
+  }
+
+  /** Give one of the member's conversations a title of their own. */
+  async function renameChat(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore(session);
     if (!store) return notFound(session);
-    await store.deleteConversation(tenantOf(session), personOf(session));
-    return redirect(303, `${root}/assistant`);
+    const chatId = chatOf(form.get('chat'));
+    const title = (form.get('title') ?? '').replace(/\s+/gu, ' ').trim();
+    if (!chatId) return assistantPage(session, 404, 'That chat is not here: it was deleted.', 'new');
+    if ([...title].length < 1 || [...title].length > 120) {
+      return assistantPage(session, 400, 'Give the chat a title of 1 to 120 characters.', chatId);
+    }
+    const renamed = await store.renameChat(tenantOf(session), personOf(session), chatId, title);
+    if (!renamed) return assistantPage(session, 404, 'That chat is not here: it was deleted.', 'new');
+    return redirect(303, chatUrl(chatId));
+  }
+
+  /** Delete one of the member's conversations, at once and for good. */
+  async function deleteChat(session: Session, form: URLSearchParams): Promise<Response> {
+    const store = assistantStore(session);
+    if (!store) return notFound(session);
+    const chatId = chatOf(form.get('chat'));
+    if (chatId) await store.deleteChat(tenantOf(session), personOf(session), chatId);
+    return redirect(303, chatUrl(null));
+  }
+
+  /**
+   * A workspace's plan as both the Usage page and the overview show it: the plan (or the default it
+   * moves to), what it has against the limits, this month's use against the quotas, and what needs a
+   * person: a failed payment, a quota used up or nearly, more than the coming plan allows.
+   * `here` is the page asking, so an item's action points to the page that resolves it.
+   */
+  async function planStanding(session: Session, here: 'usage' | 'overview', given?: readonly SlotlockApiKey[]) {
+    const active = plans as SlotlockDashboardPlans;
+    const billing = options.billing;
+    const tenantRef = tenantOf(session);
+    const [plan, planDefault, resourceCount, keys, webhooks] = await Promise.all([
+      active.plan(tenantRef),
+      active.planDefault ? active.planDefault() : Promise.resolve(null),
+      // As the limit counts them: archived resources included.
+      options.resources.count
+        ? options.resources.count(tenantRef)
+        : options.resources.list(tenantRef).then((listed) => listed.length),
+      given ?? options.keys.list({ tenantRef }),
+      options.resources.webhooks?.list(tenantRef),
+    ]);
+    const month = slotlockUsageMonthToDate(now());
+    const used =
+      options.usage && options.resources.usage
+        ? summarizeSlotlockUsage(await options.resources.usage(tenantRef, month.from, month.to))
+        : null;
+    const keyCount = keys.filter(
+      (key) => !key.revokedAt && (key.expiresAt === null || key.expiresAt.getTime() > now()),
+    ).length;
+    const admin = mayBill(session);
+    const paying = plan !== null && plan.plan !== 'free';
+    const upcoming = !plan && planDefault && planDefault.appliesFrom.getTime() > now() ? planDefault : null;
+    const limits = plan?.limits ?? upcoming?.limits;
+    const quotas = options.quotas && plan ? SLOTLOCK_PLAN_QUOTAS[plan.plan] : null;
+    const resets = formatDate(slotlockQuotaPeriod(now()).resetsAt);
+    const counted = (value: number) => value.toLocaleString('en-GB');
+    const usagePage = `${root}/plan`;
+    const upgradeAt = here === 'usage' ? '#upgrade' : `${usagePage}#upgrade`;
+    // Only where the deployment sells plans (Stripe) or arranges them (a contact) is there an upgrade.
+    const offersPlans = Boolean(billing || active.contact);
+    const canUpgrade = !paying && admin && offersPlans;
+    const upgradeHint = paying || !offersPlans ? '' : admin ? ' Upgrade for more.' : ' An owner of this organization can upgrade.';
+    const attention: Html[] = [];
+    // Whether anything is near or past a limit: the overview then offers the upgrade.
+    let pressing = false;
+    if (plan?.status === 'past_due') {
+      attention.push(
+        attentionItem(
+          'bad',
+          `Your last payment failed. ${admin && billing && plan.stripeCustomer ? 'Update your payment method in Manage billing' : 'An owner updates the payment method'} to keep the ${PLAN_NAMES[plan.plan]} plan.`,
+          here === 'overview' ? { href: usagePage, label: 'Usage' } : undefined,
+        ),
+      );
+    }
+    if (quotas && used) {
+      for (const metric of ['operations', 'bookings'] as const) {
+        const quota = quotas[metric];
+        const stop = Math.floor((quota * quotas.stopPercent) / 100);
+        const spent = used.totals[metric];
+        const refused = metric === 'operations' ? 'every call but reading usage' : 'new bookings and holds';
+        const upgrade = canUpgrade ? { href: upgradeAt, label: 'Upgrade' } : here === 'overview' ? { href: usagePage, label: 'Usage' } : undefined;
+        if (spent * 100 >= quota * 80) pressing = true;
+        if (spent >= stop) {
+          attention.push(attentionItem('bad', `This month's ${metric} are used up: Slotlock refuses ${refused} with quota_exceeded until ${resets}.${upgradeHint}`, upgrade));
+        } else if (spent >= quota) {
+          const billed = metric === 'operations' && billing?.overage && plan?.plan === 'developer' && paying;
+          attention.push(
+            attentionItem(
+              'warn',
+              `You have used this month's ${counted(quota)} ${metric}.${billed ? ` Those past it are billed at ${billing?.overage?.price ?? ''}.` : ''} Slotlock refuses ${refused} past ${counted(stop)}, until ${resets}.${billed ? '' : upgradeHint}`,
+              billed ? undefined : upgrade,
+            ),
+          );
+        } else if (spent * 100 >= quota * 80) {
+          attention.push(
+            attentionItem(
+              'warn',
+              `You have used ${String(Math.floor((spent * 100) / quota))}% of this month's ${metric}. They start again on ${resets}.`,
+              upgrade,
+            ),
+          );
+        }
+      }
+    }
+    // What the workspace has against its plan's limits (or the coming plan's): at one, adding another
+    // is refused; past one (a plan that allows less than it has), nothing is removed.
+    const full = limits
+      ? (
+          [
+            ['resources', resourceCount, limits.resources],
+            ['active API keys', keyCount, limits.apiKeys],
+            ...(webhooks ? ([['webhooks', webhooks.length, limits.webhookEndpoints]] as const) : []),
+          ] as const
+        ).filter(([, have, allowed]) => have >= allowed)
+      : [];
+    const over = full.filter(([, have, allowed]) => have > allowed);
+    const holding = full.map(([what, have, allowed]) => `${counted(have)} of ${counted(allowed)} ${what}`).join(' and ');
+    if (full.length > 0) pressing = true;
+    const limitAction = canUpgrade
+      ? { href: upgradeAt, label: 'Upgrade' }
+      : here === 'overview'
+        ? { href: usagePage, label: 'Usage' }
+        : undefined;
+    if (upcoming) {
+      attention.push(
+        attentionItem(
+          full.length > 0 ? 'warn' : 'info',
+          `From ${formatDate(upcoming.appliesFrom)}, this workspace is on ${PLAN_NAMES[upcoming.plan]}: ${String(upcoming.limits.resources)} resources, ${String(upcoming.limits.apiKeys)} API keys and ${String(upcoming.limits.webhookEndpoints)} webhooks.${
+            full.length > 0
+              ? ` You have ${holding}: ${over.length > 0 ? 'nothing is removed, but ' : ''}from then, adding another is refused.${upgradeHint}`
+              : ''
+          }`,
+          full.length > 0 ? limitAction : undefined,
+        ),
+      );
+    } else if (plan && full.length > 0) {
+      attention.push(
+        attentionItem(
+          over.length > 0 ? 'bad' : 'warn',
+          `On ${PLAN_NAMES[plan.plan]}, you have ${holding}: ${over.length > 0 ? 'nothing is removed, but ' : ''}adding another is refused.${upgradeHint}`,
+          limitAction,
+        ),
+      );
+    }
+    /** One use against its allowance: a bar, amber from 80%, red at the limit. */
+    const meter = (label: string, value: number, limit: number | undefined) => {
+      if (limit === undefined) {
+        return html`<div class="meter"><div class="meter-head"><span>${label}</span><span class="meter-value">${counted(value)}</span></div></div>`;
+      }
+      const tone = value >= limit ? ' bad' : value * 100 >= limit * 80 ? ' warn' : '';
+      return html`<div class="meter${tone}"><div class="meter-head"><span>${label}</span><span class="meter-value">${counted(value)}<span class="meta"> of ${counted(limit)}</span></span></div><progress value="${String(Math.min(value, limit))}" max="${String(limit)}" aria-label="${label}: ${counted(value)} of ${counted(limit)}"></progress></div>`;
+    };
+    const limitMeters = html`${meter('Resources', resourceCount, limits?.resources)}${meter('Active API keys', keyCount, limits?.apiKeys)}${
+      webhooks ? meter('Webhooks', webhooks.length, limits?.webhookEndpoints) : html``
+    }`;
+    // Under a "This month" heading, or beside the limits with the month in each label.
+    const monthMeters = (suffix: string) =>
+      used
+        ? html`${meter(`Operations${suffix}`, used.totals.operations, quotas?.operations)}${meter(`Bookings${suffix}`, used.totals.bookings, quotas?.bookings)}${meter(`Holds${suffix}`, used.totals.holds, undefined)}`
+        : html``;
+    const name = plan
+      ? PLAN_NAMES[plan.plan]
+      : upcoming
+        ? `${PLAN_NAMES[upcoming.plan]} from ${dayOf(upcoming.appliesFrom)}`
+        : 'No plan';
+    return {
+      plan,
+      upcoming,
+      paying,
+      admin,
+      used,
+      month,
+      resets,
+      keys,
+      name,
+      limitMeters,
+      monthMeters,
+      meters: html`${limitMeters}${monthMeters(' this month')}`,
+      attention,
+      canUpgrade,
+      pressing,
+    };
+  }
+
+  /**
+   * What resolves an add refused at a plan limit, as a link: the upgrade on Usage, for an owner of a
+   * workspace that does not pay yet where the deployment sells or arranges plans; else Usage.
+   */
+  async function pastLimit(session: Session): Promise<Html> {
+    const plan = plans ? await plans.plan(tenantOf(session)).catch(() => null) : null;
+    const paying = plan !== null && plan.plan !== 'free';
+    return !paying && mayBill(session) && Boolean(options.billing || plans?.contact)
+      ? html`<a href="${root}/plan#upgrade">upgrade</a>`
+      : html`see <a href="${root}/plan">Usage</a>`;
+  }
+
+  /** One thing that needs a person: a sentence, its tone, and what resolves it. */
+  const attentionItem = (tone: 'bad' | 'warn' | 'info', text: string, action?: { href: string; label: string }) =>
+    html`<li class="attention ${tone}"><span class="attention-text">${text}</span>${
+      action ? html`<a class="attention-action" href="${action.href}">${action.label}</a>` : html``
+    }</li>`;
+
+  /** The list of things that need a person, or nothing. */
+  const attentionList = (items: readonly Html[]) =>
+    items.length > 0 ? html`<ul class="attention-list" aria-label="Needs attention">${items}</ul>` : html``;
+
+  /** When a failed read of Stripe's prices was last reported: at most once in ten minutes. */
+  let shownPricesWarnedAt = Number.NEGATIVE_INFINITY;
+
+  async function planPage(
+    session: Session,
+    status = 200,
+    notice?: string,
+    thanks = false,
+  ): Promise<Response> {
+    if (!plans) return notFound(session);
+    const billing = options.billing;
+    const counted = (value: number) => value.toLocaleString('en-GB');
+    if (session.env === 'test') {
+      // Its own use, counted apart from Live's and never billed.
+      const range = slotlockUsageMonthToDate(now());
+      const tested =
+        options.usage && options.resources.usage
+          ? summarizeSlotlockUsage(await options.resources.usage(tenantOf(session), range.from, range.to))
+          : null;
+      const meter = (label: string, value: number) =>
+        html`<div class="meter"><div class="meter-head"><span>${label}</span><span class="meter-value">${counted(value)}</span></div></div>`;
+      return respond(
+        status,
+        layout(
+          'Usage',
+          html`${pageHead('Usage')}${noticeOf(notice, status)}<p>The test environment is on your live plan's limits and is never billed. Switch to Live to see your plan, or to change it.</p>${
+            tested
+              ? html`<section class="panel" id="usage"><h2>This month, in Test</h2><div class="meters">${meter('Operations', tested.totals.operations)}${meter('Bookings', tested.totals.bookings)}${meter('Holds', tested.totals.holds)}</div><p class="fine">Since ${range.from}, in UTC, counted apart from Live, against the same monthly quotas.</p></section>`
+              : html``
+          }`,
+          session,
+          'plan',
+        ),
+      );
+    }
+    const standing = await planStanding(session, 'usage');
+    const { plan, paying, admin, used, resets, keys } = standing;
+    const token = csrfToken(session);
+    const hidden = () => html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const keyName = new Map(keys.map((key) => [key.id, key.name]));
+    // A shared workspace is offered Team (where billing sells it, else by asking), never Developer,
+    // whose limits are a person's; a person is offered Developer, and shown the way to Team.
+    const shared = sharedWorkspace(session);
+    const offered: 'developer' | 'team' = shared ? 'team' : 'developer';
+    // Whether the subscription is set to end, asked while the prices are: a plan cancelled at the end
+    // of its period still gives its limits until then, and must not say it renews.
+    const ending =
+      billing?.ending && paying && plan?.stripeSubscription
+        ? billing.ending(plan.stripeSubscription).catch((error: unknown) => {
+            ignoreRejection(options.onError?.(error));
+            return null;
+          })
+        : Promise.resolve(null);
+    // The prices Stripe charges, read from it; the configured labels only when it does not answer.
+    const shown = billing?.shownPrices
+      ? await billing.shownPrices().catch((error: unknown) => {
+          if (now() - shownPricesWarnedAt > 600_000) {
+            shownPricesWarnedAt = now();
+            ignoreRejection(options.onError?.(error));
+          }
+          return null;
+        })
+      : null;
+    const prices = billing ? (shown?.prices ?? billing.prices) : undefined;
+    const teamPrices = billing?.teamPrices ? (shown?.teamPrices ?? billing.teamPrices) : undefined;
+    const contact = plans.contact ?? billing?.contact;
+    const current: SlotlockPlan | null = plan?.plan ?? null;
+    const manage =
+      billing && plan?.stripeCustomer && admin
+        ? html`<form class="inline" method="post" action="${root}/plan/manage">${hidden()}<button type="submit">Manage billing</button></form>`
+        : html``;
+
+    // The plan at a glance: what it is, when it renews, whose it is.
+    const ends = await ending;
+    const end = paying ? (ends ?? plan?.currentPeriodEnd ?? null) : null;
+    const due = paying && plan?.status === 'past_due';
+    const standingPill = paying
+      ? due
+        ? html`<span class="pill held">Payment due</span>`
+        : ends
+          ? html`<span class="pill held">Ending</span>`
+          : html`<span class="pill active">Active</span>`
+      : html``;
+    const workspaceName =
+      currentTeam(session)?.name ?? session.orgs?.find((org) => org.id === session.org)?.login ?? shownAs(session);
+    const workspaceKind = session.team !== undefined ? 'Team workspace' : session.org !== undefined ? 'GitHub organization' : 'Personal workspace';
+    const cell = (label: string, value: Html | string, note?: Html | string) =>
+      html`<div class="summary-cell"><span class="summary-label">${label}</span><span class="summary-value">${value}</span>${
+        note ? html`<span class="summary-note">${note}</span>` : html``
+      }</div>`;
+    const summary = html`<section class="plan-summary" id="plan" aria-label="Your plan">${cell(
+      'Plan',
+      html`<span class="plan-now">${standing.name}</span>${standingPill}`,
+    )}${
+      paying
+        ? cell(due ? 'Payment due since' : ends ? 'Ends' : 'Renews', end ? dayOf(end) : '—', end ? formatDate(end) : undefined)
+        : cell('Billing', 'Nothing to pay', 'No card on file')
+    }${cell('Workspace', html`<span class="truncate" title="${workspaceName}">${workspaceName}</span>`, workspaceKind)}${
+      used ? cell('Month resets', resets.replace(/ 00:00 UTC$/, ''), 'At 00:00 UTC') : html``
+    }</section>`;
+
+    // What it holds against its limits, and this month's use against its allowances.
+    const usage = html`<div class="usage-grid${used ? '' : ' single'}"><section class="panel" aria-labelledby="limits-title"><div class="usage-head"><h2 id="limits-title">Limits</h2><span class="meta">What this workspace holds</span></div><div class="meters stacked">${standing.limitMeters}</div></section>${
+      used
+        ? html`<section class="panel" id="month" aria-labelledby="month-title"><div class="usage-head"><h2 id="month-title">This month</h2><span class="meta">Since ${standing.month.from}, UTC</span></div><div class="meters stacked">${standing.monthMeters('')}</div><p class="fine">An operation is a call that reached Slotlock, whatever it answered. The month starts again on ${resets}.</p></section>`
+        : html``
+    }</div>${used ? html`` : html`<p class="fine">This server does not count use yet.</p>`}`;
+
+    const byKey =
+      used && used.keys.length > 0
+        ? html`<section class="panel" id="usage"><h2>Used by</h2><div class="table"><table><thead><tr><th>Key</th><th>Operations</th><th>Bookings</th><th>Holds</th></tr></thead><tbody>${used.keys.map(
+            (row) =>
+              html`<tr><td data-label="Key">${row.keyId === null ? 'The dashboard and its assistant' : (keyName.get(row.keyId) ?? 'A deleted key')}</td><td data-label="Operations">${counted(row.operations)}</td><td data-label="Bookings">${counted(row.bookings)}</td><td data-label="Holds">${counted(row.holds)}</td></tr>`,
+          )}</tbody></table></div><p class="fine">Webhook deliveries ${counted(used.totals.webhook_deliveries)} · assistant messages ${counted(used.totals.assistant_messages)}.</p></section>`
+        : html``;
+
+    // ---- The plans, side by side, each with the way to it from here ----
+    const allows = (name: SlotlockPlan): string[] => {
+      const limits = SLOTLOCK_PLAN_LIMITS[name];
+      const quota = SLOTLOCK_PLAN_QUOTAS[name];
+      const shares = name === 'team' ? ', shared' : '';
+      return [
+        `${counted(limits.resources)} resources`,
+        `${counted(limits.apiKeys)} active API keys`,
+        `${counted(limits.webhookEndpoints)} webhook endpoints`,
+        ...(options.quotas ? [`${counted(quota.operations)} operations a month${shares}`, `${counted(quota.bookings)} bookings a month${shares}`] : []),
+        name === 'team' ? 'Any number of people' : `Team workspaces of up to ${String(FREE_TEAM_MEMBERS)} people`,
+      ];
+    };
+    const price = (amount: string, per: string, alternative?: string) =>
+      html`<p class="plan-price"><span class="price-amount${/\d/.test(amount) ? '' : ' words'}">${amount}</span><span class="price-per">${per}</span></p>${
+        alternative ? html`<p class="price-alt">${alternative}</p>` : html`<p class="price-alt" aria-hidden="true"> </p>`
+      }`;
+    const inUse = html`<button type="button" class="plan-current" disabled>Current plan</button>`;
+    const note = (text: Html | string) => html`<p class="plan-hint">${text}</p>`;
+    const upgradeForm = (name: 'developer' | 'team', amounts: { month: string; year: string }) =>
+      html`<form class="plan-upgrade" method="post" action="${root}/plan/upgrade">${hidden()}<fieldset class="interval"><legend class="visually-hidden">Billed</legend><label class="choice"><input type="radio" name="interval" value="month" checked> Monthly, ${amounts.month} a month</label><label class="choice"><input type="radio" name="interval" value="year"> Yearly, ${amounts.year} a year</label></fieldset><button class="primary" type="submit">Upgrade to ${PLAN_NAMES[name]}</button></form>`;
+    const ask = (name: 'developer' | 'team') =>
+      contact ? html`<a class="button primary" href="${contact}">Talk to us about ${PLAN_NAMES[name]}</a>` : html``;
+    // Switching workspace and opening its Usage page in one step.
+    const switchTo = (organization: string, label: string, primary = false) =>
+      html`<form class="plan-switch" method="post" action="${root}/organization">${hidden()}<input type="hidden" name="organization" value="${organization}"><input type="hidden" name="then" value="/plan"><button${primary ? html` class="primary"` : html``} type="submit">${label}</button></form>`;
+    const notOwner = !paying && !admin ? note(shared ? 'An owner of this organization can change its plan.' : 'An owner can change this plan.') : html``;
+
+    const freeAction =
+      current === 'free'
+        ? inUse
+        : standing.upcoming?.plan === 'free'
+          ? note(`Your plan from ${dayOf(standing.upcoming.appliesFrom)}.`)
+          : paying
+            ? note('Where a paid plan returns when it is cancelled.')
+            : html``;
+
+    let developerAction: Html;
+    if (shared) {
+      developerAction = html`${note("For one person's own workspace.")}${
+        session.sc === undefined && session.idp !== 'sso' ? switchTo('', 'Go to your workspace') : html``
+      }`;
+    } else if (current === 'developer') {
+      developerAction = inUse;
+    } else if (paying) {
+      developerAction = html``;
+    } else if (!admin) {
+      developerAction = notOwner;
+    } else if (billing && prices) {
+      developerAction = upgradeForm('developer', prices);
+    } else {
+      developerAction = ask('developer');
+    }
+
+    let teamAction: Html;
+    if (shared) {
+      if (current === 'team') teamAction = inUse;
+      else if (paying) teamAction = html``;
+      else if (!admin) teamAction = notOwner;
+      else if (billing && teamPrices) teamAction = upgradeForm('team', teamPrices);
+      else teamAction = ask('team');
+    } else {
+      // Team is a team workspace's: upgrade one the person bills for, or make one.
+      const billable = (teamListOf.get(session) ?? []).filter((ws) => slotlockRoleCan(ws.role, 'billing.manage'));
+      const mayCreate = teamStore ? await teamCreationOn(session) : false;
+      const sold = billing ? teamPrices !== undefined : Boolean(contact);
+      const choose =
+        billable.length === 1
+          ? switchTo(billable[0]?.tenantRef ?? '', `Upgrade ${billable[0]?.name ?? 'your team'}`, true)
+          : billable.length > 1
+            ? html`<form class="plan-switch" method="post" action="${root}/organization">${hidden()}<input type="hidden" name="then" value="/plan"><label class="visually-hidden" for="team-to-upgrade">Team workspace</label><select id="team-to-upgrade" name="organization">${billable.map(
+                (ws) => html`<option value="${ws.tenantRef}">${ws.name}</option>`,
+              )}</select><button class="primary" type="submit">Upgrade it</button></form>`
+            : html``;
+      teamAction = !sold
+        ? html``
+        : billable.length > 0
+          ? html`${choose}${note('Team is bought for a team workspace, by its Owners and Billing managers.')}`
+          : mayCreate
+            ? html`<a class="button primary" href="${root}/teams#team-name">Create a team workspace</a>${note('Team is bought for a team workspace: make one, then upgrade it here.')}`
+            : teams
+              ? html`<a class="button" href="${root}/teams">Choose an organization</a>${note('Turn Slotlock on for a GitHub organization, then upgrade it here.')}`
+              : ask('team');
+    }
+
+    const featured: SlotlockPlan | 'custom' = paying && current ? current : offered;
+    const column = (
+      id: SlotlockPlan | 'custom',
+      tagline: string,
+      shownPrice: Html,
+      action: Html,
+      features: readonly string[],
+    ) =>
+      html`<article class="plan-col${current === id ? ' current' : ''}${featured === id ? ' featured' : ''}" id="${id}" aria-labelledby="${id}-name"><div class="plan-col-head"><h3 class="plan-name" id="${id}-name">${id === 'custom' ? 'Custom' : PLAN_NAMES[id]}</h3>${
+        current === id ? html`<span class="pill active">Current</span>` : html``
+      }</div><p class="plan-tagline">${tagline}</p>${shownPrice}<div class="plan-action">${action}</div><ul class="plan-features">${features.map(
+        (feature) => html`<li>${feature}</li>`,
+      )}</ul></article>`;
+    const zero = prices?.month.replace(/[\d.,\s]+/g, '') ?? '';
+    const plansGrid = html`<section class="plans" id="upgrade" aria-labelledby="plans-title"><div class="plans-head"><h2 id="plans-title">Plans</h2><p class="meta">Paid through Stripe, in your currency, with tax added where it applies. Cancel at any time.</p></div><div class="plan-grid">${column(
+      'free',
+      'Connect an agent today.',
+      price(`${zero || '£'}0`, 'a month', 'No card'),
+      freeAction,
+      allows('free'),
+    )}${column(
+      'developer',
+      "For one person's agents in production.",
+      prices ? price(prices.month, 'a month', `or ${prices.year} a year`) : price('Ask us', ''),
+      developerAction,
+      [
+        ...allows('developer'),
+        ...(billing?.overage && options.quotas ? [`Operations past them at ${billing.overage.price}, up to ${String(billing.overage.stopPercent)}%`] : []),
+      ],
+    )}${
+      teamPrices || contact
+        ? column(
+            'team',
+            'One price for the whole team.',
+            teamPrices ? price(teamPrices.month, 'a month', `or ${teamPrices.year} a year`) : price('Ask us', ''),
+            teamAction,
+            allows('team'),
+          )
+        : html``
+    }${
+      contact
+        ? column('custom', 'Slotlock on your own servers, with support from the people who build it.', price("Let's talk", ''), html`<a class="button" href="${contact}">Talk to the founder</a>`, [
+            'Your servers, your PostgreSQL',
+            'Support from the people who build it',
+            'Terms agreed in writing',
+          ])
+        : html``
+    }</div></section>`;
+    const content = html`${thanks ? html`<p class="notice done" role="status">${notice ?? ''}</p>` : noticeOf(notice, status)}
+${pageHead('Usage', manage)}
+${attentionList(standing.attention)}
+${summary}
+${usage}
+${billing || contact ? plansGrid : html``}
+${byKey}`;
+    return respond(status, layout('Usage', content, session, 'plan'));
+  }
+
+  async function upgradePlan(session: Session, form: URLSearchParams): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (session.env === 'test') return planPage(session, 400, 'Plans are changed in Live.');
+    if (!mayBill(session)) return planPage(session, 403, 'Only an owner or a billing manager of this workspace can change its plan.');
+    // A team being deleted takes no plan: kept first, so it is never billed while it waits to go.
+    if (deletingOf.has(session)) return planPage(session, 409, 'This team is being deleted. Keep it on Settings, Team before choosing a plan.');
+    const interval = form.get('interval') === 'year' ? 'year' : 'month';
+    // A shared workspace buys Team only: Developer's limits are a person's.
+    const shared = sharedWorkspace(session);
+    if (shared && !billing.teamPrices) {
+      return planPage(session, 409, 'Team is not on sale here yet: ask us about it, and we will set it up.');
+    }
+    const tenantRef = tenantOf(session);
+    const plan = await billing.plan(tenantRef);
+    if (plan && plan.plan !== 'free') {
+      return planPage(session, 409, `You are on the ${PLAN_NAMES[plan.plan]} plan already.`);
+    }
+    let url: string;
+    try {
+      url = await billing.checkout({
+        tenantRef,
+        interval,
+        ...(shared ? { plan: 'team' as const } : {}),
+        customer: plan?.stripeCustomer ?? null,
+        successUrl: `${publicRoot}/plan?checkout=done`,
+        cancelUrl: `${publicRoot}/plan`,
+      });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'subscription_exists') {
+        return planPage(
+          session,
+          409,
+          'You pay for a subscription already. Its plan shows here once Stripe confirms it; to change it, use Manage billing.',
+        );
+      }
+      ignoreRejection(options.onError?.(error));
+      return planPage(session, 502, 'The payment page did not open. Try again in a minute.');
+    }
+    return redirect(303, url);
+  }
+
+  async function manageBilling(session: Session): Promise<Response> {
+    const billing = options.billing;
+    if (!billing) return notFound(session);
+    if (session.env === 'test') return planPage(session, 400, 'Billing is managed in Live.');
+    if (!mayBill(session)) return planPage(session, 403, 'Only an owner or a billing manager of this workspace can manage its billing.');
+    const plan = await billing.plan(tenantOf(session));
+    if (!plan?.stripeCustomer) return planPage(session, 409, 'There is no billing to manage yet.');
+    let url: string;
+    try {
+      url = await billing.portal({
+        customer: plan.stripeCustomer,
+        returnUrl: `${publicRoot}/plan`,
+        plan: sharedWorkspace(session) ? 'team' : 'developer',
+      });
+    } catch (error) {
+      ignoreRejection(options.onError?.(error));
+      return planPage(session, 502, 'Billing did not open. Try again in a minute.');
+    }
+    return redirect(303, url);
   }
 
   /** The page a form was sent from, to show what went wrong with it. */
-  function pageFor(route: string) {
-    if (route.startsWith('/keys')) return keysPage;
-    if (route.startsWith('/webhooks') && options.resources.webhooks) return webhooksPage;
-    if (route.startsWith('/waitlist') && options.resources.waitlist) return waitlistPage;
-    if (route.startsWith('/resources') || route === '/hours') return resourcesPage;
-    if (route.startsWith('/assistant') && assistantStore()) return assistantPage;
-    if (route.startsWith('/settings')) return settingsPage;
-    return overviewPage;
+  /** Where a request came from, as the audit log keeps it: the client's address, and its browser. */
+  function requestOrigin(request: Request): { ipAddress?: string; userAgent?: string } {
+    const address = options.clientAddress?.(request);
+    const agent = request.headers.get('user-agent')?.slice(0, 256);
+    return { ...(address ? { ipAddress: address.slice(0, 64) } : {}), ...(agent ? { userAgent: agent } : {}) };
+  }
+
+  /**
+   * Record what the person did (or was refused) in the workspace's audit log. An action already done
+   * is not undone because its record failed: the failure goes to onError.
+   */
+  async function audit(
+    session: Session,
+    event: { action: string } & Partial<Omit<SlotlockAuditEventInput, 'action' | 'actorType' | 'actorRef'>>,
+    tenantRef = tenantOf(session),
+  ): Promise<void> {
+    const log = options.resources.audit;
+    if (!log) return;
+    const from = origins.get(session) ?? {};
+    try {
+      await log.record(tenantRef, {
+        actorType: 'person',
+        actorRef: personOf(session),
+        actorRole: roleOf(session),
+        ...from,
+        ...event,
+      });
+    } catch (error) {
+      try {
+        ignoreRejection(options.onError?.(error));
+      } catch {
+        // A failing reporter must not change the response.
+      }
+    }
+  }
+
+  /** What an audited form changed: its target, and what describes the change (never a secret). */
+  function auditDetails(route: string, form: URLSearchParams): Partial<SlotlockAuditEventInput> {
+    const id = form.get('id') ?? '';
+    if (route === '/keys') {
+      return { targetType: 'api_key', metadata: { access: form.get('access') ?? '', expires: form.get('expires') ?? '' } };
+    }
+    if (route.startsWith('/keys/') && UUID_PATTERN.test(id)) return { targetType: 'api_key', targetRef: id };
+    if (route === '/webhooks') {
+      let host = '';
+      try {
+        host = new URL(form.get('url') ?? '').host;
+      } catch {
+        // An address the form refused names no host.
+      }
+      return { targetType: 'webhook', metadata: host ? { host } : {} };
+    }
+    if (route.startsWith('/webhooks/') && UUID_PATTERN.test(id)) return { targetType: 'webhook', targetRef: id };
+    if (route.startsWith('/teams/')) {
+      const org = form.get('organization') ?? '';
+      return ORGANIZATION_ID.test(org) ? { targetType: 'organization', targetRef: `github-org:${org}` } : {};
+    }
+    if (route === '/settings/assistant') {
+      return { metadata: { provider: (form.get('provider') ?? '').slice(0, 40), model: (form.get('model') ?? '').slice(0, 120) } };
+    }
+    return {};
+  }
+
+  /**
+   * Every capability a form needs: its route's, and more where the form decides. A Full-access key
+   * asks `keys.full`; a key someone else created asks `keys.manage_any`; rotating or limiting a
+   * Full-access key asks `keys.full` as well, so a person who lost that power cannot keep it by
+   * rotating, and anyone rotating one signed in recently. A member's form asks the fresh powers of
+   * the role it gives and of the role it changes. An empty list is a route with none.
+   */
+  async function capabilitiesOf(session: Session, route: string, form: URLSearchParams): Promise<SlotlockWorkspaceCapability[]> {
+    const base = SLOTLOCK_DASHBOARD_POST_CAPABILITIES[route];
+    if (base === undefined) return [];
+    const needed: SlotlockWorkspaceCapability[] = [base];
+    if (route === '/keys' && form.get('access') === 'full') needed.push('keys.full');
+    // Giving a role needs its powers, and changing, limiting or removing a member needs those of the
+    // role they hold: an Owner's `workspace.own`, and every fresh one the role carries, so a session
+    // past its 15 minutes neither demotes an Owner nor makes or unmakes an Admin, who holds
+    // Full-access keys and webhooks. Sending an invitation again gives its role to a new link.
+    const roles: SlotlockWorkspaceRole[] = [];
+    if (route === '/members/invite' || route === '/members/role') {
+      const given = form.get('role');
+      if (isSlotlockWorkspaceRole(given)) roles.push(given);
+    }
+    const tenantRef = teamTenantOf(session);
+    if (teamStore && tenantRef !== undefined) {
+      if (route === '/members/role' || route === '/members/scope' || route === '/members/remove') {
+        const person = form.get('person') ?? '';
+        const held = (await teamStore.members(tenantRef)).find((member) => member.person === person);
+        if (held) roles.push(held.role);
+      }
+      if (route === '/members/resend') {
+        const id = (form.get('id') ?? '').toLowerCase();
+        const invitation = (await teamStore.invitations(tenantRef)).find((candidate) => candidate.id === id);
+        if (invitation) roles.push(invitation.role);
+      }
+    }
+    // Who owns the workspace first: a refusal names the power that matters most.
+    if (roles.includes('owner')) needed.push('workspace.own');
+    for (const role of roles) {
+      for (const capability of SLOTLOCK_ROLE_CAPABILITIES[role]) {
+        if (SLOTLOCK_FRESH_CAPABILITIES.has(capability) && !needed.includes(capability)) needed.push(capability);
+      }
+    }
+    if (route === '/keys/rotate' || route === '/keys/revoke' || route === '/keys/limits') {
+      // As PostgreSQL reads a uuid, whatever its case: the key the handler would act on.
+      const id = (form.get('id') ?? '').toLowerCase();
+      if (UUID_PATTERN.test(id)) {
+        const key = (await options.keys.list({ tenantRef: tenantOf(session) })).find((candidate) => candidate.id.toLowerCase() === id);
+        // A key not listed here is not one the person made: only who may change anyone's tries it.
+        if (!key || key.createdBy !== personOf(session)) needed.push('keys.manage_any');
+        if (key?.scopes.includes('admin') && route !== '/keys/revoke') needed.push('keys.full');
+      }
+    }
+    return needed;
+  }
+
+  /** The page a form's route belongs to, to go back to. */
+  const backOf = (route: string) => {
+    if (route.startsWith('/members/')) return '/settings/members';
+    if (route.startsWith('/identity/')) return '/settings/identity';
+    if (route.startsWith('/join/')) return '/teams';
+    if (route === '/teams/delete' || route === '/teams/restore') return '/settings/team';
+    if (route.startsWith('/settings/privacy')) return '/settings/privacy';
+    const first = `/${route.split('/')[1] ?? ''}`;
+    return first === '/' ? '' : first;
+  };
+
+  /** Refuse a form the person's role does not allow, or ask them to sign in again for a fresh one. */
+  async function authorizePost(session: Session, route: string, form: URLSearchParams): Promise<Response | null> {
+    // Signed in through a team's provider alone: the session acts in that team, and reaches no other
+    // (joining, invitations, switching, creating, proving oneself elsewhere). The provider is the
+    // team Owner's, so what it asserts must open nothing outside the team.
+    if (session.sc !== undefined && SSO_SCOPED_REFUSED.has(route)) {
+      await audit(session, { action: 'authz.denied', outcome: 'denied', reason: 'sso_scope', metadata: { route } });
+      return respond(
+        403,
+        layout('Not allowed', html`<p class="notice" role="alert">You signed in with your team’s single sign-on, which reaches this team only. Sign in with GitHub or Google to do that.</p>`, session),
+      );
+    }
+    const needed = await capabilitiesOf(session, route, form);
+    const missing = needed.length === 0 ? undefined : needed.find((capability) => !can(session, capability));
+    const outOfScope = scopes.has(session) && !SLOTLOCK_SCOPED_DASHBOARD_POSTS.has(route);
+    if (needed.length === 0 || missing !== undefined || outOfScope) {
+      await audit(session, {
+        action: 'authz.denied',
+        outcome: 'denied',
+        reason: missing ? `needs ${missing}` : needed.length === 0 ? 'not a listed route' : 'limited to locations and groups',
+        metadata: { route },
+      });
+      return deniedPage(session, missing, backOf(route));
+    }
+    const fresh = needed.find((capability) => SLOTLOCK_FRESH_CAPABILITIES.has(capability));
+    if (fresh !== undefined && !freshlySignedIn(session)) {
+      // A member's form asks for the powers of the roles it touches, but what it does is manage
+      // members, or change who owns the workspace.
+      const doing = needed[0] === 'members.manage' && fresh !== 'workspace.own' ? 'members.manage' : fresh;
+      return confirmPage(session, doing, backOf(route));
+    }
+    return null;
+  }
+
+  /** Refuse a page the person's role does not reach; a billing manager's overview is Usage. */
+  function authorizePage(session: Session, page: string): Response | null {
+    const capability = SLOTLOCK_DASHBOARD_PAGE_CAPABILITIES[page];
+    if (reaches(session, page)) return null;
+    if (page === '/' && plans && can(session, 'usage.read')) return redirect(303, `${root}/plan`);
+    return deniedPage(session, capability, plans && can(session, 'usage.read') ? '/plan' : '');
+  }
+
+  function deniedPage(session: Session, capability: SlotlockWorkspaceCapability | undefined, back: string): Response {
+    const role = SLOTLOCK_WORKSPACE_ROLE_NAMES[roleOf(session)];
+    const text =
+      scopes.has(session) && (capability === undefined || slotlockRoleCan(roleOf(session), capability))
+        ? 'Your access to this workspace is limited to some locations and groups, so this is not yours to see or change.'
+        : capability
+          ? `As ${/^[AEIOU]/.test(role) ? 'an' : 'a'} ${role} in this workspace, you can't ${CAPABILITY_WORDS[capability]}.`
+          : 'Nothing is here.';
+    return respond(
+      403,
+      layout('Not allowed', html`<p class="notice" role="alert">${text}</p><p><a href="${root}${back}">Back</a></p>`, session),
+    );
+  }
+
+  /** A fresh capability after more than 15 minutes: sign in again, then come back to the page. */
+  function confirmPage(session: Session, capability: SlotlockWorkspaceCapability, back: string): Response {
+    const query = new URLSearchParams({
+      ...(session.idp === 'google' ? { with: 'google' } : {}),
+      ...(STEP_UP_PAGES.has(back) ? { then: back } : {}),
+    }).toString();
+    return respond(
+      403,
+      layout(
+        'Confirm it’s you',
+        html`${pageHead('Confirm it’s you')}<p>To ${CAPABILITY_WORDS[capability]}, sign in again: your last sign-in was more than 15 minutes ago.</p><p class="actions"><a class="button primary" href="${root}/sign-in${query ? `?${query}` : ''}">Sign in again</a> <a class="button" href="${root}${back}">Cancel</a></p>`,
+        session,
+      ),
+    );
+  }
+
+  /** A page as the answers about a form render it: the person, the status, and a notice. */
+  type FormAnswerPage = (session: Session, status: number, notice: string) => Promise<Response> | Response;
+
+  /**
+   * The page a form's route belongs to, and the page path whose capability reading it needs: the
+   * page rendered, not the one the route names (without the store a page needs, it is the overview).
+   */
+  function pageEntryFor(route: string): { path: string; page: FormAnswerPage } {
+    if (route.startsWith('/keys')) return { path: '/keys', page: keysPage };
+    if (route.startsWith('/webhooks') && options.resources.webhooks) return { path: '/webhooks', page: webhooksPage };
+    if (route.startsWith('/approvals') && options.resources.approvals) return { path: '/approvals', page: approvalsPage };
+    if ((route.startsWith('/locations') || route.startsWith('/groups')) && options.resources.grouping) {
+      return { path: '/locations', page: locationsPage };
+    }
+    if (route.startsWith('/closures') && options.resources.hours) return { path: '/closures', page: closuresPage };
+    if (route.startsWith('/contacts') && options.resources.contacts) return { path: '/contacts', page: contactsPage };
+    if (route.startsWith('/resources') || route === '/hours') return { path: '/resources', page: resourcesPage };
+    // The page itself answers a workspace whose assistant staff turned off (assistantStore).
+    if (route.startsWith('/assistant') && assistantOptions && options.resources.assistant) {
+      return { path: '/assistant', page: assistantPage };
+    }
+    if ((route === '/teams/delete' || route === '/teams/restore') && teamStore) {
+      return { path: '/settings/team', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'team') };
+    }
+    if (route.startsWith('/members/') && teamStore) {
+      return { path: '/settings/members', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'members') };
+    }
+    if (route.startsWith('/identity/') && domainStore) {
+      return { path: '/settings/identity', page: (session, status, notice) => settingsPage(session, status, notice, undefined, 'identity') };
+    }
+    if (route.startsWith('/join/') && domainStore) return { path: '/teams', page: teamsPage };
+    if (route.startsWith('/settings')) return { path: '/settings', page: settingsPage };
+    if (route.startsWith('/plan') && plans) return { path: '/plan', page: planPage };
+    if ((route.startsWith('/teams') || route.startsWith('/invite')) && (teams || teamStore)) return { path: '/teams', page: teamsPage };
+    return { path: '/', page: overviewPage };
+  }
+
+  /**
+   * The page a form's route belongs to, for an answer about the form itself (already sent, too many
+   * forms, another organization's page), only to a person who reaches the page rendered, as
+   * authorizePage decides: anyone else, a member limited to locations and groups included, gets the
+   * notice alone. These answers come before the role is checked.
+   */
+  function pageOrNotice(route: string): FormAnswerPage {
+    const { path, page } = pageEntryFor(route);
+    return (session, status, notice) => {
+      if (reaches(session, path)) return page(session, status, notice);
+      return respond(status, layout('Refused', html`<p class="notice" role="alert">${notice}</p>`, session));
+    };
+  }
+
+  /** Whose hours an editor sets: the tenant's, one location's, or one resource's. */
+  type HoursTarget = 'all' | { location: SlotlockLocation } | SlotlockResource;
+  const isLocationTarget = (target: HoursTarget): target is { location: SlotlockLocation } =>
+    typeof target === 'object' && 'location' in target && typeof target.location === 'object';
+
+  /** How many resources keep hours of their own, a few by name, and what saving does to them. */
+  function ownHoursChoice(own: readonly SlotlockResource[]): Html {
+    if (own.length === 0) return html``;
+    const named = own.slice(0, OWN_HOURS_NAMED);
+    const word = own.length === 1 ? 'resource keeps hours of its own' : 'resources keep hours of their own';
+    return html`<fieldset class="modes"><legend>${String(own.length)} ${word}</legend>
+<p class="fine">${named.map(
+      (resource, index) =>
+        html`${index > 0 ? ', ' : ''}<a href="${root}/hours?resource=${resource.id}">${resourceName(resource, resource.id)}</a>`,
+    )}${own.length > named.length ? html` and ${String(own.length - named.length)} more` : html``}. <a href="${root}/resources?hours=own">See them all</a></p>
+<label class="choice"><input type="radio" name="override" value="none" checked> Keep them</label>
+<label class="choice"><input type="radio" name="override" value="matching"> Clear those with the same hours as yours were, or as these: copies an earlier version made when your hours were set</label>
+<label class="choice"><input type="radio" name="override" value="all"> Clear them all, so every resource uses these</label>
+</fieldset>`;
   }
 
   function hoursPage(
     session: Session,
     state: {
-      target: SlotlockResource | 'all';
+      target: HoursTarget;
       mode: HoursMode;
       week: WeekForm;
       unshown?: readonly WeeklyAvailabilityRule[];
       status?: number;
       notice?: string;
+      /** For the tenant's hours: the resources in use that keep hours of their own. */
+      own?: readonly SlotlockResource[] | undefined;
     },
   ): Response {
     const { target, mode } = state;
     const checked = (value: HoursMode) => (mode === value ? html` checked` : html``);
     const server = options.availability ?? [];
+    const place = isLocationTarget(target) ? target.location : null;
+    const resource = target !== 'all' && !place ? (target as SlotlockResource) : null;
     const title =
       target === 'all'
-        ? 'Hours for every resource'
-        : `Hours for ${target.externalRef ?? target.id}`;
+        ? 'Your hours'
+        : place
+          ? `Hours at ${place.name}`
+          : `Hours for ${resource?.externalRef ?? resource?.id ?? ''}`;
+    const inheritLabel =
+      target === 'all'
+        ? html`The server's hours (${server.length === 0 ? 'none' : hoursSummary(server)})`
+        : place
+          ? html`Inherit: a location it is in, else your hours, else the server's`
+          : resource && resource.availabilityRules === undefined
+            ? html`Inherit (${resourceHours(resource, server)})`
+            : html`Inherit: its location's hours, else yours, else the server's`;
     const rows = WEEKDAYS.map((day) => {
       const cells = state.week[day].flatMap(({ from, to }, index) => {
         const which = index + 1;
@@ -2534,13 +6411,15 @@ ${
     });
     const content = html`${state.notice ? html`<p class="notice" role="alert">${state.notice}</p>` : html``}
 <section>
-<p><a class="back" href="${root}/resources">Resources</a></p>
+<p><a class="back" href="${root}/${place ? 'locations' : 'resources'}">${place ? 'Locations' : 'Resources'}</a></p>
 <h1>${title}</h1>
 <p>${
       target === 'all'
-        ? 'The same hours for every resource, each in its own time zone. Saving replaces their hours.'
-        : `When agents may book it, in its time zone: ${target.timezone}.`
-    }</p>
+        ? 'Every resource without hours of its own uses these, each in its own time zone, unless its location has hours. Resources you add later too.'
+        : place
+          ? `Resources at ${place.name}, or at a location inside it, without hours of their own use these, each in its own time zone, unless a location nearer them has hours.`
+          : `When agents may book it, in its time zone: ${resource?.timezone ?? ''}.`
+    }${options.resources.hours ? html` <a href="${root}/closures">Closures and special days</a> change single days.` : html``}</p>
 ${
   state.unshown
     ? html`<div class="notice warn" role="alert"><p>These hours were set outside the dashboard, so the week below cannot show them. Saving replaces them.</p><ul class="hours">${state.unshown.map(
@@ -2552,18 +6431,40 @@ ${
 <form method="post" action="${root}/hours">
 <input type="hidden" name="csrf" value="${csrfToken(session)}">
 <input type="hidden" name="once" value="${formNonce(session)}">
-<input type="hidden" name="resource" value="${target === 'all' ? 'all' : target.id}">
+${place ? html`<input type="hidden" name="location" value="${place.ref}">` : html`<input type="hidden" name="resource" value="${target === 'all' ? 'all' : (resource?.id ?? '')}">`}
 <fieldset class="modes"><legend>Bookable hours</legend>
-<label class="choice"><input type="radio" name="mode" value="server"${checked('server')}> The server's hours (${server.length === 0 ? 'none' : hoursSummary(server)})</label>
+<label class="choice"><input type="radio" name="mode" value="server"${checked('server')}> ${inheritLabel}</label>
 <label class="choice"><input type="radio" name="mode" value="closed"${checked('closed')}> Closed: agents find no free slot</label>
 <label class="choice"><input type="radio" name="mode" value="custom"${checked('custom')}> These hours</label>
 </fieldset>
 <div class="table"><table class="week"><thead><tr><th>Day</th><th>Opens</th><th>Closes</th><th>Opens</th><th>Closes</th></tr></thead><tbody>${rows}</tbody></table></div>
 <p class="fine">A closing time at or before the opening time closes the next day; 00:00 to 00:00 is the whole day. Leave a window empty for none.</p>
+${target === 'all' ? ownHoursChoice(state.own ?? []) : html``}
 <button class="primary" type="submit">Save hours</button>
 </form>
 </section>`;
     return respond(state.status ?? 200, layout('Bookable hours', content, session, 'resources'));
+  }
+
+  /** The editor's state for stored rules: inherit (null), closed ([]), or a week. */
+  function hoursState(rules: readonly WeeklyAvailabilityRule[] | null | undefined): {
+    mode: HoursMode;
+    week: WeekForm;
+    unshown?: readonly WeeklyAvailabilityRule[];
+  } {
+    if (rules === undefined || rules === null) {
+      return { mode: 'server', week: weekFormOf(rulesToWeeklyHours(options.availability ?? [])) };
+    }
+    if (rules.length === 0) return { mode: 'closed', week: emptyWeekForm() };
+    const week = rulesToWeeklyHours(rules);
+    return { mode: 'custom', week: weekFormOf(week), ...(week === null ? { unshown: rules } : {}) };
+  }
+
+  /** The tenant's location with that reference, or null. */
+  async function ownLocation(session: Session, ref: string): Promise<SlotlockLocation | null> {
+    const grouping = options.resources.grouping;
+    if (!grouping || !/^[a-z0-9][a-z0-9._-]{0,99}$/.test(ref)) return null;
+    return (await grouping.locations(tenantOf(session))).find((location) => location.ref === ref) ?? null;
   }
 
   /** The tenant's resource with that id, or null for anything else. */
@@ -2578,38 +6479,56 @@ ${
       404,
       layout('Not found', html`<p class="notice">That resource is not one of yours.</p>`, session),
     );
+  const nothingHere = (session: Session) =>
+    respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, session));
+  const nothingHere404 = () =>
+    respond(404, layout('Not found', html`<p class="notice">Nothing is here.</p>`, null), { 'Referrer-Policy': 'no-referrer' });
+
+  /** The tenant's resources in use that keep hours of their own, by name. */
+  async function ownHoursOf(session: Session): Promise<SlotlockResource[]> {
+    const resources = await options.resources.list(tenantOf(session));
+    return resources
+      .filter((resource) => resource.archivedAt === undefined && resource.availabilityRules !== undefined)
+      .sort((one, other) => resourceName(one, one.id).localeCompare(resourceName(other, other.id)));
+  }
 
   async function hoursEditor(session: Session, url: URL): Promise<Response> {
+    const ref = url.searchParams.get('location');
+    if (ref !== null) {
+      const location = await ownLocation(session, ref);
+      if (!location || !options.resources.hours) return nothingHere(session);
+      const defaults = await options.resources.hours.defaults(tenantOf(session));
+      const rules = defaults.locations.find((entry) => entry.location === ref)?.rules ?? null;
+      return hoursPage(session, { target: { location }, ...hoursState(rules) });
+    }
     const id = url.searchParams.get('resource');
     if (id === null) {
-      const server = rulesToWeeklyHours(options.availability ?? []);
-      return hoursPage(session, { target: 'all', mode: 'server', week: weekFormOf(server) });
+      const [defaults, own] = await Promise.all([options.resources.hours?.defaults(tenantOf(session)), ownHoursOf(session)]);
+      return hoursPage(session, { target: 'all', ...hoursState(defaults?.tenant ?? null), own });
     }
     const resource = await ownResource(session, id);
     if (!resource) return notFound(session);
-    const rules = resource.availabilityRules;
-    if (rules === undefined) {
-      const server = rulesToWeeklyHours(options.availability ?? []);
-      return hoursPage(session, { target: resource, mode: 'server', week: weekFormOf(server) });
-    }
-    if (rules.length === 0) {
-      return hoursPage(session, { target: resource, mode: 'closed', week: emptyWeekForm() });
-    }
-    const week = rulesToWeeklyHours(rules);
-    return hoursPage(session, {
-      target: resource,
-      mode: 'custom',
-      week: weekFormOf(week),
-      ...(week === null ? { unshown: rules } : {}),
-    });
+    return hoursPage(session, { target: resource, ...hoursState(resource.availabilityRules) });
   }
 
+  /** The form's choice for resources' own hours (`yes`: the checkbox of a page from before); anything else keeps them. */
+  const overrideOf = (value: string | null): SlotlockOverrideResources =>
+    value === 'all' || value === 'yes' ? 'all' : value === 'matching' ? 'matching' : 'none';
+
   async function saveHours(session: Session, form: URLSearchParams): Promise<Response> {
+    const ref = form.get('location');
     const id = form.get('resource') ?? '';
-    const target = id === 'all' ? 'all' : await ownResource(session, id);
+    let target: HoursTarget | null;
+    if (ref !== null) {
+      const location = await ownLocation(session, ref);
+      target = location && options.resources.hours ? { location } : null;
+    } else {
+      target = id === 'all' ? 'all' : await ownResource(session, id);
+    }
     if (!target) return notFound(session);
     const mode = form.get('mode');
     const week = readWeekForm(form);
+    const own = target === 'all' ? await ownHoursOf(session) : undefined;
     if (mode !== 'server' && mode !== 'closed' && mode !== 'custom') {
       return hoursPage(session, {
         target,
@@ -2617,6 +6536,7 @@ ${
         week,
         status: 400,
         notice: 'Choose which hours to use.',
+        own,
       });
     }
     let rules: WeeklyAvailabilityRule[] | null = mode === 'server' ? null : [];
@@ -2636,21 +6556,295 @@ ${
           week,
           status: 400,
           notice: (error as Error).message,
+          own,
         });
       }
     }
-    const changed = await options.resources.setHours(
-      tenantOf(session),
-      target === 'all' ? 'all' : { id: target.id },
-      rules,
-      personOf(session),
-    );
-    if (changed === 0) {
-      return target === 'all'
-        ? resourcesPage(session, 409, 'Add a resource first, then set its hours.')
-        : notFound(session);
+    const place = isLocationTarget(target) ? target.location : null;
+    const changed =
+      target === 'all'
+        ? await options.resources.setHours(tenantOf(session), 'all', rules, personOf(session), overrideOf(form.get('override')))
+        : await options.resources.setHours(
+            tenantOf(session),
+            place ? { location: place.ref } : { id: (target as SlotlockResource).id },
+            rules,
+            personOf(session),
+          );
+    if (changed === 0 && target !== 'all') return notFound(session);
+    return redirect(303, `${root}/${place ? 'locations' : 'resources'}`);
+  }
+
+  /** A subscription's address as the page names it: its host, never its path or query (which may hold a token). */
+  const hostOfUrl = (url: string) => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return 'its address';
     }
-    return redirect(303, `${root}/resources`);
+  };
+
+  /** The tenant's closures and special days from yesterday on, with forms to add and import more. */
+  async function closuresPage(session: Session, status = 200, notice?: string): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    const [exceptions, locations, resources, calendars] = await Promise.all([
+      hours.exceptions(tenantRef, SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS + 1),
+      options.resources.grouping?.locations(tenantRef) ?? Promise.resolve([] as SlotlockLocation[]),
+      options.resources.list(tenantRef),
+      hours.calendars?.(tenantRef) ?? Promise.resolve([] as SlotlockHolidayCalendar[]),
+    ]);
+    const token = csrfToken(session);
+    const sent = () => html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const names = new Map(resources.map((resource) => [resource.id, resourceName(resource, resource.id)]));
+    const places = new Map(locations.map((location) => [location.ref, location.name]));
+    const scopeOf = (exception: SlotlockAvailabilityException) =>
+      exception.resourceId
+        ? names.get(exception.resourceId) ?? exception.resourceId
+        : exception.location
+          ? `${places.get(exception.location) ?? exception.location} (location)`
+          : 'Everywhere';
+    const days = (exception: SlotlockAvailabilityException) =>
+      exception.startsOn === exception.endsOn ? exception.startsOn : `${exception.startsOn} to ${exception.endsOn}`;
+    const what = (exception: SlotlockAvailabilityException) =>
+      exception.outcome === 'closed'
+        ? 'Closed'
+        : `Open ${(exception.hours ?? []).map((window) => hoursOf(window.startMinutes, window.durationMinutes)).join(', ')}`;
+    const scopeOptions = html`<option value="">Everywhere</option>${locations.map(
+      (location) => html`<option value="location:${location.ref}">${location.name} (location)</option>`,
+    )}${resources.slice(0, SLOTLOCK_DASHBOARD_MAX_RESOURCES).map(
+      (resource) => html`<option value="resource:${resource.id}">${resourceName(resource, resource.id)}</option>`,
+    )}`;
+    const shown = exceptions.slice(0, SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS);
+    const content = html`${noticeOf(notice)}
+<section>
+<p><a class="back" href="${root}/resources">Resources</a></p>
+<h1>Closures and special days</h1>
+<p>Each closes whole days, or gives them hours of their own instead of the weekly hours, read in each resource's time zone. Where several apply to a day, the nearest wins: a resource's own, then its location's, then everywhere's.</p>
+<div class="table"><table><thead><tr><th>Days</th><th>Applies to</th><th>Hours</th><th>Label</th><th></th></tr></thead><tbody>${
+      shown.length === 0
+        ? html`<tr><td colspan="5" class="muted">No closures from today on.</td></tr>`
+        : shown.map(
+            (exception) => html`<tr><td data-label="Days">${days(exception)}</td><td data-label="Applies to">${scopeOf(exception)}</td><td data-label="Hours">${what(exception)}</td><td data-label="Label" class="wrap">${exception.label}${exception.source === 'ics' ? html` <span class="meta">imported</span>` : html``}</td><td class="actions"><form method="post" action="${root}/closures/delete">${sent()}<input type="hidden" name="id" value="${exception.id}"><button type="submit">Delete</button></form></td></tr>`,
+          )
+    }</tbody></table></div>
+${exceptions.length > SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS ? html`<p class="fine">The first ${String(SLOTLOCK_DASHBOARD_MAX_EXCEPTIONS)} are shown; the API lists them all.</p>` : html``}
+<h2>Add a closure or special day</h2>
+<form method="post" action="${root}/closures" class="stack">${sent()}
+<label>Applies to <select name="scope">${scopeOptions}</select></label>
+<label>First day <input type="date" name="starts_on" required></label>
+<label>Last day <input type="date" name="ends_on"></label>
+<fieldset class="modes"><legend>Those days</legend>
+<label class="choice"><input type="radio" name="outcome" value="closed" checked> Closed</label>
+<label class="choice"><input type="radio" name="outcome" value="open"> Open only from <input type="time" name="opens" aria-label="Opens"> to <input type="time" name="closes" aria-label="Closes"></label>
+</fieldset>
+<label>Label <input name="label" maxlength="200" required placeholder="Christmas Day"></label>
+<button class="primary" type="submit">Add</button>
+</form>
+${calendars.length > 0 ? html`<h2>Holiday calendars</h2>
+<div class="table"><table><thead><tr><th>Calendar</th><th>Applies to</th><th>From</th><th>Closures</th><th></th></tr></thead><tbody>${calendars.map(
+        (calendar) => html`<tr><td data-label="Calendar" class="wrap">${calendar.name}${
+          calendar.lastError ? html`<span class="meta bad" role="status">The last import failed: ${calendar.lastError}</span>` : html``
+        }</td><td data-label="Applies to">${
+          calendar.resourceId
+            ? names.get(calendar.resourceId) ?? calendar.resourceId
+            : calendar.location
+              ? `${places.get(calendar.location) ?? calendar.location} (location)`
+              : 'Everywhere'
+        }</td><td data-label="From" class="wrap">${
+          calendar.url
+            ? html`${hostOfUrl(calendar.url)}<span class="meta">Imported again every 30 days${calendar.nextImportAt ? html`, next ${calendar.nextImportAt.toISOString().slice(0, 10)}` : html``}</span>`
+            : html`Uploaded or pasted${calendar.importedAt ? html`<span class="meta">${calendar.importedAt.toISOString().slice(0, 10)}</span>` : html``}`
+        }</td><td data-label="Closures">${String(calendar.closures)}</td><td class="actions">${
+          hours.deleteCalendar
+            ? html`<form method="post" action="${root}/closures/calendars/delete">${sent()}<input type="hidden" name="id" value="${calendar.id}"><button type="submit" class="danger">Delete</button></form>`
+            : html``
+        }</td></tr>`,
+      )}</tbody></table></div>
+<p class="fine">Deleting a calendar deletes its closures too.</p>` : html``}
+<h2>Import a holiday calendar</h2>
+<p>Upload or paste an iCalendar file of days off${hours.byUrl ? html`, or give its address` : html``}: each all-day event closes its days for the next two years. A calendar is kept by its name where it applies: importing it again updates its closures and removes the holidays it no longer has.</p>
+<form method="post" action="${root}/closures/import" class="stack" enctype="multipart/form-data">${sent()}
+<label>Applies to <select name="scope">${scopeOptions}</select></label>
+<label>Name <input name="name" maxlength="200" placeholder="Its own name, else its address, else Holidays"></label>
+<label>File <input type="file" name="icalendar_file" accept=".ics,text/calendar"></label>
+<label>Or paste it <textarea name="icalendar" rows="6" placeholder="BEGIN:VCALENDAR"></textarea></label>
+${hours.byUrl ? html`<label>Or its address <input type="url" name="url" maxlength="2000" placeholder="https://example.com/holidays.ics"></label>
+<label class="choice"><input type="checkbox" name="subscribe" value="on"> Import it again every 30 days</label>` : html``}
+<button type="submit">Import</button>
+</form>
+</section>`;
+    return respond(status, layout('Closures', content, session, 'resources'));
+  }
+
+  /**
+   * The people the tenant keeps to tell about bookings (RFC 0004 P3): how to reach each, what they
+   * agreed to and when, and a button that forgets one (their reference leaves every booking too).
+   * Contacts are added by the tenant's own systems, through the API.
+   */
+  async function contactsPage(session: Session, status = 200, notice?: string, after?: string): Promise<Response> {
+    const contacts = options.resources.contacts;
+    if (!contacts) return nothingHere(session);
+    const listed = await contacts.list(tenantOf(session), SLOTLOCK_DASHBOARD_CONTACTS_PAGE + 1, after);
+    const shown = listed.slice(0, SLOTLOCK_DASHBOARD_CONTACTS_PAGE);
+    const token = csrfToken(session);
+    const reach = (contact: SlotlockContact) =>
+      [contact.email, contact.phone ? `SMS ${contact.phone}` : null, contact.whatsapp ? `WhatsApp ${contact.whatsapp}` : null]
+        .filter(Boolean)
+        .join(', ') || 'No way to reach them';
+    const agreed = (contact: SlotlockContact) =>
+      (['email', 'sms', 'whatsapp'] as const)
+        .filter((channel) => contact.consent[channel] !== undefined)
+        .map((channel) => `${channel === 'sms' ? 'SMS' : channel === 'whatsapp' ? 'WhatsApp' : 'Email'}: ${contact.consent[channel] ? 'yes' : 'no'}${contact.consentAt[channel] ? ` (${contact.consentAt[channel]?.toISOString().slice(0, 10)})` : ''}`)
+        .join('; ') || 'Not asked';
+    const content = html`${noticeOf(notice)}
+<section>
+<p><a class="back" href="${root}/resources">Resources</a></p>
+<h1>Contacts</h1>
+<p>The people your bookings name to be told about them, kept by your own systems through the API (<code>PUT /v1/contacts/{contact_ref}</code>). Forgetting one deletes them and takes their reference off every booking, for an erasure request.</p>
+<table><thead><tr><th>Reference</th><th>Name</th><th>Reach by</th><th>Agreed to</th><th></th></tr></thead><tbody>${
+      shown.length === 0
+        ? html`<tr><td colspan="5" class="muted">No contacts yet.</td></tr>`
+        : shown.map(
+            (contact) => html`<tr><td data-label="Reference"><code>${contact.ref}</code></td><td data-label="Name">${contact.name ?? ''}</td><td data-label="Reach by" class="wrap">${reach(contact)}</td><td data-label="Agreed to" class="wrap">${agreed(contact)}</td><td class="actions"><form method="post" action="${root}/contacts/forget"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="ref" value="${contact.ref}"><button type="submit" class="danger">Forget</button></form></td></tr>`,
+          )
+    }</tbody></table>
+${listed.length > SLOTLOCK_DASHBOARD_CONTACTS_PAGE ? html`<p><a class="button" href="${root}/contacts?after=${encodeURIComponent(shown.at(-1)?.ref ?? '')}">More</a></p>` : html``}
+</section>`;
+    return respond(status, layout('Contacts', content, session, 'resources'));
+  }
+
+  async function forgetContact(session: Session, form: URLSearchParams): Promise<Response> {
+    const contacts = options.resources.contacts;
+    if (!contacts) return nothingHere(session);
+    const ref = form.get('ref') ?? '';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(ref)) return contactsPage(session, 400, 'That is not a contact reference.');
+    const forgotten = await contacts.forget(tenantOf(session), ref, personOf(session));
+    if (!forgotten.deleted) return contactsPage(session, 404, 'That contact is not one of yours.');
+    return contactsPage(
+      session,
+      200,
+      `Forgotten. ${forgotten.bookings} booking${forgotten.bookings === 1 ? '' : 's'} no longer name them.`,
+    );
+  }
+
+  /** `location:<ref>` or `resource:<id>` from a closures form, checked against the tenant's. */
+  async function closureScope(session: Session, value: string): Promise<{ location?: string; resourceId?: string } | null> {
+    if (value === '') return {};
+    if (value.startsWith('location:')) {
+      const location = await ownLocation(session, value.slice(9));
+      return location ? { location: location.ref } : null;
+    }
+    if (value.startsWith('resource:')) {
+      const resource = await ownResource(session, value.slice(9));
+      return resource ? { resourceId: resource.id } : null;
+    }
+    return null;
+  }
+
+  async function saveClosure(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const scope = await closureScope(session, form.get('scope') ?? '');
+    if (!scope) return closuresPage(session, 400, 'Choose where it applies.');
+    const outcome = form.get('outcome') === 'open' ? 'open' : 'closed';
+    const startsOn = form.get('starts_on') ?? '';
+    const endsOn = form.get('ends_on') || startsOn;
+    let windows: { startMinutes: number; durationMinutes: number }[] | undefined;
+    if (outcome === 'open') {
+      const opens = minutesOf(form.get('opens') ?? '');
+      const closes = minutesOf(form.get('closes') ?? '');
+      if (opens === null || closes === null) return closuresPage(session, 400, 'Give the hours those days open.');
+      windows = [{ startMinutes: opens, durationMinutes: closes > opens ? closes - opens : closes + 1_440 - opens }];
+    }
+    try {
+      await hours.addException(
+        tenantOf(session),
+        {
+          ...scope,
+          startsOn,
+          endsOn,
+          outcome,
+          ...(windows ? { hours: windows } : {}),
+          label: form.get('label') ?? '',
+        },
+        personOf(session),
+      );
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code === 'invalid_availability_exception' || code === 'availability_exceptions_limit_reached') {
+        return closuresPage(session, code === 'invalid_availability_exception' ? 400 : 409, (error as Error).message);
+      }
+      throw error;
+    }
+    return redirect(303, `${root}/closures`);
+  }
+
+  async function deleteClosure(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id) || !(await hours.deleteException(tenantOf(session), id, personOf(session)))) {
+      return closuresPage(session, 404, 'That closure is not one of yours.');
+    }
+    return redirect(303, `${root}/closures`);
+  }
+
+  async function importClosures(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours) return nothingHere(session);
+    const scope = await closureScope(session, form.get('scope') ?? '');
+    if (!scope) return closuresPage(session, 400, 'Choose where it applies.');
+    // An uploaded file, else what was pasted, else (where the server reads them) an address.
+    const text = (form.get('icalendar_file') ?? '').trim() || (form.get('icalendar') ?? '').trim();
+    const url = hours.byUrl ? (form.get('url') ?? '').trim() : '';
+    if ((text === '') === (url === '')) {
+      return closuresPage(session, 400, hours.byUrl ? 'Upload or paste a calendar, or give its address: one of them.' : 'Upload or paste a calendar.');
+    }
+    const name = (form.get('name') ?? '').trim();
+    const source: SlotlockHolidaySource = {
+      ...(text !== '' ? { icalendar: text } : { url }),
+      ...(name !== '' ? { name } : {}),
+      ...(url !== '' && form.get('subscribe') === 'on' ? { subscribe: true } : {}),
+    };
+    try {
+      const result = await hours.importHolidays(tenantOf(session), source, scope, personOf(session));
+      const plural = (count: number, word: string) => `${String(count)} ${word}${count === 1 ? '' : 's'}`;
+      return closuresPage(
+        session,
+        200,
+        `Imported ${plural(result.imported, 'closure')}${
+          result.removed > 0 ? `; removed ${plural(result.removed, 'holiday')} the calendar no longer has` : ''
+        }${result.skipped > 0 ? `; skipped ${plural(result.skipped, 'event')} that were not all-day or not in the next two years` : ''}.`,
+      );
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (
+        code === 'invalid_holiday_calendar' ||
+        code === 'invalid_availability_exception' ||
+        code === 'holiday_calendar_unreachable' ||
+        code === 'holiday_url_not_served' ||
+        code === 'location_not_found' ||
+        code === 'resource_not_found'
+      ) {
+        return closuresPage(session, 400, (error as Error).message);
+      }
+      if (code === 'availability_exceptions_limit_reached' || code === 'holiday_calendars_limit_reached') {
+        return closuresPage(session, 409, (error as Error).message);
+      }
+      throw error;
+    }
+  }
+
+  /** Delete a holiday calendar and the closures it made. */
+  async function deleteHolidayCalendar(session: Session, form: URLSearchParams): Promise<Response> {
+    const hours = options.resources.hours;
+    if (!hours?.deleteCalendar) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    if (!(await hours.deleteCalendar(tenantOf(session), id, personOf(session)))) {
+      return closuresPage(session, 404, 'That calendar is not one of yours.');
+    }
+    return redirect(303, `${root}/closures`);
   }
 
   function shownOncePage(
@@ -2675,8 +6869,2125 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   }
 
   /** Act in another of the session's organizations: the same session, sealed again. */
-  function switchOrganization(session: Session, form: URLSearchParams): Response {
+  function switchEnvironment(session: Session, form: URLSearchParams): Response {
+    const wanted = form.get('environment');
+    if (wanted !== 'live' && wanted !== 'test') {
+      return respond(400, layout('Refused', html`<p class="notice">Choose Live or Test.</p>`, session));
+    }
+    const { env: _, ...rest } = session;
+    const sealed = seal('slotlock-dashboard-session-v1', wanted === 'test' ? { ...rest, env: 'test' } : rest);
+    const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+    return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+  }
+
+  /**
+   * Teams on Cloud: the person's GitHub organizations, as read at sign-in, each on or off. An owner
+   * turns one on or off; a member asks an owner; one that is on is a workspace to switch to.
+   */
+  async function teamsPage(session: Session, status = 200, notice?: string, checked = false): Promise<Response> {
+    if (!teams && !teamStore) return nothingHere(session);
+    const own = teamStore ? await teamWorkspacesSection(session, checked) : html``;
+    const organizations = teams ? await organizationsSection(session) : html``;
+    const content = html`${noticeOf(notice, status)}${pageHead('Teams')}${own}${organizations}`;
+    return respond(status, layout('Teams', content, session, 'teams'));
+  }
+
+  /** The person's team workspaces, the invitations open to them, and creating one. */
+  async function teamWorkspacesSection(session: Session, checked = false): Promise<Html> {
+    if (!teamStore) return html``;
+    const listed = teamListOf.get(session) ?? [];
+    const [offered, atDomain, mayCreate] = await Promise.all([
+      teamStore.pendingFor(personOf(session), verifiedEmails(session)),
+      domainTeamsSection(session, checked),
+      teamCreationOn(session),
+    ]);
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const rows = listed.map(
+      (ws) =>
+        html`<tr><td data-label="Team" class="strong">${ws.name}</td><td data-label="Handle" class="muted">@${ws.handle}</td><td data-label="You are">${SLOTLOCK_WORKSPACE_ROLE_NAMES[ws.role]}</td><td class="actions">${
+          ws.tenantRef === teamTenantOf(session)
+            ? html`<span class="muted">In use</span>`
+            : html`<form class="inline" method="post" action="${root}/organization">${hidden()}<input type="hidden" name="organization" value="${ws.tenantRef}"><button type="submit">Switch to it</button></form>`
+        }</td></tr>`,
+    );
+    const invitations = offered.map(
+      (invitation) =>
+        html`<tr><td data-label="Team" class="strong">${invitation.workspaceName}</td><td data-label="From">${invitation.inviterDisplay}</td><td data-label="As">${SLOTLOCK_WORKSPACE_ROLE_NAMES[invitation.role]}</td><td class="actions"><form class="inline" method="post" action="${root}/invite/accept">${hidden()}<input type="hidden" name="invitation" value="${invitation.id}"><button class="primary" type="submit">Join ${invitation.workspaceName}</button></form></td></tr>`,
+    );
+    return html`<section class="team-workspaces" aria-labelledby="team-workspaces"><h2 id="team-workspaces">Team workspaces</h2>${
+      invitations.length > 0
+        ? html`<div class="table"><table><caption class="visually-hidden">Invitations</caption><thead><tr><th>Invited to</th><th>From</th><th>As</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${invitations}</tbody></table></div>`
+        : html``
+    }${atDomain}${
+      rows.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Team</th><th>Handle</th><th>You are</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : html``
+    }${
+      mayCreate
+        ? html`<form class="create-team" method="post" action="${root}/teams/create">${hidden()}<label for="team-name">Name</label><input id="team-name" name="name" maxlength="80" autocomplete="organization" required><button class="primary" type="submit">Create team</button></form>`
+        : html`<p class="muted">${TEAM_CREATION_OFF}</p>`
+    }</section>`;
+  }
+
+  /**
+   * Whether the person may create a team workspace: on unless staff turned it off for their own
+   * account's plan or the account (RFC 0006, M11). Teams they are in are not affected.
+   */
+  async function teamCreationOn(session: Session): Promise<boolean> {
+    const own = personOf(session);
+    const notices =
+      (tenantOf(session) === own ? noticesOf.get(session) : undefined) ??
+      (await (workspaces?.notices?.(own) ?? Promise.resolve(undefined)));
+    return notices?.features.team_workspaces !== false;
+  }
+
+  /** GitHub organizations turned on for Slotlock (organizations: 'enabled'). */
+  async function organizationsSection(session: Session): Promise<Html> {
+    if (!teams) return html``;
+    const orgs = session.orgs ?? [];
+    const enabled = orgs.length > 0 ? await teams.enabled(orgs.map((org) => org.id)) : new Set<string>();
+    enabledOf.set(session, enabled);
+    const token = csrfToken(session);
+    const hidden = (org: Organization) =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="organization" value="${org.id}">`;
+    const rows = orgs.map((org) => {
+      const on = enabled.has(org.id);
+      const owner = org.role === 'admin';
+      const actions = on
+        ? html`${org.id === session.org ? html`<span class="muted">In use</span>` : html`<form class="inline" method="post" action="${root}/organization">${hidden(org)}<button type="submit">Switch to it</button></form>`}${
+            owner
+              ? html`<details class="act danger"><summary>Turn off</summary><div class="pop"><p>Its keys stop at once and no member can open it. What it holds stays until an owner turns it on again or erases it.</p>
+<form method="post" action="${root}/teams/disable">${hidden(org)}<label for="confirm-${org.id}">Type ${org.login} to confirm</label><input id="confirm-${org.id}" name="confirm" autocomplete="off" required><button class="danger" type="submit">Turn off</button></form></div></details>`
+              : html``
+          }`
+        : owner
+          ? html`<form class="inline" method="post" action="${root}/teams/enable">${hidden(org)}<button class="primary" type="submit">Turn on</button></form>`
+          : html`<span class="muted">An owner can turn it on</span>`;
+      return html`<tr><td data-label="Organization" class="strong">${org.login}</td><td data-label="You are">${owner ? 'Owner' : 'Member'}</td><td data-label="Slotlock"><span class="pill ${on ? 'active' : 'revoked'}">${on ? 'On' : 'Off'}</span></td><td class="actions">${actions}</td></tr>`;
+    });
+    return html`${teamStore ? html`<h2>GitHub organizations</h2>` : html``}
+<p>Work with the people in a GitHub organization: once an owner turns Slotlock on for it, every owner and member shares its resources, keys and history, and picks it from the workspace menu. Your own workspace stays yours.</p>
+${
+  rows.length === 0
+    ? emptyState(ICONS.teams, 'Slotlock sees none of your GitHub organizations. It reads them as you sign in: after joining one, sign out and in again. An organization that restricts OAuth apps needs an owner to approve this one.')
+    : html`<div class="table"><table><thead><tr><th>Organization</th><th>You are</th><th>Slotlock</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>
+<p class="fine">Who owns an organization is read from GitHub as you sign in. Leaving one ends your access at your next sign-in.</p>`
+}`;
+  }
+
+  /** People a team workspace may have, open invitations included: 3 on the Free plan where plans apply. */
+  async function memberCapOf(tenantRef: string): Promise<number | null> {
+    if (!plans) return null;
+    const plan = await plans.plan(tenantRef);
+    // Only Team lifts a team workspace's limits (the Terms and the hosted page say so).
+    return plan !== null && plan.plan === 'team' && plan.status !== 'canceled' ? null : FREE_TEAM_MEMBERS;
+  }
+
+  /** The session moved into a workspace (its own when `team` is undefined), Live or Test as it was. */
+  function moveTo(session: Session, team: string | undefined, path: string, cookies: string[] = [], keepEmails = true): Response {
+    const { org: _org, team: _team, em, ...rest } = session;
+    const kept = keepEmails && em !== undefined ? { ...rest, em } : rest;
+    const sealed = seal('slotlock-dashboard-session-v1', team === undefined ? kept : { ...kept, team });
+    const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+    return redirect(303, `${root}${path}`, [setCookie(SESSION_COOKIE, sealed, left), ...cookies]);
+  }
+
+  const refusalPage = (session: Session, refusal: SlotlockTeamRefusal) =>
+    settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'members');
+
+  async function createTeam(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!teamStore) return nothingHere(session);
+    if (session.idp === 'sso' || session.sc !== undefined) return teamsPage(session, 403, 'Sign in with GitHub or Google to create a team.');
+    if (!(await teamCreationOn(session))) return teamsPage(session, 403, TEAM_CREATION_OFF);
+    const name = (form.get('name') ?? '').trim();
+    if (name.length === 0 || name.length > 80 || /\p{Cc}/u.test(name)) {
+      return teamsPage(session, 400, TEAM_REFUSALS.invalid_name.text);
+    }
+    // A name goes into the invitations Slotlock sends: never a web or email address in it.
+    if (/:\/\/|www\.|@|\b[a-z0-9-]+\.(?:[a-z]{2,}|xn--[a-z0-9-]+)\b/i.test(name)) {
+      return teamsPage(session, 400, "A team's name can't hold a web or email address.");
+    }
+    const person = personOf(session);
+    const cap = plans ? FREE_TEAMS_PER_PERSON : null;
+    let made: Awaited<ReturnType<typeof teamStore.create>> = { refusal: 'handle_taken' };
+    // The handle follows the name; one taken gets a random end.
+    for (let attempt = 0; attempt < 4 && 'refusal' in made && made.refusal === 'handle_taken'; attempt += 1) {
+      made = await teamStore.create(person, name, teamHandleFrom(name, attempt), cap);
+    }
+    // The database refuses too, while staff have creating teams off or the person's own account
+    // is suspended: say which, not a role refusal.
+    if ('refusal' in made && made.refusal === 'not_allowed') return teamsPage(session, 403, TEAM_CREATION_OFF);
+    if ('refusal' in made) return teamsPage(session, TEAM_REFUSALS[made.refusal].status, TEAM_REFUSALS[made.refusal].text);
+    await audit(
+      session,
+      { action: 'workspace.created', actorRole: 'owner', targetType: 'workspace', targetRef: made.tenantRef },
+      made.tenantRef,
+    );
+    return moveTo(session, made.tenantRef.slice('team:'.length), '/settings/members');
+  }
+
+  /** A team's people as the others see them: their GitHub login or Google email, as last signed in. */
+  const memberName = (member: { person: string; display: string | null }) =>
+    member.display ?? (member.person.startsWith('google:') ? 'A Google account' : 'A GitHub account');
+
+  async function membersSection(session: Session, status: number, notice: string | undefined, shown?: InvitationShown): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return noticeOf(notice, status);
+    const manage = can(session, 'members.manage');
+    const me = personOf(session);
+    const mine = roleOf(session);
+    const grouping = options.resources.grouping;
+    // Limiting people to locations and groups: by an Owner or Admin who is not limited themselves.
+    const limits = manage && grouping !== undefined && (mine === 'owner' || mine === 'admin') && !scopes.has(session);
+    const [members, invitations, cap, limited, places, requests, viaDomain] = await Promise.all([
+      teamStore.members(tenantRef),
+      manage ? teamStore.invitations(tenantRef) : Promise.resolve([]),
+      memberCapOf(tenantRef),
+      teamStore.scopes(tenantRef),
+      limits && grouping ? Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]) : Promise.resolve(null),
+      manage && domainStore ? domainStore.requests(tenantRef) : Promise.resolve([]),
+      domainStore ? domainStore.domainMembers(tenantRef) : Promise.resolve(new Map<string, { domain: string; status: string }>()),
+    ]);
+    const open = invitations.filter((invitation) => invitation.expiresAt.getTime() > now());
+    const seats = members.length + open.length;
+    const full = cap !== null && seats >= cap;
+    const team = currentTeam(session)?.name ?? 'this team';
+    const owners = members.filter((member) => member.role === 'owner').length;
+    const grantable = SLOTLOCK_WORKSPACE_ROLES.filter((role) => slotlockRoleMayGrant(mine, role));
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const roleOptions = (selected: SlotlockWorkspaceRole) =>
+      grantable.map(
+        (role) => html`<option value="${role}"${role === selected ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+      );
+    const invite = !manage
+      ? html``
+      : full
+        ? html``
+        : html`<form class="invite-card" method="post" action="${root}/members/invite">${hidden()}<label for="invite-email">Invite by email</label><div class="invite-row"><input id="invite-email" name="email" type="email" maxlength="254" autocomplete="off" placeholder="name@company.com" required${shown ? html`` : html` autofocus`}><label class="visually-hidden" for="invite-role">Role</label><select id="invite-role" name="role">${roleOptions('member')}</select><button class="primary" type="submit">Invite</button></div><p class="fine">${
+          options.invitations ? 'They get an email with a link' : 'You get a link to send them'
+        } that works once, for that address, for ${String(INVITATION_DAYS)} days.</p></form>`;
+    // The Free plan's limit, where the people are: a team on Free has 3, open invitations included.
+    const planNote =
+      cap === null
+        ? html``
+        : html`<p class="plan-note${full ? ' full' : ''}"><span><strong>${String(seats)} of ${String(cap)} people</strong> on the Free plan, open invitations included.${
+            full ? ' Upgrade to invite more.' : ''
+          }</span>${plans && can(session, 'usage.read') ? html`<a class="button" href="${root}/plan">Upgrade</a>` : html``}</p>`;
+    const link = shown
+      ? html`<div class="set-card"><div class="row"><span class="row-label">Link for ${shown.to}</span><div class="row-value">${copyField('invite-link', shown.link)}</div></div></div><p class="fine">It works once, for that address, until ${formatDate(shown.expiresAt)}. It is not shown again.</p>`
+      : html``;
+    const pendingRows = invitations.map((invitation) => {
+      const expired = invitation.expiresAt.getTime() <= now();
+      const to = invitation.email ?? `@${invitation.githubLogin ?? 'GitHub account'}`;
+      return html`<li class="person"><span class="avatar invited" aria-hidden="true">${initialOf(to)}</span><div class="who"><span class="name">${to}</span><span class="meta">Invited by ${invitation.inviterDisplay} · ${
+        expired ? html`<span class="pill revoked">Expired</span>` : html`Expires ${formatDate(invitation.expiresAt)}`
+      }</span></div><div class="role"><span class="role-name">${SLOTLOCK_WORKSPACE_ROLE_NAMES[invitation.role]}</span></div><div class="person-actions">${
+        slotlockRoleMayGrant(mine, invitation.role)
+          ? html`<form class="inline" method="post" action="${root}/members/resend">${hidden()}<input type="hidden" name="id" value="${invitation.id}"><button type="submit">Send again<span class="visually-hidden"> to ${to}</span></button></form><form class="inline" method="post" action="${root}/members/revoke">${hidden()}<input type="hidden" name="id" value="${invitation.id}"><button class="danger" type="submit">Revoke<span class="visually-hidden"> the invitation to ${to}</span></button></form>`
+          : html``
+      }</div></li>`;
+    });
+    const memberRows = members.map((member, index) => {
+      const name = memberName(member);
+      const self = member.person === me;
+      const changeable = manage && slotlockRoleMayGrant(mine, member.role);
+      const role = changeable
+        ? html`<form class="inline" method="post" action="${root}/members/role">${hidden()}<input type="hidden" name="person" value="${member.person}"><label class="visually-hidden" for="role-${String(index)}">Role for ${name}</label><select id="role-${String(index)}" name="role">${roleOptions(member.role)}</select><button type="submit">Save<span class="visually-hidden"> the role for ${name}</span></button></form>`
+        : html`${SLOTLOCK_WORKSPACE_ROLE_NAMES[member.role]}`;
+      let action = html``;
+      const onlyOwner = self && member.role === 'owner' && owners <= 1;
+      if (self) {
+        action = onlyOwner
+            ? html``
+            : html`<details class="act danger"><summary>Leave</summary><div class="pop"><p>You lose access to ${team} at once. Keys you created keep working until an owner or admin revokes them.</p><form method="post" action="${root}/members/leave">${hidden()}<button class="danger" type="submit">Leave ${team}</button></form></div></details>`;
+      } else if (changeable) {
+        action = html`${member.role !== 'owner' && places ? limitForm(member.person, name, index, limited.get(member.person) ?? null, places[0], places[1], hidden) : html``}<details class="act danger"><summary>Remove<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} loses access to ${team} at their next request. Resources, bookings and history stay.</p><form method="post" action="${root}/members/remove">${hidden()}<input type="hidden" name="person" value="${member.person}"><fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button class="danger" type="submit">Remove ${name}</button></form></div></details>`;
+      }
+      const reach = member.role === 'owner' ? undefined : limited.get(member.person);
+      const via = viaDomain.get(member.person);
+      const meta = [
+        `Joined ${formatDate(member.joinedAt)}`,
+        reach ? `Reaches ${scopeWords(reach)}` : 'Reaches all',
+        ...(via ? [`via ${via.domain}${via.status === 'verified' ? '' : ', no longer verified'}`] : []),
+        ...(onlyOwner ? ['The only owner, so can’t leave'] : []),
+      ].join(' · ');
+      return html`<li class="person"><span class="avatar" aria-hidden="true">${initialOf(name)}</span><div class="who"><span class="name">${name}${self ? html`<span class="tag">You</span>` : html``}</span><span class="meta">${meta}</span></div><div class="role">${
+        changeable ? role : html`<span class="role-name">${role}</span>`
+      }</div><div class="person-actions">${action}</div></li>`;
+    });
+    // Requests to join through a verified domain: approved as Viewer, Member or Developer.
+    const joinRoles = (['viewer', 'member', 'developer'] as const).filter((role) => slotlockRoleMayGrant(mine, role));
+    const requestRows = requests.map((request, index) => {
+      const name = request.display ?? request.email;
+      return html`<li class="person"><span class="avatar invited" aria-hidden="true">${initialOf(name)}</span><div class="who"><span class="name">${name}</span><span class="meta">${request.display ? `${request.email} · ` : ''}${JOIN_EVIDENCE_WORDS[request.evidence]} · Asked ${formatDate(request.createdAt)}</span></div><div class="person-actions spans"><form class="inline" method="post" action="${root}/members/requests">${hidden()}<input type="hidden" name="id" value="${request.id}"><label class="visually-hidden" for="join-role-${String(index)}">Role for ${name}</label><select id="join-role-${String(index)}" name="role">${joinRoles.map(
+        (role) => html`<option value="${role}"${role === 'member' ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+      )}</select><button class="primary" type="submit" name="decision" value="approve">Approve<span class="visually-hidden"> ${name}</span></button><button type="submit" name="decision" value="decline">Decline<span class="visually-hidden"> ${name}</span></button></form></div></li>`;
+    });
+    const list = (title: string, rows: readonly Html[]) =>
+      html`<section class="people-block"><h3 class="list-head">${title}<span class="count">${String(rows.length)}</span></h3><ul class="people">${rows}</ul></section>`;
+    return html`${noticeOf(notice, status)}<div class="section-head"><h2>Members</h2><p class="fine">Who works in ${team}, and what each of them can do.</p></div>${planNote}${invite}${link}${
+      requestRows.length > 0 ? list('Asking to join', requestRows) : html``
+    }${pendingRows.length > 0 ? list('Invitations', pendingRows) : html``}${list('People', memberRows)}`;
+  }
+
+  /** The letter a person's row shows for them: the first letter or digit of their name or address. */
+  const initialOf = (name: string) => (/[\p{L}\p{N}]/u.exec(name)?.[0] ?? '?').toUpperCase();
+
+  /** What a limited member reaches, in words. */
+  const scopeWords = (scope: SlotlockResourceScope) =>
+    [
+      scope.locations.length > 0 ? `Locations ${scope.locations.join(', ')}` : '',
+      scope.groups.length > 0 ? `Groups ${scope.groups.join(', ')}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+  /** Limit a member to locations and groups, or give them all of the workspace. */
+  function limitForm(
+    person: string,
+    name: string,
+    index: number,
+    scope: SlotlockResourceScope | null,
+    locations: readonly SlotlockLocation[],
+    groups: readonly SlotlockResourceGroup[],
+    hidden: () => Html,
+  ): Html {
+    const id = `limit-${String(index)}`;
+    const options_ = (entries: readonly { ref: string; name: string }[], chosen: readonly string[]) =>
+      entries.map(
+        (entry) => html`<option value="${entry.ref}"${chosen.includes(entry.ref) ? html` selected` : html``}>${entry.name} (${entry.ref})</option>`,
+      );
+    const picker = (field: 'locations' | 'groups', label: string, entries: readonly { ref: string; name: string }[], chosen: readonly string[]) =>
+      entries.length === 0
+        ? html``
+        : html`<label for="${id}-${field}">${label}</label><select id="${id}-${field}" name="${field}" multiple size="${String(Math.min(6, entries.length))}">${options_(entries, chosen)}</select>`;
+    if (locations.length === 0 && groups.length === 0 && scope === null) return html``;
+    return html`<details class="act"><summary>Limit<span class="visually-hidden"> ${name}</span></summary><div class="pop"><p>${name} reaches only the resources at these locations (and the locations in them) and in these groups: their bookings, holds, waitlist and approvals. Keys, webhooks, contacts, hours, usage and settings are not theirs.</p><form method="post" action="${root}/members/scope">${hidden()}<input type="hidden" name="person" value="${person}">${picker('locations', 'Locations', locations, scope?.locations ?? [])}${picker('groups', 'Groups', groups, scope?.groups ?? [])}<fieldset><legend>Keys ${name} created</legend><label><input type="radio" name="keys" value="revoke" checked> Revoke them: they reach all of it</label><label><input type="radio" name="keys" value="keep"> Keep them working</label></fieldset><button type="submit" name="access" value="limited">Limit ${name} to these</button>${scope === null ? html`` : html`<button type="submit" name="access" value="all">Give ${name} all of the workspace</button>`}</form></div></details>`;
+  }
+
+  /** Who did something, as the audit log names them: you, a member by their display, else their account. */
+  function actorName(event: SlotlockAuditEvent, session: Session, names: ReadonlyMap<string, string>): string {
+    if (event.actorType === 'api_key') return `API key ${event.actorRef.replace(/^api_key:/, '').slice(0, 8)}`;
+    if (event.actorType === 'assistant') return 'The assistant';
+    // What the people who run the service did (RFC 0006, E8): slotlock-staff:<role>.
+    const staff = /^slotlock-staff:(owner|support|billing|editor|viewer|operator)$/.exec(event.actorRef);
+    if (event.actorType === 'system' && staff) {
+      return `${brandName} staff (${staff[1] === 'operator' ? 'operator' : `${(staff[1] as string).slice(0, 1).toUpperCase()}${(staff[1] as string).slice(1)}`})`;
+    }
+    if (event.actorType !== 'person') return 'Slotlock';
+    if (event.actorRef === personOf(session)) return 'You';
+    return (
+      names.get(event.actorRef) ??
+      (event.actorRef.startsWith('github:') ? `GitHub user ${event.actorRef.slice(7)}` : event.actorRef.startsWith('google:') ? 'A Google account' : event.actorRef)
+    );
+  }
+
+  /** A person looked up on Privacy: how they were named, and what the workspace keeps about them. */
+  interface PersonFound {
+    kind: keyof typeof PERSON_KINDS;
+    value: string;
+    records: SlotlockSubjectExport['records'];
+    truncated: boolean;
+  }
+
+  /** The ways Privacy finds a person, as the form names them. */
+  const PERSON_KINDS = Object.freeze({
+    email: 'Email address',
+    holder: 'Holder reference',
+    contact: 'Contact reference',
+    reference: 'Booking reference',
+  });
+
+  /** A person named on a Privacy form, checked: one kind and a value, or null. */
+  function personOf_(form: URLSearchParams): { kind: keyof typeof PERSON_KINDS; value: string; subject: SlotlockSubject } | null {
+    const kind = form.get('kind') ?? '';
+    const value = (form.get('value') ?? '').trim();
+    if (!Object.hasOwn(PERSON_KINDS, kind) || value.length === 0 || Buffer.byteLength(value) > 500) return null;
+    const named = kind as keyof typeof PERSON_KINDS;
+    return { kind: named, value, subject: { [named]: value } as SlotlockSubject };
+  }
+
+  /**
+   * Privacy (RFC 0004 D3): an export of everything the workspace keeps, to download for a day; and
+   * one person found by email, holder, contact or booking reference, what is kept about them
+   * downloaded, or them erased. Owners and Admins, signed in within 15 minutes.
+   */
+  async function privacySection(
+    session: Session,
+    status: number,
+    notice: string | undefined,
+    found: PersonFound | undefined,
+  ): Promise<Html> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return noticeOf(notice, status);
+    const exports = await privacy.listExports(tenantOf(session));
+    const hidden = html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const rows = exports.map(
+      (made) =>
+        html`<tr><td data-label="Asked for">${formatDate(made.createdAt)}${
+          made.requestedBy?.startsWith('privacy:') ? html` <span class="muted">by Slotlock, for your privacy request</span>` : html``
+        }</td><td data-label="State">${
+          made.status === 'ready'
+            ? html`<span class="pill active">Ready</span>`
+            : made.status === 'pending'
+              ? html`<span class="pill">Being made</span>`
+              : html`<span class="pill revoked">Failed</span>${made.error === 'export_too_large' ? html` <span class="muted">too large: ask the operator</span>` : html``}`
+        }</td><td data-label="Rows">${made.status === 'ready' ? String(made.rows) : '—'}</td><td data-label="Deleted">${formatDate(made.expiresAt)}</td><td class="actions">${
+          made.status === 'ready' ? html`<a class="button" href="${root}/settings/privacy/download?id=${made.id}">Download</a> ` : html``
+        }<form method="post" action="${root}/settings/privacy/export/delete">${hidden}<input type="hidden" name="id" value="${made.id}"><button type="submit">Delete</button></form></td></tr>`,
+    );
+    const exportCard = html`<section class="set-card"><header class="panel-head"><h3>Workspace export</h3><p>A copy of everything this workspace keeps, every table read at one moment, as JSON lines: one <code>{"table", "row"}</code> a line. Secrets stay out. It is kept for a day, then deleted; one Slotlock makes for your privacy request, for a week.</p></header>${
+      rows.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Asked for</th><th>State</th><th>Rows</th><th>Deleted</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : html``
+    }<form method="post" action="${root}/settings/privacy/export">${hidden}<div class="card-foot"><button type="submit" class="primary">Export the workspace</button></div></form></section>`;
+    const kinds = Object.entries(PERSON_KINDS).map(
+      ([kind, label]) => html`<option value="${kind}"${found?.kind === kind ? html` selected` : html``}>${label}</option>`,
+    );
+    const finder = html`<section class="set-card"><header class="panel-head"><h3>A person’s data</h3><p>For a person who asks what you keep about them, or to be erased. Find them by one thing you know.</p></header><form class="person-find" method="post" action="${root}/settings/privacy/person">${hidden}<div class="row"><label class="row-label" for="person-value">Find by</label><div class="row-value"><span class="field-with-button"><label class="visually-hidden" for="person-kind">What you know</label><select id="person-kind" name="kind">${kinds}</select><input id="person-value" name="value" maxlength="320" autocomplete="off" required value="${found?.value ?? ''}"><button type="submit">Find</button></span></div></div></form></section>`;
+    let person = html``;
+    if (found) {
+      const counted = Object.entries(found.records).filter(([, rows_]) => rows_.length > 0);
+      const keep = html`<input type="hidden" name="kind" value="${found.kind}"><input type="hidden" name="value" value="${found.value}">`;
+      person =
+        counted.length === 0
+          ? html`<p class="empty">Nothing kept names them.</p>`
+          : html`<section class="set-card"><header class="panel-head"><h3>What is kept about them</h3></header>${counted.map(
+              ([table, rows_]) =>
+                html`<div class="row"><span class="row-label">${table.replaceAll('_', ' ')}</span><div class="row-value">${String(rows_.length)}${found.truncated && rows_.length >= 1_000 ? '+' : ''}</div></div>`,
+            )}<form method="post" action="${root}/settings/privacy/person/export">${hidden}${keep}<div class="card-foot"><button type="submit">Download what is kept</button></div></form></section><section class="set-card danger"><header class="panel-head"><h3>Erasure</h3><p>Erasing deletes their contacts, attendee and waitlist entries, takes their email out of events and approvals, and replaces their references with a name that is no one's, everywhere, history included. Their bookings stay, as time taken. This cannot be undone.</p></header><form method="post" action="${root}/settings/privacy/person/erase" class="danger-zone">${hidden}${keep}<div class="card-foot"><label class="choice"><input type="checkbox" name="confirm" value="yes" required> I understand</label><button type="submit" class="danger">Erase this person</button></div></form></section>`;
+    }
+    return html`${noticeOf(notice, status)}${exportCard}${finder}${person}`;
+  }
+
+  async function askPrivacyExport(session: Session): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    try {
+      const made = await privacy.createExport(tenantRef, personOf(session));
+      await audit(session, { action: 'export.created', targetType: 'export', targetRef: made.id });
+      return settingsPage(session, 200, 'Asked for. It is made in a moment: reload this page to download it.', undefined, 'privacy');
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code === 'export_in_progress') {
+        return settingsPage(session, 409, 'One is being made already: wait for it.', undefined, 'privacy');
+      }
+      if (code === 'export_limit_reached') {
+        return settingsPage(session, 409, 'Five exports are kept already: delete one first.', undefined, 'privacy');
+      }
+      throw error;
+    }
+  }
+
+  async function deletePrivacyExport(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id) || !(await privacy.deleteExport(tenantOf(session), id))) {
+      return settingsPage(session, 404, 'That export is not here.', undefined, 'privacy');
+    }
+    return settingsPage(session, 200, 'Deleted.', undefined, 'privacy');
+  }
+
+  /**
+   * A ready export as one file of JSON lines, `{"table", "row"}` each, read a part at a time. Only
+   * with a sign-in in the last 15 minutes, as every Privacy action.
+   */
+  async function downloadPrivacyExport(session: Session, query: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    if (!freshlySignedIn(session)) return confirmPage(session, 'privacy.manage', '/settings/privacy');
+    const id = query.get('id') ?? '';
+    const tenantRef = tenantOf(session);
+    const first = UUID_PATTERN.test(id) ? await privacy.exportPart(tenantRef, id, 1) : null;
+    if (!first || (!first.ok && first.code !== 'export_part_not_found')) {
+      return settingsPage(session, first && !first.ok && first.code === 'export_not_ready' ? 409 : 404, 'That export is not ready, or not here.', undefined, 'privacy');
+    }
+    await audit(session, { action: 'export.downloaded', targetType: 'export', targetRef: id });
+    const encoder = new TextEncoder();
+    let next: SlotlockTenantExportPartResult | null = first;
+    let part = 1;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const read = next ?? (await privacy.exportPart(tenantRef, id, part));
+        next = null;
+        if (!read.ok) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(encoder.encode(read.lines.map((line) => `{"table":${JSON.stringify(read.table)},"row":${line}}\n`).join('')));
+        part += 1;
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Content-Disposition': `attachment; filename="slotlock-export-${new Date(now()).toISOString().slice(0, 10)}.ndjson"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'",
+      },
+    });
+  }
+
+  async function findPerson(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const named = personOf_(form);
+    if (!named) return settingsPage(session, 400, 'Choose how to find them, and what you know.', undefined, 'privacy');
+    try {
+      const exported = await privacy.exportSubject(tenantOf(session), named.subject);
+      return settingsPage(session, 200, undefined, undefined, 'privacy', undefined, undefined, {
+        kind: named.kind,
+        value: named.value,
+        records: exported.records,
+        truncated: exported.truncated,
+      });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'invalid_subject') {
+        return settingsPage(session, 400, 'That is not one: an email address, or a reference of up to 500 bytes.', undefined, 'privacy');
+      }
+      throw error;
+    }
+  }
+
+  /** What is kept about one person, as a JSON file: posted, so the person is never in an address. */
+  async function exportPerson(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const named = personOf_(form);
+    if (!named) return settingsPage(session, 400, 'Choose how to find them, and what you know.', undefined, 'privacy');
+    const exported = await privacy.exportSubject(tenantOf(session), named.subject);
+    await audit(session, { action: 'subject.exported', targetType: 'subject', metadata: { by: named.kind } });
+    return new Response(JSON.stringify(exported, null, 2), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': `attachment; filename="slotlock-person-${new Date(now()).toISOString().slice(0, 10)}.json"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'",
+      },
+    });
+  }
+
+  async function erasePerson(session: Session, form: URLSearchParams): Promise<Response> {
+    const privacy = options.resources.privacy;
+    if (!privacy) return nothingHere(session);
+    const named = personOf_(form);
+    if (!named) return settingsPage(session, 400, 'Choose how to find them, and what you know.', undefined, 'privacy');
+    if (form.get('confirm') !== 'yes') return settingsPage(session, 400, 'Tick that you understand first.', undefined, 'privacy');
+    const { erased } = await privacy.eraseSubject(tenantOf(session), named.subject, personOf(session));
+    const changed = Object.entries(erased).filter(([, rows]) => rows > 0);
+    // Never the person: how they were named, and what went.
+    await audit(session, { action: 'subject.erased', targetType: 'subject', metadata: { by: named.kind, ...Object.fromEntries(changed) } });
+    const total = changed.reduce((sum, [, rows]) => sum + rows, 0);
+    return settingsPage(
+      session,
+      200,
+      total === 0 ? 'Nothing kept named them.' : `Erased: ${String(total)} row${total === 1 ? '' : 's'} deleted or changed. Their bookings stay, as time taken.`,
+      undefined,
+      'privacy',
+    );
+  }
+
+  /** A workspace's audit log, newest first, 50 a page: who did what, refused or done, from where. */
+  async function auditSection(session: Session, status: number, notice: string | undefined, query: URLSearchParams): Promise<Html> {
+    const log = options.resources.audit;
+    if (!log) return noticeOf(notice, status);
+    const tenantRef = tenantOf(session);
+    const wanted = query.get('action') ?? '';
+    const action = AUDIT_ACTION_NAMES.has(wanted) ? wanted : undefined;
+    const cursor = /^(\d{1,15})\.([0-9a-f-]{36})$/.exec(query.get('before') ?? '');
+    const before =
+      cursor && UUID_PATTERN.test(cursor[2] as string)
+        ? { occurredAt: new Date(Number(cursor[1])), id: (cursor[2] as string).toLowerCase() }
+        : undefined;
+    const team = teamTenantOf(session);
+    const [events, members] = await Promise.all([
+      log.list(tenantRef, { limit: AUDIT_PAGE, ...(before ? { before } : {}), ...(action ? { action } : {}) }),
+      teamStore && team !== undefined ? teamStore.members(team) : Promise.resolve([]),
+    ]);
+    const names = new Map(members.map((member) => [member.person, memberName(member)]));
+    const options_ = AUDIT_ACTION_GROUPS.map(
+      ([group, actions]) =>
+        html`<optgroup label="${group}">${actions.map(
+          (name) => html`<option value="${name}"${name === action ? html` selected` : html``}>${AUDIT_ACTION_WORDS[name] ?? name}</option>`,
+        )}</optgroup>`,
+    );
+    const filter = html`<form class="audit-filter" method="get" action="${root}/settings/audit"><label for="audit-action">Action</label><select id="audit-action" name="action"><option value="">Everything</option>${options_}</select><button type="submit">Show</button></form>`;
+    const rows = events.map((event) => {
+      const details: [string, string][] = [
+        ...(event.targetRef ? [['Target', `${event.targetType ?? ''} ${event.targetRef}`.trim()] as [string, string]] : []),
+        ...(event.reason ? [['Reason', event.reason] as [string, string]] : []),
+        ...Object.entries(event.metadata).map(([key, value]) => [key, String(value)] as [string, string]),
+        ...(event.ipAddress ? [['Address', event.ipAddress] as [string, string]] : []),
+        ...(event.userAgent ? [['Browser', event.userAgent] as [string, string]] : []),
+      ];
+      return html`<tr><td data-label="When">${formatDate(event.occurredAt)}</td><td data-label="Who" class="strong">${actorName(event, session, names)}${
+        event.actorRole ? html` <span class="muted">(${SLOTLOCK_WORKSPACE_ROLE_NAMES[event.actorRole]})</span>` : html``
+      }</td><td data-label="What">${AUDIT_ACTION_WORDS[event.action] ?? event.action}${
+        event.outcome === 'denied' ? html` <span class="pill revoked">Refused</span>` : html``
+      }</td><td class="actions">${
+        details.length > 0
+          ? html`<details class="act"><summary>Details</summary><div class="pop"><dl class="audit-details">${details.map(
+              ([label, value]) => html`<dt>${label}</dt><dd>${value}</dd>`,
+            )}</dl></div></details>`
+          : html``
+      }</td></tr>`;
+    });
+    const last = events[events.length - 1];
+    const older =
+      last && events.length === AUDIT_PAGE
+        ? `${root}/settings/audit?${new URLSearchParams({ ...(action ? { action } : {}), before: `${String(last.occurredAt.getTime())}.${last.id}` }).toString()}`
+        : null;
+    // The chain, checked on asking: every event kept since the oldest still links to the one before.
+    const verified = query.get('verify') === '1' && log.verify ? await log.verify(tenantRef) : null;
+    const chain = verified
+      ? verified.brokenAt === null
+        ? html`<p class="notice done" role="status">The log is unbroken: ${String(verified.checked)} event${verified.checked === 1 ? '' : 's'} checked.</p>`
+        : html`<p class="notice" role="alert">The log was changed outside Slotlock at event ${String(verified.brokenAt)}, after ${String(verified.checked)} that check out.</p>`
+      : html``;
+    const exportQuery = action ? `&action=${action}` : '';
+    const tools = html`<p class="audit-tools">${
+      log.verify ? html`<a href="${root}/settings/audit?verify=1${exportQuery}">Check the log</a>` : html``
+    } <a href="${root}/settings/audit/export?format=csv${exportQuery}">Export CSV</a> <a href="${root}/settings/audit/export?format=json${exportQuery}">Export JSON</a></p>`;
+    return html`${noticeOf(notice, status)}${chain}${filter}${tools}${
+      rows.length === 0
+        ? html`<p class="empty">${before ? 'Nothing older.' : 'Nothing recorded yet.'}</p>`
+        : html`<div class="table"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th><span class="visually-hidden">Details</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+    }<p class="pager">${before ? html`<a href="${root}/settings/audit${action ? `?action=${action}` : ''}">Newest</a>` : html``}${
+      older ? html` <a href="${older}">Older</a>` : html``
+    }</p>`;
+  }
+
+  /**
+   * A workspace's audit log as a file, filtered as the page was: up to 10,000 events, newest first,
+   * with each event's place in the chain and its hash. On the Team plan where plans apply.
+   */
+  async function exportAudit(session: Session, query: URLSearchParams): Promise<Response> {
+    const log = options.resources.audit;
+    if (!log) return nothingHere(session);
+    const tenantRef = tenantOf(session);
+    if (plans) {
+      const plan = await plans.plan(tenantRef.replace(/~test$/, ''));
+      if (plan?.plan !== 'team' || plan.status === 'canceled') {
+        return settingsPage(session, 403, 'Exports come with the Team plan. Upgrade on Usage.', undefined, 'audit', undefined, query);
+      }
+    }
+    const format = query.get('format') === 'json' ? 'json' : 'csv';
+    const wanted = query.get('action') ?? '';
+    const action = AUDIT_ACTION_NAMES.has(wanted) ? wanted : undefined;
+    const events: SlotlockAuditEvent[] = [];
+    let before: { occurredAt: Date; id: string } | undefined;
+    while (events.length < AUDIT_EXPORT_MOST) {
+      const page = await log.list(tenantRef, { limit: 200, ...(before ? { before } : {}), ...(action ? { action } : {}) });
+      events.push(...page);
+      const last = page[page.length - 1];
+      if (!last || page.length < 200) break;
+      before = { occurredAt: last.occurredAt, id: last.id };
+    }
+    await audit(session, { action: 'audit.exported', metadata: { format, events: events.length, ...(action ? { filter: action } : {}) } });
+    const rows = events.slice(0, AUDIT_EXPORT_MOST).map((event) => ({
+      occurred_at: event.occurredAt.toISOString(),
+      action: event.action,
+      outcome: event.outcome,
+      actor_type: event.actorType,
+      actor_ref: event.actorRef,
+      actor_role: event.actorRole ?? '',
+      target_type: event.targetType ?? '',
+      target_ref: event.targetRef ?? '',
+      reason: event.reason ?? '',
+      ip_address: event.ipAddress ?? '',
+      user_agent: event.userAgent ?? '',
+      metadata: JSON.stringify(event.metadata),
+      chain_index: event.chainIndex === null ? '' : String(event.chainIndex),
+      hash: event.hash ?? '',
+    }));
+    const day = new Date(now()).toISOString().slice(0, 10);
+    const body =
+      format === 'json'
+        ? JSON.stringify(rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as unknown })), null, 2)
+        : [
+            Object.keys(rows[0] ?? AUDIT_EXPORT_EMPTY).join(','),
+            ...rows.map((row) => Object.values(row).map(csvCell).join(',')),
+          ].join('\r\n');
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': format === 'json' ? 'application/json; charset=utf-8' : 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="slotlock-audit-${day}.${format}"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'",
+      },
+    });
+  }
+
+  /** A team's name and handle, and deleting it: what goes with it, the handle typed to confirm. */
+  async function teamSection(session: Session, status: number, notice: string | undefined): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return noticeOf(notice, status);
+    const [info, deleting, members, resources, keys, webhooks] = await Promise.all([
+      teamStore.info(tenantRef),
+      teamStore.deleteAfter(tenantRef),
+      teamStore.members(tenantRef),
+      options.resources.count ? options.resources.count(tenantRef) : options.resources.list(tenantRef).then((list) => list.length),
+      options.keys.list({ tenantRef }),
+      options.resources.webhooks ? options.resources.webhooks.list(tenantRef) : Promise.resolve([]),
+    ]);
+    if (!info) return noticeOf(notice, status);
+    const hidden = html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const live = keys.filter((key) => key.revokedAt === null && (key.expiresAt === null || key.expiresAt.getTime() > now())).length;
+    const card = html`<div class="set-card"><div class="row"><span class="row-label">Name</span><div class="row-value">${info.name}</div></div><div class="row"><span class="row-label">Handle</span><div class="row-value">@${info.handle}</div></div></div>`;
+    const danger = deleting
+      ? html`<section class="set-card danger"><header class="panel-head"><h3>Being deleted</h3><p>${info.name} and everything in it go on ${formatDate(deleting)}.</p></header><form method="post" action="${root}/teams/restore">${hidden}<div class="card-foot"><button class="primary" type="submit">Keep ${info.name}</button></div></form></section>`
+      : html`<section class="set-card danger"><header class="panel-head"><h3>Delete team</h3><p>Its keys stop at once, and seven days later it goes with everything in it: ${String(members.length)} member${members.length === 1 ? '' : 's'}, ${String(resources)} resource${resources === 1 ? '' : 's'} with their bookings and history, ${String(live)} key${live === 1 ? '' : 's'} and ${String(webhooks.length)} webhook${webhooks.length === 1 ? '' : 's'}. Until then any owner can keep it.</p></header><form method="post" action="${root}/teams/delete">${hidden}<div class="row"><label class="row-label" for="confirm-handle">Type ${info.handle} to confirm</label><div class="row-value"><input id="confirm-handle" name="confirm" autocomplete="off" spellcheck="false" required></div></div><div class="card-foot"><button class="danger" type="submit">Delete ${info.name}</button></div></form></section>`;
+    return html`${noticeOf(notice, status)}${card}${danger}`;
+  }
+
+  async function deleteTeam(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await teamStore.scheduleDeletion(tenantRef, personOf(session), (form.get('confirm') ?? '').trim());
+    if (refusal === 'confirm') return settingsPage(session, 400, "Type the team's handle to confirm.", undefined, 'team');
+    if (refusal === 'subscription_live') {
+      return settingsPage(session, 409, 'Cancel its Team plan on Usage first: deleting the team would not stop the payments.', undefined, 'team');
+    }
+    if (refusal) return settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'team');
+    await audit(session, { action: 'workspace.deletion_scheduled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/team`);
+  }
+
+  async function restoreTeam(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await teamStore.cancelDeletion(tenantRef, personOf(session));
+    if (refusal) return settingsPage(session, TEAM_REFUSALS[refusal].status, TEAM_REFUSALS[refusal].text, undefined, 'team');
+    await audit(session, { action: 'workspace.deletion_cancelled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/team`);
+  }
+
+  /** What a refused change to a team's domains, or a request to join, says, and its status. */
+  const DOMAIN_REFUSALS: Readonly<Record<SlotlockDomainChangeRefusal, { status: number; text: string }>> = Object.freeze({
+    invalid_domain: { status: 400, text: 'Enter a domain your organization owns, such as acme.com.' },
+    public_suffix: { status: 400, text: 'Nobody owns all of that domain. Enter your own domain under it.' },
+    consumer_domain: { status: 400, text: 'Anyone can get an address at that domain. Enter your organization’s own.' },
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s domains.' },
+    already_claimed: { status: 409, text: 'That domain is listed already.' },
+    domain_taken: { status: 409, text: 'Another team holds that domain.' },
+    domain_limit: { status: 403, text: `A team has up to ${String(SLOTLOCK_WORKSPACE_DOMAIN_LIMIT)} domains.` },
+    too_soon: { status: 429, text: 'Checked less than a minute ago. Try again shortly.' },
+    expired: { status: 409, text: 'That record expired after seven days. Add the domain again for a new one.' },
+    restricted: { status: 409, text: 'Invitations go only to verified domains: allow any address before removing the last one.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first.' },
+    already_member: { status: 409, text: 'You are a member already.' },
+    pending: { status: 409, text: 'You asked already. An owner or admin decides.' },
+    request_limit: { status: 429, text: 'You asked to join 20 teams in the last day. Try again tomorrow.' },
+    member_cap: TEAM_REFUSALS.member_cap,
+    role_not_allowed: { status: 400, text: 'Someone joining through a domain joins as Viewer, Member or Developer.' },
+    domain_not_verified: { status: 409, text: 'That domain is no longer verified, so the request cannot be approved.' },
+  });
+
+  /** How a request's address was verified, as the people deciding read it. */
+  const JOIN_EVIDENCE_WORDS: Readonly<Record<SlotlockJoinEvidence, string>> = Object.freeze({
+    google_workspace: 'verified by Google Workspace',
+    google: 'verified once by Google, not checked since',
+    github: 'verified once by GitHub, not checked since',
+  });
+
+  /** What a domain lets the people whose verified address is at it do, as the Identity page offers it. */
+  const JOIN_POLICY_WORDS: Readonly<Record<SlotlockDomainJoinPolicy, string>> = Object.freeze({
+    request: 'Ask to join',
+    auto: 'Join as Viewer',
+    off: 'Invitations only',
+  });
+
+  const identityPage = (session: Session, status: number, notice: string) =>
+    settingsPage(session, status, notice, undefined, 'identity');
+  const domainRefused = (session: Session, refusal: SlotlockDomainChangeRefusal) =>
+    identityPage(session, DOMAIN_REFUSALS[refusal].status, DOMAIN_REFUSALS[refusal].text);
+
+  /** A team's domains: each with its record until verified, who may join through it, and invitations. */
+  async function identitySection(session: Session, status: number, notice: string | undefined): Promise<Html> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return noticeOf(notice, status);
+    const [listed, restricted] = await Promise.all([domainStore.list(tenantRef), domainStore.invitesRestricted(tenantRef)]);
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const cards = listed.map((domain, index) => {
+      const name = domain.unicode === domain.ascii ? html`${domain.unicode}` : html`${domain.unicode} <span class="muted">${domain.ascii}</span>`;
+      const [pill, word] = domain.expired
+        ? ['expired', 'Expired']
+        : domain.status === 'verified'
+          ? ['active', 'Verified']
+          : domain.status === 'lapsing'
+            ? ['revoked', 'Record missing']
+            : ['held', 'Pending'];
+      const record = slotlockDomainRecord(domain.ascii, domain.token);
+      const id = html`<input type="hidden" name="id" value="${domain.id}">`;
+      let rows: Html;
+      if (domain.status === 'verified') {
+        rows = html`<div class="row"><span class="row-label">Who may join</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains/policy">${hidden()}${id}<label class="visually-hidden" for="policy-${String(index)}">Who may join through ${domain.unicode}</label><select id="policy-${String(index)}" name="policy">${(['request', 'auto', 'off'] as const).map(
+          (policy) => html`<option value="${policy}"${policy === domain.joinPolicy ? html` selected` : html``}>${JOIN_POLICY_WORDS[policy]}</option>`,
+        )}</select><button type="submit">Save<span class="visually-hidden"> who may join through ${domain.unicode}</span></button></form></div></div>`;
+      } else if (domain.expired) {
+        rows = html`<div class="row"><span class="row-label">Record</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains">${hidden()}<input type="hidden" name="domain" value="${domain.ascii}"><button type="submit">Get a new record<span class="visually-hidden"> for ${domain.unicode}</span></button></form></div></div>`;
+      } else {
+        rows = html`${
+          domain.status === 'lapsing' && domain.lapseAfter
+            ? html`<div class="row"><span class="row-label">Lapses</span><div class="row-value">${formatDate(domain.lapseAfter)}, unless this new record is published</div></div>`
+            : html``
+        }<div class="row"><span class="row-label">TXT name</span><div class="row-value">${copyField(`record-name-${String(index)}`, record.name)}</div></div><div class="row"><span class="row-label">TXT value</span><div class="row-value">${copyField(`record-value-${String(index)}`, record.value)}</div></div><div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/domains/verify">${hidden()}${id}<button class="primary" type="submit">Verify now<span class="visually-hidden"> ${domain.unicode}</span></button></form></div></div>`;
+      }
+      const remove = html`<details class="act danger"><summary>Remove<span class="visually-hidden"> ${domain.unicode}</span></summary><div class="pop"><p>${
+        domain.status === 'pending' ? 'The claim is withdrawn.' : 'Nobody new joins through it. Members who joined through it stay.'
+      }</p><form method="post" action="${root}/identity/domains/remove">${hidden()}${id}<button class="danger" type="submit">Remove ${domain.unicode}</button></form></div></details>`;
+      return html`<div class="set-card"><div class="row"><span class="row-label">Domain</span><div class="row-value"><span class="strong">${name}</span> <span class="pill ${pill}">${word}</span> ${remove}</div></div>${rows}</div>`;
+    });
+    const add =
+      listed.length >= SLOTLOCK_WORKSPACE_DOMAIN_LIMIT
+        ? html``
+        : html`<form class="set-card" method="post" action="${root}/identity/domains">${hidden()}<div class="row"><label class="row-label" for="domain">Add a domain<span class="row-hint">Colleagues at a verified domain can find the team and ask to join.</span></label><div class="row-value"><span class="field-with-button"><input id="domain" name="domain" maxlength="253" autocomplete="off" spellcheck="false" placeholder="acme.com" required><button class="primary" type="submit">Add domain</button></span></div></div></form>`;
+    const verified = listed.some((domain) => domain.status === 'verified');
+    const invites = html`<h2>Invitations</h2><div class="set-card"><div class="row"><span class="row-label">Go to</span><div class="row-value">${
+      restricted ? 'Addresses at verified domains' : 'Any address'
+    } ${
+      restricted || verified
+        ? html`<form class="inline" method="post" action="${root}/identity/invites">${hidden()}<input type="hidden" name="on" value="${restricted ? '0' : '1'}"><button type="submit">${
+            restricted ? 'Allow any address' : 'Only verified domains'
+          }</button></form>`
+        : html``
+    }</div></div></div>`;
+    return html`${noticeOf(notice, status)}<h2>Domains</h2>${add}${cards}${invites}${await ssoSection(session, tenantRef)}${await scimSection(session, tenantRef)}`;
+  }
+
+  async function claimDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const claimed = await domainStore.claim(tenantRef, personOf(session), (form.get('domain') ?? '').slice(0, 300));
+    if ('refusal' in claimed) return domainRefused(session, claimed.refusal);
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === claimed.id);
+    await audit(session, { action: 'domain.claimed', targetType: 'domain', targetRef: claimed.id, metadata: { domain: domain?.ascii ?? '' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** What an Owner's "Verify now" found, as the page says it. */
+  const VERIFY_ANSWERS: Readonly<Record<string, { status: number; text: (domain: string) => string }>> = Object.freeze({
+    verified: { status: 200, text: (domain: string) => `${domain} is verified.` },
+    restored: { status: 200, text: (domain: string) => `${domain} is verified again.` },
+    seen: { status: 200, text: (domain: string) => `${domain} is still verified.` },
+    absent: { status: 409, text: () => 'The record isn’t there yet. Slotlock also checks every hour for three days.' },
+    error: { status: 503, text: () => 'DNS didn’t answer. Try again shortly.' },
+    domain_taken: { status: 409, text: () => 'Another team verified that domain first.' },
+  });
+
+  async function verifyDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const found: SlotlockDomainCheckOutcome = await domainStore.verifyNow(tenantRef, personOf(session), form.get('id') ?? '', domainResolvers);
+    const event = slotlockDomainCheckEvent(found, false);
+    if (event) await audit(session, event, tenantRef);
+    if (found.outcome === 'absent' && found.domain !== null && found.check?.detail[0]) {
+      // What the resolver that decides found at the name, so a record at the wrong name or with
+      // another value shows itself: the values are public DNS data, at most 5 of 120 characters.
+      const at = `${SLOTLOCK_DOMAIN_RECORD_LABEL}.${found.domain}`;
+      const values = found.check.detail[0].values;
+      const said =
+        values.length === 0
+          ? `No TXT record at ${at} yet. At most DNS hosts its name is ${SLOTLOCK_DOMAIN_RECORD_LABEL} alone.`
+          : `${at} has ${values.map((value) => `“${value}”`).join(', ')}, not the value below.`;
+      return identityPage(session, 409, `${said} Slotlock also checks every hour for three days.`);
+    }
+    const answer = VERIFY_ANSWERS[found.outcome];
+    if (answer) return identityPage(session, answer.status, answer.text(found.domain ?? 'The domain'));
+    if (found.outcome in DOMAIN_REFUSALS) return domainRefused(session, found.outcome as SlotlockDomainChangeRefusal);
+    return identityPage(session, 409, 'The record isn’t there.');
+  }
+
+  async function releaseDomain(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === id);
+    const refusal = await domainStore.release(tenantRef, personOf(session), id);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(session, { action: 'domain.released', targetType: 'domain', targetRef: id, metadata: { domain: domain?.ascii ?? '' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function changeJoinPolicy(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const policy = form.get('policy') ?? '';
+    if (policy !== 'off' && policy !== 'request' && policy !== 'auto') return identityPage(session, 400, 'Choose who may join.');
+    const domain = (await domainStore.list(tenantRef)).find((listed) => listed.id === id);
+    const refusal = await domainStore.setJoinPolicy(tenantRef, personOf(session), id, policy);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(
+      session,
+      { action: 'domain.join_policy_changed', targetType: 'domain', targetRef: id, metadata: { domain: domain?.ascii ?? '', policy } },
+      tenantRef,
+    );
+    return identityPage(session, 200, `${JOIN_POLICY_WORDS[policy]}: saved for ${domain?.unicode ?? 'the domain'}.`);
+  }
+
+  async function restrictInvites(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const on = form.get('on') === '1';
+    const refusal = await domainStore.restrictInvites(tenantRef, personOf(session), on);
+    if (refusal) return domainRefused(session, refusal);
+    await audit(session, { action: on ? 'workspace.invites_restricted' : 'workspace.invites_unrestricted', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** Teams at the person's verified addresses' domains: ask to join, or join. */
+  async function domainTeamsSection(session: Session, checked: boolean): Promise<Html> {
+    if (!domainStore) return html``;
+    const emails = verifiedEmails(session);
+    const found = emails.length > 0 ? await domainStore.discoverable(personOf(session), emails) : [];
+    if (found.length === 0) {
+      // A GitHub sign-in carries no address until asked: one look with those GitHub verified.
+      if (session.idp === 'google') return html``;
+      return checked
+        ? html`<p class="muted">No team has verified the domain of an address GitHub verified for you.</p>`
+        : html`<p><a href="${root}/sign-in?then=%2Fteams&amp;email=1">${ICONS.github}Find your organization’s team</a></p>`;
+    }
+    const token = csrfToken(session);
+    const rows = found.map(
+      (team) =>
+        html`<tr><td data-label="Team" class="strong">${team.name}</td><td data-label="Domain" class="muted">${team.domain}</td><td class="actions">${
+          team.requested
+            ? html`<span class="pill held">Asked</span>`
+            : html`<form class="inline" method="post" action="${root}/join/request"><input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="team" value="${team.tenantRef}"><button class="primary" type="submit">${
+                team.joinPolicy === 'auto' && joinEvidence(session) === 'google_workspace'
+                  ? html`Join ${team.name}`
+                  : html`Ask to join<span class="visually-hidden"> ${team.name}</span>`
+              }</button></form>`
+        }</td></tr>`,
+    );
+    return html`<div class="table"><table><caption class="visually-hidden">Teams at your domain</caption><thead><tr><th>At your domain</th><th>Domain</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  async function requestToJoin(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!domainStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    const offered = (await domainStore.discoverable(personOf(session), verifiedEmails(session))).find((found) => found.tenantRef === team);
+    if (!offered) return teamsPage(session, 404, DOMAIN_REFUSALS.not_found.text);
+    const asked = await domainStore.requestToJoin(team, personOf(session), verifiedEmails(session), joinEvidence(session), await memberCapOf(team));
+    if ('refusal' in asked) return teamsPage(session, DOMAIN_REFUSALS[asked.refusal].status, DOMAIN_REFUSALS[asked.refusal].text);
+    const person = personOf(session);
+    if (asked.outcome === 'joined') {
+      await audit(
+        session,
+        { action: 'member.joined', actorRole: 'viewer', targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey } },
+        team,
+      );
+      return moveTo(session, team.slice('team:'.length), '');
+    }
+    await audit(
+      session,
+      { action: 'member.join_requested', actorRole: null, targetType: 'person', targetRef: person, metadata: { domain: offered.domainKey, evidence: joinEvidence(session) } },
+      team,
+    );
+    return teamsPage(session, 200, `Asked to join ${offered.name}. An owner or admin decides.`);
+  }
+
+  async function decideJoinRequest(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!domainStore || tenantRef === undefined) return nothingHere(session);
+    const decision = form.get('decision');
+    if (decision !== 'approve' && decision !== 'decline') return refusalPage(session, 'not_found');
+    const role = slotlockJoinRole(form.get('role'));
+    if (decision === 'approve' && role === null) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const id = form.get('id') ?? '';
+    const decided = await domainStore.decide({ tenantRef, actor: personOf(session), id, decision, role, memberCap: await memberCapOf(tenantRef) });
+    if (decided.refusal) {
+      const { status, text } = DOMAIN_REFUSALS[decided.refusal];
+      return settingsPage(session, status, text, undefined, 'members');
+    }
+    await audit(
+      session,
+      {
+        action: decision === 'approve' ? 'member.join_approved' : 'member.join_declined',
+        targetType: 'person',
+        ...(decided.person ? { targetRef: decided.person } : {}),
+        ...(role && decision === 'approve' ? { metadata: { role } } : {}),
+      },
+      tenantRef,
+    );
+    return redirect(303, `${root}/settings/members`);
+  }
+
+  // ---- Single sign-on through a team's own identity provider (teams phase 5.3–5.5) ----
+
+  /** What a refused single sign-on change or sign-in says, and its status. */
+  const SSO_REFUSALS: Readonly<Record<SlotlockSsoRefusal, { status: number; text: string }>> = Object.freeze({
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s single sign-on.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first: single sign-on trusts addresses only there.' },
+    secret_required: { status: 400, text: 'Enter the client secret.' },
+    conflict: { status: 409, text: 'The connection changed since this page was opened. Reload it.' },
+    stale_config: { status: 409, text: 'The connection changed during the test. Test it again.' },
+    untested: { status: 409, text: 'Test the connection as it is now before turning it on.' },
+    no_breakglass_owner: { status: 409, text: 'Keep an owner who signs in with GitHub or Google first, for when the provider is down.' },
+    role_not_allowed: { status: 400, text: 'People the provider adds join as Viewer, Member or Developer.' },
+    owner_not_mappable: { status: 400, text: 'No group makes an owner: owners are made in Slotlock.' },
+    invalid_value: { status: 400, text: 'Enter the group as the provider sends it.' },
+    mapping_limit: { status: 403, text: 'A team maps up to 50 groups.' },
+    connection_inactive: { status: 409, text: 'That team’s single sign-on is off.' },
+    guest_refused: { status: 403, text: 'Guests of the directory cannot sign in to this team.' },
+    not_member: { status: 403, text: 'You are not a member of this team. Ask an owner to add you.' },
+    identity_taken: { status: 409, text: 'That account is linked to someone else in Slotlock.' },
+    identity_untrusted: { status: 403, text: 'Use your work account at the team’s verified domain.' },
+    hd_mismatch: { status: 403, text: 'Use a Google Workspace account at the team’s verified domain.' },
+    member_cap: TEAM_REFUSALS.member_cap,
+    invalid_max_age: { status: 400, text: 'Sessions last from 1 to 168 hours.' },
+    no_active_connection: { status: 409, text: 'Turn the connection on first.' },
+    stale_sso_proof: { status: 409, text: 'Sign in with the team’s single sign-on first, then turn this on within 10 minutes.' },
+  });
+
+  /** The providers, as the Identity page names them. */
+  const SSO_KIND_WORDS: Readonly<Record<SlotlockSsoKind, string>> = Object.freeze({
+    okta: 'Okta',
+    entra: 'Microsoft Entra ID',
+    google_workspace: 'Google Workspace',
+    oidc: 'Other OpenID Connect',
+  });
+
+  const ssoRedirectUri = (id: string) => `${publicRoot}/sso/callback/${id}`;
+  const ssoSecretContext = (tenantRef: string, id: string) => `${tenantRef}|${id}|v1`;
+  const ssoRefused = (session: Session, refusal: SlotlockSsoRefusal) =>
+    identityPage(session, SSO_REFUSALS[refusal].status, SSO_REFUSALS[refusal].text);
+
+  /** The team's connection on its Identity page: set it up, test it, turn it on, and who it lets in. */
+  async function ssoSection(session: Session, tenantRef: string): Promise<Html> {
+    if (!ssoStore) return html``;
+    const [connection, mappings] = await Promise.all([ssoStore.connection(tenantRef), ssoStore.mappings(tenantRef)]);
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    const kinds = (selected: SlotlockSsoKind) =>
+      (['okta', 'entra', 'google_workspace', 'oidc'] as const).map(
+        (kind) => html`<option value="${kind}"${kind === selected ? html` selected` : html``}>${SSO_KIND_WORDS[kind]}</option>`,
+      );
+    // Label-left rows in a card, as the domains above. The issuer row names what the chosen provider
+    // takes (a tenant ID for Entra) and is hidden for Google Workspace, whose issuer is fixed, so the
+    // field is not `required`: the server checks it for the providers that use it.
+    const row = (id: string, label: Html, field: Html, kind = '') =>
+      html`<div class="row${kind}"><label class="row-label" for="${id}">${label}</label><div class="row-value">${field}</div></div>`;
+    const form = html`<form class="set-card sso-form" method="post" action="${root}/identity/sso">${hidden()}${row(
+      'sso-kind',
+      html`Provider`,
+      html`<select id="sso-kind" name="kind">${kinds(connection?.kind ?? 'okta')}</select>`,
+    )}${row(
+      'sso-issuer',
+      html`<span class="for-issuer">Issuer URL</span><span class="for-entra">Tenant ID</span>`,
+      html`<input id="sso-issuer" name="issuer" maxlength="500" autocomplete="off" spellcheck="false" value="${
+        connection ? (connection.kind === 'entra' ? (connection.entraTenant ?? '') : connection.issuer) : ''
+      }">`,
+      ' sso-issuer',
+    )}${row(
+      'sso-client',
+      html`Client ID`,
+      html`<input id="sso-client" name="client_id" maxlength="255" autocomplete="off" spellcheck="false" required value="${connection?.clientId ?? ''}">`,
+    )}${row(
+      'sso-secret',
+      html`Client secret`,
+      html`<input id="sso-secret" name="client_secret" type="password" maxlength="1024" autocomplete="off"${
+        connection ? html` placeholder="••••${connection.secretLast4 ?? ''}"` : html` required`
+      }>`,
+    )}<div class="card-foot">${
+      connection ? html`` : html`<p class="fine">The redirect URI to give the provider appears once connected.</p>`
+    }<button class="primary" type="submit">${connection ? 'Save' : 'Connect'}</button></div></form>`;
+    if (!connection) return html`<h2>Single sign-on</h2>${form}`;
+    const tested = connection.testedVersion === connection.configVersion;
+    const [pill, word] =
+      connection.status === 'active' ? ['active', 'On'] : connection.status === 'disabled' ? ['revoked', 'Off'] : ['held', tested ? 'Tested' : 'Not tested'];
+    const id = html`<input type="hidden" name="id" value="${connection.id}">`;
+    const claims = connection.lastTestClaims;
+    const testRow = claims
+      ? html`<div class="row"><span class="row-label">Last test</span><div class="row-value"><code>${JSON.stringify(claims)}</code></div></div>`
+      : html``;
+    const remove = html`<details class="act danger"><summary>Delete<span class="visually-hidden"> connection</span></summary><div class="pop"><p>People who sign in only through it are erased with it.</p><form method="post" action="${root}/identity/sso/delete">${hidden()}${id}<button class="danger" type="submit">Delete connection</button></form></div></details>`;
+    const status = html`<div class="set-card"><div class="row"><span class="row-label">${SSO_KIND_WORDS[connection.kind]}</span><div class="row-value"><span class="pill ${pill}">${word}</span> <span class="muted">${connection.issuer}</span> ${remove}</div></div><div class="row"><span class="row-label">Redirect URI</span><div class="row-value">${copyField('sso-redirect', ssoRedirectUri(connection.id))}</div></div>${testRow}<div class="row"><span class="row-label">Check</span><div class="row-value"><form class="inline" method="post" action="${root}/identity/sso/test">${hidden()}${id}<button type="submit">Test sign-in</button></form>${
+      connection.status === 'active'
+        ? html`<form class="inline" method="post" action="${root}/identity/sso/status">${hidden()}${id}<input type="hidden" name="status" value="disabled"><button type="submit">Turn off</button></form>`
+        : html`<form class="inline" method="post" action="${root}/identity/sso/status">${hidden()}${id}<input type="hidden" name="status" value="active"><button class="primary" type="submit"${tested ? html`` : html` disabled`}>Turn on</button></form>`
+    }</div></div></div>`;
+    const roleOptions = (selected: string, choices: readonly SlotlockWorkspaceRole[]) =>
+      choices.map((role) => html`<option value="${role}"${role === selected ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`);
+    const provisioning = html`<h3>Who joins</h3><form class="set-card sso-form" method="post" action="${root}/identity/sso/provisioning">${hidden()}<div class="row"><span class="row-label">First sign-in</span><div class="row-value"><label class="choice"><input type="checkbox" name="jit" value="1"${
+      connection.jitEnabled ? html` checked` : html``
+    }> Add people at the verified domains</label></div></div>${row(
+      'sso-default-role',
+      html`Joins as`,
+      html`<select id="sso-default-role" name="default_role">${roleOptions(connection.defaultRole, ['viewer', 'member', 'developer'])}</select>`,
+    )}${row(
+      'sso-groups-claim',
+      html`Groups claim`,
+      html`<input id="sso-groups-claim" name="groups_claim" maxlength="100" value="${connection.groupsClaim}">`,
+    )}<div class="card-foot"><button type="submit">Save</button></div></form>${
+      mappings.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Group</th><th>Role</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${mappings.map(
+            (mapping) =>
+              html`<tr><td data-label="Group" class="strong">${mapping.value}</td><td data-label="Role">${SLOTLOCK_WORKSPACE_ROLE_NAMES[mapping.role]}</td><td class="actions"><form class="inline" method="post" action="${root}/identity/sso/mapping">${hidden()}<input type="hidden" name="value" value="${mapping.value}"><input type="hidden" name="role" value=""><button class="danger" type="submit">Remove<span class="visually-hidden"> ${mapping.value}</span></button></form></td></tr>`,
+          )}</tbody></table></div>`
+        : html``
+    }<form class="set-card" method="post" action="${root}/identity/sso/mapping">${hidden()}${row(
+      'sso-group',
+      html`Group`,
+      html`<span class="field-with-button"><input id="sso-group" name="value" maxlength="255" autocomplete="off" required><label class="visually-hidden" for="sso-group-role">Role</label><select id="sso-group-role" name="role">${roleOptions(
+        'member',
+        ['admin', 'developer', 'member', 'viewer', 'billing'],
+      )}</select><button type="submit">Map group</button></span>`,
+    )}</form>`;
+    const enforcement = html`<h3>Require single sign-on</h3><form class="set-card sso-form" method="post" action="${root}/identity/sso/require">${hidden()}<input type="hidden" name="on" value="${connection.requireSso ? '0' : '1'}">${row(
+      'sso-max-age',
+      html`Sign in again every`,
+      html`<span class="unit-input"><input id="sso-max-age" name="max_age" type="number" min="1" max="168" value="${String(connection.maxAgeHours)}"><span>hours</span></span>`,
+    )}<div class="card-foot"><button type="submit"${connection.status === 'active' || connection.requireSso ? html`` : html` disabled`}>${
+      connection.requireSso ? 'Stop requiring it' : 'Require it'
+    }</button></div></form>${
+      connection.status === 'active' && !connection.requireSso && session.sc === undefined
+        ? html`<form class="inline" method="post" action="${root}/sso/proof">${hidden()}<input type="hidden" name="team" value="${tenantRef}"><button type="submit">Sign in with single sign-on</button></form>`
+        : html``
+    }`;
+    return html`<h2>Single sign-on</h2>${status}${form}${provisioning}${enforcement}`;
+  }
+
+  async function saveSsoConnection(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || !options.sso || tenantRef === undefined) return nothingHere(session);
+    const kind = form.get('kind');
+    if (kind !== 'okta' && kind !== 'entra' && kind !== 'google_workspace' && kind !== 'oidc') return identityPage(session, 400, 'Choose the provider.');
+    const typed = (form.get('issuer') ?? '').trim();
+    const clientId = (form.get('client_id') ?? '').trim();
+    const secret = form.get('client_secret') ?? '';
+    if (clientId.length === 0 || clientId.length > 255 || /\s/.test(clientId)) return identityPage(session, 400, 'Enter the client ID.');
+    let issuer: string;
+    let entraTenant: string | null = null;
+    if (kind === 'entra') {
+      const pinned = slotlockEntraIssuer(typed);
+      if (!pinned) return identityPage(session, 400, 'Enter your Entra tenant ID (a GUID): common, organizations and consumers are not one tenant.');
+      issuer = pinned;
+      entraTenant = typed.toLowerCase();
+    } else if (kind === 'google_workspace') {
+      issuer = 'https://accounts.google.com';
+    } else {
+      if (!slotlockOidcUrlAllowed(typed)) return identityPage(session, 400, 'Enter the issuer URL: https, on a public host name.');
+      issuer = typed;
+    }
+    let provider: Awaited<ReturnType<typeof discoverSlotlockOidc>>;
+    try {
+      provider = await discoverSlotlockOidc(issuer, { fetch: ssoFetch });
+    } catch (error) {
+      return identityPage(session, 502, `The issuer’s discovery document did not check out: ${error instanceof Error ? error.message : 'no answer'}.`);
+    }
+    const existing = await ssoStore.connection(tenantRef);
+    const id = existing?.id ?? randomUUID();
+    if (!existing && secret.length === 0) return ssoRefused(session, 'secret_required');
+    if (secret.length > 1024 || /[\r\n]/.test(secret)) return identityPage(session, 400, 'That is not a client secret.');
+    const sealed = secret.length > 0 ? await options.sso.secretBox.seal(secret, ssoSecretContext(tenantRef, id)) : null;
+    const saved = await ssoStore.save({
+      tenantRef,
+      actor: personOf(session),
+      id,
+      kind,
+      issuer: provider.issuer,
+      clientId,
+      secretSealed: sealed,
+      secretLast4: secret.length > 0 ? secret.slice(-4) : null,
+      authorizationEndpoint: provider.authorizationEndpoint,
+      tokenEndpoint: provider.tokenEndpoint,
+      jwksUri: provider.jwksUri,
+      algorithms: provider.algorithms,
+      issParameter: provider.issParameter,
+      entraTenant,
+    });
+    if ('refusal' in saved) return ssoRefused(session, saved.refusal);
+    await audit(session, { action: 'sso.connection_saved', targetType: 'sso_connection', targetRef: saved.id, metadata: { kind, issuer: provider.issuer } }, tenantRef);
+    if (saved.enforcementOff) {
+      await audit(session, { action: 'sso.not_required', targetType: 'workspace', targetRef: tenantRef, metadata: { reason: 'connection_changed' } }, tenantRef);
+    }
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setSsoStatus(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const status = form.get('status') === 'active' ? 'active' : 'disabled';
+    const id = form.get('id') ?? '';
+    const refusal = await ssoStore.setStatus(tenantRef, personOf(session), id, status);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: status === 'active' ? 'sso.connection_activated' : 'sso.connection_disabled', targetType: 'sso_connection', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function deleteSsoConnection(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const refusal = await ssoStore.remove(tenantRef, personOf(session), id);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: 'sso.connection_deleted', targetType: 'sso_connection', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setSsoProvisioning(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const jit = form.get('jit') === '1';
+    const defaultRole = form.get('default_role') ?? '';
+    const groupsClaim = (form.get('groups_claim') ?? '').trim();
+    if (groupsClaim !== '' && !/^[A-Za-z0-9_:./-]{1,100}$/.test(groupsClaim)) return identityPage(session, 400, 'Enter the groups claim as the provider names it.');
+    const refusal = await ssoStore.setProvisioning(tenantRef, personOf(session), jit, defaultRole, groupsClaim);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: 'sso.provisioning_changed', targetType: 'workspace', targetRef: tenantRef, metadata: { jit, defaultRole } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setSsoMapping(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const value = (form.get('value') ?? '').trim();
+    const role = form.get('role') || null;
+    const refusal = await ssoStore.setMapping(tenantRef, personOf(session), value, role);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: 'sso.mapping_changed', targetType: 'workspace', targetRef: tenantRef, metadata: { group: value.slice(0, 100), role: role ?? 'none' } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function setRequireSso(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const on = form.get('on') === '1';
+    const maxAge = Number(form.get('max_age') ?? '');
+    const refusal = await ssoStore.requireSso(tenantRef, personOf(session), session.sid, on, Number.isSafeInteger(maxAge) ? maxAge : 0);
+    if (refusal) return ssoRefused(session, refusal);
+    await audit(session, { action: on ? 'sso.required' : 'sso.not_required', targetType: 'workspace', targetRef: tenantRef, metadata: { maxAgeHours: maxAge } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  /** The page a member meets at a team that requires single sign-on: sign in through it, or (an Owner) bypass. */
+  function ssoRequiredPage(session: Session, tenantRef: string, name: string, mayBypass: boolean): Response {
+    const token = csrfToken(session);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${token}"><input type="hidden" name="once" value="${formNonce(session)}"><input type="hidden" name="team" value="${tenantRef}">`;
+    const content = html`${pageHead(name)}<p>${name} requires single sign-on.</p><p class="actions"><form class="inline" method="post" action="${root}/sso/proof">${hidden()}<button class="primary" type="submit">Sign in with single sign-on</button></form>${
+      mayBypass
+        ? html`<form class="inline" method="post" action="${root}/sso/bypass">${hidden()}<button type="submit">Use owner bypass</button></form>`
+        : html``
+    }</p>${mayBypass ? html`<p class="fine">An owner’s bypass lasts an hour, in this browser, and every other owner can see it in the audit log.</p>` : html``}`;
+    return respond(403, layout(name, content, session));
+  }
+
+  /** Start a sign-in through a team's provider: to sign in alone, prove oneself (or link) while signed in, or test it. */
+  async function startSsoSignIn(
+    connection: { id: string; authorizationEndpoint: string; clientId: string; kind: SlotlockSsoKind; tenantRef: string },
+    purpose: 'signin' | 'proof' | 'test',
+    person?: string,
+    version?: number,
+  ): Promise<Response> {
+    const state = randomBytes(32).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    const nonce = randomBytes(24).toString('base64url');
+    const target = new URL(connection.authorizationEndpoint);
+    target.search = new URLSearchParams({
+      client_id: connection.clientId,
+      redirect_uri: ssoRedirectUri(connection.id),
+      response_type: 'code',
+      scope: 'openid email profile',
+      state,
+      nonce,
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      ...(purpose === 'test' ? { prompt: 'login' } : {}),
+    }).toString();
+    const sealed = seal('slotlock-dashboard-sso-v1', {
+      state,
+      verifier,
+      nonce,
+      conn: connection.id,
+      purpose,
+      exp: now() + SIGN_IN_TTL_MS,
+      ...(person !== undefined ? { person } : {}),
+      ...(version !== undefined ? { version } : {}),
+    });
+    return redirect(302, target.href, [setCookie(SSO_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
+  }
+
+  async function testSsoConnection(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!ssoStore || tenantRef === undefined) return nothingHere(session);
+    const connection = await ssoStore.connection(tenantRef);
+    if (!connection) return ssoRefused(session, 'not_found');
+    return startSsoSignIn({ ...connection, tenantRef }, 'test', personOf(session), connection.configVersion);
+  }
+
+  /** A signed-in member's sign-in through their team's provider: to link it, or prove themselves to a team that requires it. */
+  async function startSsoProof(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!ssoStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    const connection = TEAM_ID.test(team.replace(/^team:/, '')) ? await ssoStore.connection(team) : null;
+    if (!connection || connection.status !== 'active') return teamsPage(session, 409, SSO_REFUSALS.connection_inactive.text);
+    return startSsoSignIn({ ...connection, tenantRef: team }, 'proof', personOf(session));
+  }
+
+  const SCIM_REFUSALS: Readonly<Record<SlotlockScimRefusal, { status: number; text: string }>> = Object.freeze({
+    not_found: { status: 404, text: 'That is no longer here.' },
+    not_allowed: { status: 403, text: 'Only an owner can change the team’s provisioning.' },
+    not_enabled: { status: 409, text: 'Turn on SCIM first.' },
+    no_verified_domain: { status: 409, text: 'Verify a domain first: the directory adds people only there.' },
+    key_policy: { status: 400, text: 'Choose what happens to a deactivated member’s API keys.' },
+    token_limit: { status: 403, text: 'A team keeps two tokens. Revoke one first.' },
+    bad_token: { status: 401, text: 'That token is not this team’s.' },
+    wrong_workspace: { status: 401, text: 'That token is not this team’s.' },
+    domain_not_verified: { status: 400, text: 'The directory adds people at the verified domains only.' },
+    uniqueness: { status: 409, text: 'That name is taken.' },
+    owner_protected: { status: 409, text: 'The directory never changes an owner.' },
+    invalid_member: { status: 400, text: 'That member is not in the directory.' },
+    owner_not_mappable: { status: 400, text: 'No group makes an owner: owners are made in Slotlock.' },
+    role_not_allowed: { status: 400, text: 'Choose a role.' },
+  });
+  const scimRefused = (session: Session, refusal: SlotlockScimRefusal) =>
+    identityPage(session, SCIM_REFUSALS[refusal].status, SCIM_REFUSALS[refusal].text);
+  /** A token just made: shown on the page that answers, once. */
+  const scimTokenShown = new WeakMap<Session, string>();
+  const scimBaseUrl = (tenantRef: string) => `${publicRoot}/scim/v2/${tenantRef.slice('team:'.length)}`;
+
+  /** A team's SCIM provisioning on its Identity page: off with the Owner's choice of key policy, or its address, tokens and groups. */
+  async function scimSection(session: Session, tenantRef: string): Promise<Html> {
+    if (!scimStore) return html``;
+    const state = await scimStore.state(tenantRef);
+    const hidden = () =>
+      html`<input type="hidden" name="csrf" value="${csrfToken(session)}"><input type="hidden" name="once" value="${formNonce(session)}">`;
+    if (!state.enabled) {
+      return html`<h2>Provisioning</h2><form class="set-card" method="post" action="${root}/identity/scim/enable">${hidden()}<fieldset class="row"><legend class="visually-hidden">When the directory deactivates someone, their API keys</legend><span class="row-label" aria-hidden="true">When the directory deactivates someone, their API keys</span><div class="row-value choices-inline"><label class="choice"><input type="radio" name="keys" value="revoke" required> Are revoked</label><label class="choice"><input type="radio" name="keys" value="keep" required> Keep working</label></div></fieldset><div class="card-foot"><button class="primary" type="submit">Turn on SCIM</button></div></form>`;
+    }
+    const shown = scimTokenShown.get(session);
+    const tokens = state.tokens.map(
+      (token) =>
+        html`<tr><td data-label="Token" class="strong"><code>${token.prefix}…</code></td><td data-label="Made">${formatDate(token.createdAt)}</td><td data-label="Last used">${token.lastUsedAt ? formatDate(token.lastUsedAt) : 'Never'}</td><td class="actions"><form class="inline" method="post" action="${root}/identity/scim/token/revoke">${hidden()}<input type="hidden" name="id" value="${token.id}"><button class="danger" type="submit">Revoke<span class="visually-hidden"> ${token.prefix}</span></button></form></td></tr>`,
+    );
+    const card = html`<div class="set-card"><div class="row"><span class="row-label">SCIM URL</span><div class="row-value">${copyField('scim-url', scimBaseUrl(tenantRef))}</div></div>${
+      shown ? html`<div class="row"><span class="row-label">New token</span><div class="row-value">${copyField('scim-token', shown)}</div></div>` : html``
+    }<div class="row"><span class="row-label">Deactivated members’ keys</span><div class="row-value">${state.keyPolicy === 'revoke' ? 'Revoked' : 'Keep working'}</div></div></div>`;
+    const tokenTable =
+      tokens.length > 0
+        ? html`<div class="table"><table><thead><tr><th>Token</th><th>Made</th><th>Last used</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${tokens}</tbody></table></div>`
+        : html``;
+    const { groups } = await scimStore.groups(tenantRef, null, 1, 100);
+    const roleChoices: readonly SlotlockWorkspaceRole[] = ['admin', 'developer', 'member', 'viewer', 'billing'];
+    const reserved = (name: string) => /^slotlock-role-(admin|developer|member|viewer|billing)$/i.test(name);
+    const groupRows = groups.map(
+      (group) =>
+        html`<tr><td data-label="Group" class="strong">${group.displayName}</td><td data-label="People">${String(group.members.length)}</td><td data-label="Role">${
+          reserved(group.displayName)
+            ? SLOTLOCK_WORKSPACE_ROLE_NAMES[group.displayName.slice('slotlock-role-'.length).toLowerCase() as SlotlockWorkspaceRole]
+            : html`<form class="inline" method="post" action="${root}/identity/scim/group">${hidden()}<input type="hidden" name="id" value="${group.id}"><label class="visually-hidden" for="scim-group-${group.id}">Role for ${group.displayName}</label><select id="scim-group-${group.id}" name="role"><option value="">None</option>${roleChoices.map(
+                (role) => html`<option value="${role}"${group.role === role ? html` selected` : html``}>${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}</option>`,
+              )}</select><button type="submit">Save</button></form>`
+        }</td></tr>`,
+    );
+    const groupTable =
+      groupRows.length > 0
+        ? html`<h3>Groups</h3><div class="table"><table><thead><tr><th>Group</th><th>People</th><th>Role</th></tr></thead><tbody>${groupRows}</tbody></table></div>`
+        : html``;
+    const off = html`<details class="act danger"><summary>Turn off SCIM</summary><div class="pop"><p>Its tokens stop working. Members it added stay.</p><form method="post" action="${root}/identity/scim/disable">${hidden()}<button class="danger" type="submit">Turn off SCIM</button></form></div></details>`;
+    return html`<h2>Provisioning</h2>${card}${tokenTable}<form class="inline" method="post" action="${root}/identity/scim/token">${hidden()}<button type="submit">New token</button></form>${groupTable}${off}`;
+  }
+
+  async function enableScim(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const keys = form.get('keys');
+    if (keys !== 'keep' && keys !== 'revoke') return scimRefused(session, 'key_policy');
+    const refusal = await scimStore.enable(tenantRef, personOf(session), keys);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.enabled', targetType: 'workspace', targetRef: tenantRef, metadata: { keys } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function disableScim(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const refusal = await scimStore.disable(tenantRef, personOf(session));
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.disabled', targetType: 'workspace', targetRef: tenantRef }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function createScimToken(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const made = await scimStore.createToken(tenantRef, personOf(session));
+    if ('refusal' in made) return scimRefused(session, made.refusal);
+    await audit(session, { action: 'scim.token_created', targetType: 'scim_token', targetRef: made.prefix }, tenantRef);
+    scimTokenShown.set(session, made.token);
+    return identityPage(session, 201, 'Copy the token into your identity provider now: it is not shown again.');
+  }
+
+  async function revokeScimToken(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const refusal = await scimStore.revokeToken(tenantRef, personOf(session), id);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.token_revoked', targetType: 'scim_token', targetRef: id }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function mapScimGroup(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!scimStore || tenantRef === undefined) return nothingHere(session);
+    const id = form.get('id') ?? '';
+    const role = form.get('role') || null;
+    const refusal = await scimStore.mapGroup(tenantRef, personOf(session), id, role);
+    if (refusal) return scimRefused(session, refusal);
+    await audit(session, { action: 'scim.group_mapped', targetType: 'scim_group', targetRef: id, metadata: { role } }, tenantRef);
+    return redirect(303, `${root}/settings/identity`);
+  }
+
+  async function useSsoBypass(session: Session, form: URLSearchParams): Promise<Response> {
+    if (!ssoStore) return nothingHere(session);
+    const team = form.get('team') ?? '';
+    if (!TEAM_ID.test(team.replace(/^team:/, ''))) return nothingHere(session);
+    // As fresh as any Owner's power: a sign-in in the last 15 minutes.
+    if (!freshlySignedIn(session)) return confirmPage(session, 'workspace.own', '/teams');
+    const refusal = await ssoStore.bypass(team, personOf(session), session.sid);
+    if (refusal) return teamsPage(session, 403, 'Only an owner who signs in with GitHub or Google can bypass single sign-on.');
+    await audit(session, { action: 'sso.bypass_used', actorRole: 'owner', targetType: 'workspace', targetRef: team }, team);
+    return moveTo(session, team.slice('team:'.length), '');
+  }
+
+  /** The claims a test sign-in shows the Owner: what decides who someone is and what they get, no token. */
+  function ssoTestClaims(claims: Record<string, unknown>, groupsClaim: string): Record<string, unknown> {
+    const pick = (name: string) => (claims[name] === undefined ? {} : { [name]: claims[name] });
+    const groups = claims[groupsClaim];
+    return {
+      ...pick('iss'),
+      ...pick('sub'),
+      ...pick('tid'),
+      ...pick('oid'),
+      ...pick('email'),
+      ...pick('email_verified'),
+      ...pick('xms_edov'),
+      ...pick('hd'),
+      ...pick('acct'),
+      ...(Array.isArray(groups) ? { groups: groups.slice(0, 20) } : isRecord(claims._claim_names) ? { groups: 'overage' } : {}),
+    };
+  }
+
+  /** The callback of a team's provider: the code exchanged, the ID token checked, then the purpose served. */
+  async function finishSsoSignIn(request: Request, url: URL, connectionId: string): Promise<Response> {
+    const clear = setCookie(SSO_COOKIE, '', 0);
+    const pending = unseal('slotlock-dashboard-sso-v1', readCookies(request).get(SSO_COOKIE));
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (
+      !ssoStore ||
+      !options.sso ||
+      url.searchParams.has('error') ||
+      !pending ||
+      pending.conn !== connectionId ||
+      typeof pending.state !== 'string' ||
+      typeof pending.verifier !== 'string' ||
+      typeof pending.nonce !== 'string' ||
+      code === null ||
+      code.length === 0 ||
+      code.length > 2048 ||
+      state === null ||
+      !safeEqual(state, pending.state)
+    ) {
+      return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+    }
+    const connection = await ssoStore.connectionById(connectionId);
+    if (!connection || (pending.purpose !== 'test' && connection.status !== 'active')) {
+      return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+    }
+    // RFC 9207: the issuer that answered, when it says, must be this connection's (mix-up defence).
+    const answeredBy = url.searchParams.get('iss');
+    if ((answeredBy !== null || connection.issParameter) && answeredBy !== connection.issuer) {
+      return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+    }
+    if (!(await options.state.use('sign_in', `sso.${pending.state}`, pending.exp as number))) return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+    const secret = connection.secretSealed ? await options.sso.secretBox.open(connection.secretSealed, ssoSecretContext(connection.tenantRef, connection.id)) : null;
+    if (secret === null) {
+      report('Single sign-on refused: the client secret does not open');
+      return signedOutPage(502, `${connection.name}’s single sign-on did not complete. Try again.`, [clear]);
+    }
+    let checked: Awaited<ReturnType<typeof verifySlotlockIdToken>> | null = null;
+    try {
+      // Okta and other providers take the client's secret by HTTP Basic (RFC 6749 2.3.1); Entra and
+      // Google, in the body.
+      const basic = connection.kind === 'okta' || connection.kind === 'oidc';
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: ssoRedirectUri(connection.id),
+        code_verifier: pending.verifier,
+        ...(basic ? {} : { client_id: connection.clientId, client_secret: secret }),
+      });
+      if (!slotlockOidcUrlAllowed(connection.tokenEndpoint)) throw new Error('token endpoint');
+      const response = await ssoFetch(connection.tokenEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+          ...(basic
+            ? { Authorization: `Basic ${btoa(`${encodeURIComponent(connection.clientId)}:${encodeURIComponent(secret)}`)}` }
+            : {}),
+        },
+        body: body.toString(),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+      });
+      // Read to 64 KB at most: the endpoint is the Owner's to choose, and a token answer is small.
+      const answer = response.ok ? await slotlockReadJsonBody(response, SSO_TOKEN_ANSWER_BYTES).catch(() => null) : null;
+      if (!response.ok) await response.body?.cancel().catch(() => undefined);
+      const token = answer !== null && typeof answer.id_token === 'string' ? answer.id_token : null;
+      if (token !== null) {
+        checked = await verifySlotlockIdToken(token, {
+          issuers: connection.kind === 'google_workspace' ? SLOTLOCK_GOOGLE_ISSUERS : [connection.issuer],
+          clientId: connection.clientId,
+          algorithms: connection.algorithms,
+          keys: ssoJwks.lookup(connection.jwksUri),
+          nonce: pending.nonce,
+          now: now(),
+        });
+      } else {
+        report(`Single sign-on token exchange failed: HTTP ${response.status}`);
+      }
+    } catch (error) {
+      report(`Single sign-on failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+    }
+    if (!checked || 'refusal' in checked) {
+      if (checked) report(`Single sign-on refused: the ID token did not check out (${checked.refusal})`);
+      return signedOutPage(502, `${connection.name}’s single sign-on did not complete. Try again.`, [clear]);
+    }
+    const claims = checked.claims;
+    const subject = claims.sub as string;
+    // Entra: the token's tenant is the one pinned, the object id is the stable key, guests stay out,
+    // and an email counts only when Entra says the domain's owner verified it (xms_edov).
+    if (connection.kind === 'entra' && (claims.tid !== connection.entraTenant || typeof claims.oid !== 'string')) {
+      return signedOutPage(403, `${connection.name}’s single sign-on did not complete. Try again.`, [clear]);
+    }
+    // The team's verified domains: an email is trusted only there, and a Google account only of one.
+    const verifiedDomains = domainStore
+      ? (await domainStore.list(connection.tenantRef)).filter((claim) => claim.status === 'verified').map((claim) => claim.ascii)
+      : [];
+    const hostedDomain = typeof claims.hd === 'string' ? slotlockEmailDomain(`x@${claims.hd}`) : null;
+    if (connection.kind === 'google_workspace' && (hostedDomain === null || !verifiedDomains.includes(hostedDomain))) {
+      // Any Google account can pass an "External" OAuth client: only the team's Workspace counts.
+      const refused = SSO_REFUSALS.hd_mismatch;
+      if (pending.purpose === 'signin') return signedOutPage(refused.status, refused.text, [clear]);
+      const session = await readSession(request);
+      if (!session) return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+      return pending.purpose === 'test' ? identityPage(session, refused.status, refused.text) : teamsPage(session, refused.status, refused.text);
+    }
+    const email = typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email) ? claims.email.toLowerCase() : null;
+    const emailDomain = email === null ? null : slotlockEmailDomain(email);
+    const emailOk =
+      email !== null &&
+      (connection.kind === 'entra'
+        ? claims.xms_edov === true || claims.xms_edov === 'true' || claims.xms_edov === 1
+        : connection.kind === 'google_workspace'
+          ? (claims.email_verified === true || claims.email_verified === 'true') && emailDomain !== null && emailDomain === hostedDomain
+          : // Okta and other providers: the team's directory vouches for its own domain's addresses,
+            // unless the token itself says the address is unverified.
+            claims.email_verified !== false && claims.email_verified !== 'false');
+    const groupsValue = claims[connection.groupsClaim];
+    const groups = Array.isArray(groupsValue) ? groupsValue.filter((group): group is string => typeof group === 'string').slice(0, 200) : [];
+    const overage = isRecord(claims._claim_names) && 'groups' in claims._claim_names;
+    const guest = connection.kind === 'entra' && (claims.acct === 1 || claims.acct === '1');
+    const entra = connection.kind === 'entra' ? { tid: claims.tid as string, oid: claims.oid as string } : null;
+    const session = pending.purpose === 'signin' ? null : await readSession(request);
+
+    if (pending.purpose === 'test') {
+      if (!session || personOf(session) !== pending.person || typeof pending.version !== 'number') return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+      const shown = { ...ssoTestClaims(claims, connection.groupsClaim), trusted_email: emailOk };
+      const refusal = await ssoStore.recordTest(connection.tenantRef, personOf(session), connection.id, pending.version, shown);
+      if (refusal) return identityPage(session, SSO_REFUSALS[refusal].status, SSO_REFUSALS[refusal].text);
+      await audit(session, { action: 'sso.connection_tested', targetType: 'sso_connection', targetRef: connection.id }, connection.tenantRef);
+      return redirect(303, `${root}/settings/identity`, [clear]);
+    }
+
+    if (pending.purpose === 'proof') {
+      // A session through one team's provider alone proves nothing to another's, nor links to it.
+      if (!session || personOf(session) !== pending.person || session.sc !== undefined) return signedOutPage(400, SIGN_IN_AGAIN, [clear]);
+      const result = await ssoStore.signIn({
+        connectionId: connection.id,
+        issuer: connection.issuer,
+        subject,
+        entraTid: entra?.tid ?? null,
+        entraOid: entra?.oid ?? null,
+        email,
+        emailOk,
+        groups,
+        overage,
+        guest,
+        sessionPerson: personOf(session),
+        memberCap: null,
+      });
+      if (result.refusal) return teamsPage(session, SSO_REFUSALS[result.refusal].status, SSO_REFUSALS[result.refusal].text);
+      // Recorded only while the connection is on as it was: turned off meanwhile, no proof.
+      if (!(await ssoStore.recordProof(session.sid, personOf(session), connection.id, false, connection.configVersion))) {
+        return teamsPage(session, SSO_REFUSALS.connection_inactive.status, SSO_REFUSALS.connection_inactive.text);
+      }
+      // The team's own provider vouched for the address: the directory's user there is this person.
+      if (scimStore && emailOk && email !== null && emailDomain !== null && verifiedDomains.includes(emailDomain)) {
+        await scimStore.bind(personOf(session), [email], plans ? FREE_TEAM_MEMBERS : null);
+      }
+      if (result.outcome === 'linked') {
+        await audit(session, { action: 'sso.linked', targetType: 'sso_connection', targetRef: connection.id }, connection.tenantRef);
+      }
+      return moveTo(session, connection.tenantRef.slice('team:'.length), '', [clear]);
+    }
+
+    // Through the provider alone.
+    const result = await ssoStore.signIn({
+      connectionId: connection.id,
+      issuer: connection.issuer,
+      subject,
+      entraTid: entra?.tid ?? null,
+      entraOid: entra?.oid ?? null,
+      email,
+      emailOk,
+      groups,
+      overage,
+      guest,
+      sessionPerson: null,
+      memberCap: await memberCapOf(connection.tenantRef),
+    });
+    if (result.refusal || result.person === null) {
+      const refusal = result.refusal ?? 'not_member';
+      return signedOutPage(SSO_REFUSALS[refusal].status, SSO_REFUSALS[refusal].text, [clear]);
+    }
+    const person = result.person;
+    const [idp, uid] = person.startsWith('github:')
+      ? [undefined, person.slice('github:'.length)]
+      : person.startsWith('google:')
+        ? (['google', person.slice('google:'.length)] as const)
+        : (['sso', person.slice('sso:'.length)] as const);
+    if (!allowed(uid, idp)) return signedOutPage(403, 'This Slotlock server does not let that account sign in.', [clear]);
+    const epoch = workspaces ? await workspaces.signedIn(person) : undefined;
+    // Named by the provider's email only where the team trusts it: at a domain it verified.
+    const trusted = emailOk && emailDomain !== null && verifiedDomains.includes(emailDomain);
+    if (scimStore && trusted && email !== null) await scimStore.bind(person, [email], plans ? FREE_TEAM_MEMBERS : null);
+    const login = trusted && email !== null ? email : 'SSO account';
+    if (teamStore && idp === 'sso') await teamStore.setDisplay(person, login === 'SSO account' ? null : login);
+    const sid = randomBytes(24).toString('base64url');
+    const expires = now() + SESSION_TTL_MS;
+    // Scoped to this team for the session's life: the provider reaches nothing else of the person's.
+    // Recorded scoped, with its proof, in one step, so it never counts among the sessions the person
+    // began (50 of which are kept), not even while its proof is recorded; a refused one is not kept.
+    const recorded = await ssoStore.startScoped(sid, person, connection.id, connection.configVersion, new Date(expires), requestOrigin(request));
+    if (recorded === null) {
+      // A schema from before that step (0.10.2's): recorded, then scoped by its proof, as it was.
+      await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
+      if (!(await ssoStore.recordProof(sid, person, connection.id, true, connection.configVersion))) {
+        await workspaces?.sessions?.end(person, workspaces.sessions.idOf(sid));
+        return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+      }
+    } else if (!recorded) {
+      return signedOutPage(409, SSO_REFUSALS.connection_inactive.text, [clear]);
+    }
+    const sealedSession = seal('slotlock-dashboard-session-v1', {
+      uid,
+      login,
+      sid,
+      exp: expires,
+      ...(idp !== undefined ? { idp } : {}),
+      ...(epoch !== undefined ? { ep: epoch } : {}),
+      team: connection.tenantRef.slice('team:'.length),
+      sc: connection.id,
+    });
+    if (options.resources.audit) {
+      await options.resources.audit
+        .record(connection.tenantRef, {
+          action: result.outcome === 'joined' ? 'member.joined' : 'sso.signed_in',
+          actorType: 'person',
+          actorRef: person,
+          actorRole: result.role,
+          ...requestOrigin(request),
+          ...(overage ? { metadata: { groups: 'overage' } } : {}),
+        })
+        .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
+    }
+    return redirect(303, root, [clear, setCookie(SESSION_COOKIE, sealedSession, SESSION_TTL_MS / 1000)]);
+  }
+
+  /**
+   * Where single sign-on starts without a session: the team's handle, or an address at its verified
+   * domain. A link only names the team; the person continues to its provider by a button here (a
+   * same-origin POST), so another site can neither sign someone in to a team they did not choose
+   * nor send them on to a provider's address through this one.
+   */
+  async function ssoStartPage(url: URL, handle?: string): Promise<Response> {
+    if (!ssoStore) return nothingHere404();
+    const email = (url.searchParams.get('email') ?? '').trim();
+    const team = (handle ?? url.searchParams.get('team') ?? '').trim();
+    if (team !== '' || email !== '') {
+      const domain = email === '' ? null : slotlockEmailDomain(email);
+      const route = await ssoStore.route(team !== '' ? { handle: team } : domain !== null ? { domain } : {});
+      if (route) {
+        const provider = new URL(route.authorizationEndpoint).host;
+        const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Sign in to ${route.name}</h1><p class="lead">${route.name} signs in through its identity provider, ${provider}.</p><form class="auth-form" method="post" action="${root}/sso/start"><input type="hidden" name="team" value="${route.handle}"><button class="primary wide" type="submit">Continue to ${provider}</button></form>${authLinks([['Other ways to sign in', root]])}</section>`;
+        return respond(200, layout('Single sign-on', content, null));
+      }
+    }
+    const asked = team !== '' || email !== '';
+    // What was asked, said back, with the way forward: an address's domain, never whether a team
+    // holds it (the route answers the same for a domain no team claimed and one without single sign-on).
+    const domain = email === '' ? null : slotlockEmailDomain(email);
+    const why = !asked
+      ? html``
+      : team !== ''
+        ? html`<p class="notice" role="alert">No team signs in with single sign-on at that link. Ask your team’s owner for it, or sign in another way.</p>`
+        : domain === null
+          ? html`<p class="notice" role="alert">That doesn’t look like an email address. Check it and try again.</p>`
+          : html`<p class="notice" role="alert">Single sign-on isn’t set up for ${domain}. Check the address, or sign in another way below.</p>`;
+    const content = html`<section class="sign-in"><span class="sign-in-mark">${ICONS.mark}</span><h1>Single sign-on</h1><p class="lead">Enter your work email to continue to your team’s identity provider.</p>${why}<form class="auth-form" method="get" action="${root}/sso"><label for="sso-email">Work email</label><input id="sso-email" name="email" type="email" maxlength="254" autocomplete="email" placeholder="you@company.com" value="${team === '' ? email.slice(0, 254) : ''}" required><button class="primary wide" type="submit">Continue</button></form><div class="or" role="separator"><span>or</span></div>${
+      google ? html`<a class="button wide" href="${root}/sign-in?with=google">${ICONS.google}Continue with Google</a>` : html``
+    }<a class="button wide" href="${root}/sign-in">${ICONS.github}Continue with GitHub</a>${
+      asked
+        ? html`<p class="fine">Setting this up for your team? An Owner verifies the domain and connects the provider in Settings, Identity, then tests it and turns it on.</p>`
+        : html``
+    }</section>`;
+    return respond(asked ? 404 : 200, layout('Single sign-on', content, null));
+  }
+
+  /** A signed-out card's links to other pages, as rows with a chevron. */
+  const authLinks = (links: readonly (readonly [string, string])[]) =>
+    html`<nav class="auth-links" aria-label="More">${links.map(([label, href]) => html`<a href="${href}">${label}${ICONS.chevron}</a>`)}</nav>`;
+
+  /** Send an invitation's link where a sender is set: whether it went. The link is shown either way. */
+  async function deliverInvitation(session: Session, to: string, role: SlotlockWorkspaceRole, link: string, expiresAt: Date): Promise<boolean> {
+    if (!options.invitations) return false;
+    try {
+      await options.invitations.send({
+        to,
+        workspace: currentTeam(session)?.name ?? 'a team',
+        inviter: shownAs(session),
+        role: SLOTLOCK_WORKSPACE_ROLE_NAMES[role],
+        link,
+        expiresAt,
+      });
+      return true;
+    } catch (error) {
+      // The sender's own message names the provider and its status, never the address.
+      const known = error instanceof Error && error.name === 'SlotlockInvitationEmailError';
+      report(`Invitation email failed: ${known ? error.message : error instanceof Error ? error.name : 'unknown error'}`);
+      return false;
+    }
+  }
+
+  async function inviteMember(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const email = (form.get('email') ?? '').trim().toLowerCase();
+    const role = form.get('role') ?? '';
+    if (email.length > 254 || !EMAIL_ADDRESS.test(email)) {
+      return settingsPage(session, 400, 'Enter an email address.', undefined, 'members');
+    }
+    if (!isSlotlockWorkspaceRole(role)) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const raw = randomBytes(32).toString('base64url');
+    const sent = await teamStore.invite({
+      tenantRef,
+      inviter: personOf(session),
+      to: { email },
+      role,
+      tokenSha256: tokenDigest(raw),
+      days: INVITATION_DAYS,
+      dailyLimit: INVITATION_DAILY_LIMIT,
+      memberCap: await memberCapOf(tenantRef),
+    });
+    if ('refusal' in sent) return refusalPage(session, sent.refusal);
+    await audit(session, { action: 'member.invited', targetType: 'invitation', targetRef: sent.id, metadata: { role } }, tenantRef);
+    const link = `${publicRoot}/invite?t=${raw}`;
+    const expiresAt = new Date(now() + INVITATION_DAYS * DAY_MS);
+    const delivered = await deliverInvitation(session, email, role, link, expiresAt);
+    return settingsPage(
+      session,
+      200,
+      delivered ? `Invitation sent to ${email}.` : `Invitation made for ${email}. Send them the link.`,
+      undefined,
+      'members',
+      { link, to: email, expiresAt },
+    );
+  }
+
+  async function resendInvitation(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const id = (form.get('id') ?? '').toLowerCase();
+    const invitation = (await teamStore.invitations(tenantRef)).find((candidate) => candidate.id === id);
+    if (!invitation) return refusalPage(session, 'not_found');
+    const raw = randomBytes(32).toString('base64url');
+    const refusal = await teamStore.resend(
+      tenantRef,
+      personOf(session),
+      id,
+      tokenDigest(raw),
+      INVITATION_DAYS,
+      INVITATION_DAILY_LIMIT,
+      await memberCapOf(tenantRef),
+    );
+    if (refusal) return refusalPage(session, refusal);
+    await audit(session, { action: 'invitation.resent', targetType: 'invitation', targetRef: id }, tenantRef);
+    const to = invitation.email ?? `@${invitation.githubLogin ?? 'GitHub account'}`;
+    const link = `${publicRoot}/invite?t=${raw}`;
+    const expiresAt = new Date(now() + INVITATION_DAYS * DAY_MS);
+    const delivered = invitation.email !== null && (await deliverInvitation(session, invitation.email, invitation.role, link, expiresAt));
+    return settingsPage(
+      session,
+      200,
+      delivered ? `Invitation sent to ${to} again. The old link no longer works.` : `A new link for ${to}. The old one no longer works.`,
+      undefined,
+      'members',
+      { link, to, expiresAt },
+    );
+  }
+
+  async function revokeInvitation(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const id = (form.get('id') ?? '').toLowerCase();
+    if (!(await teamStore.revoke(tenantRef, personOf(session), id))) return refusalPage(session, 'not_found');
+    await audit(session, { action: 'invitation.revoked', targetType: 'invitation', targetRef: id }, tenantRef);
+    return settingsPage(session, 200, 'Invitation revoked: its link no longer works.', undefined, 'members');
+  }
+
+  async function changeMemberRole(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const person = form.get('person') ?? '';
+    const role = form.get('role') ?? '';
+    if (!isSlotlockWorkspaceRole(role)) return settingsPage(session, 400, 'Choose a role.', undefined, 'members');
+    const members = await teamStore.members(tenantRef);
+    const member = members.find((candidate) => candidate.person === person);
+    if (!member) return refusalPage(session, 'not_found');
+    if (member.role === role) return settingsPage(session, 200, 'Nothing changed.', undefined, 'members');
+    const refusal = await teamStore.changeRole(tenantRef, personOf(session), person, role);
+    if (refusal) return refusalPage(session, refusal);
+    await audit(
+      session,
+      { action: 'member.role_changed', targetType: 'person', targetRef: person, metadata: { from: member.role, to: role } },
+      tenantRef,
+    );
+    // One's own role changed: the page is read again under the new one.
+    if (person === personOf(session)) return redirect(303, `${root}/settings/members`);
+    return settingsPage(session, 200, `${memberName(member)} is now ${SLOTLOCK_WORKSPACE_ROLE_NAMES[role]}.`, undefined, 'members');
+  }
+
+  /** Revoke the keys a member created in a team's Live and Test environments: how many were. */
+  async function revokeKeysOf(tenantRef: string, person: string, actor: string): Promise<number> {
+    let revoked = 0;
+    for (const tenant of [tenantRef, `${tenantRef}${SLOTLOCK_TEST_TENANT_SUFFIX}`]) {
+      for (const key of await options.keys.list({ tenantRef: tenant })) {
+        if (key.createdBy !== person || key.revokedAt !== null) continue;
+        if (await options.keys.revoke({ tenantRef: tenant, actor, origin: 'dashboard', id: key.id })) revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
+  /**
+   * Limit a member to locations and groups (RFC 0004 D1), or give them all of the workspace again.
+   * Keys they created reach all of it, so limiting them revokes those unless the form keeps them.
+   */
+  async function limitMember(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    const grouping = options.resources.grouping;
+    if (!teamStore || tenantRef === undefined || !grouping) return nothingHere(session);
+    const me = personOf(session);
+    const person = form.get('person') ?? '';
+    const member = (await teamStore.members(tenantRef)).find((candidate) => candidate.person === person);
+    if (!member) return refusalPage(session, 'not_found');
+    let scope: SlotlockResourceScope | null = null;
+    if (form.get('access') !== 'all') {
+      const chosen = { locations: [...new Set(form.getAll('locations'))].sort(), groups: [...new Set(form.getAll('groups'))].sort() };
+      if (chosen.locations.length + chosen.groups.length === 0) {
+        return settingsPage(session, 400, 'Choose at least one location or group, or all of the workspace.', undefined, 'members');
+      }
+      if (chosen.locations.length > SLOTLOCK_MAX_KEY_SCOPE_REFS || chosen.groups.length > SLOTLOCK_MAX_KEY_SCOPE_REFS) {
+        return settingsPage(
+          session,
+          400,
+          `Choose up to ${String(SLOTLOCK_MAX_KEY_SCOPE_REFS)} locations and ${String(SLOTLOCK_MAX_KEY_SCOPE_REFS)} groups.`,
+          undefined,
+          'members',
+        );
+      }
+      // Each one the workspace has.
+      const [locations, groups] = await Promise.all([grouping.locations(tenantRef), grouping.groups(tenantRef)]);
+      const known = (refs: readonly string[], kept: readonly { ref: string }[]) =>
+        refs.every((ref) => kept.some((entry) => entry.ref === ref));
+      if (!isSlotlockResourceScope(chosen) || !known(chosen.locations, locations) || !known(chosen.groups, groups)) {
+        return settingsPage(session, 400, 'Choose locations and groups this workspace has.', undefined, 'members');
+      }
+      scope = chosen;
+    }
+    const refusal = await teamStore.setScope(tenantRef, me, person, scope);
+    if (refusal) return refusalPage(session, refusal);
+    const keep = scope === null || form.get('keys') === 'keep';
+    const revoked = keep ? 0 : await revokeKeysOf(tenantRef, person, me);
+    await audit(
+      session,
+      {
+        action: 'member.scope_changed',
+        targetType: 'person',
+        targetRef: person,
+        metadata: scope
+          ? { locations: scope.locations, groups: scope.groups, keys: keep ? 'kept' : 'revoked', revoked }
+          : { reaches: 'all' },
+      },
+      tenantRef,
+    );
+    const name = memberName(member);
+    const team = currentTeam(session)?.name ?? 'this team';
+    return settingsPage(
+      session,
+      200,
+      scope
+        ? `${name} now reaches only the resources at those locations and in those groups${revoked > 0 ? `, and ${String(revoked)} key${revoked === 1 ? '' : 's'} they created ${revoked === 1 ? 'was' : 'were'} revoked` : ''}.`
+        : `${name} now reaches all of ${team}.`,
+      undefined,
+      'members',
+    );
+  }
+
+  async function removeMember(session: Session, form: URLSearchParams): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const me = personOf(session);
+    const person = form.get('person') ?? '';
+    if (person === me) return settingsPage(session, 400, 'To leave this team, use Leave.', undefined, 'members');
+    const member = (await teamStore.members(tenantRef)).find((candidate) => candidate.person === person);
+    if (!member) return refusalPage(session, 'not_found');
+    const refusal = await teamStore.remove(tenantRef, me, person);
+    if (refusal) return refusalPage(session, refusal);
+    // Keys they created, Live and Test: revoked unless the form keeps them.
+    const keep = form.get('keys') === 'keep';
+    const revoked = keep ? 0 : await revokeKeysOf(tenantRef, person, me);
+    await audit(
+      session,
+      { action: 'member.removed', targetType: 'person', targetRef: person, metadata: { keys: keep ? 'kept' : 'revoked', revoked } },
+      tenantRef,
+    );
+    return settingsPage(
+      session,
+      200,
+      `${memberName(member)} was removed${revoked > 0 ? `, and ${String(revoked)} key${revoked === 1 ? '' : 's'} they created revoked` : ''}.`,
+      undefined,
+      'members',
+    );
+  }
+
+  async function leaveTeam(session: Session): Promise<Response> {
+    const tenantRef = teamTenantOf(session);
+    if (!teamStore || tenantRef === undefined) return nothingHere(session);
+    const me = personOf(session);
+    const refusal = await teamStore.remove(tenantRef, me, me);
+    if (refusal) return refusalPage(session, refusal);
+    await audit(session, { action: 'member.left', targetType: 'person', targetRef: me }, tenantRef);
+    return moveTo(session, undefined, '');
+  }
+
+  /** The invitation link being opened in this browser: its token, or null. */
+  function inviteTokenOf(request: Request): string | null {
+    const opened = unseal('slotlock-dashboard-invite-v1', readCookies(request).get(INVITE_COOKIE));
+    return opened &&
+      typeof opened.t === 'string' &&
+      INVITE_TOKEN.test(opened.t) &&
+      typeof opened.exp === 'number' &&
+      opened.exp > now()
+      ? opened.t
+      : null;
+  }
+
+  /** An invitation's own page: what it is for, and joining, in the states it can be in. Never consumes it. */
+  async function invitePage(session: Session | null, raw: string | null, status = 200, notice?: string, checked = false): Promise<Response> {
+    const preview = raw && teamStore ? await teamStore.preview(tokenDigest(raw)) : null;
+    const headers = { 'Referrer-Policy': 'no-referrer' };
+    // Every state in one card, as signing in is: centred in the dashboard for someone signed in.
+    const card = (title: Html | string, inner: Html, said = notice) => {
+      const section = html`<section class="sign-in invite"><span class="sign-in-mark">${ICONS.mark}</span><h1>${title}</h1>${noticeOf(said, status)}${inner}</section>`;
+      return session ? html`<div class="auth-center">${section}</div>` : section;
+    };
+    if (!preview) {
+      const content = card(
+        'Invitation',
+        html`<p class="lead">This invitation link can’t be used here. Open the link you were sent again, in this browser.</p>${authLinks([[`Go to ${brandName}`, root]])}`,
+      );
+      return respond(status === 200 ? 404 : status, layout('Invitation', content, session), headers);
+    }
+    const name = preview.workspaceName;
+    const role = SLOTLOCK_WORKSPACE_ROLE_NAMES[preview.role];
+    const forWhom = preview.email !== null ? maskedEmail(preview.email) : `@${preview.githubLogin ?? 'a GitHub account'}`;
+    const invited = html`<span class="soft">You’re invited.</span>Join ${name}`;
+    const details = html`<dl class="invite-facts"><div><dt>Team</dt><dd>${name}</dd></div><div><dt>Role</dt><dd>${role}</dd></div><div><dt>Invited by</dt><dd>${preview.inviterDisplay}</dd></div><div><dt>For</dt><dd>${forWhom}</dd></div></dl>`;
+    const hidden = (signed: Session) =>
+      html`<input type="hidden" name="csrf" value="${csrfToken(signed)}"><input type="hidden" name="once" value="${formNonce(signed)}">`;
+    let content: Html;
+    if (preview.state !== 'pending') {
+      const [title, lead] =
+        preview.state === 'expired'
+          ? ['This invitation expired', `Ask ${preview.inviterDisplay} to send it again.`]
+          : preview.state === 'revoked'
+            ? ['This invitation was withdrawn', `Ask ${preview.inviterDisplay} for a new one if you still need to join ${name}.`]
+            : ['This invitation was already used', `Sign in to open ${name}.`];
+      content = card(title, html`<p class="lead">${lead}</p>${authLinks([[`Go to ${brandName}`, root]])}`, undefined);
+    } else if (!session) {
+      const then = new URLSearchParams({ then: '/invite' }).toString();
+      // An invitation by email asks GitHub for the person's verified addresses on the way in.
+      const github = preview.email !== null ? `${then}&email=1` : then;
+      content = card(
+        invited,
+        html`<p class="lead">${preview.inviterDisplay} invited you to join ${name} on ${brandName}.</p>${details}<a class="button primary wide" href="${root}/sign-in?${github}">${ICONS.github}Continue with GitHub</a>${
+          google && preview.email !== null
+            ? html`<a class="button wide" href="${root}/sign-in?with=google&amp;${then}">${ICONS.google}Continue with Google</a>`
+            : html``
+        }<p class="fine">Sign in as ${forWhom} to accept. The link works once.</p>`,
+      );
+    } else if ((teamListOf.get(session) ?? []).some((ws) => ws.tenantRef === preview.tenantRef)) {
+      content = card(
+        `You’re already in ${name}`,
+        html`<p class="lead">You’re a member of ${name} already.</p><form class="auth-form" method="post" action="${root}/organization">${hidden(session)}<input type="hidden" name="organization" value="${preview.tenantRef}"><button class="primary wide" type="submit">Open ${name}</button></form>`,
+      );
+    } else {
+      const person = personOf(session);
+      const bound =
+        (preview.githubRef !== null && preview.githubRef === person) ||
+        (preview.email !== null && verifiedEmails(session).includes(preview.email));
+      if (bound) {
+        content = card(
+          invited,
+          html`<p class="lead">${preview.inviterDisplay} invited you to join ${name} on ${brandName}.</p>${details}<form class="auth-form" method="post" action="${root}/invite/accept">${hidden(session)}<button class="primary wide" type="submit">Join as ${shownAs(session)}</button></form>`,
+        );
+      } else if (preview.email !== null && session.idp !== 'google') {
+        // A GitHub account shows its addresses only when asked: once, for this invitation.
+        content = card(
+          invited,
+          html`<p class="lead">${preview.inviterDisplay} invited ${forWhom}. Confirm it’s an address GitHub verified for ${shownAs(session)}.${
+            checked ? html` None of the addresses GitHub verified for ${shownAs(session)} is it.` : html``
+          }</p>${details}<a class="button primary wide" href="${root}/sign-in?then=%2Finvite&amp;email=1">${ICONS.github}Confirm the address with GitHub</a>`,
+        );
+      } else {
+        content = card(
+          `Join ${name}`,
+          html`<p class="lead">This invitation is for ${forWhom}, and you’re signed in as ${shownAs(session)}.</p><p class="fine">Sign out, then open the link again and sign in as that account.</p>`,
+        );
+      }
+    }
+    return respond(status, layout(`Join ${name}`, content, session), headers);
+  }
+
+  async function acceptInvitation(session: Session, form: URLSearchParams, request: Request): Promise<Response> {
+    if (!teamStore) return nothingHere(session);
+    const person = personOf(session);
+    const emails = verifiedEmails(session);
+    const id = (form.get('invitation') ?? '').toLowerCase();
+    let accepted: Awaited<ReturnType<typeof teamStore.accept>>;
+    let role: SlotlockWorkspaceRole;
+    let raw: string | null = null;
+    if (id !== '') {
+      // One offered on Teams: an invitation open to this person, found again here.
+      const offered = (await teamStore.pendingFor(person, emails)).find((invitation) => invitation.id === id);
+      if (!offered) return teamsPage(session, 404, 'That invitation is no longer open to you.');
+      role = offered.role;
+      accepted = await teamStore.accept({ id: offered.id, person, emails, memberCap: await memberCapOf(offered.tenantRef) });
+    } else {
+      raw = inviteTokenOf(request);
+      const preview = raw ? await teamStore.preview(tokenDigest(raw)) : null;
+      if (!raw || !preview) return invitePage(session, null, 400);
+      role = preview.role;
+      accepted = await teamStore.accept({ tokenSha256: tokenDigest(raw), person, emails, memberCap: await memberCapOf(preview.tenantRef) });
+    }
+    if ('refusal' in accepted) {
+      const { status, text } = TEAM_REFUSALS[accepted.refusal];
+      return id !== '' ? teamsPage(session, status, text) : invitePage(session, raw, status, text);
+    }
+    await audit(
+      session,
+      { action: 'member.joined', actorRole: role, targetType: 'person', targetRef: person },
+      accepted.tenantRef,
+    );
+    // Into the team joined; the link is spent, and the addresses kept for it go.
+    return moveTo(session, accepted.tenantRef.slice('team:'.length), '', [setCookie(INVITE_COOKIE, '', 0)], false);
+  }
+
+  async function changeTeam(session: Session, form: URLSearchParams, on: boolean): Promise<Response> {
+    if (!teams) return nothingHere(session);
+    const org = session.orgs?.find((candidate) => candidate.id === form.get('organization'));
+    if (!org) return teamsPage(session, 400, 'That is not one of your organizations.');
+    if (org.role !== 'admin') return teamsPage(session, 403, `Only an owner of ${org.login} can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    // And an Owner of its workspace in Slotlock: a GitHub owner Slotlock gave a lesser role may not.
+    if (workspaces && (await workspaces.standing(`github-org:${org.id}`, personOf(session), session.sid)).role !== 'owner') {
+      return teamsPage(session, 403, `Only an owner of ${org.login}'s workspace can turn Slotlock ${on ? 'on' : 'off'} for it.`);
+    }
+    // Who owns it was read as the person signed in: only a recent sign-in is trusted to say so.
+    if (now() - (session.exp - SESSION_TTL_MS) > FRESH_SIGN_IN_MS) {
+      return teamsPage(
+        session,
+        403,
+        `To turn Slotlock ${on ? 'on' : 'off'} for ${org.login}, sign out and in again: who owns it is read from GitHub as you sign in.`,
+      );
+    }
+    if (on) {
+      await teams.enable({ id: org.id, login: org.login }, personOf(session));
+      return teamsPage(session, 200, `Slotlock is on for ${org.login}. Its members pick it from the workspace menu.`);
+    }
+    if (form.get('confirm') !== org.login) return teamsPage(session, 400, `Type ${org.login} to turn it off.`);
+    await teams.disable(org.id, personOf(session));
+    return teamsPage(session, 200, `Slotlock is off for ${org.login}: its keys stopped. What it holds stays until it is turned on again or erased.`);
+  }
+
+  async function switchOrganization(session: Session, form: URLSearchParams): Promise<Response> {
     const wanted = form.get('organization') ?? '';
+    // Where to land: the workspace's Usage page when asked from a plan (upgrading a team), else its
+    // Overview. Only these, never an address the form names.
+    const then = form.get('then') === '/plan' ? '/plan' : '';
+    const teamId = /^team:(.+)$/.exec(wanted)?.[1];
+    if (teamStore && (teamId !== undefined || (wanted === '' && !teams))) {
+      // Their own tenant, or a team workspace they are a member of now.
+      if (teamId !== undefined) {
+        const standing = TEAM_ID.test(teamId) && workspaces ? await workspaces.standing(wanted, personOf(session), session.sid) : null;
+        if (standing?.refusal === 'sso_required') {
+          const name = teamListOf.get(session)?.find((ws) => ws.tenantRef === wanted)?.name ?? 'This team';
+          return ssoRequiredPage(session, wanted, name, standing.mayBypass === true);
+        }
+        if (!standing || standing.role === null) {
+          return respond(400, layout('Refused', html`<p class="notice">You are not a member of that team.</p>`, session));
+        }
+      }
+      return moveTo(session, teamId, then);
+    }
+    if (teams) {
+      // Their own tenant, or an organization of theirs that is turned on now.
+      const org = session.orgs?.find((candidate) => candidate.id === wanted);
+      if (wanted !== '' && (!org || !(await teams.enabled([wanted])).has(wanted))) {
+        return respond(
+          400,
+          layout('Refused', html`<p class="notice">You cannot act for that organization. An owner turns it on from Teams.</p>`, session),
+        );
+      }
+      const { org: _, team: _team, ...personal } = session;
+      const sealed = seal('slotlock-dashboard-session-v1', wanted === '' ? personal : { ...personal, org: wanted });
+      const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
+      return redirect(303, `${root}${then}`, [setCookie(SESSION_COOKIE, sealed, left)]);
+    }
     const org = session.orgs?.find(
       (candidate) => candidate.id === wanted && served?.has(candidate.id),
     );
@@ -2688,10 +8999,10 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     }
     const sealed = seal('slotlock-dashboard-session-v1', { ...session, org: org.id });
     const left = Math.max(1, Math.floor((session.exp - now()) / 1000));
-    return redirect(303, root, [setCookie(SESSION_COOKIE, sealed, left)]);
+    return redirect(303, `${root}${then}`, [setCookie(SESSION_COOKIE, sealed, left)]);
   }
 
-  async function startSignIn(): Promise<Response> {
+  async function startSignIn(then?: string, emails = false): Promise<Response> {
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -2703,12 +9014,17 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       code_challenge: challenge,
       code_challenge_method: 'S256',
       // Reading organization membership needs read:org; a personal tenant needs no scope at all.
-      ...(served ? { scope: 'read:org' } : {}),
+      // Accepting an invitation by email asks GitHub for the person's verified addresses, then only.
+      ...(readsOrganizations || emails
+        ? { scope: [...(readsOrganizations ? ['read:org'] : []), ...(emails ? ['user:email'] : [])].join(' ') }
+        : {}),
     }).toString();
     const sealed = seal('slotlock-dashboard-sign-in-v1', {
       state,
       verifier,
       exp: now() + SIGN_IN_TTL_MS,
+      ...(then ? { then } : {}),
+      ...(emails ? { emails: true } : {}),
     });
     return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
   }
@@ -2748,7 +9064,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     return null;
   }
 
-  async function readGitHubUser(token: string): Promise<{ uid: string; login: string } | null> {
+  async function readGitHubUser(token: string): Promise<{ uid: string; login: string; name: string | null } | null> {
     const response = await fetchImpl(userUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -2773,7 +9089,35 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     ) {
       return null;
     }
-    return { uid: String(body.id), login: body.login };
+    // The profile's name, null when the person gave none (GET /user).
+    return { uid: String(body.id), login: body.login, name: typeof body.name === 'string' ? body.name : null };
+  }
+
+  /** The addresses GitHub verified for the token's person, lower-cased; none when it does not say. */
+  async function readGitHubEmails(token: string): Promise<string[]> {
+    const response = await fetchImpl(`${userUrl}/emails`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION,
+        'User-Agent': USER_AGENT,
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      report(`GitHub email lookup failed: HTTP ${response.status}`);
+      return [];
+    }
+    const body: unknown = await response.json().catch(() => null);
+    if (!Array.isArray(body)) return [];
+    return body
+      .slice(0, 100)
+      .filter(
+        (entry): entry is { email: string } =>
+          isRecord(entry) && entry.verified === true && typeof entry.email === 'string' && entry.email.length <= 254,
+      )
+      .map((entry) => entry.email.toLowerCase());
   }
 
   /**
@@ -2818,7 +9162,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         continue;
       }
       const id = String(organization.id);
-      if (served?.has(id)) {
+      if (teams || served?.has(id)) {
         found.set(id, { id, login: organization.login, role: membership.role === 'admin' ? 'admin' : 'member' });
       }
     }
@@ -2827,15 +9171,114 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       .slice(0, MAX_SESSION_ORGANIZATIONS);
   }
 
+  /** Google's sign-in (OpenID Connect, code flow with PKCE and a nonce), back to the same callback. */
+  async function startGoogleSignIn(provider: NonNullable<typeof google>, then?: string): Promise<Response> {
+    const state = randomBytes(32).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    const nonce = randomBytes(24).toString('base64url');
+    const target = new URL(provider.authorizeUrl ?? 'https://accounts.google.com/o/oauth2/v2/auth');
+    target.search = new URLSearchParams({
+      client_id: provider.clientId,
+      redirect_uri: callbackUrl,
+      response_type: 'code',
+      // `profile` for the name claim, which Google gives only with it (developers.google.com/identity/
+      // openid-connect/openid-connect, read 2026-11-14): kept beside the email for the staff console.
+      scope: 'openid email profile',
+      state,
+      nonce,
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+    }).toString();
+    const sealed = seal('slotlock-dashboard-sign-in-v1', {
+      state,
+      verifier,
+      nonce,
+      idp: 'google',
+      exp: now() + SIGN_IN_TTL_MS,
+      ...(then ? { then } : {}),
+    });
+    return redirect(302, target.href, [setCookie(SIGN_IN_COOKIE, sealed, SIGN_IN_TTL_MS / 1000)]);
+  }
+
+  /** Issuers' signing keys (Google's, and teams' identity providers'), by JWKS URL (oidc.ts). */
+  const jwks = createSlotlockJwksCache({ fetch: fetchImpl, now });
+
+  /**
+   * The person Google signed in, from the ID token its token endpoint returned for this code. The
+   * token's signature is checked against Google's published keys, and its issuer, audience (and
+   * azp), expiry and nonce (OpenID Connect Core 1.0, 3.1.3.7).
+   */
+  async function askGoogle(
+    provider: NonNullable<typeof google>,
+    code: string,
+    verifier: string,
+    nonce: string,
+  ): Promise<{ uid: string; login: string; idp: 'google'; name: string | null; hd?: string } | null> {
+    try {
+      const response = await fetchImpl(provider.tokenUrl ?? 'https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: new URLSearchParams({
+          code,
+          client_id: provider.clientId,
+          client_secret: provider.clientSecret,
+          redirect_uri: callbackUrl,
+          grant_type: 'authorization_code',
+          code_verifier: verifier,
+        }).toString(),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        report(`Google token exchange failed: HTTP ${response.status}`);
+        return null;
+      }
+      const body: unknown = await response.json().catch(() => null);
+      const token = isRecord(body) && typeof body.id_token === 'string' ? body.id_token : null;
+      if (token === null) return null;
+      // Signed by Google with a key it publishes (RS256), for this client, unexpired, with this
+      // sign-in's nonce (oidc.ts verifySlotlockIdToken: OpenID Connect Core 1.0, 3.1.3.7).
+      const checked = await verifySlotlockIdToken(token, {
+        issuers: SLOTLOCK_GOOGLE_ISSUERS,
+        clientId: provider.clientId,
+        algorithms: ['RS256'],
+        keys: jwks.lookup(provider.jwksUrl ?? 'https://www.googleapis.com/oauth2/v3/certs'),
+        nonce,
+        now: now(),
+      });
+      if ('refusal' in checked) {
+        report(`Google sign-in refused: the ID token did not check out (${checked.refusal})`);
+        return null;
+      }
+      const claims = checked.claims;
+      if (typeof claims.sub !== 'string' || !GOOGLE_SUBJECT.test(claims.sub)) return null;
+      // The email names the person on the page only, and only once Google has verified it.
+      const email =
+        (claims.email_verified === true || claims.email_verified === 'true') && typeof claims.email === 'string' && claims.email.length <= 254 && !/[<>\p{Cc}]/u.test(claims.email)
+          ? claims.email
+          : 'Google account';
+      // A Google Workspace account names its domain (hd); a consumer account names none.
+      const hd = typeof claims.hd === 'string' && /^[a-z0-9.-]{1,253}$/i.test(claims.hd) ? claims.hd.toLowerCase() : undefined;
+      // The name claim (OpenID Connect Core 1.0, 5.1), with the email's scopes when Google gives it.
+      const name = typeof claims.name === 'string' ? claims.name : null;
+      return { uid: claims.sub, login: email, idp: 'google', name, ...(hd !== undefined && email.includes('@') ? { hd } : {}) };
+    } catch (error) {
+      report(`Google sign-in failed: ${error instanceof Error ? error.name : 'unknown error'}`);
+      return null;
+    }
+  }
+
   async function askGitHub(
     code: string,
     verifier: string,
-  ): Promise<{ uid: string; login: string; orgs?: Organization[] } | null> {
+    emails = false,
+  ): Promise<{ uid: string; login: string; name: string | null; orgs?: Organization[]; emails?: string[] } | null> {
     try {
       const token = await exchangeCode(code, verifier);
       if (token === null) return null;
-      const user = await readGitHubUser(token);
-      if (!user || !served) return user;
+      const found = await readGitHubUser(token);
+      const user = found && emails ? { ...found, emails: await readGitHubEmails(token) } : found;
+      if (!user || !readsOrganizations) return user;
       const orgs = await readMemberships(token);
       return orgs === null ? null : { ...user, orgs };
     } catch (error) {
@@ -2880,13 +9323,18 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     const verifier = pending.verifier;
     signInsInFlight += 1;
     if (client !== undefined) signInsByClient.set(client, fromClient + 1);
-    let user: { uid: string; login: string; orgs?: Organization[] } | null;
+    let user: { uid: string; login: string; name: string | null; orgs?: Organization[]; idp?: 'google'; emails?: string[]; hd?: string } | null;
     try {
       // Recorded before GitHub is asked, so a replayed callback is refused on every server unasked.
       if (!(await options.state.use('sign_in', pending.state, pending.exp as number))) {
         return signedOutPage(400, SIGN_IN_AGAIN, [clearSignIn]);
       }
-      user = await askGitHub(code, verifier);
+      user =
+        pending.idp === 'google'
+          ? google && typeof pending.nonce === 'string'
+            ? await askGoogle(google, code, verifier, pending.nonce)
+            : null
+          : await askGitHub(code, verifier, pending.emails === true);
     } finally {
       signInsInFlight -= 1;
       if (client !== undefined) {
@@ -2896,12 +9344,18 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       }
     }
     if (!user) {
-      return signedOutPage(502, 'GitHub did not complete the sign-in. Try again.', [clearSignIn]);
+      return signedOutPage(
+        502,
+        `${pending.idp === 'google' ? 'Google' : 'GitHub'} did not complete the sign-in. Try again.`,
+        [clearSignIn],
+      );
     }
-    if (!allowed(user.uid)) {
-      return signedOutPage(403, `This Slotlock server does not let @${user.login} sign in.`, [
-        clearSignIn,
-      ]);
+    if (!allowed(user.uid, user.idp)) {
+      return signedOutPage(
+        403,
+        `This Slotlock server does not let ${user.idp === 'google' ? user.login : `@${user.login}`} sign in.`,
+        [clearSignIn],
+      );
     }
     const orgs = user.orgs ?? [];
     if (served && orgs.length === 0) {
@@ -2911,14 +9365,66 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         [clearSignIn],
       );
     }
+    // The person and, with GitHub, the organizations GitHub lists them in, as memberships now; the
+    // epoch their sessions must carry.
+    const person = user.idp === 'google' ? `google:${user.uid}` : `github:${user.uid}`;
+    const epoch = workspaces
+      ? await workspaces.signedIn(
+          person,
+          user.idp === 'google' || user.orgs === undefined
+            ? undefined
+            : user.orgs.map((org) => ({ id: org.id, role: org.role === 'admin' ? ('admin' as const) : ('member' as const) })),
+        )
+      : undefined;
+    // How the person is shown to the others in their teams: their GitHub login, or Google's verified
+    // email; and the name their provider gives, for the staff console (cleaned, slotlockPersonName).
+    if (teamStore) {
+      await teamStore.setDisplay(person, user.idp === 'google' ? (user.login.includes('@') ? user.login : null) : `@${user.login}`);
+      await teamStore.setName?.(person, user.name);
+    }
+    // Of the addresses GitHub verified, only the invitation being opened's is kept, to accept it.
+    let em: string[] | undefined;
+    if (teamStore && user.emails) {
+      const raw = inviteTokenOf(request);
+      const invited = raw ? (await teamStore.preview(tokenDigest(raw)))?.email : null;
+      if (invited && user.emails.includes(invited)) em = [invited];
+      else if (domainStore && pending.then === '/teams' && pending.emails === true) {
+        // Looking for a team at one's domain: only the addresses at a team one may ask to join.
+        const keys = new Set((await domainStore.discoverable(person, user.emails)).map((found) => found.domainKey));
+        const kept = user.emails.filter((email) => keys.has(slotlockEmailDomain(email) ?? '')).slice(0, 3);
+        if (kept.length > 0) em = kept;
+      }
+    }
+    // A Google Workspace account of its own domain binds the directory's user at that address (SCIM):
+    // the domain vouches for it. An address GitHub or a consumer Google account verified once does not.
+    if (scimStore && user.idp === 'google' && user.hd !== undefined && user.login.includes('@')) {
+      const address = user.login.toLowerCase();
+      if (slotlockEmailDomain(address) === slotlockEmailDomain(`x@${user.hd}`)) await scimStore.bind(person, [address], plans ? FREE_TEAM_MEMBERS : null);
+    }
+    const sealedOrg = served ? (orgs[0] as Organization).id : undefined;
+    const sid = randomBytes(24).toString('base64url');
+    const expires = now() + SESSION_TTL_MS;
+    // Listed on the person's Account page, to sign out from another device.
+    await workspaces?.sessions?.started(person, sid, new Date(expires), requestOrigin(request));
     const session = seal('slotlock-dashboard-session-v1', {
       uid: user.uid,
       login: user.login,
-      sid: randomBytes(24).toString('base64url'),
-      exp: now() + SESSION_TTL_MS,
-      ...(served ? { orgs, org: (orgs[0] as Organization).id } : {}),
+      sid,
+      exp: expires,
+      ...(user.idp === 'google' ? { idp: 'google', ...(user.hd !== undefined ? { hd: user.hd } : {}) } : {}),
+      ...(served ? { orgs, org: sealedOrg } : teams && user.idp !== 'google' ? { orgs } : {}),
+      ...(epoch !== undefined ? { ep: epoch } : {}),
+      ...(em ? { em } : {}),
     });
-    return redirect(303, root, [
+    if (options.resources.audit) {
+      const signedInTo = sealedOrg !== undefined ? `github-org:${sealedOrg}` : person;
+      const from = requestOrigin(request);
+      await options.resources.audit
+        .record(signedInTo, { action: 'session.signed_in', actorType: 'person', actorRef: person, ...from })
+        .catch((error: unknown) => ignoreRejection(options.onError?.(error)));
+    }
+    const back = typeof pending.then === 'string' && STEP_UP_PAGES.has(pending.then) ? pending.then : '';
+    return redirect(303, `${root}${back}${(back === '/invite' || back === '/teams') && pending.emails === true ? '?checked=1' : ''}`, [
       clearSignIn,
       setCookie(SESSION_COOKIE, session, SESSION_TTL_MS / 1000),
     ]);
@@ -2928,9 +9434,12 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
   async function readForm(
     request: Request,
     maxBytes = MAX_FORM_BYTES,
+    multipart = false,
   ): Promise<URLSearchParams | 'too_large' | null> {
-    const type = request.headers.get('content-type')?.split(';')[0]?.trim();
-    if (type !== 'application/x-www-form-urlencoded') return null;
+    const header = request.headers.get('content-type') ?? '';
+    const type = header.split(';')[0]?.trim();
+    const isMultipart = multipart && type === 'multipart/form-data';
+    if (type !== 'application/x-www-form-urlencoded' && !isMultipart) return null;
     const declared = Number(request.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > maxBytes) return 'too_large';
     if (!request.body) return new URLSearchParams();
@@ -2947,7 +9456,20 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       }
       chunks.push(value);
     }
-    return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    if (!isMultipart) return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    // A file field is read as text under its name; nothing else a form sends is kept apart.
+    let data: FormData;
+    try {
+      data = await new Response(Buffer.concat(chunks), { headers: { 'content-type': header } }).formData();
+    } catch {
+      return null;
+    }
+    const form = new URLSearchParams();
+    for (const [name, value] of data.entries()) {
+      if (typeof value === 'string') form.append(name, value);
+      else if (value.size > 0) form.append(name, await value.text());
+    }
+    return form;
   }
 
   async function createKey(session: Session, form: URLSearchParams): Promise<Response> {
@@ -2957,6 +9479,24 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       return keysPage(session, 400, 'Choose an access level and an expiry from the lists.');
     }
     const days = KEY_EXPIRY_DAYS[expiry];
+    const limited = {
+      locations: [...new Set(form.getAll('limit_location'))],
+      groups: [...new Set(form.getAll('limit_group'))],
+    };
+    const resourceScope = limited.locations.length + limited.groups.length > 0 ? limited : undefined;
+    const limits = keyLimitsOf(form);
+    if (typeof limits === 'string') return keysPage(session, 400, limits);
+    if (resourceScope) {
+      if (scopes.includes('admin')) {
+        return keysPage(session, 400, 'A key limited to locations or groups reads and writes only: choose that access.');
+      }
+      // Keys limited to part of the tenant come with Developer (RFC 0003 pricing); a server without
+      // plans allows them.
+      const plan = plans ? await plans.plan(tenantOf(session)) : null;
+      if (plan?.plan === 'free') {
+        return keysPage(session, 403, 'Keys limited to locations or groups come with the Developer and Team plans. See Usage.');
+      }
+    }
     try {
       const created = await options.keys.create({
         tenantRef: tenantOf(session),
@@ -2964,6 +9504,8 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         scopes,
         createdBy: personOf(session),
         origin: 'dashboard',
+        ...(resourceScope ? { resourceScope } : {}),
+        ...(Object.keys(limits).length > 0 ? { limits } : {}),
         ...(typeof days === 'number' ? { expiresAt: new Date(now() + days * DAY_MS) } : {}),
       });
       return shownOncePage(session, created.key, created.apiKey, false);
@@ -2972,11 +9514,16 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       if (code === 'invalid_api_key_name') {
         return keysPage(session, 400, 'Give the key a name of 1 to 100 characters.');
       }
+      if (code === 'invalid_api_key_resource_scope') {
+        return keysPage(session, 400, 'Choose up to 20 locations and 20 groups from the lists.');
+      }
       if (code === 'api_key_limit_reached') {
         return keysPage(
           session,
           409,
-          'You have as many keys as Slotlock allows. Revoke one first.',
+          plans
+            ? html`You have as many active keys as your plan allows. Revoke one first, or ${await pastLimit(session)}.`
+            : 'You have as many keys as Slotlock allows. Revoke one first.',
         );
       }
       throw error;
@@ -2989,6 +9536,39 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     actor: personOf(session),
     origin: 'dashboard' as const,
   });
+
+  /** A key's limits from its form (RFC 0004 A5): each empty field the server's; else what is wrong. */
+  function keyLimitsOf(form: URLSearchParams): SlotlockApiKeyLimits | string {
+    const whole = (name: string, most: number): number | undefined | null => {
+      const text = (form.get(name) ?? '').trim();
+      if (text === '') return undefined;
+      const value = /^[0-9]{1,7}$/.test(text) ? Number(text) : Number.NaN;
+      return Number.isSafeInteger(value) && value >= 1 && value <= most ? value : null;
+    };
+    const maxHolds = whole('max_holds', 10_000);
+    const maxHeldHours = whole('max_held_hours', 876_000);
+    const requestsPerMinute = whole('requests_per_minute', 100_000);
+    if (maxHolds === null || maxHeldHours === null || requestsPerMinute === null) {
+      return 'Give each limit as a whole number: live holds 1 to 10,000, hours held 1 to 876,000, requests a minute 1 to 100,000. Leave one empty for the server’s.';
+    }
+    return {
+      ...(maxHolds !== undefined ? { maxHolds } : {}),
+      ...(maxHeldHours !== undefined ? { maxHeldHours } : {}),
+      ...(requestsPerMinute !== undefined ? { requestsPerMinute } : {}),
+      ...(form.get('requires_approval') === 'on' ? { requiresApproval: true } : {}),
+    };
+  }
+
+  async function saveKeyLimits(session: Session, form: URLSearchParams): Promise<Response> {
+    const id = form.get('id') ?? '';
+    if (!UUID_PATTERN.test(id)) return keysPage(session, 404, 'That key is not one of yours.');
+    const limits = keyLimitsOf(form);
+    if (typeof limits === 'string') return keysPage(session, 400, limits);
+    if (!(await options.keys.setLimits({ tenantRef: tenantOf(session), id, limits }))) {
+      return keysPage(session, 404, 'That key is not an active key of yours.');
+    }
+    return redirect(303, `${root}/keys`);
+  }
 
   async function changeKey(session: Session, form: URLSearchParams, change: 'rotate' | 'revoke') {
     const id = form.get('id') ?? '';
@@ -3014,10 +9594,13 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     } catch (error) {
       const code = (error as { code?: unknown }).code;
       if (code === 'resource_limit_reached') {
+        const limit = (error as { limit?: unknown }).limit;
         return resourcesPage(
           session,
           409,
-          `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
+          typeof limit === 'number' && limit < SLOTLOCK_DASHBOARD_MAX_RESOURCES
+            ? html`You have ${String(limit)} resources, archived ones included, as many as your plan allows. Delete one, or ${await pastLimit(session)}.`
+            : `You have ${SLOTLOCK_DASHBOARD_MAX_RESOURCES} resources, as many as the dashboard allows.`,
         );
       }
       if (code === 'invalid_timezone') {
@@ -3047,9 +9630,26 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         ),
       );
     }
+    // Single sign-on continues to the team's provider from its own page, with or without a session.
+    if (route === '/sso/start' && ssoStore) {
+      const form = await readForm(request);
+      const handle = form === null || form === 'too_large' ? '' : (form.get('team') ?? '');
+      const found = /^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$/.test(handle) ? await ssoStore.route({ handle }) : null;
+      return found ? startSsoSignIn(found, 'signin') : ssoStartPage(new URL(`${publicRoot}/sso?team=${encodeURIComponent(handle)}`));
+    }
     const session = await readSession(request);
     if (!session) return redirect(303, root);
-    const form = await readForm(request, route === '/assistant' ? MAX_ASSISTANT_FORM_BYTES : MAX_FORM_BYTES);
+    // A holiday calendar may be uploaded, or pasted, up to its own limit.
+    const importing = route === '/closures/import';
+    const form = await readForm(
+      request,
+      importing
+        ? MAX_IMPORT_FORM_BYTES
+        : route === '/assistant' || route === '/assistant/stream'
+          ? MAX_ASSISTANT_FORM_BYTES
+          : MAX_FORM_BYTES,
+      importing,
+    );
     if (form === 'too_large') {
       return respond(
         413,
@@ -3079,6 +9679,7 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
         layout('Not found', html`<p class="notice">Nothing is here.</p>`, session),
       );
     }
+    origins.set(session, requestOrigin(request));
     // A form sent again (a reload of its result, a double click) must not create or rotate twice.
     // Every form but sign-out carries a single-use value, so leaving it out cannot skip this check
     // or the per-person form limit.
@@ -3092,75 +9693,245 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
     if (once !== null) {
       const checked = checkFormNonce(session, once);
       if (checked === 'other_org') {
-        return pageFor(route)(
+        return pageOrNotice(route)(
           session,
           409,
-          'That page was for another organization. Nothing was changed: check the organization and try again.',
+          'That page was for another workspace. Nothing was changed: check the workspace and try again.',
         );
       }
+      // Whose forms these are, for the per-person limit. A session a team's provider began alone
+      // keeps a budget of its own: the provider, which the team's Owner runs, cannot spend the
+      // forms the person sends everywhere else.
+      const owner =
+        session.sc !== undefined
+          ? `sso:${session.sc}:${personOf(session)}`
+          : session.idp === 'google'
+            ? personOf(session)
+            : session.uid;
+      const overLimit = (error: unknown) => (error as { code?: unknown }).code === 'dashboard_form_limit';
       let first: boolean;
       try {
         first =
           checked === 'ok' &&
-          (await options.state.use('form', once, session.exp, session.uid));
+          (await options.state.use('form', once, session.exp, owner).catch((error: unknown) => {
+            // Past the limit a person can still end their sessions: signing out draws on a budget
+            // of its own, and its single-use value is still used once.
+            if (!overLimit(error) || (route !== '/sign-out' && route !== '/sign-out-everywhere')) throw error;
+            return options.state.use('form', once, session.exp, `sign-out:${owner}`);
+          }));
       } catch (error) {
-        if ((error as { code?: unknown }).code !== 'dashboard_form_limit') throw error;
-        return pageFor(route)(
+        if (!overLimit(error)) throw error;
+        return pageOrNotice(route)(
           session,
           429,
           'Too many forms sent from this account in the last 12 hours. Try again later.',
         );
       }
       if (!first) {
-        return pageFor(route)(
+        // The first one was taken: a second click, a reload or a resend shows what it did.
+        if (route.startsWith('/assistant')) {
+          const chat = chatOf(form.get('chat'));
+          return redirect(303, chat ? `${chatUrl(chat)}#latest` : `${root}/assistant#latest`);
+        }
+        return pageOrNotice(route)(
           session,
           409,
           'That form was already sent. Reload the page to start again.',
         );
       }
     }
+    // What the person may do, from their role now: before anything changes, and after the form's
+    // single-use value and the per-person form limit, so refusals cannot flood the audit log.
+    const refused = await authorizePost(session, route, form);
+    if (refused) return refused;
+    // A tenant new to plans is put on the default plan before it adds what plans limit.
+    if (route === '/keys' || route === '/resources' || route === '/webhooks') {
+      await plans?.enrol?.(tenantOf(session));
+    }
+    const response = await dispatchPost(session, route, form, request);
+    const action = AUDITED_ROUTES[route];
+    if (action && response.status < 400) await audit(session, { action, ...auditDetails(route, form) });
+    return response;
+  }
+
+  async function dispatchPost(session: Session, route: string, form: URLSearchParams, request: Request): Promise<Response> {
     switch (route) {
-      case '/sign-out':
+      case '/sign-out-everywhere':
+        // Every session of the person, on every device and server, this one included: only with
+        // the membership store, which holds the epoch every session carries.
+        if (!workspaces) return notFound(session);
+        await workspaces.signOutEverywhere(personOf(session));
+        await workspaces.sessions?.end(personOf(session), null);
         await options.state.endSession(session.sid, session.exp);
         return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
+      case '/sign-out':
+        await options.state.endSession(session.sid, session.exp);
+        await workspaces?.sessions?.end(personOf(session), workspaces.sessions.idOf(session.sid));
+        return redirect(303, root, [setCookie(SESSION_COOKIE, '', 0)]);
+      case '/sessions/end':
+        return endSession(session, form);
       case '/keys':
         return createKey(session, form);
       case '/keys/rotate':
         return changeKey(session, form, 'rotate');
       case '/keys/revoke':
         return changeKey(session, form, 'revoke');
+      case '/keys/limits':
+        return saveKeyLimits(session, form);
       case '/resources':
         return addResource(session, form);
       case '/hours':
         return saveHours(session, form);
+      case '/closures':
+        return saveClosure(session, form);
+      case '/closures/delete':
+        return deleteClosure(session, form);
+      case '/closures/import':
+        return importClosures(session, form);
+      case '/closures/calendars/delete':
+        return deleteHolidayCalendar(session, form);
+      case '/contacts/forget':
+        return forgetContact(session, form);
+      case '/settings/privacy/export':
+        return askPrivacyExport(session);
+      case '/settings/privacy/export/delete':
+        return deletePrivacyExport(session, form);
+      case '/settings/privacy/person':
+        return findPerson(session, form);
+      case '/settings/privacy/person/export':
+        return exportPerson(session, form);
+      case '/settings/privacy/person/erase':
+        return erasePerson(session, form);
       case '/organization':
         return switchOrganization(session, form);
+      case '/environment':
+        return switchEnvironment(session, form);
       case '/resources/rules':
         return saveRules(session, form);
       case '/resources/pool':
         return savePool(session, form);
+      case '/resources/profile':
+        return saveProfile(session, form);
+      case '/resources/place':
+        return savePlace(session, form);
+      case '/resources/parent':
+        return saveParent(session, form);
+      case '/locations':
+        return saveLocation(session, form);
+      case '/locations/delete':
+        return deleteGrouping(session, form, 'location');
+      case '/groups':
+        return saveGroup(session, form);
+      case '/groups/delete':
+        return deleteGrouping(session, form, 'group');
       case '/webhooks':
         return addWebhook(session, form);
       case '/webhooks/delete':
         return changeWebhook(session, form, 'remove');
       case '/webhooks/enable':
         return changeWebhook(session, form, 'enable');
-      case '/waitlist/leave':
-        return leaveWaitlist(session, form);
+      case '/approvals/decide':
+        return decideApproval(session, form);
+      case '/sandbox/seed':
+        return sandboxAction(session, form, 'seed');
+      case '/sandbox/reset':
+        return sandboxAction(session, form, 'reset');
+      case '/sandbox/fast-forward':
+        return sandboxAction(session, form, 'fast-forward');
       case '/assistant':
         return sendToAssistant(session, form);
+      case '/assistant/stream':
+        return streamToAssistant(session, form, request);
       case '/assistant/approve':
         return settleAction(session, form, 'approve');
       case '/assistant/dismiss':
         return settleAction(session, form, 'dismiss');
       case '/assistant/reset':
         return resetAssistant(session);
+      case '/assistant/rename':
+        return renameChat(session, form);
+      case '/assistant/delete':
+        return deleteChat(session, form);
       case '/settings/assistant':
         return saveAssistantSettings(session, form);
+      case '/settings/assistant/models':
+        return loadAssistantModels(session, form);
       case '/settings/assistant/test':
         return testAssistant(session);
       case '/settings/assistant/remove':
         return removeAssistantSettings(session);
+      case '/plan/upgrade':
+        return upgradePlan(session, form);
+      case '/plan/manage':
+        return manageBilling(session);
+      case '/teams/enable':
+        return changeTeam(session, form, true);
+      case '/teams/disable':
+        return changeTeam(session, form, false);
+      case '/teams/create':
+        return createTeam(session, form);
+      case '/teams/delete':
+        return deleteTeam(session, form);
+      case '/teams/restore':
+        return restoreTeam(session);
+      case '/invite/accept':
+        return acceptInvitation(session, form, request);
+      case '/members/invite':
+        return inviteMember(session, form);
+      case '/members/resend':
+        return resendInvitation(session, form);
+      case '/members/revoke':
+        return revokeInvitation(session, form);
+      case '/members/role':
+        return changeMemberRole(session, form);
+      case '/members/scope':
+        return limitMember(session, form);
+      case '/members/remove':
+        return removeMember(session, form);
+      case '/members/leave':
+        return leaveTeam(session);
+      case '/members/requests':
+        return decideJoinRequest(session, form);
+      case '/join/request':
+        return requestToJoin(session, form);
+      case '/identity/domains':
+        return claimDomain(session, form);
+      case '/identity/domains/verify':
+        return verifyDomain(session, form);
+      case '/identity/domains/remove':
+        return releaseDomain(session, form);
+      case '/identity/domains/policy':
+        return changeJoinPolicy(session, form);
+      case '/identity/invites':
+        return restrictInvites(session, form);
+      case '/identity/sso':
+        return saveSsoConnection(session, form);
+      case '/identity/sso/test':
+        return testSsoConnection(session);
+      case '/identity/sso/status':
+        return setSsoStatus(session, form);
+      case '/identity/sso/delete':
+        return deleteSsoConnection(session, form);
+      case '/identity/sso/provisioning':
+        return setSsoProvisioning(session, form);
+      case '/identity/sso/mapping':
+        return setSsoMapping(session, form);
+      case '/identity/sso/require':
+        return setRequireSso(session, form);
+      case '/sso/proof':
+        return startSsoProof(session, form);
+      case '/sso/bypass':
+        return useSsoBypass(session, form);
+      case '/identity/scim/enable':
+        return enableScim(session, form);
+      case '/identity/scim/disable':
+        return disableScim(session);
+      case '/identity/scim/token':
+        return createScimToken(session);
+      case '/identity/scim/token/revoke':
+        return revokeScimToken(session, form);
+      case '/identity/scim/group':
+        return mapScimGroup(session, form);
       default:
         return respond(
           404,
@@ -3175,98 +9946,232 @@ ${org ? html`<p>For the organization <strong>${org.login}</strong>.</p>` : html`
       return pathname === root || pathname.startsWith(`${root}/`);
     },
 
-    async fetch(request) {
-      const url = new URL(request.url);
-      const route = url.pathname.slice(root.length).replace(/\/$/, '') || '/';
-      try {
-        if (request.method === 'GET') {
-          switch (route) {
-            case '/': {
-              const session = await readSession(request);
-              return session ? await overviewPage(session) : signedOutPage(200);
-            }
-            case '/keys':
-            case '/resources':
-            case '/webhooks':
-            case '/waitlist':
-            case '/assistant':
-            case '/settings': {
-              const session = await readSession(request);
-              if (!session) return redirect(303, root);
-              if (route === '/keys') return await keysPage(session);
-              if (route === '/resources') return await resourcesPage(session);
-              if (route === '/webhooks') return await webhooksPage(session);
-              if (route === '/waitlist') return await waitlistPage(session);
-              if (route === '/assistant') return await assistantPage(session);
-              return await settingsPage(session);
-            }
-            case '/style.css':
-              return asset(DASHBOARD_CSS, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
-            case '/app.js':
-              return asset(DASHBOARD_JS, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
-            case '/sign-in':
-              return await startSignIn();
-            case '/callback':
-              return await finishSignIn(request, url);
-            case '/hours': {
-              const session = await readSession(request);
-              return session ? await hoursEditor(session, url) : redirect(303, root);
-            }
-            default: {
-              const resourceId = RESOURCE_PAGE.exec(route)?.[1];
-              if (resourceId !== undefined) {
-                const session = await readSession(request);
-                return session
-                  ? await resourceDetailPage(session, resourceId.toLowerCase())
-                  : redirect(303, root);
-              }
-              return respond(
-                404,
-                layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
+    // Each request with its own scope (dashboard-scope.ts), set once the person's standing is read.
+    fetch: (request) => runSlotlockDashboardRequest(() => serve(request)),
+  };
+
+  async function serve(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const route = url.pathname.slice(root.length).replace(/\/$/, '') || '/';
+    try {
+        // A team's SCIM endpoint: its identity provider's, by bearer token, never a session or a form.
+        if (scimStore && route.startsWith('/scim/v2/')) {
+          const log = options.resources.audit;
+          return await handleSlotlockScimRequest(request, route.slice('/scim/v2/'.length), {
+            scim: scimStore,
+            publicRoot,
+            documentationUri: 'https://slotlock.pylota.io/docs/dashboard/#scim',
+            ...(log ? { record: (tenantRef: string, event: SlotlockAuditEventInput) => log.record(tenantRef, event) } : {}),
+            // Their keys go as the team chose when it turned SCIM on.
+            deactivated: (tenantRef, person, keyPolicy) => (keyPolicy === 'revoke' ? revokeKeysOf(tenantRef, person, 'scim') : Promise.resolve(0)),
+          });
+        }
+      if (request.method === 'GET') {
+        switch (route) {
+          case '/': {
+            const session = await readSession(request);
+            if (!session) return signedOutPage(200);
+            return authorizePage(session, '/') ?? (await overviewPage(session));
+          }
+          case '/keys':
+          case '/resources':
+          case '/webhooks':
+          case '/approvals':
+          case '/assistant':
+          case '/assistant/chats':
+          case '/plan':
+          case '/teams':
+          case '/settings/endpoints':
+          case '/settings/hours':
+          case '/settings/account':
+          case '/settings/members':
+          case '/settings/audit':
+          case '/settings/audit/export':
+          case '/settings/team':
+          case '/settings/privacy':
+          case '/settings/privacy/download':
+          case '/settings/identity':
+          case '/settings': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            const denied = authorizePage(session, route);
+            if (denied) return denied;
+            if (route === '/teams') return await teamsPage(session, 200, undefined, url.searchParams.get('checked') === '1');
+            if (route === '/plan') {
+              return await planPage(
+                session,
+                200,
+                url.searchParams.get('checkout') === 'done'
+                  ? 'Thank you. Your plan changes here once Stripe confirms the payment, usually within a minute.'
+                  : undefined,
+                url.searchParams.get('checkout') === 'done',
               );
             }
+            if (route === '/keys') return await keysPage(session);
+            if (route === '/resources') {
+              return await resourcesPage(session, 200, undefined, url.searchParams.get('hours') === 'own');
+            }
+            if (route === '/webhooks') return await webhooksPage(session);
+            if (route === '/approvals') return await approvalsPage(session);
+            if (route === '/assistant') return await assistantPage(session, 200, undefined, url.searchParams.get('c') ?? undefined);
+            if (route === '/assistant/chats') return await chatsPage(session);
+            if (route === '/settings/endpoints') return await settingsPage(session, 200, undefined, undefined, 'endpoints');
+            if (route === '/settings/hours') return await settingsPage(session, 200, undefined, undefined, 'hours');
+            if (route === '/settings/account') return await settingsPage(session, 200, undefined, undefined, 'account');
+            if (route === '/settings/members') {
+              return teamStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'members')
+                : nothingHere(session);
+            }
+            if (route === '/settings/audit/export') return await exportAudit(session, url.searchParams);
+            if (route === '/settings/privacy') {
+              return options.resources.privacy
+                ? await settingsPage(session, 200, undefined, undefined, 'privacy')
+                : nothingHere(session);
+            }
+            if (route === '/settings/privacy/download') return await downloadPrivacyExport(session, url.searchParams);
+            if (route === '/settings/team') {
+              return teamStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'team')
+                : nothingHere(session);
+            }
+            if (route === '/settings/identity') {
+              return domainStore && session.team !== undefined
+                ? await settingsPage(session, 200, undefined, undefined, 'identity')
+                : nothingHere(session);
+            }
+            if (route === '/settings/audit') {
+              return options.resources.audit
+                ? await settingsPage(session, 200, undefined, undefined, 'audit', undefined, url.searchParams)
+                : nothingHere(session);
+            }
+            // A provider preset fills the assistant's form; nothing is saved until Save.
+            const preset = SLOTLOCK_ASSISTANT_PRESETS.find(
+              (candidate) => candidate.id === url.searchParams.get('preset'),
+            );
+            return await settingsPage(
+              session,
+              200,
+              undefined,
+              preset ? { provider: preset.provider, baseUrl: preset.baseUrl } : undefined,
+            );
+          }
+          case '/style.css':
+            return asset(DASHBOARD_ASSETS.css, 'text/css; charset=utf-8', url, ASSET_VERSIONS.css);
+          case '/app.js':
+            return asset(DASHBOARD_ASSETS.js, 'text/javascript; charset=utf-8', url, ASSET_VERSIONS.js);
+          case '/favicon.svg':
+            return asset(SLOTLOCK_DASHBOARD_ICON_SVG, 'image/svg+xml', url, ASSET_VERSIONS.icon);
+          case '/sign-in': {
+            // After signing in again to confirm it's you, back to the page that asked.
+            const then = url.searchParams.get('then') ?? '';
+            const back = STEP_UP_PAGES.has(then) ? then : undefined;
+            return google && url.searchParams.get('with') === 'google'
+              ? await startGoogleSignIn(google, back)
+              : await startSignIn(
+                  back,
+                  Boolean(teamStore) && (back === '/invite' || (back === '/teams' && Boolean(domainStore))) && url.searchParams.get('email') === '1',
+                );
+          }
+          case '/invite': {
+            if (!teamStore) return nothingHere404();
+            // An invitation's link: its token (in the query, which request logs leave out) is kept
+            // in this browser for the sign-in that accepts it, and nothing else; opening it twice
+            // (a link scanner, a preview) consumes nothing.
+            const raw = url.searchParams.get('t');
+            if (raw !== null) {
+              if (!INVITE_TOKEN.test(raw)) return nothingHere404();
+              const opened = seal('slotlock-dashboard-invite-v1', { t: raw, exp: now() + INVITE_LINK_TTL_MS });
+              return respond(303, '', { Location: `${root}/invite`, 'Referrer-Policy': 'no-referrer' }, [
+                setCookie(INVITE_COOKIE, opened, INVITE_LINK_TTL_MS / 1000),
+              ]);
+            }
+            const session = await readSession(request);
+            return await invitePage(session, inviteTokenOf(request), 200, undefined, url.searchParams.get('checked') === '1');
+          }
+          case '/callback':
+            return await finishSignIn(request, url);
+          case '/sso':
+            return await ssoStartPage(url);
+          case '/hours': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await hoursEditor(session, url));
+          }
+          case '/closures': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await closuresPage(session));
+          }
+          case '/contacts': {
+            const session = await readSession(request);
+            const after = url.searchParams.get('after') ?? undefined;
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await contactsPage(session, 200, undefined, after));
+          }
+          case '/locations': {
+            const session = await readSession(request);
+            if (!session) return redirect(303, root);
+            return authorizePage(session, route) ?? (await locationsPage(session));
+          }
+          default: {
+            // A team's provider's callback, by connection; and single sign-on by a team's handle.
+            const ssoCallback = /^\/sso\/callback\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(route)?.[1];
+            if (ssoCallback !== undefined && ssoStore) return await finishSsoSignIn(request, url, ssoCallback);
+            const ssoHandle = /^\/sso\/([a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?)$/.exec(route)?.[1];
+            if (ssoHandle !== undefined && ssoStore) return await ssoStartPage(url, ssoHandle);
+            const resourceId = RESOURCE_PAGE.exec(route)?.[1];
+            if (resourceId !== undefined) {
+              const session = await readSession(request);
+              if (!session) return redirect(303, root);
+              return authorizePage(session, '/resources/:id') ?? (await resourceDetailPage(session, resourceId.toLowerCase()));
+            }
+            return respond(
+              404,
+              layout('Not found', html`<p class="notice">Nothing is here.</p>`, null),
+            );
           }
         }
-        if (request.method === 'POST') return await handlePost(request, route);
+      }
+      if (request.method === 'POST') return await handlePost(request, route);
+      return respond(
+        405,
+        layout(
+          'Not allowed',
+          html`<p class="notice">Use the dashboard's pages and forms.</p>`,
+          null,
+        ),
+        {
+          Allow: 'GET, POST',
+        },
+      );
+    } catch (error) {
+      // A suspended tenant may look, not change: the store refuses its writes.
+      if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
         return respond(
-          405,
+          403,
           layout(
-            'Not allowed',
-            html`<p class="notice">Use the dashboard's pages and forms.</p>`,
-            null,
-          ),
-          {
-            Allow: 'GET, POST',
-          },
-        );
-      } catch (error) {
-        // A suspended tenant may look, not change: the store refuses its writes.
-        if ((error as { code?: unknown } | null)?.code === 'tenant_suspended') {
-          return respond(
-            403,
-            layout(
-              'Suspended',
-              html`<p class="notice">This account is suspended: its data can be seen, not changed.</p>`,
-              null,
-            ),
-          );
-        }
-        try {
-          ignoreRejection(options.onError?.(error));
-        } catch {
-          // A failing reporter must not change the response.
-        }
-        return respond(
-          500,
-          layout(
-            'Error',
-            html`<p class="notice">Something went wrong. Try again in a moment.</p>`,
+            'Suspended',
+            html`<p class="notice">This account is suspended: its data can be seen, not changed.</p>`,
             null,
           ),
         );
       }
-    },
-  };
+      try {
+        ignoreRejection(options.onError?.(error));
+      } catch {
+        // A failing reporter must not change the response.
+      }
+      return respond(
+        500,
+        layout(
+          'Error',
+          html`<p class="notice">Something went wrong. Try again in a moment.</p>`,
+          null,
+        ),
+      );
+    }
+  }
 }
 
 // Progressive enhancement only, loaded as a file so the policy needs no inline code: copy buttons
@@ -3327,27 +10232,12 @@ const DASHBOARD_CSS = `:root {
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
   --radius-sm: 6px; --radius: 8px; --radius-lg: 12px; --radius-full: 999px;
   --ease: cubic-bezier(0.2, 0, 0, 1); --fast: 120ms; --slow: 180ms;
-  --canvas: #f7f7f8; --surface: #ffffff; --surface-2: #fafafa; --sunken: #f2f2f4; --hover: #f0f0f2;
-  --line: #e6e6e9; --line-strong: #d4d4d8; --line-soft: #efeff1;
-  --ink: #18181b; --ink-2: #52525b; --ink-3: #6b6b74;
-  --accent: #2456e6; --accent-wash: #eef2fe; --ring: rgba(36, 86, 230, 0.28);
-  --button: #18181b; --button-ink: #ffffff; --button-hover: #2e2e33;
-  --good: #11764c; --good-wash: #e9f6ef; --bad: #c42b1c; --bad-ink: #ffffff; --bad-wash: #fdeeec; --bad-line: #f5c9c3;
-  --warn: #8a5300; --warn-wash: #fff5e1; --warn-line: #f3dcae;
-  --brand: #ff5b2e;
-  --pop-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 12px 32px -8px rgba(24, 24, 27, 0.18);
+  ${slotlockCssVars(SLOTLOCK_DASHBOARD_TOKENS.light, '\n  ')}
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --canvas: #0b0b0d; --surface: #111114; --surface-2: #141418; --sunken: #18181c; --hover: #1c1c21;
-    --line: #26262c; --line-strong: #34343b; --line-soft: #1d1d22;
-    --ink: #ededf0; --ink-2: #b4b4bc; --ink-3: #8e8e98;
-    --accent: #7ea2ff; --accent-wash: #18203a; --ring: rgba(126, 162, 255, 0.35);
-    --button: #ededf0; --button-ink: #0b0b0d; --button-hover: #ffffff;
-    --good: #4fca8f; --good-wash: #0f2419; --bad: #ff7a6b; --bad-ink: #1a0806; --bad-wash: #2c1512; --bad-line: #5a2a24;
-    --warn: #f4c25a; --warn-wash: #2a2210; --warn-line: #4d3d17;
-    --pop-shadow: 0 0 0 1px #26262c, 0 16px 40px -8px rgba(0, 0, 0, 0.7);
+    ${slotlockCssVars(SLOTLOCK_DASHBOARD_TOKENS.dark, '\n    ')}
     color-scheme: dark;
   }
 }
@@ -3361,9 +10251,15 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .icon .fill { fill: currentColor; stroke: none; }
-.mark { width: 20px; height: 18px; flex: none; }
-.mark-ink { fill: currentColor; }
-.mark-slot { fill: var(--brand); }
+.mark { width: 17px; height: 20px; flex: none; }
+.mark-shackle { fill: none; stroke: var(--logo-lock); stroke-width: 7; }
+.mark-body, .mark-cut { fill: var(--logo-lock); }
+.mark-slot { fill: var(--logo-slot); }
+.mark-cut { display: none; }
+@media (prefers-color-scheme: dark) {
+  .mark-body, .mark-slot { display: none; }
+  .mark-cut { display: inline; }
+}
 .skip { position: absolute; left: var(--space-3); top: -48px; z-index: 10; padding: var(--space-2) var(--space-3); border-radius: var(--radius); background: var(--button); color: var(--button-ink); font-weight: 600; }
 .skip:focus { top: var(--space-3); text-decoration: none; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -3380,6 +10276,11 @@ code, pre, kbd, input[readonly] { font-family: var(--mono); font-size: 12.5px; }
 .workspace select { flex: 1; min-width: 0; height: 26px; border: 0; padding: 0 18px 0 2px; font-weight: 600; font-size: var(--text-md); background-color: transparent; box-shadow: none; text-overflow: ellipsis; }
 .workspace select:focus { box-shadow: none; }
 .workspace:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.environment { display: flex; gap: 2px; margin: calc(-1 * var(--space-2)) 0 0; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.environment button { flex: 1; height: 26px; padding: 0 var(--space-2); border: 0; border-radius: calc(var(--radius) - 2px); background: none; box-shadow: none; color: var(--muted); font-size: var(--text-sm); font-weight: 600; }
+.environment button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.environment button[aria-pressed="true"][value="test"] { background: var(--warn-wash); color: var(--warn); box-shadow: 0 0 0 1px var(--warn-line); }
+${SLOTLOCK_BANNER_CSS}
 .avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: none; border-radius: var(--radius-sm); background: var(--ink); color: var(--surface); font-size: 11px; font-weight: 700; }
 .nav { display: grid; gap: 1px; }
 .nav a { position: relative; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: var(--radius); color: var(--ink-2); font-weight: 500; font-size: var(--text-md); transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease); }
@@ -3417,13 +10318,83 @@ a.stat:hover { background: var(--surface-2); text-decoration: none; }
 a.stat::after { content: ""; position: absolute; top: 18px; right: 18px; width: 6px; height: 6px; border-top: 1.5px solid var(--ink-3); border-right: 1.5px solid var(--ink-3); transform: rotate(45deg); opacity: 0; transition: opacity var(--fast) var(--ease); }
 a.stat:hover::after, a.stat:focus-visible::after { opacity: 1; }
 a.stat:focus-visible { outline-offset: -2px; border-radius: 0; }
-.stat-label { font: 500 var(--text-xs)/1.4 var(--mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.stat-label { font-size: var(--text-sm); line-height: 1.4; color: var(--ink-3); }
+.attention-stat .stat-value { color: var(--accent); }
 .stat-value { font-size: var(--text-2xl); line-height: 1.1; font-weight: 500; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 
-/* Setup checklist */
-.setup .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; counter-reset: step; }
-.steps li { display: flex; align-items: center; gap: var(--space-3); min-height: 36px; color: var(--ink); font-weight: 500; }
-.steps li.done { color: var(--ink-3); font-weight: 400; text-decoration: line-through; text-decoration-color: var(--line-strong); }
+/* Overview: what needs a person, getting started, the side column */
+.column { display: grid; gap: var(--space-5); align-content: start; min-width: 0; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+.panel-head h2 { margin: 0; }
+.panel-head .meta { flex: none; }
+.attention-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.attention { display: flex; align-items: center; gap: var(--space-4); padding: 10px var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); font-size: var(--text-md); color: var(--ink); box-shadow: inset 3px 0 0 var(--ink-3); }
+.attention.bad { border-color: var(--bad-line); background: var(--bad-wash); box-shadow: inset 3px 0 0 var(--bad); }
+.attention.warn { border-color: var(--warn-line); background: var(--warn-wash); box-shadow: inset 3px 0 0 var(--warn); }
+.attention.info { box-shadow: inset 3px 0 0 var(--accent); }
+.attention-text { flex: 1; min-width: 0; }
+.attention-action { flex: none; font-weight: 600; white-space: nowrap; }
+.segments { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; }
+.segments span { height: 4px; border-radius: var(--radius-full); background: var(--sunken); }
+.segments span.done { background: var(--good); }
+.setup-card .segments { margin-bottom: var(--space-3); }
+.setup-steps { list-style: none; margin: 0; padding: 0; display: grid; }
+.setup-steps li { display: flex; align-items: center; gap: var(--space-3); min-height: 44px; border-top: 1px solid var(--line-soft); color: var(--ink-3); }
+.setup-steps li:first-child { border-top: 0; }
+.setup-steps li.next { color: var(--ink); font-weight: 500; }
+.setup-steps li.done .step-title { text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.setup-steps .step-title { flex: 1; min-width: 0; }
+.setup-row { display: flex; align-items: center; gap: var(--space-4); padding: 10px var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink-2); font-size: var(--text-md); }
+.setup-row:hover { background: var(--surface-2); text-decoration: none; }
+.setup-row .segments { width: 96px; flex: none; }
+.plan-card .panel-head h2 { font-size: var(--text-lg); }
+.meters.stacked { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); margin: 0 0 var(--space-4); }
+.plan-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; }
+.summary-cell { display: grid; gap: 4px; align-content: start; padding: var(--space-4) var(--space-5) 18px; box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); min-width: 0; }
+.summary-label { font-size: var(--text-sm); color: var(--ink-3); }
+.summary-value { display: flex; align-items: center; gap: var(--space-2); min-width: 0; font-size: var(--text-lg); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+.summary-note { font-size: var(--text-sm); color: var(--ink-3); }
+.usage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); align-items: stretch; }
+.usage-grid.single { grid-template-columns: minmax(0, 1fr); }
+.usage-grid .meters.stacked { margin-bottom: 0; }
+.usage-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
+.usage-head h2 { margin: 0; }
+.usage-head .meta { flex: none; }
+.plans { display: grid; gap: var(--space-4); scroll-margin-top: var(--space-6); }
+.plans-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2) var(--space-4); flex-wrap: wrap; }
+.plans-head h2 { margin: 0; }
+.plans-head .meta { white-space: normal; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-2); overflow: hidden; }
+.plan-col { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-6); box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); min-width: 0; scroll-margin-top: var(--space-6); }
+.plan-col.featured { background: var(--surface); box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line), inset 0 2px 0 var(--ink); }
+.plan-col:target { box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line), inset 0 0 0 2px var(--accent); }
+.plan-col-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 22px; }
+h3.plan-name { font: 600 var(--text-lg)/1.3 var(--font); color: var(--ink); text-transform: none; letter-spacing: -0.01em; }
+.plan-tagline { margin: 0; min-height: 2.9em; font-size: var(--text-md); color: var(--ink-3); }
+.plan-price { display: flex; align-items: baseline; gap: 6px; margin: var(--space-2) 0 0; }
+.price-amount { font-size: 34px; line-height: 1; font-weight: 500; letter-spacing: -0.035em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.price-amount.words { font-size: 26px; letter-spacing: -0.025em; }
+.price-per { font-size: var(--text-md); color: var(--ink-3); }
+.price-alt { min-height: 1.5em; margin: 0; font-size: var(--text-sm); color: var(--ink-3); }
+.plan-action { display: grid; gap: var(--space-2); margin: var(--space-1) 0 var(--space-2); }
+.plan-action form { display: grid; gap: var(--space-2); margin: 0; }
+.plan-action .button, .plan-action button, .plan-action select { width: 100%; }
+.plan-hint { margin: 0; font-size: var(--text-sm); color: var(--ink-3); }
+button.plan-current { border-style: dashed; background: transparent; color: var(--ink-3); cursor: default; }
+button.plan-current:hover { border-color: var(--line-strong); background: transparent; }
+.interval { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.interval .choice { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); font-size: var(--text-md); }
+.interval .choice:has(input:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.plan-features { display: grid; gap: 8px; margin: auto 0 0; padding: var(--space-4) 0 0; border-top: 1px solid var(--line); list-style: none; font-size: var(--text-md); color: var(--ink-3); }
+.plan-features li:first-child { color: var(--ink); }
+@media (max-width: 760px) { .usage-grid { grid-template-columns: minmax(0, 1fr); } .plan-col { padding: var(--space-5); } .summary-cell { padding: var(--space-3) var(--space-4) var(--space-4); } }
+.plan-card > .button { width: 100%; justify-content: center; }
+details.command { margin-top: var(--space-4); }
+details.command > summary { cursor: pointer; font-size: var(--text-md); color: var(--ink-2); }
+details.command[open] > summary { margin-bottom: var(--space-2); }
+.copy-block { position: relative; }
+.copy-block pre { padding-right: 72px; font-size: var(--text-sm); }
+.copy-block button { position: absolute; top: 6px; right: 6px; }
 .check { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: var(--radius-full); border: 1.5px dashed var(--line-strong); color: var(--surface); }
 .done .check { background: var(--good); border: 0; }
 .check .icon { width: 12px; height: 12px; stroke-width: 3; }
@@ -3441,7 +10412,11 @@ a.stat:focus-visible { outline-offset: -2px; border-radius: 0; }
 .on { color: var(--ink-3); font-weight: 400; }
 .meta { font-size: var(--text-sm); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed { position: relative; }
-.event { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: var(--space-3); align-items: start; padding: 7px 0; }
+.event { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: var(--space-3); align-items: start; padding: 7px 0; }
+.event .title { font-weight: 400; color: var(--ink-2); white-space: normal; overflow-wrap: anywhere; }
+.event .title strong { font-weight: 600; color: var(--ink); }
+.event .when { font-size: var(--text-sm); font-weight: 400; color: var(--ink-3); white-space: nowrap; padding-top: 1px; }
+.times { font-size: var(--text-sm); color: var(--ink-3); }
 .event:not(:last-child)::before { content: ""; position: absolute; left: 5.5px; top: 22px; bottom: -8px; width: 1px; background: var(--line); }
 .dot { position: relative; width: 12px; height: 12px; margin-top: 4px; border-radius: var(--radius-full); background: var(--surface); box-shadow: inset 0 0 0 3px var(--ink-3); }
 .dot.good { box-shadow: inset 0 0 0 3px var(--good); }
@@ -3466,23 +10441,28 @@ a.stat:focus-visible { outline-offset: -2px; border-radius: 0; }
 .page > .facts { padding: var(--space-4) var(--space-6); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
 
 /* Forms */
-label { display: grid; gap: 6px; font-size: var(--text-sm); font-weight: 500; color: var(--ink-2); min-width: 0; }
-input, select, textarea { font: inherit; font-size: 14px; color: var(--ink); background-color: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); min-width: 0; transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
+label { display: grid; gap: 6px; font-size: 13px; font-weight: 500; color: var(--ink); min-width: 0; }
+/* Fields: their own colour against any card, a hairline that darkens on hover, the accent and a ring
+   on focus, and a stroked chevron on selects (drawn with gradients: the page loads no images). */
+input, select, textarea { font: inherit; font-size: 14px; color: var(--ink); background-color: var(--field); border: 1px solid var(--field-line); border-radius: var(--radius); min-width: 0; box-shadow: var(--field-shadow); transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
 input, select { height: 36px; padding: 0 var(--space-3); }
-input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 0.8; }
-input:hover, select:hover, textarea:hover { border-color: var(--ink-3); }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--ring); }
-input[readonly] { background-color: var(--surface-2); }
-select { -webkit-appearance: none; appearance: none; padding-right: 32px; cursor: pointer; background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%); background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
-input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--ink); flex: none; }
+input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 0.75; font-family: var(--font); }
+input:hover, select:hover, textarea:hover { border-color: var(--field-line-hover); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; box-shadow: var(--field-shadow), 0 0 0 3px var(--ring); }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+input[readonly] { background-color: var(--sunken); box-shadow: none; }
+select { -webkit-appearance: none; appearance: none; padding-right: 34px; cursor: pointer; text-overflow: ellipsis; background-image: linear-gradient(45deg, transparent 40%, var(--ink-3) 40%, var(--ink-3) 60%, transparent 60%), linear-gradient(-45deg, transparent 40%, var(--ink-3) 40%, var(--ink-3) 60%, transparent 60%); background-position: right 17px center, right 12px center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--ink); flex: none; box-shadow: none; }
 input[type="time"] { font-variant-numeric: tabular-nums; }
 textarea { padding: 10px var(--space-3); resize: vertical; min-height: 72px; line-height: 1.5; }
 .create { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin: 0; }
 .create .grow { flex: 1 1 220px; }
 label > input, label > select, label > .unit-input { width: 100%; }
+label > textarea { width: 100%; padding: var(--space-2) var(--space-3); resize: vertical; }
 label.choice > input { width: 16px; }
 .create label:not(.grow) { flex: 0 1 auto; }
 form > label { margin-bottom: var(--space-3); }
+.create > label { margin-bottom: 0; }
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-4) var(--space-3); margin-bottom: var(--space-4); align-items: end; }
 .unit-input { display: flex; align-items: center; gap: var(--space-2); }
 .unit-input input { width: 100%; }
@@ -3497,6 +10477,37 @@ form .choice { margin: var(--space-1) 0 var(--space-3); }
 .types summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-md); width: fit-content; }
 .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--space-2) var(--space-4); margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
 .checks .choice { font-size: var(--text-md); margin: 0; }
+.choices { border: 0; padding: 0; margin: var(--space-4) 0; min-width: 0; }
+.choices legend { font-size: var(--text-sm); font-weight: 500; color: var(--ink-2); padding: 0; }
+.choices .checks { margin-top: 6px; }
+.fine + .table, .fine + .empty { margin-top: var(--space-4); }
+.pop label { margin-bottom: var(--space-3); }
+.pop textarea { width: 100%; }
+/* A team being deleted */
+.deleting-banner { background: var(--bad-soft, var(--surface-2)); }
+.suspended-banner { background: var(--bad-soft, var(--surface-2)); }
+${SLOTLOCK_ANNOUNCEMENT_BANNER_CSS}
+/* Sessions (Settings, Account) */
+h2.sessions-head { margin-top: var(--space-6); }
+/* Audit log */
+form.audit-filter { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-3); margin: 0 0 var(--space-4); }
+form.audit-filter label { flex-basis: 100%; margin: 0; }
+form.audit-filter select { width: auto; }
+dl.audit-details { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); margin: 0; font-size: var(--text-sm); }
+dl.audit-details dt { color: var(--ink-2); }
+dl.audit-details dd { margin: 0; overflow-wrap: anywhere; }
+.pager, .audit-tools { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-4); }
+.audit-tools { margin: 0 0 var(--space-4); }
+/* Teams: one-line forms that create a team or invite to one */
+form.create-team, form.invite { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-3); margin: var(--space-5) 0; }
+form.create-team label, form.invite label { flex-basis: 100%; margin: 0; }
+form.create-team input, form.invite input { flex: 1 1 240px; min-width: 0; }
+form.invite select { flex: 0 1 auto; width: auto; }
+.team-workspaces .table + .table { margin-top: var(--space-4); }
+.seats { margin: var(--space-4) 0; color: var(--ink-2); }
+.pop fieldset { border: 0; padding: 0; margin: 0 0 var(--space-3); }
+.pop legend { font-weight: 500; padding: 0; margin-bottom: var(--space-2); }
+.pop fieldset label { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-1); font-weight: 400; }
 
 /* Buttons */
 button, .button { font: inherit; font-size: var(--text-md); font-weight: 500; height: 36px; padding: 0 var(--space-4); border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); white-space: nowrap; transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease), transform var(--fast) var(--ease); }
@@ -3562,6 +10573,22 @@ form > .table { margin-bottom: var(--space-3); }
 /* Notices and empty states */
 .notice { display: block; border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-3) var(--space-4); background: var(--surface); color: var(--ink); margin: 0; font-size: var(--text-md); }
 .notice[role="alert"] { border-color: var(--bad-line); background: var(--bad-wash); color: var(--ink); box-shadow: inset 3px 0 0 var(--bad); }
+.meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-5) var(--space-6); margin: var(--space-4) 0; }
+.meter { display: grid; gap: 6px; min-width: 0; }
+.meter-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-2); font-size: var(--text-md); color: var(--ink-2); }
+.meter-value { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+.meter progress { appearance: none; -webkit-appearance: none; width: 100%; height: 6px; border: 0; border-radius: var(--radius-full); background: var(--sunken); overflow: hidden; }
+.meter progress::-webkit-progress-bar { background: var(--sunken); border-radius: var(--radius-full); }
+.meter progress::-webkit-progress-value { background: var(--ink-2); border-radius: var(--radius-full); }
+.meter progress::-moz-progress-bar { background: var(--ink-2); border-radius: var(--radius-full); }
+.meter.warn progress::-webkit-progress-value { background: var(--warn); }
+.meter.warn progress::-moz-progress-bar { background: var(--warn); }
+.meter.bad progress::-webkit-progress-value { background: var(--bad); }
+.meter.bad progress::-moz-progress-bar { background: var(--bad); }
+.meter.bad .meter-value { color: var(--bad); }
+.plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.plan-head h2 { margin: 0; }
+.notice.done { border-color: color-mix(in srgb, var(--good) 35%, var(--line)); background: var(--good-wash); color: var(--ink); box-shadow: inset 3px 0 0 var(--good); }
 .notice.warn, .notice.warn[role="alert"] { border-color: var(--warn-line); background: var(--warn-wash); color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); }
 .notice p { color: inherit; margin: 0 0 var(--space-2); }
 .empty { color: var(--ink-3); margin: 0; }
@@ -3591,30 +10618,33 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 .bare-main { display: grid; place-items: start center; padding: 10vh var(--space-4) var(--space-12); }
 .sign-in { width: 100%; max-width: 400px; padding: var(--space-8); border: 1px solid var(--line); border-radius: 16px; background: var(--surface); display: grid; gap: var(--space-3); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 24px 48px -24px rgba(0, 0, 0, 0.12); }
 .sign-in-mark { display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: var(--space-2); border-radius: var(--radius-lg); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); }
-.sign-in-mark .mark { width: 24px; height: 22px; }
-.sign-in h1 { font-size: 20px; }
+.sign-in-mark .mark { width: 21px; height: 24px; }
+.sign-in h1 { font-size: 22px; line-height: 1.25; letter-spacing: -0.02em; }
+.sign-in h1 .soft { display: block; color: var(--ink-3); }
 .sign-in p { margin: 0; }
+.sign-in .lead { margin-top: calc(-1 * var(--space-1)); color: var(--ink-2); font-size: var(--text-md); line-height: 1.5; }
+.sign-in .notice { margin: var(--space-1) 0 0; }
 .sign-in .button { margin-top: var(--space-3); }
+.auth-form { display: grid; gap: var(--space-2); margin-top: var(--space-2); }
+.auth-form input:not([type="hidden"]) { width: 100%; height: 42px; }
+.auth-form .wide { margin-top: var(--space-2); }
+.or { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: var(--space-3); margin-top: var(--space-2); color: var(--ink-3); font-size: var(--text-sm); }
+.or::before, .or::after { content: ""; height: 1px; background: var(--line); }
+.or + .button { margin-top: var(--space-2); }
+.sign-in .button.wide + .button.wide { margin-top: 0; }
+.auth-links { display: grid; margin-top: var(--space-3); border-top: 1px solid var(--line-soft); }
+.auth-links a { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: 44px; border-bottom: 1px solid var(--line-soft); color: var(--ink); font-size: var(--text-md); text-decoration: none; }
+.auth-links a:hover { color: var(--accent); }
+.auth-links .icon { color: var(--ink-3); }
+.invite-facts { margin: var(--space-2) 0 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
+.invite-facts div { display: flex; justify-content: space-between; gap: var(--space-4); padding: 10px 14px; border-top: 1px solid var(--line-soft); font-size: var(--text-sm); }
+.invite-facts div:first-child { border-top: 0; }
+.invite-facts dt { color: var(--ink-3); }
+.invite-facts dd { margin: 0; min-width: 0; color: var(--ink); font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.auth-center { display: grid; place-items: start center; padding-top: 4vh; }
 .bare-main > .notice { max-width: 480px; }
 
 /* Assistant */
-.chat { display: grid; gap: var(--space-5); }
-.thread { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
-.msg { max-width: 78%; padding: 10px 14px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--line); }
-.msg p { margin: 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg.mine { justify-self: end; background: var(--button); border-color: var(--button); border-bottom-right-radius: 4px; }
-.msg.mine p { color: var(--button-ink); }
-.msg.bot { justify-self: start; border-bottom-left-radius: 4px; }
-.tool-line { font: 400 var(--text-sm)/1.5 var(--mono); color: var(--ink-3); padding-left: var(--space-1); }
-.thread > .notice { justify-self: start; }
-.action-card { justify-self: start; width: min(100%, 540px); padding: var(--space-4) var(--space-5); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--pop-shadow); display: grid; gap: var(--space-3); }
-.action-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.action-card .facts { font-size: var(--text-md); gap: 6px var(--space-4); }
-.action-card .facts dt::first-letter { text-transform: uppercase; }
-.action-card pre.wrap { white-space: pre-wrap; margin: 0; padding: var(--space-2); font-size: 12px; }
-.action-summary { margin: 0; color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
-.action-card .action-buttons { margin-top: var(--space-1); }
-.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--line-soft); }
 
 @media (max-width: 1080px) {
   .split { grid-template-columns: minmax(0, 1fr); }
@@ -3627,6 +10657,7 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .side-top .brand .name { display: none; }
   .workspace { flex: 1; min-width: 0; padding: 3px 4px; }
   .workspace .avatar { display: none; }
+  .environment { margin: 0; flex: none; }
   .me { grid-column: 2; grid-row: 1; margin: 0; padding: 0; border: 0; }
   .me-avatar, .me .login { display: none; }
   .sign-out { width: 36px; height: 36px; padding: 0; }
@@ -3643,6 +10674,8 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat { padding: 14px var(--space-4); box-shadow: -1px 0 0 var(--line), 0 -1px 0 var(--line); }
   .stat-value { font-size: 22px; }
+  .attention { flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+  .setup-row .segments { width: 56px; }
   .create > * { flex: 1 1 100%; }
   .create button { width: 100%; }
   .endpoints { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
@@ -3665,13 +10698,12 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
   .week th[scope="row"] { display: block; padding: var(--space-2) var(--space-4) 0; }
   .actions { text-align: left; width: auto; padding-top: var(--space-2); }
   .act { margin: 0 var(--space-2) 0 0; }
+  .actions form.inline { margin-right: var(--space-2); }
   .act:first-child, form.inline + .act { margin-left: 0; }
   .act summary { border: 1px solid var(--line-strong); height: 32px; }
   .act.danger summary { border-color: var(--bad-line); }
   .pop { left: 0; right: auto; width: min(300px, calc(100vw - 48px)); transform-origin: top left; }
   .table .pop { margin-left: 0; }
-  .msg { max-width: 92%; }
-  .composer { grid-template-columns: minmax(0, 1fr); }
   .empty-state { padding: var(--space-8) var(--space-4); }
   .bare-main { padding-top: 6vh; }
   .sign-in { padding: var(--space-6); }
@@ -3684,7 +10716,25 @@ pre { background: var(--surface-2); border: 1px solid var(--line); border-radius
 }
 `;
 
+/** A composite the store refused, in a person's words. */
+const COMPOSITE_PROBLEMS: Readonly<Record<string, string>> = Object.freeze({
+  parent_not_found: 'That is not one of your resources.',
+  composite_too_deep: 'A part has no parts of its own, and a whole is no part: choose a resource that stands alone.',
+  composite_parts_limit: 'A whole has at most 50 parts.',
+  composite_busy: 'One of them has a booking or hold still to come. A composite changes only while neither does.',
+});
+
+/** What the Usage page calls each plan. */
+const PLAN_NAMES: Readonly<Record<SlotlockPlan, string>> = Object.freeze({ free: 'Free', developer: 'Developer', team: 'Team' });
+
+const DASHBOARD_ASSETS = Object.freeze({
+  css: DASHBOARD_CSS + SLOTLOCK_ASSISTANT_CSS + SLOTLOCK_SETTINGS_CSS,
+  // The chat's script renders a reply with the server's own Markdown renderer, embedded.
+  js: DASHBOARD_JS + slotlockAssistantScript(renderSlotlockMarkdown.toString()),
+});
+
 const ASSET_VERSIONS = Object.freeze({
-  css: createHash('sha256').update(DASHBOARD_CSS).digest('base64url').slice(0, 12),
-  js: createHash('sha256').update(DASHBOARD_JS).digest('base64url').slice(0, 12),
+  css: createHash('sha256').update(DASHBOARD_ASSETS.css).digest('base64url').slice(0, 12),
+  js: createHash('sha256').update(DASHBOARD_ASSETS.js).digest('base64url').slice(0, 12),
+  icon: createHash('sha256').update(SLOTLOCK_DASHBOARD_ICON_SVG).digest('base64url').slice(0, 12),
 });

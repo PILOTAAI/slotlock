@@ -172,6 +172,7 @@ describe('Compose quickstart', () => {
       'SLOTLOCK_GITHUB_CLIENT_SECRET',
       'SLOTLOCK_SESSION_SECRET',
       'SLOTLOCK_ASSISTANT_SECRET',
+      'SLOTLOCK_ASSISTANT_PREVIOUS_SECRETS',
     ]) {
       expect(exampleKeys.get(secret), secret).toBe('');
     }
@@ -185,7 +186,8 @@ describe('Compose quickstart', () => {
     );
     expect(passed, 'canary: the service environment was found').toContain('DATABASE_URL');
     // The owner's URL belongs to the one-off migrate service; HOST and PORT are the image's own.
-    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'HOST', 'PORT']);
+    // The admin console's URL is for migrate alone, on a deployment that runs the console (RFC 0006).
+    const owned = new Set(['SLOTLOCK_MIGRATE_DATABASE_URL', 'SLOTLOCK_ADMIN_DATABASE_URL', 'HOST', 'PORT']);
     const missing = SLOTLOCK_ENVIRONMENT_VARIABLES.filter(
       (name) => !owned.has(name) && !passed.has(name),
     );
@@ -589,6 +591,54 @@ describe('release automation', () => {
     expect(release).not.toContain('uses: actions/attest@');
   });
 
+  // --signer-workflow alone matches image.yml run from any ref: a writer who is not the ghcr
+  // reviewer could push a branch whose workflow calls image.yml without its environment, and its
+  // attestation would pass. So every documented check also names the source ref, the release's tag
+  // (gh 2.89.0's --source-ref), and refuses a self-hosted runner.
+  it('documents the image check bound to image.yml at the release tag, wherever it is given', () => {
+    const markdown = (directory: string) =>
+      readdirSync(join(root, directory), { recursive: true, encoding: 'utf8' })
+        .filter((file) => file.endsWith('.md'))
+        .map((file) => join(directory, file));
+    const texts = [
+      ...workflows.map(({ file, text }) => ({
+        file: `.github/workflows/${file}`,
+        text: text.replace(/^\s*# ?/gm, ''),
+      })),
+      ...[
+        ...readdirSync(root).filter((file) => file.endsWith('.md') && file !== 'CHANGELOG.md'),
+        ...markdown('docs'),
+        ...markdown('site/docs-src'),
+      ].map((file) => ({ file, text: read(file) })),
+    ];
+    const commands = texts.flatMap(({ file, text }) =>
+      text
+        .split('gh attestation verify ')
+        .slice(1)
+        .map((rest) => ({
+          file,
+          command: (rest.split(/`|\n\s*\n/)[0] ?? '').replace(/\\\n/g, ' ').replace(/\s+/g, ' ').trim(),
+        })),
+    );
+    expect(commands.map(({ file }) => file).sort()).toEqual([
+      '.github/workflows/image.yml',
+      'SECURITY.md',
+      'site/docs-src/self-host.md',
+    ]);
+    for (const { file, command } of commands) {
+      const version = /^oci:\/\/ghcr\.io\/pilotaai\/slotlock:(<version>|\{\{version\}\}) /.exec(command)?.[1];
+      expect(version, `${file}: ${command}`).toBeDefined();
+      for (const flag of [
+        '--repo PILOTAAI/slotlock',
+        '--signer-workflow PILOTAAI/slotlock/.github/workflows/image.yml',
+        `--source-ref refs/tags/v${version ?? ''}`,
+        '--deny-self-hosted-runners',
+      ]) {
+        expect(command, file).toContain(flag);
+      }
+    }
+  });
+
   it('only stages on npm, and asks for the bootstrap when npm refuses the credential', () => {
     const text = workflow('release.yml');
     const stage = text.slice(text.indexOf('\n  stage:\n'), text.indexOf('\n  github-release:\n'));
@@ -757,19 +807,104 @@ describe.skipIf(!hasJq)('GitHub configuration', () => {
     for (const name of ['npm', 'ghcr', 'mcp-registry']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([{ type: 'User', id: 0 }]);
     }
-    for (const name of ['release-tag', 'release-app', 'site']) {
+    for (const name of ['release-tag', 'release-app', 'site', 'dashboard', 'site-preview']) {
       expect(environment(requests, name)?.reviewers, name).toEqual([]);
+    }
+    // The CMS's schedule uses the release app's environment: there is no cms environment, and the
+    // preview token is on main only too, where site-preview.yml's workflow_run job runs as main has it.
+    expect(environment(requests, 'cms')).toBeUndefined();
+    const policy = (name: string) =>
+      requests.find(
+        (request) =>
+          request.method === 'POST' && request.path === `repos/PILOTAAI/slotlock/environments/${name}/deployment-branch-policies`,
+      )?.body;
+    expect(policy('site-preview')).toEqual({ name: 'main', type: 'branch' });
+    // The dashboard's deploy token can replace the Worker and read its session secret: main only.
+    expect(policy('dashboard')).toEqual({ name: 'main', type: 'branch' });
+  });
+
+  // dashboard-deploy.yml holds a token that can replace the dashboard Worker. It runs as main has
+  // it (workflow_run), only for a push to this repository's main that CI passed (a pull request
+  // from a fork's branch called main runs CI too, with head_branch main), and deploys exactly the
+  // commit CI tested, still main's newest.
+  it('deploys the dashboard only from main, on the commit CI passed, from main\'s workflow', () => {
+    const deploy = read('.github/workflows/dashboard-deploy.yml');
+    expect(deploy).toMatch(/^on:\n  workflow_run:\n    workflows: \[CI\]\n    types: \[completed\]\n    branches: \[main\]\n  workflow_dispatch:\n/m);
+    expect(deploy).not.toMatch(/^\s*(pull_request|pull_request_target|push):/m);
+    for (const condition of [
+      "github.repository == 'PILOTAAI/slotlock'",
+      "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+      "github.event.workflow_run.conclusion == 'success'",
+      "github.event.workflow_run.event == 'push'",
+      "github.event.workflow_run.head_branch == 'main'",
+      'github.event.workflow_run.head_repository.full_name == github.repository',
+    ]) expect(deploy).toContain(condition);
+    // Only the deploy job enters the environment, and only after the pick job chose a commit.
+    expect(deploy.match(/^    environment:\n      name: dashboard$/gm)).toHaveLength(1);
+    expect(deploy).toContain("needs: pick\n    if: needs.pick.outputs.sha != ''");
+    expect(deploy).toContain('ref: ${{ needs.pick.outputs.sha }}');
+    // main is refs/heads/main, never the bare name a tag called main would also answer to; the
+    // deploy job checks it again before any secret, so a re-run of an old run deploys nothing.
+    expect(deploy.match(/repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main/g)).toHaveLength(2);
+    expect(deploy).not.toMatch(/commits\/main\b/);
+    expect(deploy).toContain("if: steps.current.outputs.deploy == 'true'\n        env:\n          CLOUDFLARE_API_TOKEN");
+    expect(deploy).toContain('npm ci --omit=dev --ignore-scripts');
+    expect(deploy).toContain('cancel-in-progress: false');
+    // The tested commit reaches the shell through the environment, never interpolated into it.
+    for (const line of deploy.split('\n').filter((text) => /^\s+(run:|\S.*\$\(|if \[|echo )/.test(text))) {
+      expect(line).not.toContain('${{ github.event');
+    }
+    expect(deploy).toContain('TESTED: ${{ github.event.workflow_run.head_sha }}');
+    expect(deploy).toContain('run: node scripts/deploy-dashboard.mjs');
+  });
+
+  // A pull_request job runs the workflow as the pull request has it: no such job may hold a secret
+  // or enter an environment. The CMS's previews come from a workflow_run workflow, which runs as main
+  // has it, and reads the run's pull request, branch and repository from GitHub's event, through the
+  // environment only, never interpolated into a shell line.
+  it('keeps every token out of pull_request jobs, and builds CMS previews from main\'s workflow', () => {
+    const site = read('.github/workflows/site.yml');
+    expect(site).not.toMatch(/\n  preview:\n/);
+    expect(site).not.toContain('environment:\n      name: site-preview');
+    expect(site).not.toContain('pull_request.number');
+    const preview = read('.github/workflows/site-preview.yml');
+    expect(preview).toMatch(/^on:\n  workflow_run:\n    workflows: \[Site\]\n    types: \[completed\]\n/m);
+    expect(preview).not.toMatch(/^\s*(pull_request|pull_request_target|push):/m);
+    expect(preview).toMatch(/^permissions: \{\}$/m);
+    for (const condition of [
+      "github.event.workflow_run.event == 'pull_request'",
+      "github.event.workflow_run.conclusion == 'success'",
+      'github.event.workflow_run.head_repository.full_name == github.repository',
+      "startsWith(github.event.workflow_run.head_branch, 'cms/')",
+      "vars.SITE_PREVIEW_HOST != ''",
+    ]) expect(preview).toContain(condition);
+    // The checkout is main's; the build comes only as the run's artifact.
+    expect(preview).toContain('ref: ${{ github.event.repository.default_branch }}');
+    expect(preview).toContain('run-id: ${{ github.event.workflow_run.id }}');
+    expect(preview).not.toMatch(/ref: \$\{\{ github\.event\.workflow_run\.head|github\.head_ref/);
+    // No value of the event is interpolated into a shell line: the branch name is the pusher's to choose.
+    const find = preview.slice(preview.indexOf('- name: Find the pull request'), preview.indexOf('- uses: actions/checkout'));
+    expect(find.slice(find.indexOf('run: |'))).not.toContain('${{');
+    expect(find).toContain('HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}');
+    for (const line of preview.split('\n').filter((text) => /^\s*run: /.test(text))) {
+      expect(line).not.toContain('${{ github.event');
     }
   });
 
   // A stand-in for gh that answers configure-github.sh, logs each request, and keeps the deploy
-  // key, rulesets and secret it is sent. STUB_WORKFLOW_PERMISSIONS refuses the Actions workflow
-  // permissions as GitHub does (409) for an organization setting; STUB_CHECK_RUNS is main's "CI
-  // passed" list.
+  // key, rulesets and secret it is sent (also as secret-<name>-<environment>). STUB_SECRETS lists
+  // the release-tag environment's secrets, STUB_GO_SECRETS the go-module one's (the same unless
+  // set). STUB_WORKFLOW_PERMISSIONS refuses the Actions workflow permissions as GitHub does (409)
+  // for an organization setting; STUB_CHECK_RUNS is main's "CI passed" list.
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
 case "$1 $2" in
-  'secret set') cat > "$STUB_LOG/secret-$3"; ls "$TMPDIR" > "$STUB_LOG/tmpdir-while-storing"; exit 0 ;;
+  'secret set')
+    cat > "$STUB_LOG/secret-$3"
+    cp "$STUB_LOG/secret-$3" "$STUB_LOG/secret-$3-$5"
+    ls "$TMPDIR" > "$STUB_LOG/tmpdir-while-storing"
+    exit 0 ;;
+  'variable set') cat > "$STUB_LOG/variable-$3"; exit 0 ;;
 esac
 case "$*" in
   *'--jq .id') echo 42; exit 0 ;;
@@ -799,6 +934,8 @@ case "$path" in
   */code-scanning/default-setup) echo '{"state":"configured","languages":["actions","javascript-typescript"],"query_suite":"extended"}' ;;
   */deployment-branch-policies*) echo '{"branch_policies":[]}' ;;
   */environments/release-tag/secrets*) echo "$STUB_SECRETS" ;;
+  */environments/go-module/secrets*) echo "\${STUB_GO_SECRETS:-$STUB_SECRETS}" ;;
+  */environments/dashboard/secrets*) echo '{"secrets":[{"name":"CLOUDFLARE_API_TOKEN"},{"name":"CLOUDFLARE_ACCOUNT_ID"}]}' ;;
   repos/PILOTAAI/slotlock/keys*) echo "$STUB_KEYS" ;;
   */rulesets\\?*) echo '[]' ;;
   *) echo '{}' ;;
@@ -816,7 +953,13 @@ esac
     });
 
   function configure(
-    scenario: { keys: string; secrets: string; workflowPermissions?: string; checkRuns?: string },
+    scenario: {
+      keys: string;
+      secrets: string;
+      goSecrets?: string;
+      workflowPermissions?: string;
+      checkRuns?: string;
+    },
     ...args: string[]
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'slotlock-configure-'));
@@ -835,6 +978,7 @@ esac
         STUB_LOG: log,
         STUB_KEYS: scenario.keys,
         STUB_SECRETS: scenario.secrets,
+        STUB_GO_SECRETS: scenario.goSecrets ?? '',
         STUB_WORKFLOW_PERMISSIONS: scenario.workflowPermissions ?? '',
         STUB_CHECK_RUNS: scenario.checkRuns ?? ciPassed('success'),
       },
@@ -869,6 +1013,35 @@ esac
     expect(waiting.rulesets, 'the tag rulesets still apply').toHaveLength(2);
     expect(waiting.stderr).toContain(`"CI passed" has not succeeded on main`);
     expect(waiting.stdout).toContain("[ ] Apply the ruleset 'Protect main'");
+  });
+
+  it('stores the dashboard deploy configuration only once it passes the deploy\'s own check', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'slotlock-dashboard-config-'));
+    scratch.push(dir);
+    const example = read('workers/dashboard/wrangler.jsonc');
+    const production = join(dir, 'production.jsonc');
+    writeFileSync(
+      production,
+      example
+        .replaceAll('dashboard.example.com', 'app.slotlock.pylota.io')
+        .replace('slotlock.example.com', 'slotlock-api.pylota.io')
+        .replace('set-this-to-the-hyperdrive-configuration-id', '0123456789abcdef0123456789abcdef'),
+    );
+    const stored = configure(present, '--dashboard-deploy', production);
+    expect(stored.status, stored.stderr).toBe(0);
+    expect(readFileSync(join(stored.log, 'variable-SLOTLOCK_DASHBOARD_WRANGLER_CONFIG'), 'utf8')).toBe(
+      readFileSync(production, 'utf8'),
+    );
+    expect(stored.calls).toContain('variable set SLOTLOCK_DASHBOARD_WRANGLER_CONFIG --env dashboard --repo PILOTAAI/slotlock');
+    expect(stored.stdout).toContain('CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN already set');
+    // The example itself is refused before GitHub is asked to change anything.
+    const example_ = join(dir, 'example.jsonc');
+    writeFileSync(example_, example);
+    const refused = configure(present, '--dashboard-deploy', example_);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('still holds values from the example');
+    expect(refused.calls.filter((call) => !call.startsWith('api user') && !/^api --method GET/.test(call))).toEqual([]);
+    expect(existsSync(join(refused.log, 'variable-SLOTLOCK_DASHBOARD_WRANGLER_CONFIG'))).toBe(false);
   });
 
   it('locks main behind "CI passed" once that check has succeeded on main', () => {
@@ -928,9 +1101,13 @@ esac
       expect(sent.key).toMatch(/^ssh-ed25519 \S+ slotlock tag-release \(GitHub Actions\)$/);
       const secret = join(run.log, 'secret-TAG_RELEASE_DEPLOY_KEY');
       expect(readFileSync(secret, 'utf8')).toMatch(/^-----BEGIN OPENSSH PRIVATE KEY-----\n/);
-      expect(run.calls).toContain(
-        'secret set TAG_RELEASE_DEPLOY_KEY --env release-tag --repo PILOTAAI/slotlock',
-      );
+      // tag-release.yml pushes v* tags with it, and release.yml's go-module job clients/go/v* tags.
+      for (const environment of ['release-tag', 'go-module']) {
+        expect(run.calls).toContain(
+          `secret set TAG_RELEASE_DEPLOY_KEY --env ${environment} --repo PILOTAAI/slotlock`,
+        );
+        expect(readFileSync(`${secret}-${environment}`, 'utf8')).toBe(readFileSync(secret, 'utf8'));
+      }
       // The secret is the private half of the key GitHub was sent.
       chmodSync(secret, 0o600);
       const derived = execFileSync('ssh-keygen', ['-y', '-f', secret], { encoding: 'utf8' });
@@ -969,6 +1146,25 @@ esac
       expect(deleted).toBeGreaterThan(stored);
       expect(readdirSync(run.temp)).toEqual([]);
     });
+
+    // A repository set up before the go-module job pushed with the key: GitHub never returns a
+    // secret, so the only way to hand the job the key is a new one, in both environments.
+    it('replaces the key when the go-module environment lacks it, storing the new one in both', () => {
+      const run = configure({ ...present, goSecrets: '{"secrets":[]}' });
+      expect(run.status, run.stderr).toBe(0);
+      const sets = run.calls.filter((call) => call.startsWith('secret set'));
+      expect(sets).toEqual([
+        'secret set TAG_RELEASE_DEPLOY_KEY --env release-tag --repo PILOTAAI/slotlock',
+        'secret set TAG_RELEASE_DEPLOY_KEY --env go-module --repo PILOTAAI/slotlock',
+      ]);
+      const deleted = run.calls.findIndex(
+        (call) =>
+          call.startsWith('api --method DELETE') &&
+          call.endsWith(' repos/PILOTAAI/slotlock/keys/7'),
+      );
+      expect(deleted).toBeGreaterThan(run.calls.indexOf(sets[1] ?? ''));
+      expect(readdirSync(run.temp)).toEqual([]);
+    });
   });
 });
 
@@ -1001,8 +1197,12 @@ esac`,
     gh: `case "$*" in
   'api -H Accept: application/vnd.github.raw+json repos/PILOTAAI/slotlock/contents/package.json?ref=main')
     echo '{"version":"1.2.3"}' ;;
-  'api repos/PILOTAAI/slotlock/environments/release-tag/secrets '*)
-    if [ "$STUB_CONFIGURED" = 1 ] || [ -f "$STUB_LOG/configured" ]; then echo '["TAG_RELEASE_DEPLOY_KEY"]'; else echo '[]'; fi ;;
+  'api repos/PILOTAAI/slotlock/environments/release-tag/secrets '* | 'api repos/PILOTAAI/slotlock/environments/go-module/secrets '*)
+    if [ -f "$STUB_LOG/configured" ] || { [ "$STUB_CONFIGURED" = 1 ] && [ "$2" != "repos/PILOTAAI/slotlock/environments/$STUB_UNCONFIGURED_ENVIRONMENT/secrets" ]; }; then
+      echo '["TAG_RELEASE_DEPLOY_KEY"]'
+    else
+      echo '[]'
+    fi ;;
   'api repos/PILOTAAI/slotlock/rulesets?'*) echo 7 ;;
   'api repos/PILOTAAI/slotlock/rulesets/7 '*) echo true ;;
   'api repos/PILOTAAI/slotlock/commits/main --jq .sha') echo "$STUB_MAIN_COMMIT" ;;
@@ -1108,6 +1308,16 @@ esac`,
     const result = bootstrap({});
     expect(result.status, result.stderr).toBe(0);
     expect(result.configure).toEqual([]);
+    expect(result.gh).toContain(
+      'api repos/PILOTAAI/slotlock/environments/go-module/secrets --jq [.secrets[].name]',
+    );
+  });
+
+  // release.yml's go-module job pushes the Go module's tag with the same deploy key.
+  it('sets GitHub up when the go-module environment has no deploy key yet', () => {
+    const result = bootstrap({ STUB_UNCONFIGURED_ENVIRONMENT: 'go-module' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.configure).toEqual(['SKIP_SITE_SECRETS=1']);
   });
 
   it('stops when configure-github.sh leaves the deploy key missing', () => {
@@ -1408,6 +1618,32 @@ describe.skipIf(!hasJq)('release preparation', () => {
     expect(repo.script('check-release-tag.sh', 'v1.2.4', '--commit', released).status).toBe(0);
   });
 
+  it("records the release's schema functions, which the dashboard Worker may call", () => {
+    const repo = project();
+    mkdirSync(join(repo.cwd, 'src'));
+    mkdirSync(join(repo.cwd, 'workers/dashboard'), { recursive: true });
+    writeFileSync(
+      join(repo.cwd, 'src/ddl.ts'),
+      'CREATE OR REPLACE FUNCTION slotlock.beta(text)\nCREATE FUNCTION slotlock.alpha()\nDROP FUNCTION slotlock.gone(text)\n',
+    );
+    writeFileSync(join(repo.cwd, 'src/ddl-sso.ts'), 'CREATE OR REPLACE FUNCTION slotlock.gamma(uuid)\n');
+    writeFileSync(join(repo.cwd, 'src/store.ts'), 'CREATE OR REPLACE FUNCTION slotlock.not_schema()\n');
+    writeFileSync(
+      join(repo.cwd, 'workers/dashboard/released-schema-functions.json'),
+      `${JSON.stringify({ release: '1.2.3', functions: ['alpha'] }, null, 2)}\n`,
+    );
+    repo.git('add', '.');
+    repo.commit('schema');
+    const result = repo.script('prepare-release.sh', '1.2.4');
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(JSON.parse(contents(repo, 'workers/dashboard/released-schema-functions.json'))).toEqual({
+      release: '1.2.4',
+      functions: ['alpha', 'beta', 'gamma'],
+    });
+    expect(read('scripts/open-release-pr.sh')).toContain('git add workers/dashboard/released-schema-functions.json');
+  });
+
   it.each([
     ['1.2.4', true],
     ['1.3.0', true],
@@ -1561,9 +1797,14 @@ describe('release button', () => {
   });
 });
 
-describe('release pull request', () => {
+describe.skipIf(!hasJq)('release pull request', () => {
   const bot = 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>';
   const branch = 'release/v1.2.4';
+  /** An open pull request into main from `repository`'s release/v1.2.4, as the pulls API lists it. */
+  const pull = (number: number, repository: string) => ({
+    number,
+    head: { ref: branch, repo: { full_name: repository } },
+  });
   // One client file stands for the eight scripts/client-versions.sh lists.
   const files = [
     'package.json',
@@ -1573,12 +1814,25 @@ describe('release pull request', () => {
     'CHANGELOG.md',
     'clients/go/client.go',
   ];
-  // A stand-in for gh: pr list answers the open pull request's number or nothing; pr create opens
-  // #52 or fails with STUB_CREATE_ERROR.
+  // A stand-in for gh: the pulls API answers STUB_PULLS, the open pull requests into main, and once
+  // pr create has opened #52, that one too, through the --jq filter the script passes, as gh does.
+  // It does not filter by head as GitHub does, so a fork's pull request reaches the filter. pr create
+  // opens #52 or fails with STUB_CREATE_ERROR.
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
+filter=''
+previous=''
+for arg; do
+  [ "$previous" = --jq ] && filter=$arg
+  previous=$arg
+done
 case "$1 $2" in
-  'pr list') if [ -f "$STUB_LOG/created" ]; then echo 52; else printf '%s' "$STUB_OPEN_PR"; fi ;;
+  'api repos/PILOTAAI/slotlock/pulls?'*)
+    pulls=\${STUB_PULLS:-[]}
+    if [ -f "$STUB_LOG/created" ]; then
+      pulls=$(printf '%s' "$pulls" | jq -c '. + [{number: 52, head: {ref: "${branch}", repo: {full_name: "PILOTAAI/slotlock"}}}]')
+    fi
+    printf '%s' "$pulls" | jq -r "$filter" ;;
   'pr create')
     if [ -n "$STUB_CREATE_ERROR" ]; then echo "$STUB_CREATE_ERROR" >&2; exit 1; fi
     touch "$STUB_LOG/created"
@@ -1643,7 +1897,7 @@ esac
     const calls = () =>
       existsSync(join(log, 'gh.log')) ? readFileSync(join(log, 'gh.log'), 'utf8') : '';
     // The script runs as release-version.yml runs it: no committer in the environment.
-    const run = (scenario: { openPr?: string; createError?: string } = {}) =>
+    const run = (scenario: { pulls?: object[]; createError?: string } = {}) =>
       spawnSync('sh', [join(root, 'scripts', 'open-release-pr.sh'), '1.2.4'], {
         cwd,
         encoding: 'utf8',
@@ -1653,7 +1907,7 @@ esac
           GITHUB_REPOSITORY: 'PILOTAAI/slotlock',
           GITHUB_RUN_ID: '9',
           STUB_LOG: log,
-          STUB_OPEN_PR: scenario.openPr ?? '',
+          STUB_PULLS: JSON.stringify(scenario.pulls ?? []),
           STUB_CREATE_ERROR: scenario.createError ?? '',
         },
       });
@@ -1689,7 +1943,7 @@ esac
   it('replaces the branch an earlier run left, and reuses its open pull request', () => {
     const repo = checkout([{ author: bot, message: 'Release 1.2.4' }]);
     const left = repo.remote();
-    const result = repo.run({ openPr: '41' });
+    const result = repo.run({ pulls: [pull(41, 'PILOTAAI/slotlock')] });
     expect(result.status, result.stderr).toBe(0);
     const tip = repo.remote();
     expect(tip).not.toBe(left);
@@ -1698,6 +1952,28 @@ esac
       `::notice::Replacing ${branch}, which an earlier run left at ${left}.`,
     );
     expect(repo.calls()).not.toContain('pr create');
+  });
+
+  // Anyone can fork the repository and open a pull request into main from a branch called
+  // release/v<next version>. gh pr list --head matches the branch name alone.
+  it.each([
+    ['instead of a fork\'s of the same name', [pull(77, 'outsider/slotlock')], '52'],
+    [
+      'when a fork has one of the same name too',
+      [pull(77, 'outsider/slotlock'), pull(41, 'PILOTAAI/slotlock')],
+      '41',
+    ],
+    // An organization's own fork shares the owner, so the head's repository is checked as well.
+    ["instead of the organization's own fork's", [pull(78, 'PILOTAAI/slotlock-fork')], '52'],
+  ])('uses the pull request from its own branch, %s', (_, pulls, number) => {
+    const repo = checkout();
+    const result = repo.run({ pulls });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(`SHA=${repo.remote()}\nPR=${number}\n`);
+    expect(repo.calls()).toContain(
+      `api repos/PILOTAAI/slotlock/pulls?state=open&base=main&head=PILOTAAI:${branch}&per_page=100`,
+    );
+    expect(repo.calls().includes('pr create')).toBe(number === '52');
   });
 
   it.each([
@@ -1826,20 +2102,21 @@ esac
 describe.skipIf(!hasJq)('release checks wait', () => {
   const commit = 'c'.repeat(40);
   const url = 'https://github.com/PILOTAAI/slotlock/pull/53';
-  // A stand-in for gh run list: each call answers with the next run JSON queued for its workflow (the
-  // last one repeats), through the --jq filter the script passes, as gh does.
+  // A stand-in for gh api's list of a workflow's runs: each call answers with the next runs JSON
+  // queued for its workflow (the last one repeats), through the --jq filter the script passes, as gh
+  // does.
   const gh = `#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG/gh.log"
-workflow=''
 filter=''
 previous=''
 for arg; do
-  [ "$previous" = --workflow ] && workflow=$arg
   [ "$previous" = --jq ] && filter=$arg
   previous=$arg
 done
+workflow=\${2#*/actions/workflows/}
+workflow=\${workflow%%/*}
 queue="$STUB_LOG/runs-$workflow"
-answer='[]'
+answer='{"workflow_runs":[]}'
 if [ -s "$queue" ]; then
   answer=$(head -n 1 "$queue")
   if [ "$(wc -l < "$queue")" -gt 1 ]; then
@@ -1849,12 +2126,18 @@ if [ -s "$queue" ]; then
 fi
 printf '%s' "$answer" | jq -r "$filter"
 `;
-  // A run waiting for approval reads completed / action_required in gh run list (GitHub,
-  // 2026-10-22).
-  const run = (id: number, status: string, conclusion = '') =>
-    JSON.stringify([{ databaseId: id, status, conclusion }]);
+  // A run waiting for approval reads completed / action_required (GitHub, 2026-10-22).
+  const workflowRun = (
+    id: number,
+    status: string,
+    conclusion: string | null = null,
+    repository = 'PILOTAAI/slotlock',
+  ) => ({ id, status, conclusion, head_repository: { full_name: repository } });
+  const runs = (...list: ReturnType<typeof workflowRun>[]) => JSON.stringify({ workflow_runs: list });
+  const run = (id: number, status: string, conclusion: string | null = null) =>
+    runs(workflowRun(id, status, conclusion));
   const held = (id: number) => run(id, 'completed', 'action_required');
-  const none = '[]';
+  const none = runs();
 
   function wait(queues: Record<string, string[]>, minutes = '5') {
     const dir = mkdtempSync(join(tmpdir(), 'slotlock-wait-'));
@@ -1910,8 +2193,45 @@ printf '%s' "$answer" | jq -r "$filter"
     const result = wait({ 'ci.yml': [run(1, 'completed', 'success')] });
     expect(result.status, result.stderr).toBe(0);
     expect(result.calls).toEqual([
-      expect.stringContaining(`run list --workflow ci.yml --commit ${commit} --event pull_request`),
+      expect.stringContaining(
+        `api repos/PILOTAAI/slotlock/actions/workflows/ci.yml/runs?head_sha=${commit}&event=pull_request&per_page=100 --jq`,
+      ),
     ]);
+  });
+
+  // A fork's pull request can carry the release commit too (it is public), and GitHub holds its
+  // runs for approval: they are not the release pull request's checks.
+  it("passes over a fork's runs at the same commit, held or failed", () => {
+    const result = wait(
+      {
+        'ci.yml': [
+          runs(
+            workflowRun(9, 'completed', 'action_required', 'outsider/slotlock'),
+            workflowRun(1, 'completed', 'success'),
+          ),
+        ],
+        'dco.yml': [
+          runs(
+            workflowRun(8, 'completed', 'failure', 'outsider/slotlock'),
+            workflowRun(2, 'completed', 'success'),
+          ),
+        ],
+      },
+      '0',
+    );
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain('::notice::');
+    expect(result.stdout.trim()).toBe('ci.yml: passed. dco.yml: passed.');
+  });
+
+  it("does not count a fork's passed run as the pull request's own", () => {
+    const result = wait(
+      { 'ci.yml': [runs(workflowRun(9, 'completed', 'success', 'outsider/slotlock'))] },
+      '0',
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`::error::Still waiting for ci.yml on ${url}.`);
   });
 
   it('fails on a run that did not pass, naming it', () => {
@@ -1936,6 +2256,57 @@ printf '%s' "$answer" | jq -r "$filter"
     const result = wait({ 'ci.yml': [run(1, 'completed', 'success')], 'dco.yml': [none] }, '0');
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`::error::Still waiting for dco.yml on ${url}.`);
+  });
+});
+
+// cms-schedule.yml publishes the admin console's scheduled posts as the release app, the one GitHub
+// App: its key in the release-app environment (main only), a token with only what merging a post
+// needs, and no key of its own.
+describe('the CMS schedule', () => {
+  const workflow = (file: string) => read(join('.github', 'workflows', file));
+  const step = (text: string, name: string) => {
+    const start = text.indexOf(`- name: ${name}`);
+    expect(start, name).toBeGreaterThan(0);
+    const next = text.indexOf('\n      - ', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  };
+
+  it('mints the release app\'s token in its environment, for what merging a post needs and no more', () => {
+    const text = workflow('cms-schedule.yml');
+    expect(text).toMatch(/^permissions: \{\}$/m);
+    // The environment's key, without a deployment for each hourly run.
+    expect(text).toContain('\n    environment:\n      name: release-app\n      deployment: false\n');
+    // A job's `if` reads no environment's variables: the step checks the client ID.
+    expect(text).toMatch(/^ {4}if: github\.ref == 'refs\/heads\/main'$/m);
+    const mint = step(text, "Mint the release app's token");
+    expect(mint).toContain("if: vars.RELEASE_APP_CLIENT_ID != ''");
+    expect(mint).toContain('client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}');
+    expect(mint).toContain('private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}');
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual([
+      'permission-checks: read',
+      'permission-contents: write',
+      'permission-pull-requests: write',
+    ]);
+    // The same action, at the same commit, as Release a version mints its token with.
+    const action = (source: string) => /uses: (actions\/create-github-app-token@[0-9a-f]{40}) # v[\d.]+/.exec(source)?.[1];
+    expect(action(mint)).toBeDefined();
+    expect(action(mint)).toBe(action(workflow('release-version.yml')));
+    // The key reaches only that step; the script gets the token and the App's slug.
+    expect(text.match(/secrets\.\w+/g)).toEqual(['secrets.RELEASE_APP_PRIVATE_KEY']);
+    const merge = step(text, 'Merge the scheduled posts whose time has come');
+    expect(merge).toContain("if: steps.app.outputs.token != ''");
+    expect(merge).toContain('CMS_TOKEN: ${{ steps.app.outputs.token }}');
+    expect(merge).toContain('CMS_APP_SLUG: ${{ steps.app.outputs.app-slug }}');
+    expect(merge).toContain('node scripts/cms-scheduled-merge.mjs');
+    // No second App, no second key, no environment of its own.
+    for (const gone of ['CMS_APP_ID', 'CMS_APP_INSTALLATION', 'CMS_APP_KEY', 'environment: cms']) {
+      expect(text).not.toContain(gone);
+    }
+  });
+
+  it('keeps Release a version\'s token to opening and merging its pull request', () => {
+    const mint = step(workflow('release-version.yml'), "Mint the release app's token");
+    expect(mint.match(/permission-[a-z-]+: \w+/g)).toEqual(['permission-contents: write', 'permission-pull-requests: write']);
   });
 });
 
@@ -2229,6 +2600,44 @@ describe('required checks', () => {
       .parameters.required_status_checks.map((check: { context: string }) => check.context);
     expect(checks).toEqual(['CI passed', 'Signed-off-by']);
     expect(result.stderr).not.toContain('no longer names its jobs');
+  });
+});
+
+describe('the admin console in a browser', () => {
+  const ci = read('.github/workflows/ci.yml');
+  const job = ci.slice(ci.indexOf('\n  browser:\n'), ci.indexOf('\n  image:\n'));
+
+  it('runs in CI with Chromium for the pinned Playwright, against the job\'s PostgreSQL, keeping the screenshots of a failure', () => {
+    expect(job, 'canary: the browser job was found').toContain('name: Admin console in a browser');
+    expect(job).toContain('DATABASE_URL: postgresql://slotlock_ci:ci-only-password@localhost:5432/slotlock');
+    const step = (text: string) => job.indexOf(text);
+    // The browser the installed playwright drives, after npm ci installs that version.
+    expect(step('- run: npm ci')).toBeGreaterThan(-1);
+    expect(step('run: npx playwright install --with-deps chromium')).toBeGreaterThan(step('- run: npm ci'));
+    // Required here: a browser that does not start fails the job instead of skipping the file.
+    const run = job.slice(step('- name: Every console page in Chromium'));
+    expect(run).toMatch(/SLOTLOCK_BROWSER_TESTS: required\n\s+SLOTLOCK_ADMIN_SHOTS: \$\{\{ runner\.temp \}\}\/admin-shots\n\s+run: npx vitest run src\/__tests__\/admin-console-visual\.integration\.test\.ts\n/);
+    expect(step('- name: Every console page in Chromium')).toBeGreaterThan(step('npx playwright install'));
+    const keep = job.slice(step('- name: Keep the screenshots'));
+    expect(keep).toMatch(/^- name: Keep the screenshots\n\s+if: failure\(\)\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+\n/);
+    expect(keep).toContain('path: ${{ runner.temp }}/admin-shots');
+  });
+
+  it('pins playwright exactly, at a version whose engines take every Node.js CI runs', () => {
+    const manifest = JSON.parse(read('package.json')) as { devDependencies: Record<string, string> };
+    const pinned = manifest.devDependencies.playwright;
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(read('package-lock.json')) as { packages: Record<string, { version?: string; engines?: { node?: string } }> };
+    for (const name of ['playwright', 'playwright-core']) {
+      const entry = lock.packages[`node_modules/${name}`];
+      expect(entry?.version, name).toBe(pinned);
+      const least = /^>=\s*(\d+)(?:\.\d+){0,2}$/.exec(entry?.engines?.node ?? '')?.[1];
+      expect(least, `${name}'s engines`).toBeDefined();
+      const nodes = [...ci.matchAll(/node-version: '(\d+)'|node: \[([^\]]+)\]/g)]
+        .flatMap(([, one, many]) => (one ? [one] : (many ?? '').split(',').map((value) => value.trim().replace(/'/g, ''))));
+      expect(nodes.length).toBeGreaterThan(0);
+      for (const node of nodes) expect(Number(node), `Node.js ${node}`).toBeGreaterThanOrEqual(Number(least));
+    }
   });
 });
 

@@ -1,0 +1,43 @@
+---
+// The site's main links in the docs header, as on every other page, with Docs marked as where you
+// are. Starlight keeps its header's middle column for search, which this site leaves off, so this
+// overrides the Search component (astro.config.mjs). Narrow screens keep Starlight's menu.
+import { nav } from '../../data/landing';
+import { navCurrent } from '../../lib/nav';
+
+const here = Astro.url.pathname;
+---
+
+<nav class="site-nav" aria-label="Main">
+  {nav.map((item) => <a href={item.href} aria-current={navCurrent(here, item.href)}>{item.label}</a>)}
+</nav>
+
+<style>
+  .site-nav {
+    display: none;
+  }
+  @media (min-width: 72rem) {
+    .site-nav {
+      display: flex;
+      gap: 0.25rem;
+      align-items: center;
+    }
+  }
+  .site-nav a {
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.5rem;
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .site-nav a:hover {
+    color: var(--sl-color-white);
+    background: var(--sl-color-gray-6);
+  }
+  .site-nav a[aria-current] {
+    color: var(--sl-color-white);
+    font-weight: 500;
+    background: var(--sl-color-gray-6);
+  }
+</style>
