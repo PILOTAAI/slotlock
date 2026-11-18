@@ -193,8 +193,16 @@ export interface ProviderCalendar {
   writable: boolean;
 }
 
-/** The calendars a Google account sees free/busy for, and the account's address. */
-export async function listGoogleCalendars(accessToken: string, send: typeof fetch = fetch): Promise<{ account: string | null; calendars: ProviderCalendar[] }> {
+/**
+ * The calendars a Google account sees free/busy for, and the account's address. A calendar is
+ * writable when the person owns it, or, with `writesEveryCalendar` (a token holding
+ * `calendar.events`, as connections made before `calendar.events.owned` do), when they can edit it.
+ */
+export async function listGoogleCalendars(
+  accessToken: string,
+  send: typeof fetch = fetch,
+  options: { writesEveryCalendar?: boolean } = {},
+): Promise<{ account: string | null; calendars: ProviderCalendar[] }> {
   const body = await providerJson(
     send,
     `https://www.googleapis.com/calendar/v3/users/me/calendarList?${new URLSearchParams({ minAccessRole: 'freeBusyReader', maxResults: '250' })}`,
@@ -208,7 +216,7 @@ export async function listGoogleCalendars(accessToken: string, send: typeof fetc
       id: item.id as string,
       name: String(item.summary ?? item.id).slice(0, 200),
       primary: item.primary === true,
-      writable: item.accessRole === 'owner' || item.accessRole === 'writer',
+      writable: item.accessRole === 'owner' || (options.writesEveryCalendar === true && item.accessRole === 'writer'),
     }));
   return { account: calendars.find((calendar) => calendar.primary)?.id ?? null, calendars };
 }

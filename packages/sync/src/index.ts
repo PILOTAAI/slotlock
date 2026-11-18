@@ -6,9 +6,11 @@ export {
   type OAuthClient,
   type OAuthProvider,
   type OAuthTokens,
+  GOOGLE_EVENT_WRITE_SCOPES,
   OAuthError,
   beginAuthorization,
   exchangeCode,
+  googleWritesEveryCalendar,
   oauthScopes,
   refreshTokens,
 } from './oauth.js';

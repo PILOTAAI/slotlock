@@ -44,15 +44,29 @@ curl -X POST "$SYNC/v1/tenants/fleet-ops/connect-links" -H "Authorization: Beare
   -H 'Content-Type: application/json' -d '{"provider":"google","write_back":true}'
 ```
 
-The answer is a link, signed and valid for 30 minutes, for the tenant's person. It sends them to
-Google or Microsoft (OAuth code flow with PKCE and a state the sync keeps, used once), back to
-`/oauth/callback`, and to a page listing the account's calendars beside the tenant's resources: they
-choose which calendar's busy time blocks which resource. That form is signed for the connection.
-A link is followed once: opened again (forwarded, or found in a browser's history) it is refused, so
-send it to that person only and make a new one if they need it again. The flow is finished only in
-the browser that followed the link, which holds a cookie for it (`HttpOnly`, sent to the callback
-alone), so the provider's page cannot be handed to someone else.
-The sync asks for the calendar list and free/busy, and events only to write back.
+The answer is a link, signed and valid for 30 minutes, for the tenant's person. It first opens a
+page of the sync's own, before the provider's consent screen, as Google's Workspace developer
+policy asks:
+- what the sync will read (busy times only) and, with write-back, what it will write;
+- a link to `SYNC_PRIVACY_URL`, when set;
+- a Continue button.
+
+Continue sends them to Google or Microsoft (OAuth code flow with PKCE and a state the sync keeps,
+used once), back to `/oauth/callback`, and to a page listing the account's calendars beside the
+tenant's resources. There they choose which calendar's busy time blocks which resource. That form
+is signed for the connection.
+
+A link is used up by its Continue, never by being opened, so a mail scanner that opens it first
+leaves it for its person. Once used (forwarded, or found in a browser's history) it is refused, so
+send it to that person only and make a new one if they need it again. Continue is refused when the
+browser says another site sent it (`Sec-Fetch-Site`). The flow is finished only in the browser that
+pressed Continue, which holds a cookie for it (`HttpOnly`, sent to the callback alone), so the
+provider's page cannot be handed to someone else.
+
+The sync asks for the calendar list and free/busy, and events only to write back. On Google that
+is `calendar.events.owned`, which writes only on calendars the person owns, so the choose page
+shows calendars they can edit but do not own as read only. A connection made before this holds
+`calendar.events` and keeps writing where it could.
 
 Other operator routes: `POST /v1/tenants/{tenant}/ics` (`{"url"}`, an iCalendar URL, read only),
 `GET /v1/tenants/{tenant}/connections` (connections, their mappings and health),
@@ -88,7 +102,8 @@ slotlock-sync serve
 
 Settings: `SYNC_DATABASE_URL`, `SLOTLOCK_URL`, `SLOTLOCK_SYNC_KEYS`, `SYNC_ADMIN_TOKEN` (32+
 characters), `SYNC_LINK_SECRET` (32+ bytes), `SYNC_PUBLIC_URL` (https; OAuth apps redirect to
-`<SYNC_PUBLIC_URL>/oauth/callback`), `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`,
+`<SYNC_PUBLIC_URL>/oauth/callback`), `SYNC_PRIVACY_URL` (https, optional: the page that says how
+calendar data is used), `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`,
 `MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET`/`MICROSOFT_DIRECTORY`, `SYNC_INTERVAL_SECONDS`
 (300), `SYNC_WINDOW_DAYS` (60), `HOST`, `PORT` (8090). iCalendar URLs need the slotlock package
 installed beside it (the image has it), and are fetched through its guarded fetch, which refuses
