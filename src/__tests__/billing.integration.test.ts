@@ -634,7 +634,10 @@ describe.skipIf(!url)('the Stripe webhook (real Postgres)', () => {
           detail: { amount: 500, amount_refunded: 500, currency: 'gbp', refunded: true, subscription: 'sub_R1' },
         },
       ]);
-      expect(JSON.stringify(await alerts())).not.toMatch(/ada@|Lovelace|4242/);
+      // Nothing of the charge's billing details or card is kept. The tenant refs are left out of the
+      // search: they hold random UUIDs, one of which may well contain 4242.
+      const kept = (await alerts()).map(({ tenant_ref: _tenant, ...alert }) => alert);
+      expect(JSON.stringify(kept)).not.toMatch(/ada@|Lovelace|4242/);
       // One payment for both accounts' invoices: each account is told, under the same charge.
       invoicePayments.set('pi_RB', ['sub_R1', 'sub_R2']);
       await send(charge('ch_RB', 'pi_RB'));
