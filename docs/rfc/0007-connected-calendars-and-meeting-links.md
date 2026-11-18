@@ -321,6 +321,16 @@ the link. It deletes the room when the event is cancelled.
   the structured output. Over A2A it is an artifact.
 - **Who sends it.** The agent, from the person's own mailbox, so replies go to the person. A
   cancellation is the same UID at a higher `SEQUENCE`.
+- **As built (Delivery 7).** Two choices differ from the text above:
+  - The UID is derived rather than stored: a version 8 UUID from SHA-256 of the tenant and the
+    event's id. It is just as stable and names no id, needs no new column or backfill for events
+    made before it, and lets any backend that reads events produce it, since the tool is composed
+    from `getEvent`.
+  - A2A gets a `text/calendar` part on the reply message, not an artifact: the server keeps no
+    tasks, and A2A artifacts belong to tasks.
+
+  `cancel` carries the `SEQUENCE` that cancelling will write, so the agent reads it before
+  `slotlock_cancel` and sends it after. Once cancelled, the event has no invitation.
 
 This is the default for everyone. Zoom's "Copy invitation" and Doodle's free tier work the same
 way. Slotlock sends nothing, so it is never a relay, never the "transmitter" under PECR, and never
