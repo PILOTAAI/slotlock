@@ -616,6 +616,8 @@ public sealed partial class SlotlockClient
     /// <param name="idempotencyKey">idempotency_key</param>
     /// <param name="title">title</param>
     /// <param name="holdGroupId">hold_group_id</param>
+    /// <param name="conference">conference</param>
+    /// <param name="conferenceUrl">conference_url</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -631,6 +633,8 @@ public sealed partial class SlotlockClient
         string idempotencyKey,
         Optional<string> title = default,
         Optional<string> holdGroupId = default,
+        Optional<string> conference = default,
+        Optional<string> conferenceUrl = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -642,6 +646,8 @@ public sealed partial class SlotlockClient
         values["idempotency_key"] = Json.ToNode(idempotencyKey);
         if (title.HasValue) values["title"] = Json.ToNode(title.Value);
         if (holdGroupId.HasValue) values["hold_group_id"] = Json.ToNode(holdGroupId.Value);
+        if (conference.HasValue) values["conference"] = Json.ToNode(conference.Value);
+        if (conferenceUrl.HasValue) values["conference_url"] = Json.ToNode(conferenceUrl.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_book_together", values, cancellationToken);
     }
@@ -752,6 +758,8 @@ public sealed partial class SlotlockClient
     /// <param name="location">location</param>
     /// <param name="timezone">timezone</param>
     /// <param name="idempotencyKey">idempotency_key</param>
+    /// <param name="conference">conference</param>
+    /// <param name="conferenceUrl">conference_url</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -766,6 +774,8 @@ public sealed partial class SlotlockClient
         Optional<string> location = default,
         Optional<string> timezone = default,
         Optional<string> idempotencyKey = default,
+        Optional<string> conference = default,
+        Optional<string> conferenceUrl = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -776,6 +786,8 @@ public sealed partial class SlotlockClient
         if (location.HasValue) values["location"] = Json.ToNode(location.Value);
         if (timezone.HasValue) values["timezone"] = Json.ToNode(timezone.Value);
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
+        if (conference.HasValue) values["conference"] = Json.ToNode(conference.Value);
+        if (conferenceUrl.HasValue) values["conference_url"] = Json.ToNode(conferenceUrl.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_confirm_slot", values, cancellationToken);
     }
@@ -815,8 +827,9 @@ public sealed partial class SlotlockClient
     /// rental). The database refuses a time already taken: 409 overlap, with alternatives (the
     /// earliest free times of the same length) and, when the booking in the way is yours, its id.
     /// A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
-    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
-    /// idempotency_key answers the same event.
+    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url gives it a
+    /// meeting link the person supplied (https), which Slotlock keeps and exports but never makes
+    /// or checks. A retry with the same idempotency_key answers the same event.
     /// </remarks>
     /// <param name="resourceId">resource_id</param>
     /// <param name="startsAt">starts_at</param>
@@ -835,6 +848,8 @@ public sealed partial class SlotlockClient
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
     /// <param name="holdId">hold_id</param>
     /// <param name="notify">notify</param>
+    /// <param name="conference">conference</param>
+    /// <param name="conferenceUrl">conference_url</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -860,6 +875,8 @@ public sealed partial class SlotlockClient
         Optional<JsonArray> recurrenceExceptions = default,
         Optional<string> holdId = default,
         Optional<bool> notify = default,
+        Optional<string> conference = default,
+        Optional<string> conferenceUrl = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -881,6 +898,8 @@ public sealed partial class SlotlockClient
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
         if (holdId.HasValue) values["hold_id"] = Json.ToNode(holdId.Value);
         if (notify.HasValue) values["notify"] = Json.ToNode(notify.Value);
+        if (conference.HasValue) values["conference"] = Json.ToNode(conference.Value);
+        if (conferenceUrl.HasValue) values["conference_url"] = Json.ToNode(conferenceUrl.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_create_event", values, cancellationToken);
     }
@@ -924,6 +943,8 @@ public sealed partial class SlotlockClient
             cancellationToken: cancellationToken,
             holdId: default,
             notify: default,
+            conference: default,
+            conferenceUrl: default,
             dryRun: default);
 
     /// <summary>Get resource event.</summary>
@@ -971,6 +992,8 @@ public sealed partial class SlotlockClient
     /// it.</param>
     /// <param name="recurrenceExceptions">recurrence_exceptions</param>
     /// <param name="expectedResourceId">expected_resource_id</param>
+    /// <param name="conference">conference</param>
+    /// <param name="conferenceUrl">conference_url</param>
     /// <param name="dryRun">Check the write without making it: it runs with every check, the
     /// database's included, and is then undone, so nothing is stored, recorded or sent. The
     /// answer is what it would have been, with dry_run: true (ids in it are never stored), or the
@@ -997,6 +1020,8 @@ public sealed partial class SlotlockClient
         Optional<string?> recurrenceRule = default,
         Optional<JsonArray> recurrenceExceptions = default,
         Optional<string> expectedResourceId = default,
+        Optional<string> conference = default,
+        Optional<string> conferenceUrl = default,
         Optional<bool> dryRun = default,
         CancellationToken cancellationToken = default)
     {
@@ -1019,6 +1044,8 @@ public sealed partial class SlotlockClient
         if (recurrenceRule.HasValue) values["recurrence_rule"] = Json.ToNode(recurrenceRule.Value);
         if (recurrenceExceptions.HasValue) values["recurrence_exceptions"] = Json.ToNode(recurrenceExceptions.Value);
         if (expectedResourceId.HasValue) values["expected_resource_id"] = Json.ToNode(expectedResourceId.Value);
+        if (conference.HasValue) values["conference"] = Json.ToNode(conference.Value);
+        if (conferenceUrl.HasValue) values["conference_url"] = Json.ToNode(conferenceUrl.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_update_event", values, cancellationToken);
     }
@@ -1065,6 +1092,8 @@ public sealed partial class SlotlockClient
             recurrenceExceptions: recurrenceExceptions,
             cancellationToken: cancellationToken,
             expectedResourceId: default,
+            conference: default,
+            conferenceUrl: default,
             dryRun: default);
 
     /// <summary>Delete resource event.</summary>

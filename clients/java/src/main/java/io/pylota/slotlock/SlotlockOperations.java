@@ -627,7 +627,8 @@ public abstract class SlotlockOperations {
    * @param timezone {@code timezone}, string
    * @param idempotencyKey {@code idempotency_key}, string
    * @param optional the optional arguments, or null: {@code title} (string), {@code
-   * hold_group_id} (string), {@code dry_run} (boolean)
+   * hold_group_id} (string), {@code conference} (string), {@code conference_url} (string), {@code
+   * dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -638,7 +639,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title", "hold_group_id", "dry_run"), "slotlock_book_together");
+    putOptional(values, optional, Set.of("title", "hold_group_id", "conference", "conference_url", "dry_run"), "slotlock_book_together");
     return call("slotlock_book_together", values);
   }
 
@@ -767,14 +768,15 @@ public abstract class SlotlockOperations {
    * @param holdId {@code hold_id}, string
    * @param optional the optional arguments, or null: {@code title} (string), {@code description}
    * (string), {@code location} (string), {@code timezone} (string), {@code idempotency_key}
-   * (string), {@code dry_run} (boolean)
+   * (string), {@code conference} (string), {@code conference_url} (string), {@code dry_run}
+   * (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
   public Map<String, Object> confirmSlot(String holdId, Map<String, ?> optional) {
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("hold_id", holdId);
-    putOptional(values, optional, Set.of("title", "description", "location", "timezone", "idempotency_key", "dry_run"), "slotlock_confirm_slot");
+    putOptional(values, optional, Set.of("title", "description", "location", "timezone", "idempotency_key", "conference", "conference_url", "dry_run"), "slotlock_confirm_slot");
     return call("slotlock_confirm_slot", values);
   }
 
@@ -830,8 +832,9 @@ public abstract class SlotlockOperations {
    * booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
    * alternatives (the earliest free times of the same length) and, when the booking in the way is
    * yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
-   * too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with
-   * the same idempotency_key answers the same event.
+   * too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url
+   * gives it a meeting link the person supplied (https), which Slotlock keeps and exports but
+   * never makes or checks. A retry with the same idempotency_key answers the same event.
    *
    * @param resourceId {@code resource_id}, string
    * @param startsAt {@code starts_at}, string
@@ -842,7 +845,8 @@ public abstract class SlotlockOperations {
    * (string), {@code location} (string), {@code organizer} (object), {@code transparency}
    * (string), {@code status} (string), {@code recurrence_rule} (string), {@code attendees} (list
    * of object), {@code reminders} (list of object), {@code recurrence_exceptions} (list of
-   * object), {@code hold_id} (string), {@code notify} (boolean), {@code dry_run} (boolean)
+   * object), {@code hold_id} (string), {@code notify} (boolean), {@code conference} (string),
+   * {@code conference_url} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -853,7 +857,7 @@ public abstract class SlotlockOperations {
     values.put("ends_at", endsAt);
     values.put("timezone", timezone);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id", "notify", "dry_run"), "slotlock_create_event");
+    putOptional(values, optional, Set.of("title", "description", "location", "organizer", "transparency", "status", "recurrence_rule", "attendees", "reminders", "recurrence_exceptions", "hold_id", "notify", "conference", "conference_url", "dry_run"), "slotlock_create_event");
     return call("slotlock_create_event", values);
   }
 
@@ -862,8 +866,9 @@ public abstract class SlotlockOperations {
    * booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
    * alternatives (the earliest free times of the same length) and, when the booking in the way is
    * yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
-   * too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with
-   * the same idempotency_key answers the same event.
+   * too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url
+   * gives it a meeting link the person supplied (https), which Slotlock keeps and exports but
+   * never makes or checks. A retry with the same idempotency_key answers the same event.
    *
    * @param resourceId {@code resource_id}, string
    * @param startsAt {@code starts_at}, string
@@ -907,7 +912,8 @@ public abstract class SlotlockOperations {
    * (string, null clears it), {@code organizer} (object, null clears it), {@code attendees} (list
    * of object), {@code reminders} (list of object), {@code transparency} (string), {@code status}
    * (string), {@code recurrence_rule} (string, null clears it), {@code recurrence_exceptions}
-   * (list of object), {@code expected_resource_id} (string), {@code dry_run} (boolean)
+   * (list of object), {@code expected_resource_id} (string), {@code conference} (string), {@code
+   * conference_url} (string), {@code dry_run} (boolean)
    * @return the response body
    * @throws SlotlockException when the server refuses the call
    */
@@ -916,7 +922,7 @@ public abstract class SlotlockOperations {
     values.put("event_id", eventId);
     values.put("expected_revision", expectedRevision);
     values.put("idempotency_key", idempotencyKey);
-    putOptional(values, optional, Set.of("resource_id", "starts_at", "ends_at", "timezone", "title", "description", "location", "organizer", "attendees", "reminders", "transparency", "status", "recurrence_rule", "recurrence_exceptions", "expected_resource_id", "dry_run"), "slotlock_update_event");
+    putOptional(values, optional, Set.of("resource_id", "starts_at", "ends_at", "timezone", "title", "description", "location", "organizer", "attendees", "reminders", "transparency", "status", "recurrence_rule", "recurrence_exceptions", "expected_resource_id", "conference", "conference_url", "dry_run"), "slotlock_update_event");
     return call("slotlock_update_event", values);
   }
 

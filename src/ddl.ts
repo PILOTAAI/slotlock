@@ -8008,6 +8008,30 @@ BEGIN
   END IF;
 END
 $slotlock_calendar_event_recurrence_cursor$;
+-- The meeting link an event asks for (RFC 0007 3.1): who provides it, and the link when the person
+-- gave it. The store checks the link (https, ASCII, no user name or password); this bounds it. The
+-- provider is any short name, so a release that adds one needs no new check.
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS conference text;
+ALTER TABLE slotlock.calendar_events ADD COLUMN IF NOT EXISTS conference_url text;
+DO $slotlock_calendar_event_conference$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'slotlock_calendar_events_conference_valid'
+       AND conrelid = 'slotlock.calendar_events'::regclass
+  ) THEN
+    ALTER TABLE slotlock.calendar_events
+      ADD CONSTRAINT slotlock_calendar_events_conference_valid CHECK (
+        (conference IS NULL OR conference ~ '^[a-z][a-z_]{0,31}$')
+        AND (conference_url IS NULL OR (
+          conference IS NOT NULL
+          AND octet_length(conference_url) BETWEEN 9 AND 2048
+          AND conference_url LIKE 'https://%'
+        ))
+      ) NOT VALID;
+  END IF;
+END
+$slotlock_calendar_event_conference$;
 
 CREATE OR REPLACE FUNCTION slotlock.prevent_calendar_event_owner_change()
 RETURNS trigger

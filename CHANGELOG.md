@@ -3,6 +3,26 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Added
+
+- Meeting links on events (RFC 0007 3.1). `slotlock_create_event`, `slotlock_confirm_slot`,
+  `slotlock_update_event` and `slotlock_book_together` take `conference_url`, a link the person gave
+  (https, with no user name or password, at most 2,048 bytes), and `conference`: `user_supplied`
+  with the link, or `none`. A link alone is `user_supplied`; on an update, `none` removes it and a
+  call that names neither keeps it. Every event booked together gets the same link. Slotlock keeps
+  the link as the URL parser writes it (ASCII, a host in another script as `xn--`) and never makes,
+  fetches or checks it. Events answer `conference`: `{requested, provider, status, join_url}`, or
+  `null`; it is optional in the output schema, so a backend written before links still answers.
+  Each of its sets of values may grow in a later release. iCalendar output writes the link as RFC
+  7986 `CONFERENCE`, as `LOCATION` when the event has none, and as a last `Join:` line of
+  `DESCRIPTION`; JSCalendar output as a `virtualLocations` entry. A write that waits for a person
+  names the link by its host. An event without a link hashes as before, so its retries replay across
+  the upgrade. The generated clients gain `conference` and `conference_url` as their last optional
+  arguments, before `dry_run`. Run `slotlock migrate`: it adds `calendar_events.conference` and
+  `conference_url`, and a server from before them keeps an event's link when it rewrites that event.
+
 ## 0.12.3 - 2026-11-15
 
 ### Added

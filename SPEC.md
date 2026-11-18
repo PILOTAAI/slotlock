@@ -144,7 +144,12 @@ the key with drift fails. Cancellation atomically removes derived occupation and
 tombstone; delayed create delivery cannot resurrect the UID.
 
 Events may carry organizer, attendees, roles, participation status, RSVP requests, display/email
-relative reminders, one RFC 5545 RRULE, and bounded recurrence exceptions. A materialization window
+relative reminders, one RFC 5545 RRULE, bounded recurrence exceptions, and a meeting link (RFC 0007
+3.1). A link is `user_supplied`: one the person gave, kept with the event's revision and hashed with
+its content, never made, fetched or checked by Slotlock. It is https with no user name or password,
+no space or control character, and at most 2,048 bytes as the WHATWG URL parser writes it, which is
+ASCII (a host in another script is written as `xn--`). An event without one hashes as it did before
+links. No host-only link is ever stored. A materialization window
 is mandatory for recurring events, must not exceed 367 days, and may produce at most 2,000
 occurrences. Expansion is bounded by a count of work, never a clock, so an input is accepted or
 refused the same way however loaded the machine: each series may pass 4,000 occurrences from its
@@ -196,7 +201,10 @@ series keeps its day boundaries, and a DATE `UNTIL` becomes that day's local mid
 
 RFC 5545 output includes recurrence and exception components. iTIP methods `PUBLISH`, `REQUEST`, `REPLY`,
 and `CANCEL` are explicit; a request requires an organizer and attendee, and a reply requires one
-attendee. The installed standards library parses every payload before it leaves the package.
+attendee. The installed standards library parses every payload before it leaves the package. A
+meeting link is written as RFC 7986 `CONFERENCE;FEATURE=VIDEO;VALUE=URI`, as `LOCATION` when the event
+has none, and as a last `Join:` line of `DESCRIPTION` while that stays within 16,384 bytes. The
+trusted parser does not read `CONFERENCE`: a link enters only through the event tools.
 
 ## Agent contract
 

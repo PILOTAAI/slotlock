@@ -639,6 +639,10 @@ type BookTogetherInput struct {
 
 	HoldGroupID *string
 
+	Conference *string
+
+	ConferenceURL *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -658,6 +662,12 @@ func (in BookTogetherInput) values() map[string]any {
 	}
 	if in.HoldGroupID != nil {
 		values["hold_group_id"] = *in.HoldGroupID
+	}
+	if in.Conference != nil {
+		values["conference"] = *in.Conference
+	}
+	if in.ConferenceURL != nil {
+		values["conference_url"] = *in.ConferenceURL
 	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
@@ -788,6 +798,10 @@ type ConfirmSlotInput struct {
 
 	IdempotencyKey *string
 
+	Conference *string
+
+	ConferenceURL *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -812,6 +826,12 @@ func (in ConfirmSlotInput) values() map[string]any {
 	}
 	if in.IdempotencyKey != nil {
 		values["idempotency_key"] = *in.IdempotencyKey
+	}
+	if in.Conference != nil {
+		values["conference"] = *in.Conference
+	}
+	if in.ConferenceURL != nil {
+		values["conference_url"] = *in.ConferenceURL
 	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
@@ -895,6 +915,10 @@ type CreateEventInput struct {
 
 	Notify *bool
 
+	Conference *string
+
+	ConferenceURL *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -945,6 +969,12 @@ func (in CreateEventInput) values() map[string]any {
 	if in.Notify != nil {
 		values["notify"] = *in.Notify
 	}
+	if in.Conference != nil {
+		values["conference"] = *in.Conference
+	}
+	if in.ConferenceURL != nil {
+		values["conference_url"] = *in.ConferenceURL
+	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
 	}
@@ -955,8 +985,9 @@ func (in CreateEventInput) values() map[string]any {
 // (a booking, lease or long rental). The database refuses a time already taken: 409 overlap, with
 // alternatives (the earliest free times of the same length) and, when the booking in the way is
 // yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives
-// too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the
-// same idempotency_key answers the same event.
+// too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url
+// gives it a meeting link the person supplied (https), which Slotlock keeps and exports but never
+// makes or checks. A retry with the same idempotency_key answers the same event.
 func (c *Client) CreateEvent(ctx context.Context, in CreateEventInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_create_event", in.values())
 }
@@ -1016,6 +1047,10 @@ type UpdateEventInput struct {
 
 	ExpectedResourceID *string
 
+	Conference *string
+
+	ConferenceURL *string
+
 	// Check the write without making it: it runs with every check, the database's included, and is
 	// then undone, so nothing is stored, recorded or sent. The answer is what it would have been,
 	// with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1072,6 +1107,12 @@ func (in UpdateEventInput) values() map[string]any {
 	}
 	if in.ExpectedResourceID != nil {
 		values["expected_resource_id"] = *in.ExpectedResourceID
+	}
+	if in.Conference != nil {
+		values["conference"] = *in.Conference
+	}
+	if in.ConferenceURL != nil {
+		values["conference_url"] = *in.ConferenceURL
 	}
 	if in.DryRun != nil {
 		values["dry_run"] = *in.DryRun
