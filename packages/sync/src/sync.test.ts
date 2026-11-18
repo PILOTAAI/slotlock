@@ -10,6 +10,8 @@ import {
   createMemorySyncStore,
   createSyncHttpHandler,
   createSyncer,
+  googleWritesEveryCalendar,
+  listGoogleCalendars,
   readMicrosoftCalendarBusy,
   retryAfterMs,
   exchangeCode,
@@ -67,6 +69,11 @@ describe('OAuth', () => {
       'https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.freebusy',
     );
     expect(url.searchParams.get('code_challenge')).not.toBe(read.verifier);
+    // Writing back asks Google for events on calendars the person owns, nothing wider.
+    expect(new URL(beginAuthorization(google, { writeBack: true }).url).searchParams.get('scope')).toBe(
+      'https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.freebusy ' +
+        'https://www.googleapis.com/auth/calendar.events.owned',
+    );
     const write = new URL(beginAuthorization({ ...google, provider: 'microsoft', directory: 'org-1' }, { writeBack: true }).url);
     expect(write.pathname).toBe('/org-1/oauth2/v2.0/authorize');
     expect(write.searchParams.get('scope')).toBe('offline_access User.Read Calendars.ReadWrite');
@@ -213,7 +220,7 @@ describe("Microsoft calendars and providers' limits", () => {
 
 describe('the HTTP surface', () => {
   const keys = parseSealKeys(`k1:${key()}`);
-  const setup = () => {
+  const setup = (more: { privacyUrl?: string } = {}) => {
     const store = createMemorySyncStore();
     const { send } = fakeFetch(() => json({}));
     const syncer = createSyncer({
@@ -223,7 +230,14 @@ describe('the HTTP surface', () => {
       clients: { google: { provider: 'google', clientId: 'id', clientSecret: 'secret', redirectUri: 'https://sync.example/oauth/callback' } },
       fetch: send,
     });
-    const handler = createSyncHttpHandler({ syncer, store, adminToken: 'a'.repeat(40), linkSecret: 'l'.repeat(40), publicUrl: 'https://sync.example' });
+    const handler = createSyncHttpHandler({
+      syncer,
+      store,
+      adminToken: 'a'.repeat(40),
+      linkSecret: 'l'.repeat(40),
+      publicUrl: 'https://sync.example',
+      ...more,
+    });
     const call = (method: string, path: string, body?: unknown, token = 'a'.repeat(40)) =>
       handler(
         new Request(`https://sync.example${path}`, {
@@ -232,7 +246,21 @@ describe('the HTTP surface', () => {
           ...(body ? { body: JSON.stringify(body) } : {}),
         }),
       );
-    return { store, handler, call };
+    /** Continue on the page a link opens, as a browser does: from that page, so same-origin. */
+    const press = async (opened: Response, site = 'same-origin') => {
+      const html = await opened.text();
+      const action = /<form method="post" action="([^"]+)">/.exec(html)?.[1] as string;
+      const value = /name="link" value="([^"]+)"/.exec(html)?.[1] as string;
+      return handler(
+        new Request(action, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': site },
+          body: new URLSearchParams({ link: value }).toString(),
+        }),
+      );
+    };
+    const follow = async (url: string) => press(await handler(new Request(url)));
+    return { store, handler, call, press, follow };
   };
 
   it("keeps the operator's routes behind its token", async () => {
@@ -244,23 +272,25 @@ describe('the HTTP surface', () => {
   });
 
   it('sends a person with a signed link to the provider, and refuses a changed or old link', async () => {
-    const { call, handler, store } = setup();
+    const { call, handler, store, follow } = setup();
     await call('PUT', '/v1/tenants/fleet', { api_key: 'slk_0123456789abcdef' });
     const link = (await (await call('POST', '/v1/tenants/fleet/connect-links', { provider: 'google', write_back: false })).json()) as { url: string };
-    const followed = await handler(new Request(link.url));
-    expect(followed.status).toBe(302);
+    const followed = await follow(link.url);
+    expect(followed.status).toBe(303);
     const provider = new URL(followed.headers.get('location') as string);
     expect(provider.origin).toBe('https://accounts.google.com');
     expect(provider.searchParams.get('redirect_uri')).toBe('https://sync.example/oauth/callback');
     // The state is kept as a digest, used once.
     const state = provider.searchParams.get('state') as string;
     expect(await store.takeOAuthState(state, new Date())).toBeNull();
-    // A link is followed once: opened again (forwarded, or found in a history), it is refused.
-    expect((await handler(new Request(link.url))).status).toBe(400);
+    // A link is followed once: continued again (forwarded, or found in a history), it is refused.
+    const used = await follow(link.url);
+    expect(used.status).toBe(400);
+    expect(await used.text()).toContain('This link was used');
     // The flow is finished only in the browser that began it: without its cookie, or with
     // another's, the callback is refused, and the state is spent.
     const again = (await (await call('POST', '/v1/tenants/fleet/connect-links', { provider: 'google', write_back: false })).json()) as { url: string };
-    const begun = await handler(new Request(again.url));
+    const begun = await follow(again.url);
     const theirs = new URL(begun.headers.get('location') as string).searchParams.get('state') as string;
     const elsewhere = await handler(new Request(`https://sync.example/oauth/callback?state=${theirs}&code=c`));
     expect(elsewhere.status).toBe(400);
@@ -284,6 +314,75 @@ describe('the HTTP surface', () => {
       }),
     );
     expect(forged.status).toBe(400);
+  });
+
+  it('tells the person what is read and written before the consent screen, and opening the link uses nothing', async () => {
+    const { call, handler, press } = setup({ privacyUrl: 'https://slotlock.example/docs/privacy/' });
+    await call('PUT', '/v1/tenants/fleet', { api_key: 'slk_0123456789abcdef' });
+    const link = (await (await call('POST', '/v1/tenants/fleet/connect-links', { provider: 'google', write_back: true })).json()) as { url: string };
+    // Opened (by a person, or a mail scanner first), the link shows the page and stays unused.
+    const scanned = await handler(new Request(link.url));
+    expect(scanned.status).toBe(200);
+    const opened = await handler(new Request(link.url));
+    expect(opened.status).toBe(200);
+    expect(opened.headers.get('content-security-policy')).toContain("form-action 'self'");
+    expect(opened.headers.get('cache-control')).toBe('no-store');
+    const html = await opened.clone().text();
+    expect(html).toContain('<h1>Connect your Google calendar</h1>');
+    expect(html).toContain('It reads start and end times only, never what your events are about.');
+    expect(html).toContain('titled "Busy"');
+    expect(html).toContain('<a href="https://slotlock.example/docs/privacy/" rel="noreferrer">How Slotlock uses calendar data</a>');
+    expect(html).toContain('<button type="submit">Continue to Google</button>');
+    expect(html).not.toContain('accounts.google.com');
+    // Continue sent by another site starts nothing and leaves the link to its person.
+    expect((await press(opened.clone(), 'cross-site')).status).toBe(403);
+    const continued = await press(opened);
+    expect(continued.status).toBe(303);
+    expect(new URL(continued.headers.get('location') as string).origin).toBe('https://accounts.google.com');
+    // Read only: no word of writing, and no privacy link where none is set.
+    const plain = setup();
+    await plain.call('PUT', '/v1/tenants/fleet', { api_key: 'slk_0123456789abcdef' });
+    const readOnly = (await (await plain.call('POST', '/v1/tenants/fleet/connect-links', { provider: 'google', write_back: false })).json()) as { url: string };
+    const readPage = await (await plain.handler(new Request(readOnly.url))).text();
+    expect(readPage).not.toContain('Busy');
+    expect(readPage).not.toContain('<a href=');
+    expect(() =>
+      createSyncHttpHandler({
+        syncer: {} as never,
+        store: {} as never,
+        adminToken: 'a'.repeat(40),
+        linkSecret: 'l'.repeat(40),
+        publicUrl: 'https://sync.example',
+        privacyUrl: 'http://slotlock.example/privacy',
+      }),
+    ).toThrow('privacy URL must be https');
+  });
+});
+
+describe('Google calendars a connection can write to', () => {
+  const list = (writesEveryCalendar?: boolean) => {
+    const { send } = fakeFetch(() =>
+      json({
+        items: [
+          { id: 'me@example.com', summary: 'Me', primary: true, accessRole: 'owner' },
+          { id: 'team@group.example', summary: 'Team', accessRole: 'writer' },
+          { id: 'holidays@group.example', summary: 'Holidays', accessRole: 'reader' },
+        ],
+      }),
+    );
+    return listGoogleCalendars('token', send, writesEveryCalendar === undefined ? {} : { writesEveryCalendar });
+  };
+
+  it('writes only to calendars the person owns, unless the token writes events everywhere', async () => {
+    const writable = async (writesEveryCalendar?: boolean) =>
+      (await list(writesEveryCalendar)).calendars.filter((calendar) => calendar.writable).map((calendar) => calendar.id);
+    // calendar.events.owned: owned calendars only.
+    expect(await writable()).toEqual(['me@example.com']);
+    // A connection made before it, holding calendar.events, keeps writing where it could.
+    expect(await writable(true)).toEqual(['me@example.com', 'team@group.example']);
+    expect(googleWritesEveryCalendar(['https://www.googleapis.com/auth/calendar.events'])).toBe(true);
+    expect(googleWritesEveryCalendar(['https://www.googleapis.com/auth/calendar'])).toBe(true);
+    expect(googleWritesEveryCalendar(['https://www.googleapis.com/auth/calendar.events.owned'])).toBe(false);
   });
 });
 

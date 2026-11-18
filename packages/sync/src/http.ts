@@ -4,8 +4,10 @@
 //   tenant's Slotlock key, makes connect links, connects iCalendar URLs, maps calendars, lists and
 //   removes connections, and runs a pass on demand.
 // - A tenant's person, with a connect link the operator made (signed, for one tenant and provider,
-//   valid 30 minutes): sent to Google or Microsoft, back to /oauth/callback, then shown the account's
-//   calendars to choose which feeds which resource. The choice form is signed for that connection.
+//   valid 30 minutes): first shown what Slotlock will read and write, before the provider's consent
+//   screen, as Google's Workspace developer policy asks; on Continue (a POST, which uses the link
+//   up) sent to Google or Microsoft, back to /oauth/callback, then shown the account's calendars to
+//   choose which feeds which resource. The choice form is signed for that connection.
 //
 // Pages carry no script or style, a strict Content-Security-Policy, and no referrer (the callback's
 // URL holds the provider's code).
@@ -25,8 +27,15 @@ export interface SyncHttpOptions {
   linkSecret: string;
   /** This server's public origin (https), as links and OAuth redirects name it. */
   publicUrl: string;
+  /**
+   * The page that says how calendar data is used (https), linked before the provider's consent
+   * screen. Google's review checks for it; without it the page before consent links nothing.
+   */
+  privacyUrl?: string;
   now?: () => Date;
 }
+
+const PROVIDER_NAMES: Record<OAuthProvider, string> = { google: 'Google', microsoft: 'Microsoft' };
 
 /** How long a connect link, and the calendar form after it, may be used. */
 const LINK_TTL_MS = 30 * 60 * 1_000;
@@ -72,6 +81,9 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
   const publicUrl = withoutTrailingSlashes(options.publicUrl);
   if (!/^https:\/\//.test(publicUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(publicUrl)) {
     throw new TypeError('The sync public URL must be https (or http on localhost)');
+  }
+  if (options.privacyUrl !== undefined && !/^https:\/\/[^\s"'<>]+$/.test(options.privacyUrl)) {
+    throw new TypeError('The sync privacy URL must be https');
   }
   const now = options.now ?? (() => new Date());
   const sign = (purpose: string, payload: string) =>
@@ -120,6 +132,28 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
     }
     return null;
   };
+
+  /**
+   * What the person is told before the provider's consent screen: what is read, what is written,
+   * where calendar data is described, and a button that continues with this link.
+   */
+  function consentPage(provider: OAuthProvider, writeBack: boolean, link: string): Response {
+    const name = PROVIDER_NAMES[provider];
+    return page(
+      `Connect your ${name} calendar`,
+      '<p>Slotlock will read when the calendars you choose are busy, so it does not book you at times you are ' +
+        'already taken. It reads start and end times only, never what your events are about.</p>' +
+        (writeBack
+          ? '<p>It will also add your bookings to the calendar you choose, titled "Busy", and move or remove them ' +
+            'when a booking changes.</p>'
+          : '') +
+        '<p>You choose which calendars count on the next page. You can disconnect at any time.</p>' +
+        (options.privacyUrl ? `<p><a href="${escapeHtml(options.privacyUrl)}" rel="noreferrer">How Slotlock uses calendar data</a></p>` : '') +
+        `<form method="post" action="${escapeHtml(`${publicUrl}/connect`)}">` +
+        `<input type="hidden" name="link" value="${escapeHtml(link)}">` +
+        `<button type="submit">Continue to ${escapeHtml(name)}</button></form>`,
+    );
+  }
 
   const formToken = (connectionId: string, expires: number) => sign('choose', `${connectionId}\n${expires}`);
 
@@ -269,7 +303,19 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
       if (url.pathname === '/healthz' && request.method === 'GET') return json({ ok: true });
       if (url.pathname.startsWith('/v1/')) return await operator(request, url);
       if (url.pathname === '/connect' && request.method === 'GET') {
-        const link = readLink(url.searchParams.get('link'));
+        const value = url.searchParams.get('link');
+        const link = readLink(value);
+        if (!link) return page('This link has expired', '<p>Ask for a new link to connect your calendar.</p>', 400);
+        // Shown, not used up: a mail scanner that opens the link leaves it for its person.
+        return consentPage(link.provider, link.writeBack, value as string);
+      }
+      if (url.pathname === '/connect' && request.method === 'POST') {
+        // Continue on the page above: a form another site posts cannot start a flow.
+        const site = request.headers.get('sec-fetch-site');
+        if (site !== null && site !== 'same-origin') {
+          return page('Open the link again', '<p>Continue from the page your link opens, or ask for a new link.</p>', 403);
+        }
+        const link = readLink(new URLSearchParams(await request.text()).get('link'));
         if (!link) return page('This link has expired', '<p>Ask for a new link to connect your calendar.</p>', 400);
         // Followed once: whoever opens it again, or after it was forwarded, is asked for a new one.
         if (!(await options.store.claimLink(link.linkId, link.expiresAt))) {
@@ -283,8 +329,9 @@ export function createSyncHttpHandler(options: SyncHttpOptions): (request: Reque
           writeBack: link.writeBack,
           browserHash: digest(browser),
         });
+        // 303: the browser follows a POST's answer with a GET.
         return new Response(null, {
-          status: 302,
+          status: 303,
           headers: {
             location: to,
             'cache-control': 'no-store',

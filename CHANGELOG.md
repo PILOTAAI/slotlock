@@ -3,6 +3,25 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- **`@slotlock/sync`: a page of its own before the provider's consent screen.** A connect link now
+  opens a page that says what the sync will read (busy times only) and, with write-back, what it
+  will write. It links `SYNC_PRIVACY_URL` (new, optional, https) and continues to Google or
+  Microsoft on a button. Google's Workspace developer policy asks for this disclosure, and its app
+  verification checks it.
+  - Opening a link no longer uses it up, so a mail scanner that opens it first leaves it for its
+    person.
+  - Continue uses it up, answers 303, and is refused (403) when the browser says another site sent
+    it (`Sec-Fetch-Site`).
+- **`@slotlock/sync`: writing back asks Google for `calendar.events.owned`** in place of
+  `calendar.events`: events on calendars the person owns, the narrowest scope that writes bookings.
+  - Calendars the person can edit but does not own are shown read only.
+  - A read-only connection is refused if its token holds any scope that writes events.
+  - Connections made before this hold `calendar.events` and keep writing where they did.
+
 ## 0.12.3 - 2026-11-15
 
 ### Added

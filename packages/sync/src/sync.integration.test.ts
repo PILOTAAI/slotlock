@@ -41,7 +41,7 @@ describe.skipIf(!url)('@slotlock/sync with Slotlock (real Postgres)', () => {
   let granted = [
     'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
     'https://www.googleapis.com/auth/calendar.freebusy',
-    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/calendar.events.owned',
   ];
   const googleFetch = async (target: string, init: RequestInit = {}): Promise<Response> => {
     if (target === 'https://oauth2.googleapis.com/token') {
@@ -140,14 +140,26 @@ describe.skipIf(!url)('@slotlock/sync with Slotlock (real Postgres)', () => {
           ...(body ? { body: JSON.stringify(body) } : {}),
         }),
       );
+    // A person opens the link, reads the page before Google's, and presses Continue.
+    const follow = async (url: string) => {
+      const opened = await (await http(new Request(url))).text();
+      const value = /name="link" value="([^"]+)"/.exec(opened)?.[1] as string;
+      return http(
+        new Request(`${SYNC}/connect`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin' },
+          body: new URLSearchParams({ link: value }).toString(),
+        }),
+      );
+    };
 
     // The operator keeps the tenant's key and makes a link; the person follows it, comes back, and
     // chooses the calendar for the van.
     expect((await operator('PUT', `/v1/tenants/${tenantRef}`, { api_key: 'admin-key-0123456789' })).status).toBe(200);
     // A person who unticked writing events connects nothing to a link that writes bookings back.
     const unticked = (await (await operator('POST', `/v1/tenants/${tenantRef}/connect-links`, { provider: 'google', write_back: true })).json()) as { url: string };
-    const tried = await http(new Request(unticked.url));
-    granted = granted.filter((scope) => !scope.endsWith('calendar.events'));
+    const tried = await follow(unticked.url);
+    granted = granted.filter((scope) => !scope.endsWith('calendar.events.owned'));
     const refused = await http(
       new Request(`${SYNC}/oauth/callback?state=${new URL(tried.headers.get('location') as string).searchParams.get('state')}&code=c`, {
         headers: { cookie: (tried.headers.get('set-cookie') ?? '').split(';')[0] as string },
@@ -155,9 +167,9 @@ describe.skipIf(!url)('@slotlock/sync with Slotlock (real Postgres)', () => {
     );
     expect(refused.status).toBe(400);
     expect(await refused.text()).toContain('allow each calendar permission');
-    granted = [...granted, 'https://www.googleapis.com/auth/calendar.events'];
+    granted = [...granted, 'https://www.googleapis.com/auth/calendar.events.owned'];
     const link = (await (await operator('POST', `/v1/tenants/${tenantRef}/connect-links`, { provider: 'google', write_back: true })).json()) as { url: string };
-    const followed = await http(new Request(link.url));
+    const followed = await follow(link.url);
     const toGoogle = new URL(followed.headers.get('location') as string);
     // The browser that followed the link holds the flow's cookie, sent back only to the callback.
     const cookie = (followed.headers.get('set-cookie') ?? '').split(';')[0] as string;

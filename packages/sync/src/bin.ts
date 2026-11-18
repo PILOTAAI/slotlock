@@ -5,7 +5,8 @@
 //   slotlock-sync serve      serve its HTTP surface and sync every SYNC_INTERVAL_SECONDS
 //
 // Settings (environment): SYNC_DATABASE_URL, SLOTLOCK_URL, SLOTLOCK_SYNC_KEYS (id:base64 seal keys,
-// newest first), SYNC_ADMIN_TOKEN, SYNC_LINK_SECRET, SYNC_PUBLIC_URL; GOOGLE_CLIENT_ID and
+// newest first), SYNC_ADMIN_TOKEN, SYNC_LINK_SECRET, SYNC_PUBLIC_URL, SYNC_PRIVACY_URL (the page,
+// https, that says how calendar data is used: linked before the provider's consent screen); GOOGLE_CLIENT_ID and
 // GOOGLE_CLIENT_SECRET, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and MICROSOFT_DIRECTORY for
 // the providers offered; SYNC_INTERVAL_SECONDS (default 300), SYNC_WINDOW_DAYS (default 60), HOST,
 // PORT (default 8090). iCalendar URLs need the slotlock package installed beside it.
@@ -89,6 +90,7 @@ async function main(command: string): Promise<void> {
     adminToken: setting('SYNC_ADMIN_TOKEN'),
     linkSecret: setting('SYNC_LINK_SECRET'),
     publicUrl,
+    ...(process.env.SYNC_PRIVACY_URL ? { privacyUrl: process.env.SYNC_PRIVACY_URL } : {}),
   });
   const server = createServer(
     serveFetchHandler(handler, { maxBodyBytes: 64 * 1024, onError: (error) => log('error', 'request failed', { error: String(error) }) }),

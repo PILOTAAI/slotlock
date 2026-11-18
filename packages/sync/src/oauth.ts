@@ -36,17 +36,38 @@ export class OAuthError extends Error {
 
 /**
  * What each provider is asked for: the list of calendars (to choose one) and free/busy, and with
- * write-back, events. Microsoft needs User.Read for the account's address.
+ * write-back, events. Google is asked to write only on calendars the person owns
+ * (`calendar.events.owned`), the narrowest scope that writes bookings (RFC 0007, Part 1.3).
+ * Microsoft needs User.Read for the account's address.
  */
 export function oauthScopes(provider: OAuthProvider, writeBack: boolean): string[] {
   if (provider === 'google') {
     return [
       'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
       'https://www.googleapis.com/auth/calendar.freebusy',
-      ...(writeBack ? ['https://www.googleapis.com/auth/calendar.events'] : []),
+      ...(writeBack ? ['https://www.googleapis.com/auth/calendar.events.owned'] : []),
     ];
   }
   return ['offline_access', 'User.Read', writeBack ? 'Calendars.ReadWrite' : 'Calendars.Read'];
+}
+
+/** Google scopes that write events: one of these on a read-only connection is refused. */
+export const GOOGLE_EVENT_WRITE_SCOPES: readonly string[] = Object.freeze([
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/calendar.events.owned',
+]);
+
+/**
+ * Whether Google scopes write events on every calendar the person can edit, not only those they
+ * own. A connection made before `calendar.events.owned` holds `calendar.events`, and keeps
+ * writing where it wrote.
+ */
+export function googleWritesEveryCalendar(scopes: Iterable<string>): boolean {
+  const granted = new Set(scopes);
+  return (
+    granted.has('https://www.googleapis.com/auth/calendar') || granted.has('https://www.googleapis.com/auth/calendar.events')
+  );
 }
 
 function endpoints(client: OAuthClient): { authorize: string; token: string } {

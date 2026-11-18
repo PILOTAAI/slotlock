@@ -16,9 +16,11 @@ import {
   type OAuthClient,
   type OAuthProvider,
   type OAuthTokens,
+  GOOGLE_EVENT_WRITE_SCOPES,
   OAuthError,
   beginAuthorization,
   exchangeCode,
+  googleWritesEveryCalendar,
   oauthScopes,
   refreshTokens,
 } from './oauth.js';
@@ -503,16 +505,18 @@ export function createSyncer(options: SyncerOptions) {
       const tokens = await exchangeCode(oauthClient(flow.provider), { code: params.code, verifier }, send);
       // Exactly what the connection asked for: a person who unticked a scope Google asked about
       // connects nothing, and a read-only connection never keeps a token that writes events.
+      const granted = new Set(tokens.scope.split(/\s+/).filter(Boolean));
       if (flow.provider === 'google') {
-        const granted = new Set(tokens.scope.split(/\s+/).filter(Boolean));
         const wanted = oauthScopes('google', flow.writeBack);
-        const events = 'https://www.googleapis.com/auth/calendar.events';
-        if (wanted.some((scope) => !granted.has(scope)) || (!flow.writeBack && granted.has(events))) {
+        const writes = GOOGLE_EVENT_WRITE_SCOPES.some((scope) => granted.has(scope));
+        if (wanted.some((scope) => !granted.has(scope)) || (!flow.writeBack && writes)) {
           throw new Error('oauth_scope_mismatch');
         }
       }
       const listed =
-        flow.provider === 'google' ? await listGoogleCalendars(tokens.accessToken, send) : await listMicrosoftCalendars(tokens.accessToken, send);
+        flow.provider === 'google'
+          ? await listGoogleCalendars(tokens.accessToken, send, { writesEveryCalendar: googleWritesEveryCalendar(granted) })
+          : await listMicrosoftCalendars(tokens.accessToken, send);
       const id = randomUUID();
       const connection: SyncConnection = {
         id,
@@ -532,7 +536,12 @@ export function createSyncer(options: SyncerOptions) {
       if (!connection) throw new Error('connection_not_found');
       if (connection.provider === 'ics') return [{ id: 'feed', name: connection.account, primary: true, writable: false }];
       const token = await accessToken(connection);
-      return (connection.provider === 'google' ? await listGoogleCalendars(token, send) : await listMicrosoftCalendars(token, send)).calendars;
+      if (connection.provider === 'google') {
+        // What the token can write, as it holds now (a refresh keeps the scopes Google granted).
+        const writesEveryCalendar = googleWritesEveryCalendar(tokensOf(connection).scope.split(/\s+/).filter(Boolean));
+        return (await listGoogleCalendars(token, send, { writesEveryCalendar })).calendars;
+      }
+      return (await listMicrosoftCalendars(token, send)).calendars;
     },
 
     /** The tenant's resources, for choosing where a calendar's time goes. */
