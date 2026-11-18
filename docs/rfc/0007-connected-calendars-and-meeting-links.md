@@ -235,6 +235,11 @@ an account (estimate). Revisit polling near that scale.
 
 ### 3.1 The `conference` field (T2)
 
+It ships in two parts (Delivery 6a and 6b). The first takes only `none` and `user_supplied`: a link
+the person gave is content, kept with the event's revision like its location, so it needs no side
+table and no new key scope. `auto`, the providers and `room` come with the side table, once a
+package can make links.
+
 - **Request.** `slotlock_create_event`, `slotlock_update_event` and `slotlock_book_together` take
   `conference`, one of:
   - `none` (the default);
@@ -524,7 +529,8 @@ verification, the independent reviewer, and counsel on PECR roles and Article 50
 | 3 | Dashboard Calendars page, Microsoft admin-consent link, `calendar.events.owned` | T2 | 1.x, with the sync's review |
 | 4 | `max_age_seconds` and `live` on coverage | T1 | 1.x |
 | 5 | `confirmAfterRead`; the sync re-reads on `hold.created` | T2 | 1.x |
-| 6 | `conference` field, its side table, RFC 7986 `CONFERENCE` export | T2 | 1.x |
+| 6a | `conference` field with `none` and `user_supplied` links, stored with the event's revision; RFC 7986 `CONFERENCE` and JSCalendar export; the confirmation names the link's host | T2 | 1.x |
+| 6b | The side table and its `sync`-scoped route for links a package makes; `auto` and `room` | T2 | 1.x, with PR 8 |
 | 7 | `slotlock_get_invitation`, `ical_uid`, a confirmation that names recipients | T1 | 1.x |
 | 8 | `@slotlock/rooms`: Daily, Whereby, Jitsi/JaaS, static link | T2 | rooms 0.1 |
 | 9 | Meeting write-back with Meet and Teams | T2 | sync 0.x |
