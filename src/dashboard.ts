@@ -4413,12 +4413,15 @@ ${
     const assistant = assistantOptions as SlotlockDashboardAssistantOptions;
     let text: string;
     if (CONFIRMED_WRITES.has(operation)) {
+      // The card lists every attendee among its facts, so the sentence, which is cut at 500
+      // characters, leaves their addresses to it.
+      const { attendees: _listed, ...described } = input;
       text = await describeSlotlockAgentWrite({
         backend: assistant.backend,
         authorize: assistantAuthorize,
         principal: assistantPrincipal(session),
         operation: operation as SlotlockAgentWriteOperation,
-        input,
+        input: described,
         signal: AbortSignal.timeout(assistantTimeout),
       }).catch(() => '');
     } else if (operation === 'slotlock_hold_slots' && Array.isArray(input.slots)) {

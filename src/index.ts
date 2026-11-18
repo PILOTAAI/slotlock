@@ -213,9 +213,20 @@ export type {
   SlotlockAgentWriteOperation,
   SlotlockAlternative,
   SlotlockArgumentIssue,
+  SlotlockMcpEmbeddedResource,
   SlotlockMcpToolResult,
   SlotlockTraceContext,
 } from './agent-server.js';
+export {
+  SLOTLOCK_EVENT_INVITATION_MAX_BYTES,
+  slotlockEventInvitation,
+  slotlockICalUid,
+} from './event-invitation.js';
+export type {
+  SlotlockEventInvitation,
+  SlotlockEventInvitationMethod,
+  SlotlockEventInvitationResult,
+} from './event-invitation.js';
 export { createSlotlockNodeServer } from './node-server.js';
 export type {
   SlotlockNodeListenOptions,
@@ -493,6 +504,7 @@ export type {
   CalendarAttendeeRole,
   CalendarConference,
   CalendarConferenceRequest,
+  SlotlockEventInvitationRefusal,
   CalendarCoverageAssessment,
   CalendarCoverageCommand,
   CalendarCoverageResult,

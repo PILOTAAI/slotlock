@@ -48,6 +48,7 @@ export const SLOTLOCK_ASSISTANT_TOOL_USE: Readonly<Record<SlotlockAgentOperation
     slotlock_get_pool_availability: 'read',
     slotlock_get_event: 'read',
     slotlock_list_events: 'read',
+    slotlock_get_invitation: 'read',
     slotlock_hold_slots: 'propose',
     slotlock_hold_together: 'propose',
     slotlock_release_slots: 'propose',

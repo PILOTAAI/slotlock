@@ -233,8 +233,24 @@ event, an exhausted quota) is a result, not a protocol error:
 - MCP returns a tool result with `isError: true` whose text content is `{"error":{"code":"…"}}` and
   which carries no `structuredContent`, because structured content must conform to the tool's
   output schema. A successful result carries the output as both `structuredContent` and JSON text.
+  A `slotlock_get_invitation` result also carries its iCalendar as an embedded `text/calendar`
+  resource.
 - A2A returns the agent's reply message with one `application/json` data part holding the result or
-  `{"error":{"code":"…"}}`.
+  `{"error":{"code":"…"}}`. A `slotlock_get_invitation` reply adds a `text/calendar` part, the
+  iCalendar, named `invite.ics`.
+
+### Invitations
+
+Slotlock sends no invitation. `slotlock_get_invitation` returns one for the agent to send from the
+person's own mailbox (RFC 0007 4.1): an iTIP iCalendar (RFC 5546) with method `REQUEST`, `CANCEL` or
+`PUBLISH`, its media type and file name (RFC 6047), the organizer's and attendees' addresses, the
+meeting link, a subject and a short plain-text body. Its `UID` is a version 8 UUID (RFC 9562) made
+from SHA-256 of the tenant and the event's id: the same in every invitation to the event, and never
+the event's id, an `agent:` digest or a store id. Its `SEQUENCE` is the event's revision, and for
+`CANCEL` the revision cancelling the event will write, so a cancellation read before
+`slotlock_cancel` and sent after it supersedes every request. `REQUEST` and `CANCEL` need an
+organizer and an attendee; `PUBLISH` carries no attendees (RFC 5546 §3.2.1). An iCalendar over 256
+KiB is refused (`invitation_too_large`).
 
 A body must be `application/json`, compared without regard to case (RFC 9110 §8.3.1), or the request
 is HTTP 415; one longer than the server's limit is HTTP 413, refused as soon as it passes the limit,

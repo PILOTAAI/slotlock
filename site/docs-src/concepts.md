@@ -94,6 +94,9 @@ occupies nothing.
 - Over MCP and A2A, a caller sees only its own events, but everyone's count as busy time.
 - A meeting link is one the person gave (`conference_url`): Slotlock keeps it with the event and
   writes it into the event's iCalendar as `CONFERENCE`, but never makes, fetches or checks it.
+- Slotlock sends no invitations. `slotlock_get_invitation` returns one for the agent to send from
+  the person's own mailbox, so replies reach them: the iCalendar to attach, the addresses, a
+  subject and a short body. Its UID stays the same, so a later update or cancellation replaces it.
 
 ## Free/busy certainty
 

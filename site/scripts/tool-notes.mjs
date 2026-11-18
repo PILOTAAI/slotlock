@@ -35,10 +35,14 @@ export const SUMMARIES = {
   slotlock_confirm_slot: 'Book a time you hold: the held resource and time exactly.',
   slotlock_reschedule: 'Move one of your events to a new time, and resource, at the revision you last read.',
   slotlock_cancel: 'Cancel one of your events at the revision you last read.',
+  slotlock_get_invitation:
+    'The invitation to one of your events, for you to send from the person\u2019s own mailbox.',
 };
 
 /** A paragraph after the summary, where the schema alone would mislead. */
 export const DETAILS = {
+  slotlock_get_invitation:
+    'Slotlock sends nothing: you send the invitation, from the organizer\u2019s mailbox, so replies reach the person and no one hears from Slotlock. Attach `ical` as `filename` with `content_type`, to the `recipients`, with `subject` and `text`. The UID is the same in every invitation to the event, so a calendar that has the request updates it, and a cancellation, read before `slotlock_cancel` and sent once it succeeds, removes it. `request` and `cancel` need an organizer (`organizer_required`) and an attendee (`attendees_required`); an event too large to send whole is `invitation_too_large`.',
   slotlock_get_free_busy:
     'Busy time includes every booking on the resource, whoever made it. Intervals carry times only, never titles or attendees.',
   slotlock_find_next_available:
@@ -130,6 +134,8 @@ export const INPUT_NOTES = {
   conference_url:
     'A link the person gave you, https; on its own it means `user_supplied`. Slotlock keeps it and writes it into the event\u2019s iCalendar, but never makes, fetches or checks it. `invalid_event` when it has a user name or password, a space, or more than 2,048 bytes.',
   'slotlock_update_event.conference': '`none` removes the link; left out, it stays.',
+  'slotlock_get_invitation.method':
+    '`request` invites the attendees; `cancel` withdraws a request (read it before `slotlock_cancel`, send it after); `publish` is a copy for a calendar, without attendees.',
   'slotlock_book_together.conference_url':
     'A link the person gave you, https, for every event booked; on its own it means `user_supplied`. Slotlock never makes, fetches or checks it.',
 };
@@ -165,6 +171,19 @@ export const OUTPUT_NOTES = {
   'EVENT.revision': 'Pass it as `expected_revision` to update or delete.',
   'EVENT.sequence': 'The iCalendar `SEQUENCE`.',
   'EVENT.title': 'Busy when the event was created without one.',
+  'INVITATION.ical_uid':
+    'The iCalendar `UID`, the same in every invitation to this event, made from a hash: never its id.',
+  'INVITATION.sequence':
+    'The `SEQUENCE`: the event\u2019s revision, one more for `cancel`, as cancelling it will make it.',
+  'INVITATION.content_type': 'The attachment\u2019s media type, with its iTIP method (RFC 6047).',
+  'INVITATION.filename': 'The name to attach it under.',
+  'INVITATION.ical':
+    'The iTIP iCalendar to attach. Over MCP it is also an embedded `text/calendar` resource, and over A2A a `text/calendar` part.',
+  'INVITATION.organizer': 'Send from this address, so replies reach the person.',
+  'INVITATION.recipients': 'Every attendee\u2019s address; none for `publish`.',
+  'INVITATION.join_url': 'The meeting link, or `null`.',
+  'INVITATION.subject': 'A subject line, in English.',
+  'INVITATION.text': 'A short plain-text body, in English: the title, when, the link and the place.',
   'EVENT.conference': '`null` when it has none; absent from a backend written before meeting links.',
   'CONFERENCE.requested': 'What the booking asked for.',
   'CONFERENCE.provider': 'Who made the link: `user_supplied` is the person.',
@@ -193,6 +212,7 @@ export const OBJECTS = {
   REMINDER: { name: 'Reminder', role: 'output' },
   RECURRENCE_EXCEPTION: { name: 'Recurrence exception', role: 'output' },
   CONFERENCE: { name: 'Meeting link', role: 'output' },
+  INVITATION: { name: 'Invitation', role: 'output' },
   ORGANIZER_INPUT: { name: 'Organizer input', role: 'input' },
   ATTENDEE_INPUT: { name: 'Attendee input', role: 'input' },
   REMINDER_INPUT: { name: 'Reminder input', role: 'input' },
@@ -262,6 +282,7 @@ export const TOOL_ERRORS = {
     'store_inconsistent',
   ],
   slotlock_get_event: ['event_not_found'],
+  slotlock_get_invitation: ['event_not_found', 'organizer_required', 'attendees_required', 'invitation_too_large'],
   slotlock_list_events: ['resource_not_found', 'invalid_cursor'],
   slotlock_update_event: [
     'revision_conflict',

@@ -22,6 +22,26 @@ versioning.
   the upgrade. The generated clients gain `conference` and `conference_url` as their last optional
   arguments, before `dry_run`. Run `slotlock migrate`: it adds `calendar_events.conference` and
   `conference_url`, and a server from before them keeps an event's link when it rewrites that event.
+- `slotlock_get_invitation` (RFC 0007 4.1), a read tool, and `GET /v1/events/{event_id}/invitation`:
+  the invitation to one of the caller's events, for the agent to send from the person's own mailbox.
+  Slotlock sends nothing. It returns an iTIP iCalendar (`request`, `cancel` or `publish`) with its
+  `content_type` and `filename`, the organizer's and attendees' addresses, the meeting link, and an
+  English subject and plain-text body. Over MCP the iCalendar is also an embedded `text/calendar`
+  resource, and over A2A a `text/calendar` part. Its UID is a version 8 UUID made from a hash of the
+  tenant and the event's id, the same in every invitation to the event and never an id; its
+  SEQUENCE is the event's revision, and for `cancel` the revision cancelling writes, so a
+  cancellation read before `slotlock_cancel` and sent after it replaces the request. `request` and
+  `cancel` need an organizer and an attendee (`organizer_required`, `attendees_required`); an
+  invitation over 256 KiB is `invitation_too_large`. It is composed from the backend's `getEvent`,
+  so custom backends have it too. The package exports `slotlockEventInvitation` and `slotlockICalUid`.
+
+### Changed
+
+- A write that waits for a person names whoever an invitation would reach (RFC 0007 4.2): the
+  organizer's address and every attendee's (`also organizer ana@example.com, attendees
+  (ben@example.com)`), and `no attendees` or `no organizer` when a write clears them, where it said
+  `organizer` and `attendees`. The dashboard assistant's approval card leaves attendees to its facts,
+  which list every one.
 
 ## 0.12.3 - 2026-11-15
 

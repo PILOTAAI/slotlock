@@ -91,6 +91,12 @@ export const SLOTLOCK_REST_ROUTES: readonly SlotlockRestRoute[] = Object.freeze(
     operation: 'slotlock_cancel',
     refusals: [404, 409],
   },
+  {
+    method: 'GET',
+    path: '/v1/events/{event_id}/invitation',
+    operation: 'slotlock_get_invitation',
+    refusals: [404, 409],
+  },
 ]);
 
 /** The application operations' routes, served when the server has an application backend. */

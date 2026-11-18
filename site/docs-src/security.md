@@ -19,9 +19,12 @@ handover".` Only an explicit yes runs the write.
   `slotlock_update_event`, and `slotlock_confirm_slot` with `slotlock_create_event`, asked as
   booking the time its hold holds. Holds never wait: they book nothing and lapse within minutes.
 - A booking that leaves the time free (`transparency: 'transparent'`) says so, and a write names
-  the other fields it sets (`also description, attendees`) without quoting them. A meeting link is
-  named by its host (`also meeting link on meet.example.com`), written in ASCII, so a look-alike
-  host in another script shows as `xn--…`.
+  the other fields it sets (`also description, reminders`) without quoting them. Whoever an
+  invitation would reach is named in full: the organizer's address and every attendee's
+  (`also organizer ana@example.com, attendees (ben@example.com, cy@example.com)`), which have no
+  space or quote to pass as another part of the question. A meeting link is named by its host
+  (`also meeting link on meet.example.com`), written in ASCII, so a look-alike host in another
+  script shows as `xn--…`.
 - Facts come first: the resource by its own reference, times in its own zone, and an event as it
   stands now, read through your backend's `describeResource` and `getEvent` when the caller may
   read them (within 2 seconds in all). Otherwise things are named by id, and each time carries its

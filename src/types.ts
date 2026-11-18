@@ -494,6 +494,12 @@ export interface CalendarEventContent {
  */
 export type CalendarConferenceRequest = 'user_supplied';
 
+/**
+ * Why an event has no invitation as it stands (RFC 0007 4.1): a request or cancellation names no
+ * organizer or no attendee, or the event is too large to send whole.
+ */
+export type SlotlockEventInvitationRefusal = 'organizer_required' | 'attendees_required' | 'invitation_too_large';
+
 export interface CalendarConference {
   requested: CalendarConferenceRequest;
   /** The join link, for `user_supplied`. Never a link that lets its holder host the meeting. */

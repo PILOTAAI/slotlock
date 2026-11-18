@@ -149,6 +149,13 @@ pub(crate) const OPERATIONS: &[Operation] = &[
         query: &[],
     },
     Operation {
+        name: "slotlock_get_invitation",
+        method: "GET",
+        path: "/v1/events/{event_id}/invitation",
+        path_params: &["event_id"],
+        query: &["method"],
+    },
+    Operation {
         name: "slotlock_get_resource",
         method: "GET",
         path: "/v1/resources/{resource_id}",
@@ -1339,6 +1346,14 @@ pub struct CancelInput {
     /// alternatives included. Charged as a read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+}
+
+/// The arguments of [`Client::get_invitation`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GetInvitationInput {
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 /// The arguments of [`Client::get_resource`].
@@ -2857,6 +2872,19 @@ impl Client {
     /// (replayed).
     pub fn cancel(&self, input: &CancelInput) -> Result<Value, Error> {
         self.call("slotlock_cancel", serde_json::to_value(input)?)
+    }
+
+    /// Get an event invitation.
+    ///
+    /// The invitation to one of your events, for you to send from the person's own mailbox so
+    /// replies reach them: an iTIP iCalendar (attach it as invite.ics with its content_type), a
+    /// subject and a short plain-text body. Slotlock sends nothing. request invites the attendees
+    /// and needs an organizer and an attendee; cancel withdraws it: read it before
+    /// slotlock_cancel, send it once the cancel succeeds; publish is a copy without attendees,
+    /// for a calendar. Its UID is the same for every invitation to the event and names nothing
+    /// internal.
+    pub fn get_invitation(&self, input: &GetInvitationInput) -> Result<Value, Error> {
+        self.call("slotlock_get_invitation", serde_json::to_value(input)?)
     }
 
     /// Get a resource.

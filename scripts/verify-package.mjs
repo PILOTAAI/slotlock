@@ -155,6 +155,8 @@ const expectedFiles = new Set([
   'engine.d.ts',
   'event-schema.js',
   'event-schema.d.ts',
+  'event-invitation.js',
+  'event-invitation.d.ts',
   'hooks.js',
   'hooks.d.ts',
   'ical-worker.js',
@@ -865,7 +867,7 @@ if (databaseUrl) {
         { jsonrpc: '2.0', id: 2, method: 'tools/list' },
         { 'MCP-Protocol-Version': '2025-11-25' },
       );
-      assert.equal((await tools.json()).result.tools.length, 19);
+      assert.equal((await tools.json()).result.tools.length, 20);
       // The REST API: its document is public, its routes take the same token, and a write that
       // waits for a person (SLOTLOCK_CONFIRM_WRITES=all, set above; the default is none) answers 428.
       const openApi = await fetch(`${listening.address}/openapi.json`);

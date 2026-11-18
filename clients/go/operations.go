@@ -30,6 +30,7 @@ var operations = func() map[string]operation {
 		{name: "slotlock_delete_event", method: "DELETE", path: "/v1/events/{event_id}", pathParams: []string{"event_id"}, query: []string{"expected_revision", "idempotency_key", "dry_run"}},
 		{name: "slotlock_reschedule", method: "POST", path: "/v1/events/{event_id}/reschedule", pathParams: []string{"event_id"}, query: nil},
 		{name: "slotlock_cancel", method: "POST", path: "/v1/events/{event_id}/cancel", pathParams: []string{"event_id"}, query: nil},
+		{name: "slotlock_get_invitation", method: "GET", path: "/v1/events/{event_id}/invitation", pathParams: []string{"event_id"}, query: []string{"method"}},
 		{name: "slotlock_get_resource", method: "GET", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_update_resource", method: "PATCH", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: nil},
 		{name: "slotlock_delete_resource", method: "DELETE", path: "/v1/resources/{resource_id}", pathParams: []string{"resource_id"}, query: []string{"dry_run"}},
@@ -1243,6 +1244,33 @@ func (in CancelInput) values() map[string]any {
 // answers the same cancellation (replayed).
 func (c *Client) Cancel(ctx context.Context, in CancelInput) (map[string]any, error) {
 	return c.Call(ctx, "slotlock_cancel", in.values())
+}
+
+// GetInvitationInput holds the arguments of [Client.GetInvitation].
+type GetInvitationInput struct {
+	EventID string
+
+	Method *string
+}
+
+func (in GetInvitationInput) values() map[string]any {
+	values := map[string]any{}
+	values["event_id"] = in.EventID
+	if in.Method != nil {
+		values["method"] = *in.Method
+	}
+	return values
+}
+
+// GetInvitation: Get an event invitation. The invitation to one of your events, for you to send
+// from the person's own mailbox so replies reach them: an iTIP iCalendar (attach it as invite.ics
+// with its content_type), a subject and a short plain-text body. Slotlock sends nothing. request
+// invites the attendees and needs an organizer and an attendee; cancel withdraws it: read it
+// before slotlock_cancel, send it once the cancel succeeds; publish is a copy without attendees,
+// for a calendar. Its UID is the same for every invitation to the event and names nothing
+// internal.
+func (c *Client) GetInvitation(ctx context.Context, in GetInvitationInput) (map[string]any, error) {
+	return c.Call(ctx, "slotlock_get_invitation", in.values())
 }
 
 // GetResourceInput holds the arguments of [Client.GetResource].
