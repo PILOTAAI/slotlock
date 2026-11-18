@@ -12,7 +12,7 @@ versioning.
   codes and response fields already may. Clients must not fail on a value they do not know; an
   existing value keeps its meaning and is not removed within a major version. The five language
   clients already read these fields as plain strings. This is said now, before 1.0, so that adding
-  a value after 1.0 is not a breaking change (RFC 0007, Part 6).
+  a value after 1.0 is not a breaking change.
 - VERSIONING.md: the integration packages in `packages/` (`@slotlock/sync`, `@slotlock/notify`,
   `@slotlock/payments-stripe`) keep versions of their own (0.1.0 today), which do not follow
   Slotlock's, and a Slotlock release never waits on one. They are not published to npm yet; their
