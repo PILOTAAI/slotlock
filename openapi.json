@@ -7043,6 +7043,159 @@
         }
       }
     },
+    "/v1/events/{event_id}/invitation": {
+      "get": {
+        "operationId": "slotlock_get_invitation",
+        "summary": "Get an event invitation",
+        "description": "The invitation to one of your events, for you to send from the person's own mailbox so replies reach them: an iTIP iCalendar (attach it as invite.ics with its content_type), a subject and a short plain-text body. Slotlock sends nothing. request invites the attendees and needs an organizer and an attendee; cancel withdraws it: read it before slotlock_cancel, send it once the cancel succeeds; publish is a copy without attendees, for a calendar. Its UID is the same for every invitation to the event and names nothing internal.",
+        "tags": [
+          "Agent tools"
+        ],
+        "x-slotlock-scope": "read",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": "request",
+              "type": "string",
+              "enum": [
+                "request",
+                "cancel",
+                "publish"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "request",
+                        "cancel",
+                        "publish"
+                      ]
+                    },
+                    "ical_uid": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "sequence": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "content_type": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "filename": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "ical": {
+                      "type": "string",
+                      "maxLength": 262144
+                    },
+                    "organizer": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 320
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "recipients": {
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 320
+                      }
+                    },
+                    "join_url": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "subject": {
+                      "type": "string",
+                      "maxLength": 4200
+                    },
+                    "text": {
+                      "type": "string",
+                      "maxLength": 24000
+                    }
+                  },
+                  "required": [
+                    "method",
+                    "ical_uid",
+                    "sequence",
+                    "content_type",
+                    "filename",
+                    "ical",
+                    "organizer",
+                    "recipients",
+                    "join_url",
+                    "subject",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/resources/{resource_id}": {
       "patch": {
         "operationId": "slotlock_update_resource",

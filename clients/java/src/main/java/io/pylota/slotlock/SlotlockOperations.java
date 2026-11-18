@@ -32,6 +32,7 @@ public abstract class SlotlockOperations {
           Map.entry("slotlock_delete_event", new Operation("DELETE", "/v1/events/{event_id}", List.of("event_id"), List.of("expected_revision", "idempotency_key", "dry_run"))),
           Map.entry("slotlock_reschedule", new Operation("POST", "/v1/events/{event_id}/reschedule", List.of("event_id"), List.of())),
           Map.entry("slotlock_cancel", new Operation("POST", "/v1/events/{event_id}/cancel", List.of("event_id"), List.of())),
+          Map.entry("slotlock_get_invitation", new Operation("GET", "/v1/events/{event_id}/invitation", List.of("event_id"), List.of("method"))),
           Map.entry("slotlock_get_resource", new Operation("GET", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_update_resource", new Operation("PATCH", "/v1/resources/{resource_id}", List.of("resource_id"), List.of())),
           Map.entry("slotlock_delete_resource", new Operation("DELETE", "/v1/resources/{resource_id}", List.of("resource_id"), List.of("dry_run"))),
@@ -1055,6 +1056,44 @@ public abstract class SlotlockOperations {
    */
   public Map<String, Object> cancel(String eventId, long expectedRevision) {
     return cancel(eventId, expectedRevision, null);
+  }
+
+  /**
+   * Get an event invitation. The invitation to one of your events, for you to send from the
+   * person's own mailbox so replies reach them: an iTIP iCalendar (attach it as invite.ics with
+   * its content_type), a subject and a short plain-text body. Slotlock sends nothing. request
+   * invites the attendees and needs an organizer and an attendee; cancel withdraws it: read it
+   * before slotlock_cancel, send it once the cancel succeeds; publish is a copy without
+   * attendees, for a calendar. Its UID is the same for every invitation to the event and names
+   * nothing internal.
+   *
+   * @param eventId {@code event_id}, string
+   * @param optional the optional arguments, or null: {@code method} (string)
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getInvitation(String eventId, Map<String, ?> optional) {
+    Map<String, Object> values = new LinkedHashMap<>();
+    values.put("event_id", eventId);
+    putOptional(values, optional, Set.of("method"), "slotlock_get_invitation");
+    return call("slotlock_get_invitation", values);
+  }
+
+  /**
+   * Get an event invitation. The invitation to one of your events, for you to send from the
+   * person's own mailbox so replies reach them: an iTIP iCalendar (attach it as invite.ics with
+   * its content_type), a subject and a short plain-text body. Slotlock sends nothing. request
+   * invites the attendees and needs an organizer and an attendee; cancel withdraws it: read it
+   * before slotlock_cancel, send it once the cancel succeeds; publish is a copy without
+   * attendees, for a calendar. Its UID is the same for every invitation to the event and names
+   * nothing internal.
+   *
+   * @param eventId {@code event_id}, string
+   * @return the response body
+   * @throws SlotlockException when the server refuses the call
+   */
+  public Map<String, Object> getInvitation(String eventId) {
+    return getInvitation(eventId, null);
   }
 
   /**

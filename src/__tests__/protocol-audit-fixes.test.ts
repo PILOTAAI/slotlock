@@ -243,7 +243,7 @@ describe('P4: the question for a create names what changes the booking', () => {
     expect(createEvent).not.toHaveBeenCalled();
   });
 
-  it('lists the other fields set, by name, before the quoted title', async () => {
+  it('lists the other fields set before the quoted title, naming whoever an invitation reaches', async () => {
     const message = await createQuestion({
       ...BOOKING,
       status: 'tentative',
@@ -261,10 +261,11 @@ describe('P4: the question for a create names what changes the booking', () => {
       reminders: [{ minutes_before: 30, channel: 'email' }],
     });
     expect(message).toBe(
-      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London), tentatively, leaving the time free for other bookings (also description, location, organizer, attendees, reminders): "Vehicle handover".',
+      'Book resource vehicle-1 for 2027-03-02 09:00–10:00 UTC+00:00 (Europe/London), tentatively, leaving the time free for other bookings (also description, location, organizer desk@fleet.example, attendees (driver@fleet.example), reminders): "Vehicle handover".',
     );
-    // The agent's own text stays out of everything but the quoted title.
-    for (const text of ['Bring the spare key', 'Depot 4', 'desk@fleet.example', 'driver@']) {
+    // The agent's own text stays out of everything but the quoted title and the addresses (RFC 0007
+    // 4.2): an address has no space or quote to pass itself off as another part of the question.
+    for (const text of ['Bring the spare key', 'Depot 4']) {
       expect(message).not.toContain(text);
     }
   });

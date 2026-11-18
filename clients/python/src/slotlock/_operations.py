@@ -148,6 +148,13 @@ OPERATIONS: dict[str, Operation] = {
         ("event_id",),
         (),
     ),
+    "slotlock_get_invitation": Operation(
+        "slotlock_get_invitation",
+        "GET",
+        "/v1/events/{event_id}/invitation",
+        ("event_id",),
+        ("method",),
+    ),
     "slotlock_get_resource": Operation(
         "slotlock_get_resource",
         "GET",
@@ -1695,6 +1702,22 @@ class Operations(Transport):
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_cancel", values)
+
+    def get_invitation(self, event_id: str, *, method: str | None = None) -> dict[str, Any]:
+        """Get an event invitation.
+
+        The invitation to one of your events, for you to send from the person's own mailbox so
+        replies reach them: an iTIP iCalendar (attach it as invite.ics with its content_type), a
+        subject and a short plain-text body. Slotlock sends nothing. request invites the attendees
+        and needs an organizer and an attendee; cancel withdraws it: read it before
+        slotlock_cancel, send it once the cancel succeeds; publish is a copy without attendees,
+        for a calendar. Its UID is the same for every invitation to the event and names nothing
+        internal.
+        """
+        values: dict[str, Any] = {"event_id": event_id}
+        if method is not None:
+            values["method"] = method
+        return self.call("slotlock_get_invitation", values)
 
     def get_resource(self, resource_id: str) -> dict[str, Any]:
         """Get a resource.

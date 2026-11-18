@@ -35,6 +35,7 @@ public sealed partial class SlotlockClient
         ["slotlock_delete_event"] = new("DELETE", "/v1/events/{event_id}", ["event_id"], ["expected_revision", "idempotency_key", "dry_run"]),
         ["slotlock_reschedule"] = new("POST", "/v1/events/{event_id}/reschedule", ["event_id"], []),
         ["slotlock_cancel"] = new("POST", "/v1/events/{event_id}/cancel", ["event_id"], []),
+        ["slotlock_get_invitation"] = new("GET", "/v1/events/{event_id}/invitation", ["event_id"], ["method"]),
         ["slotlock_get_resource"] = new("GET", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_update_resource"] = new("PATCH", "/v1/resources/{resource_id}", ["resource_id"], []),
         ["slotlock_delete_resource"] = new("DELETE", "/v1/resources/{resource_id}", ["resource_id"], ["dry_run"]),
@@ -1212,6 +1213,32 @@ public sealed partial class SlotlockClient
         if (idempotencyKey.HasValue) values["idempotency_key"] = Json.ToNode(idempotencyKey.Value);
         if (dryRun.HasValue) values["dry_run"] = Json.ToNode(dryRun.Value);
         return CallAsync("slotlock_cancel", values, cancellationToken);
+    }
+
+    /// <summary>Get an event invitation.</summary>
+    /// <remarks>
+    /// The invitation to one of your events, for you to send from the person's own mailbox so
+    /// replies reach them: an iTIP iCalendar (attach it as invite.ics with its content_type), a
+    /// subject and a short plain-text body. Slotlock sends nothing. request invites the attendees
+    /// and needs an organizer and an attendee; cancel withdraws it: read it before
+    /// slotlock_cancel, send it once the cancel succeeds; publish is a copy without attendees,
+    /// for a calendar. Its UID is the same for every invitation to the event and names nothing
+    /// internal.
+    /// </remarks>
+    /// <param name="eventId">event_id</param>
+    /// <param name="method">method</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The response body.</returns>
+    /// <exception cref="SlotlockException">The server refused the call.</exception>
+    public Task<JsonObject> GetInvitationAsync(
+        string eventId,
+        Optional<string> method = default,
+        CancellationToken cancellationToken = default)
+    {
+        var values = new JsonObject();
+        values["event_id"] = Json.ToNode(eventId);
+        if (method.HasValue) values["method"] = Json.ToNode(method.Value);
+        return CallAsync("slotlock_get_invitation", values, cancellationToken);
     }
 
     /// <summary>Get a resource.</summary>

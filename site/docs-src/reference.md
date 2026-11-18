@@ -151,6 +151,7 @@ never cached. W3C `traceparent`, `tracestate` and `baggage` reach your backend a
 | `PATCH /v1/events/{event_id}` | `slotlock_update_event` |
 | `POST /v1/events/{event_id}/reschedule` | `slotlock_reschedule` |
 | `POST /v1/events/{event_id}/cancel` | `slotlock_cancel` |
+| `GET /v1/events/{event_id}/invitation` | `slotlock_get_invitation` |
 | `DELETE /v1/events/{event_id}` | `slotlock_delete_event` |
 
 ```sh

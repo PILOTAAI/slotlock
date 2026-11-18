@@ -54,6 +54,7 @@ export const SLOTLOCK_BOOKING_OPERATIONS: Readonly<Record<SlotlockQuotaOperation
     slotlock_list_events: false,
     slotlock_update_event: false,
     slotlock_delete_event: false,
+    slotlock_get_invitation: false,
     // The application API's.
     slotlock_create_resource: false,
     slotlock_update_resource: false,

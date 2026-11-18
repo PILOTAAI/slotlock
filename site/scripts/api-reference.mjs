@@ -83,6 +83,7 @@ export const GROUPS = [
       'slotlock_create_event',
       'slotlock_list_events',
       'slotlock_get_event',
+      'slotlock_get_invitation',
       'slotlock_update_event',
       'slotlock_reschedule',
       'slotlock_delete_event',

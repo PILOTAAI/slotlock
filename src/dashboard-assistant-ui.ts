@@ -14,6 +14,7 @@ const STEP_WORDS: Readonly<Record<string, readonly [string, string, string]>> = 
   slotlock_get_pool_availability: ['Checking the pool', 'Checked the pool', 'check the pool'],
   slotlock_get_event: ['Reading a booking', 'Read a booking', 'read the booking'],
   slotlock_list_events: ['Reading bookings', 'Read bookings', 'read bookings'],
+  slotlock_get_invitation: ['Writing an invitation', 'Wrote an invitation', 'write the invitation'],
 });
 
 /** A tool step in plain words: "Checking availability…", "Checked availability", "Couldn't check availability". */

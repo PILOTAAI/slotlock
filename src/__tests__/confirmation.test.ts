@@ -1223,7 +1223,7 @@ describe('a confirmation question a person can trust', () => {
       'slotlock_update_event',
     );
     expect(message).toContain('4 moved (2027-03-09 12:00:59 to 2027-03-09 03:00–04:00; ');
-    expect(message).toContain('; also description, location, attendees, reminders; ');
+    expect(message).toContain('; also description, location, no attendees, reminders; ');
     expect(message).toContain(`; title to "${'N'.repeat(119)}…"`);
     expect(message.endsWith(`. It is titled "${'T'.repeat(119)}…".`)).toBe(true);
     expect(message.length).toBeLessThan(1_600);
