@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Status | Proposed |
+| Status | Proposed. The owner decided its six open questions on 2026-11-18, taking each recommendation ([Decisions](#decisions-owner-2026-11-18)) |
 | Target | One sentence in VERSIONING.md before 1.0.0; everything else in 1.x minors and the integration packages' own 0.x releases, additive and opt-in |
 | Builds on | RFC 0004 P3 (C1 free/busy adapters, C2 notifications, C4 two-way sync), A4 (approval policies) and B7 (holds together), as built at 0.12.3 in core, `@slotlock/sync` and `@slotlock/notify` |
 | Decision | GOVERNANCE.md: adds key scopes, a booking rule, an event field and an agent tool, and puts people's provider tokens and outbound invitations on Cloud; needs the maintainer's approval and an independent, non-AI security review of every PR marked T2 |
@@ -170,6 +170,8 @@ Thirty days before Cloud runs the sync:
 - Google's Limited Use statement is published, with how to delete data.
 - **TERMS.md**'s processing list ("and nothing else") covers reading calendars and writing bookings
   back.
+- **PRIVACY.md** names the verified email address kept for a person who turns on invitations
+  (Decision 5), and keeps today's rule for everyone else: the address only in the session cookie.
 - **The operations guide's checklist** (`site/docs-src/operations.md`, item 4) "keep provider
   credentials out of Slotlock" becomes "out of core".
 
@@ -191,8 +193,11 @@ so `observed_at` is the last completed read.
 
 ### 2.2 Read again after the hold (T2)
 
-A booking rule, **`confirmAfterRead`**, is opt-in per resource, pool or tenant. On a resource with
-it:
+A booking rule, **`confirmAfterRead`**, is set per resource, pool or tenant. It starts on when a
+person connects a calendar on the dashboard's Calendars page: the box starts ticked, beside a line
+saying agents must hold a time before booking it, and the person can untick it (Decision 2).
+Nothing else turns it on: not a connection made through the sync's operator API, not one made
+before this release, not a self-hosted or library deployment. On a resource with it:
 
 1. A booking must come from a hold (`hold_id`, `hold_group_id`, or a confirm through the
    application API). Otherwise it is refused with `booking_rule_hold_required`.
@@ -280,7 +285,7 @@ the link. It deletes the room when the event is cancelled.
 
 | Adapter | For | Notes |
 | --- | --- | --- |
-| Daily | Cloud default | Set `geo: eu-west-2` on every room: the default is `us-west-2`, and the setting places media only, so Daily remains a US processor. `privacy: private`, `exp` at the meeting's end, recording off, unguessable names. 10,000 free participant-minutes a month, then $0.004. About $320 a month at 1,000 meetings of 30 minutes with 3 people (estimate) |
+| Daily | Cloud's provider (Decision 4) | Set `geo: eu-west-2` on every room: the default is `us-west-2`, and the setting places media only, so Daily remains a US processor. `privacy: private`, `exp` at the meeting's end, recording off, unguessable names. 10,000 free participant-minutes a month, then $0.004. About $320 a month at 1,000 meetings of 30 minutes with 3 people (estimate) |
 | Whereby Embedded | EU-company alternative | `endDate` required, and the room is deleted an hour after it; `roomNamePattern: uuid`; `isLocked` gives a waiting room. $10.99 a month plus $0.0042 per participant-minute |
 | Jitsi (self-hosted) and 8x8 JaaS | Self-host default | One JWT adapter. Jitsi is Apache-2.0. JaaS is priced per active user (from $99 for 300), so it is not Cloud's default |
 | Static link | Any deployment | An operator setting |
@@ -288,7 +293,9 @@ the link. It deletes the room when the event is cancelled.
 
 - **Links.** One room per meeting. Per-invitee tokens only where invitations are rendered per
   attendee (4.3).
-- **Cloud.** Daily, or Whereby, becomes a subprocessor, with 30 days' notice.
+- **Cloud.** Daily becomes a subprocessor, with 30 days' notice, its data processing agreement and
+  the transfer mechanism for a US processor named in PRIVACY.md. Whereby stays an adapter for
+  operators and self-hosters who want an EU company.
 
 ## Part 4: invitations
 
@@ -327,8 +334,8 @@ tenant and opt-in:
   move sends the same UID at a higher `SEQUENCE`.
 - **Sender and replies.**
   - The From line reads "<organizer> via <tenant>", on the tenant's verified domain.
-  - Reply-To and `ORGANIZER` are both the organizer, so answers go to them, as Cal.com does. This
-    mode tracks no RSVPs.
+  - Reply-To and `ORGANIZER` are both the organizer's verified address (Decisions 3 and 5), so
+    answers go to them, as Cal.com does. This mode tracks no RSVPs.
 - **AI disclosure.** A disclosure line when an agent made the booking. Article 50(1) of the EU AI
   Act has applied since 2 August 2026, and the Commission's guidelines say a disclosure only in
   terms, or only in machine-readable form, is not enough.
@@ -390,7 +397,8 @@ source covers, tools and confirmations should say "free in Slotlock", never "fre
 5. `slotlock_get_invitation`.
 6. The agent sends the invitation from the person's mailbox.
 
-**Left to another RFC:** a page where invitees pick among offered times.
+**Left to a later RFC** (Decision 6), written once 4.1 and the room adapter have shipped and show
+demand: a page where invitees pick among offered times.
 - No product researched holds offered times without writing to the host's calendar.
 - In Calendly's one-off links and Gmail's offered times, only the first person to book gets the
   meeting.
@@ -440,9 +448,9 @@ OAuth **clients** of Google and Microsoft. Neither needs the other first. Where 
 - **Connecting a calendar from chat.** This needs MCP's URL-mode elicitation and the person behind
   the MCP session, which the authorization server's grants provide. Until then, calendars are
   connected from the dashboard.
-- **Email addresses.** The connector plan asks whether Cloud keeps users' email addresses. 4.3's
-  verified organizer address and a connected account's address raise the same question; decide it
-  once.
+- **Email addresses.** The connector plan asks whether Cloud keeps users' email addresses. Decision
+  5 answers it for both plans: a verified address, kept only for a person who turns on a feature
+  that needs one.
 - **First experience.** Someone who adds Slotlock in ChatGPT and connects nothing still gets a
   meeting with a link (Part 5).
 
@@ -516,7 +524,7 @@ verification, the independent reviewer, and counsel on PECR roles and Article 50
 | 7 | `slotlock_get_invitation`, `ical_uid`, a confirmation that names recipients | T1 | 1.x |
 | 8 | `@slotlock/rooms`: Daily, Whereby, Jitsi/JaaS, static link | T2 | rooms 0.1 |
 | 9 | Meeting write-back with Meet and Teams | T2 | sync 0.x |
-| 10 | Invitations from notify, with Cloud's controls | T2 | notify 0.x, after the notice cycle |
+| 10 | Invitations from notify, with Cloud's controls and the organizer's verified address | T2 | notify 0.x, after the notice cycle |
 | 11 | Agent as organizer, with RSVP intake | T2 | later |
 | 12 | Hosted documents and limits | T1 | 30 days before each Cloud feature |
 
@@ -526,20 +534,23 @@ Each core PR proves its guarantee with a red-to-green test:
 - `slotlock_get_invitation` never exposes an internal id.
 - A link Slotlock did not make never reaches a message Slotlock sends.
 
-## Open questions
+## Decisions (owner, 2026-11-18)
 
-1. Cloud holding people's provider tokens: RFC 0004 D1 left this as "still the owner's to
-   confirm". Agreed?
-2. Should `confirmAfterRead` default to on for resources with a `live` source?
-3. When notify sends invitations, who is the default organizer: the person (recommended) or an
-   agent address?
-4. Cloud's room provider: Daily, a US processor, or Whereby, an EU company?
-5. Does Cloud keep users' email addresses? This is shared with the connector plan.
-6. Write the invitee pick page's RFC now, or later?
-7. Questions for counsel:
-   - PECR roles when Cloud sends for a tenant;
-   - how far Article 50 reaches email agents and a UK provider;
-   - whether busy intervals reaching another party's agent fit Google's Limited Use rules.
+The owner took the recommendation on each of the six open questions.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 1 | Does Cloud hold people's provider tokens? (RFC 0004 D1 left it "still the owner's to confirm".) | **Yes.** Cloud runs `@slotlock/sync`, which holds the tokens in its own process, schema and role, sealed under keys wrapped outside the database host (1.4), once its independent review has passed. Core still holds none |
+| 2 | Does `confirmAfterRead` start on for a resource with a `live` source? | **Yes, for calendars connected on the dashboard's Calendars page:** the box starts ticked and says agents must hold first; the person can untick it. Nothing else turns it on (2.2) |
+| 3 | Who is the default organizer when notify sends invitations? | **The person**, at their verified address, so replies go to them. An agent address with RSVP tracking stays an opt-in for later (4.4) |
+| 4 | Daily or Whereby for Cloud's rooms? | **Daily**, with `geo: eu-west-2` set on every room, listed as a US subprocessor with its data processing agreement. Whereby stays an adapter (3.3) |
+| 5 | Does Cloud keep users' email addresses? | **Yes, narrowly.** One verified address per person, kept only when they turn on a feature that needs one: sending invitations through notify, and whatever the Claude and ChatGPT connector needs when it ships (Part 7). It is never written to logs, is erased with the account, and is named in PRIVACY.md with 30 days' notice. Everyone else keeps today's rule: the address only in the session cookie |
+| 6 | Write the invitee pick page's RFC now, or later? | **Later,** once 4.1 and the room adapter have shipped and show demand. Until then a person picks the time in chat (Part 5) |
+
+Still open, for counsel:
+- PECR roles when Cloud sends for a tenant;
+- how far Article 50 reaches email agents and a UK provider;
+- whether busy intervals reaching another party's agent fit Google's Limited Use rules.
 
 To test before relying on them:
 - Google's labels for `calendar.events.owned` and `calendar.freebusy`.
