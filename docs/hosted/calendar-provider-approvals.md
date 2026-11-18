@@ -13,9 +13,9 @@ Partner Center accounts. The repository changes are pull requests like any other
 | # | Item | Who | Status |
 | --- | --- | --- | --- |
 | B1 | Choose the sync's public hostname on Cloud | Owner | To do |
-| B2 | Privacy notice: calendar access and Google's Limited Use statement | PR, owner merges | Drafted below |
-| B3 | A page of Slotlock's own before the provider's consent screen | PR to `packages/sync` (T2) | To do |
-| B4 | Settle the Google scopes before submitting | Owner reads labels; PR to `packages/sync` | To do |
+| B2 | Privacy notice: calendar access and Google's Limited Use statement | PR, owner merges | PILOTAAI/slotlock#247, takes effect 30 days after posting |
+| B3 | A page of Slotlock's own before the provider's consent screen | PR to `packages/sync` (T2) | PILOTAAI/slotlock#246 (draft, waits for independent review) |
+| B4 | Settle the Google scopes before submitting | Owner reads labels; PR to `packages/sync` | `calendar.events.owned` in PILOTAAI/slotlock#246; owner reads its label (G5) |
 | B5 | The sync running at the redirect URI, for the demo video | Owner | To do |
 | G1–G7 | Google: project, branding, scopes, client, verification | Owner | To do |
 | M1–M8 | Microsoft: tenant, Partner One ID, app registration, publisher verification | Owner | To do |
