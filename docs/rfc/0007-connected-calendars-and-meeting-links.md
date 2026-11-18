@@ -425,8 +425,9 @@ It says nothing about new values in an existing enum.
 - **After 1.0.0:** everything else is additive and opt-in, in 1.x minors.
 - **The integration packages** (`@slotlock/sync`, `@slotlock/notify` and the new `@slotlock/rooms`)
   already carry their own versions (0.1.0). They stay separately versioned while their approvals
-  and Cloud rollout settle. VERSIONING.md's sentence that every published artifact "carry the same
-  version" gains that exception.
+  and Cloud rollout settle. VERSIONING.md now says so (added with this RFC): the artifacts that
+  "carry the same version" are Slotlock's own, and each package keeps its own version, relying only
+  on Slotlock's API.
 
 ## Part 7: the Claude and ChatGPT connector
 
@@ -516,7 +517,7 @@ verification, the independent reviewer, and counsel on PECR roles and Article 50
 
 | # | PR | Tier | Release |
 | --- | --- | --- | --- |
-| 1 | VERSIONING.md: listed values may gain values (added with this RFC); integration packages version separately (to do) | T0 | 1.0.0 |
+| 1 | VERSIONING.md: listed values may gain values; integration packages version separately (both added with this RFC) | T0 | 1.0.0 |
 | 2 | `sync` and `notify` key scopes; packages take them and refuse admin keys on Cloud | T2 | 1.1 |
 | 3 | Dashboard Calendars page, Microsoft admin-consent link, `calendar.events.owned` | T2 | 1.x, with the sync's review |
 | 4 | `max_age_seconds` and `live` on coverage | T1 | 1.x |

@@ -17,7 +17,17 @@ Slotlock is versioned `MAJOR.MINOR.PATCH` ([semver.org](https://semver.org)). Un
 From 1.0, breaking changes need a new major version.
 
 The npm package, the server image, the MCP Registry entry and the five language clients carry the
-same version. npm's `latest` tag is always the highest release; a fix to an older line is published
+same version.
+
+The integration packages in `packages/` (today `@slotlock/sync`, `@slotlock/notify` and
+`@slotlock/payments-stripe`) are the exception. Each keeps a version of its own, 0.1.0 for now,
+which does not follow Slotlock's, and a Slotlock release never waits on one. They are not published
+to npm yet: they run from the repository or from the image `packages/integrations.Dockerfile`
+builds, and their changes are listed in CHANGELOG.md under the release that carried them, named by
+package. Once a package is published, its version moves on its own, by the 0.x rules above until
+that package reaches 1.0. They reach Slotlock only through its API, so the guarantees under "What
+stays stable" are the ones they rely on; their own settings, operator routes and schemas are
+promised only by their own versions. npm's `latest` tag is always the highest release; a fix to an older line is published
 under `latest-<major>.<minor>` (for example `slotlock@latest-0.2`, if a 0.2 fix is ever published), and a prerelease under `next`.
 Security fixes go to the latest minor release, as SECURITY.md says, and each security release names
 the lowest safe version.
