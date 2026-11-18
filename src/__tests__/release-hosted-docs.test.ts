@@ -83,6 +83,17 @@ describe('the published policies', () => {
     }
     expect(privacy).toContain('event, hold, payment record, waitlist entry, contact, busy period, webhook');
     expect(privacy).toContain('Hosted Slotlock sends no email, SMS or WhatsApp message to your contacts');
+    // Calendars connected to hosted Slotlock: erased with the account, described where TERMS.md
+    // points, and Google's Limited Use statement in Google's words on the page its consent screen
+    // links (Google's app verification looks for it).
+    expect(privacy).toContain('busy period, webhook, connected calendar,');
+    expect(read('PRIVACY.md')).toMatch(/^## Calendars you connect$/m);
+    expect(flat(read('TERMS.md'))).toContain('(PRIVACY.md#calendars-you-connect)');
+    expect(privacy).toContain(
+      "Slotlock's use and transfer to any other app of information received from Google APIs will adhere to the " +
+        '[Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), ' +
+        'including the Limited Use requirements.',
+    );
     const maintenanceMinutes =
       declared('src/self-host.ts', /const SERVE_MAINTENANCE_INTERVAL_MS = ([0-9_ *]+);/) / 60_000;
     expect(maintenanceMinutes).toBe(60);

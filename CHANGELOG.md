@@ -3,6 +3,23 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- **Privacy notice and terms: Google and Microsoft calendars connected to hosted Slotlock**, taking
+  effect on 18 December 2026, 30 days after they are posted.
+  - **What it holds:** the account's address, the calendars chosen and what each blocks, tokens
+    stored only encrypted, and, with writing back, the ids of the events written.
+  - **What it reads and writes:** busy times only, never what events are about, and bookings titled
+    "Busy".
+  - **Use and sharing:** what it is used for, and that it is never used for advertising, sold, or
+    used to train AI models.
+  - **Disconnecting:** how to disconnect, and how to revoke access at Google or Microsoft.
+  - **Google's Limited Use statement,** which Google's app verification looks for.
+  - **Erasure** includes connected calendars.
+  - **The terms' processing list** names reading and writing those calendars.
+
 ## 0.12.3 - 2026-11-15
 
 ### Added

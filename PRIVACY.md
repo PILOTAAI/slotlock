@@ -1,10 +1,14 @@
 # Privacy notice for hosted Slotlock
 
-Last updated: 14 November 2026.
+Last updated: 18 November 2026.
 
 What it says about our staff console, and about the privacy requests our staff handle there (in
 "What we hold", "How our staff see your account", "Why we use it, and our lawful basis" and "Your
 rights"), takes effect on 14 November 2026.
+
+What it says about Google and Microsoft calendars you connect to hosted Slotlock (in "What we
+hold", "Why we use it, and our lawful basis", "Who else processes it", "Calendars you connect" and
+"Your rights") takes effect on 18 December 2026.
 
 This notice covers hosted Slotlock (Slotlock Cloud): the API at `https://slotlock-api.pylota.io`
 (MCP, A2A and REST) and the dashboard at `https://app.slotlock.pylota.io`. Any GitHub or Google
@@ -59,6 +63,7 @@ protection officer.
 | Calendar content: resources with their names, descriptions, labels, the attributes you give them, time zones, weekly hours, booking rules and pools, and the locations and groups you put them in, with their names; holds, bookings and waitlist entries with their times, references and the holder names your agents give; events with their titles, descriptions, locations, organisers, attendees' names and email addresses, reminders and recurrence; and the outside calendars you record coverage from, by the source name you give (which can be a calendar address) with the last error reported for it | You and your agents | While your account exists, or until you delete it. Holds end when they expire and are then deleted; finished waitlist entries are deleted 30 days after their window |
 | Contacts, if you keep them: each person's reference, name, email address, phone and WhatsApp numbers and language; whether they agreed to be told by email, SMS or WhatsApp, and when each agreement was given or withdrawn; and on each booking, the contact it is for, whether to tell them, and its reminders | You and your systems, through the API or the dashboard's Contacts page | Until you delete the contact, which also takes it off every booking, or your account is erased. Changes and webhooks name a contact only by its reference, never its details |
 | Busy time from your other calendars: when each busy period starts and ends, never its title, description or attendees, for the resources you link a calendar to, by the source you name | You or an integration you run (such as `@slotlock/sync`), through the API | 30 days after the period ends, then deleted; at once when you retire the source or your account is erased |
+| From 18 December 2026, Google and Microsoft calendars you connect to hosted Slotlock: the account's email address; the names and ids of its calendars, and which resource each one you choose blocks; an access token and a refresh token, stored only encrypted (AES-256-GCM); and, if you turn on writing back, the ids of the events written to your calendar for your bookings. Their busy time is kept as the row above says | You, when you connect a calendar; Google or Microsoft | While the calendar is connected; deleted when you disconnect it or your account is erased |
 | Payments for holds that wait for one: the amount the hold asks, the payment's reference at your payment provider (a Stripe PaymentIntent id, say), the amount received and when, and whether the hold was booked. Never card or bank details, nor who paid | You or an integration you run (such as `@slotlock/payments-stripe`), through the API | Until the resource is deleted or your account is erased |
 | A record of each reminder put on your change feed (its booking or event and when it was due), so it is said once | The service | Until the booking or event is deleted |
 | Webhooks: each endpoint's address, its signing secret, the change types it receives, and its delivery state and last error | You | While your account exists, or until you delete the endpoint |
@@ -161,7 +166,7 @@ their role again on every page.
 
 | Purpose | Data | Lawful basis (UK GDPR Article 6(1)) |
 | --- | --- | --- |
-| Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history | Account, keys, calendar content, contacts, busy time, payments for holds, reminder records, webhooks, history, write records, exports, sessions, assistant settings | (b) contract: the Terms of Service |
+| Running your account and the service you signed up for: storing your calendars, answering your agents, sending your webhooks, keeping your activity history; from 18 December 2026, reading busy time from the calendars you connect and, if you ask, writing your bookings to them | Account, keys, calendar content, contacts, busy time, connected calendars, payments for holds, reminder records, webhooks, history, write records, exports, sessions, assistant settings | (b) contract: the Terms of Service |
 | Applying your plan: its limits, upgrading and managing it through Stripe | Account, plan | (b) contract: the Terms of Service |
 | Team workspaces: showing members to each other, and inviting a person a member names | Login or verified email, memberships, invitations | (b) contract for members; (f) legitimate interests for an invitation: a member asked for it, it holds an address and a role only, and it is deleted 30 days after it ends; the email that carries it says only who invited, to which team, in which role, with the link, and Resend deletes it 30 days after it is sent |
 | Verified domains: proving a team holds its domain, and letting the people at it ask to join | Domain claims, verified addresses, requests to join | (b) contract for the team's members; (f) legitimate interests for a request: the person asked to join, it holds the address they chose to use, and it is deleted 30 days after it is decided |
@@ -198,13 +203,46 @@ data the assistant reads to answer them go to the provider you chose, under your
 it. That provider is not our subprocessor.
 
 Hosted Slotlock sends no email, SMS or WhatsApp message to your contacts, holds no token for your
-Google or Microsoft calendars or your payment provider, and moves no money for your bookings. If you run integrations
-that do (such as `@slotlock/notify`, `@slotlock/sync` or `@slotlock/payments-stripe`), they read
-from and write to Slotlock through the API like any client, and what they send to those providers
-is under your own agreements with them. Those providers are not our subprocessors.
+payment provider, and moves no money for your bookings. Until 18 December 2026 it holds no token for
+your Google or Microsoft calendars either; from then it does, for the calendars you connect to it
+("Calendars you connect", below). Google and Microsoft are your own providers, each a separate
+controller of your account with them, not our subprocessors. If you run integrations yourself
+(such as `@slotlock/notify`, `@slotlock/sync` or `@slotlock/payments-stripe`), they read from and
+write to Slotlock through the API like any client, and what they send to those providers is under
+your own agreements with them. Those providers are not our subprocessors.
 
 We do not sell personal data or share it for advertising. We disclose it to anyone else only when
 the law requires us to.
+
+## Calendars you connect
+
+From 18 December 2026 you can connect a Google or Microsoft calendar to hosted Slotlock, so that
+its busy time blocks bookings on a resource you choose. Before you sign in to Google or Microsoft,
+a page of ours says what follows.
+
+- **What we read.** The list of the account's calendars, so you can choose among them; and when the
+  calendars you choose are busy, as start and end times only. We never read what your events are
+  about: their titles, descriptions, locations or attendees.
+- **What we write.** Only if you turn on writing back: each confirmed booking on that resource, added
+  to the calendar you choose as an event titled "Busy" with the booking's times, and moved or
+  removed with the booking. With Google, we can write only to calendars you own.
+- **How we use it.** Busy times block bookings on the resource you chose. They are shown as free and
+  busy time to you and to the applications and AI agents you give access to your Slotlock account.
+  We use this data for nothing else. We never use it for advertising, never sell it, never use it
+  to train any AI model, and no person reads it except with your consent, to keep the service
+  secure, or where the law requires.
+- **Where it goes.** Our servers in London call Google or Microsoft with your token and your
+  calendars' ids, and, when writing back, your bookings' times. We share it with no one else.
+- **How long we keep it.** As "What we hold" says: the tokens and your choices while the calendar is
+  connected, and busy times for a limited time after each busy period ends.
+- **Disconnecting.** Disconnecting a calendar deletes its tokens and your choices, removes the
+  events we wrote for your bookings, and stops its busy time counting. For a Google calendar we also
+  revoke the token with Google. You can also remove Slotlock's access yourself, in your Google
+  Account (third-party access) or in your Microsoft account's app permissions.
+
+Slotlock's use and transfer to any other app of information received from Google APIs will adhere
+to the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy),
+including the Limited Use requirements.
 
 ## International transfers
 
@@ -242,7 +280,7 @@ To erase your account and everything in it, write to [privacy@pylota.io](mailto:
 naming your GitHub login. We reply with a word; sign in to the dashboard and create an API key with
 that word as its name (for a team or an organization, as one of its Owners), which shows us the
 account is yours. We then erase every resource, booking,
-event, hold, payment record, waitlist entry, contact, busy period, webhook, export, history entry, assistant
+event, hold, payment record, waitlist entry, contact, busy period, webhook, connected calendar, export, history entry, assistant
 setting, plan, usage count and key in the account, and in its test environment, in one step, with
 our internal notes about it, and tell you when it is done. What stays: the digests of your erased keys, with nothing about
 you, so those keys are never accepted again; a record that the account was suspended, with the reason we gave, if it was; log
