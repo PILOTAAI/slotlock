@@ -3,6 +3,17 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic
 versioning.
 
+## Unreleased
+
+### Changed
+
+- VERSIONING.md: a field that takes one of a listed set of values (a status, a key scope, a change
+  type, a provider) may gain values in any release, in requests and in responses, as new error
+  codes and response fields already may. Clients must not fail on a value they do not know; an
+  existing value keeps its meaning and is not removed within a major version. The five language
+  clients already read these fields as plain strings. This is said now, before 1.0, so that adding
+  a value after 1.0 is not a breaking change (RFC 0007, Part 6).
+
 ## 0.12.3 - 2026-11-15
 
 ### Added

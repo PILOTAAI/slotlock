@@ -35,6 +35,13 @@ Within a major version, and across 0.x minor releases unless CHANGELOG.md lists 
 - **MCP tools and A2A skills.** Tool and skill names, argument names and error codes keep their
   meaning. A renamed tool keeps answering to its old name: `calendar.<verb>` and `calendar_<verb>`
   still work beside `slotlock_<verb>`.
+- **Listed values.** A field that takes one of a listed set of values (an enum, such as a status, a
+  key scope, a change type or a provider) may gain values in any release, in requests and in
+  responses. Clients must not fail on a value they do not know: they handle it as the field's
+  description says, or else skip what needed it, as a change-feed consumer skips a change type it
+  does not handle. An existing value keeps its meaning and is not removed within a major version.
+  The five language clients read these fields as plain strings, so a new value reaches them
+  unchanged.
 - **The database schema.** `applySchema` and `slotlock migrate` upgrade an existing schema in place.
   Downgrading the package against an upgraded schema is not supported; take a backup first.
 - **The library.** Everything exported from `slotlock` and its documented subpaths, with the types

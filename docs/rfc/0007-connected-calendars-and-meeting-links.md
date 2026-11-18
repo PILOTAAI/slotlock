@@ -413,9 +413,10 @@ Slotlock is at 0.12.3, and 1.0.0 is next. VERSIONING.md says:
 
 It says nothing about new values in an existing enum.
 
-- **Before 1.0.0:** one sentence in VERSIONING.md: an enum may gain values in a minor release, and
-  clients treat an unknown value by the fallback that enum documents. Without it, each of these
-  could be argued breaking after 1.0:
+- **Before 1.0.0:** a "Listed values" rule in VERSIONING.md (added with this RFC): a field that
+  takes one of a listed set of values may gain values in any release, as error codes already may,
+  and clients must not fail on a value they do not know. Without it, each of these could be argued
+  breaking after 1.0:
   - a `sync` scope in key listings;
   - a new change type;
   - a new conference provider.
@@ -515,7 +516,7 @@ verification, the independent reviewer, and counsel on PECR roles and Article 50
 
 | # | PR | Tier | Release |
 | --- | --- | --- | --- |
-| 1 | VERSIONING.md: enums may gain values; integration packages version separately | T0 | 1.0.0 |
+| 1 | VERSIONING.md: listed values may gain values (added with this RFC); integration packages version separately (to do) | T0 | 1.0.0 |
 | 2 | `sync` and `notify` key scopes; packages take them and refuse admin keys on Cloud | T2 | 1.1 |
 | 3 | Dashboard Calendars page, Microsoft admin-consent link, `calendar.events.owned` | T2 | 1.x, with the sync's review |
 | 4 | `max_age_seconds` and `live` on coverage | T1 | 1.x |
