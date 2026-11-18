@@ -396,6 +396,27 @@ describe('the versioning policy', () => {
     expect(policy).toContain('https://github.com/PILOTAAI/slotlock/releases.atom');
     expect(policy).toContain('**Deprecated**');
   });
+
+  it('lets a listed set of values grow without a new major version', () => {
+    const policy = flat(read('VERSIONING.md'));
+    expect(policy).toContain('**Listed values.**');
+    expect(policy).toContain('may gain values in any release');
+    expect(policy).toContain('Clients must not fail on a value they do not know');
+  });
+
+  it('names every integration package as versioned on its own, and none is published yet', () => {
+    const policy = flat(read('VERSIONING.md'));
+    expect(policy).toContain('Each keeps a version of its own');
+    const packages = readdirSync(path('packages'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(path(`packages/${entry.name}/package.json`)))
+      .map((entry) => JSON.parse(read(`packages/${entry.name}/package.json`)) as { name: string; private?: boolean });
+    expect(packages.length).toBeGreaterThan(0);
+    for (const pkg of packages) {
+      // A new package must be named in the policy; one published to npm needs the policy changed.
+      expect(policy).toContain(`\`${pkg.name}\``);
+      expect(pkg.private, `${pkg.name} is published: update VERSIONING.md`).toBe(true);
+    }
+  });
 });
 
 describe('the specification and the README', () => {
