@@ -151,6 +151,8 @@ built. Publisher verification needs a Microsoft partner (Partner One) ID.
 
 **Start the approvals now:** Google brand and scope verification, Microsoft partner enrolment and
 publisher verification. Cloud turns each provider on when its approval lands, without a release.
+The steps, the blockers to clear first and the texts the forms ask for are in
+[docs/hosted/calendar-provider-approvals.md](../hosted/calendar-provider-approvals.md).
 
 ### 1.4 Keys and audit (T2)
 
