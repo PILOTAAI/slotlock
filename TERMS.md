@@ -1,6 +1,9 @@
 # Terms of Service for hosted Slotlock
 
-Last updated: 13 November 2026.
+Last updated: 18 November 2026.
+
+The changes for Google and Microsoft calendars you connect (in "Data processing terms") take effect
+on 18 December 2026.
 
 These terms are an agreement between you and TREFT LTD, trading as Pylota (company number 16211391,
 registered office 20 Wenlock Road, London, England, N1 7GU), for hosted Slotlock: the API at
@@ -88,10 +91,15 @@ are the contract UK GDPR Article 28(3) requires.
   account exists.
 - **Nature and purpose:** storing, reading, expanding and checking calendar data so the service can
   answer your requests, sending your changes to the webhooks you set up, keeping the history and
-  backups the [privacy notice](PRIVACY.md#what-we-hold) describes, and nothing else.
+  backups the [privacy notice](PRIVACY.md#what-we-hold) describes, and, from 18 December 2026,
+  reading busy time from the Google and Microsoft calendars you connect and, if you ask, writing your
+  bookings to them, as the [privacy notice](PRIVACY.md#calendars-you-connect) describes, and nothing
+  else.
 - **Types of personal data:** whatever you put in your content, typically names, email addresses,
   and the times, places and descriptions of bookings and events, the holder names and references
-  your agents give, and the addresses of the calendars and webhooks you set up.
+  your agents give, and the addresses of the calendars and webhooks you set up; from 18 December
+  2026 also the email address of each Google or Microsoft account whose calendars you connect, and
+  those calendars' busy times.
 - **Categories of data subjects:** the people your content is about, such as your staff,
   customers and event attendees.
 
