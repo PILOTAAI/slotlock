@@ -491,6 +491,8 @@ export type {
   BookingRetentionResult,
   CalendarAttendee,
   CalendarAttendeeRole,
+  CalendarConference,
+  CalendarConferenceRequest,
   CalendarCoverageAssessment,
   CalendarCoverageCommand,
   CalendarCoverageResult,

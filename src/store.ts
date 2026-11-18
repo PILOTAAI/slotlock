@@ -935,6 +935,9 @@ interface CalendarEventRow {
   summary: string;
   description: string | null;
   location: string | null;
+  /** The meeting link asked for, and the link when the person gave it (RFC 0007 3.1). */
+  conference: string | null;
+  conference_url: string | null;
   status: 'confirmed' | 'tentative';
   transparency: 'opaque' | 'transparent';
   organizer: CalendarOrganizer | null;
@@ -1637,6 +1640,9 @@ function toCalendarEvent(
   };
   if (row.description !== null) event.description = row.description;
   if (row.location !== null) event.location = row.location;
+  if (row.conference === 'user_supplied' && row.conference_url !== null) {
+    event.conference = { requested: 'user_supplied', url: row.conference_url };
+  }
   if (row.organizer !== null) event.organizer = row.organizer;
   const attendees = normalizedChildren?.attendees ?? row.attendees;
   const reminders = normalizedChildren?.reminders ?? row.reminders;
@@ -3043,7 +3049,8 @@ async function rollStoredSeries(
     (CalendarEventRow & { ends_by_missing: boolean; buffer_after_ms: number; buffer_before_ms: number })[]
   >`
     SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-           summary, description, location, status, transparency, organizer, attendees,
+           summary, description, location, conference, conference_url, status, transparency,
+           organizer, attendees,
            reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
            materialized_ends_at, recurrence_cursor, revision, source, created_at,
            updated_at, recurrence_ends_by IS NULL AS ends_by_missing, buffer_after_ms, buffer_before_ms
@@ -3109,7 +3116,8 @@ async function rollStoredSeries(
 async function learnSeriesEnd(tx: TransactionSql, tenantRef: string, eventId: string): Promise<void> {
   const [row] = await tx<CalendarEventRow[]>`
     SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-           summary, description, location, status, transparency, organizer, attendees,
+           summary, description, location, conference, conference_url, status, transparency,
+           organizer, attendees,
            reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
            materialized_ends_at, recurrence_cursor, revision, source, created_at,
            updated_at
@@ -8703,7 +8711,8 @@ function buildSlotlockStore(
             if (resourceState === 'archived') return { ok: false, code: 'resource_archived' };
             const existing = await tx<CalendarEventRow[]>`
               SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-                     summary, description, location, status, transparency, organizer, attendees,
+                     summary, description, location, conference, conference_url, status, transparency,
+                     organizer, attendees,
                      reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
                      materialized_ends_at, recurrence_cursor, revision, source, created_at, updated_at,
                      cutoff_anchor
@@ -8910,6 +8919,8 @@ function buildSlotlockStore(
                        summary = ${event.summary},
                        description = ${event.description ?? null},
                        location = ${event.location ?? null},
+                       conference = ${event.conference?.requested ?? null},
+                       conference_url = ${event.conference?.url ?? null},
                        status = ${event.status ?? 'confirmed'},
                        transparency = ${event.transparency ?? 'opaque'},
                        organizer = ${event.organizer ? tx.json(organizerForJson(event.organizer)) : null},
@@ -8940,7 +8951,8 @@ function buildSlotlockStore(
               await tx`
                 INSERT INTO slotlock.calendar_events (
                   id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-                  summary, description, location, status, transparency, organizer, attendees,
+                  summary, description, location, conference, conference_url, status, transparency,
+                  organizer, attendees,
                   reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
                   materialized_ends_at, recurrence_cursor, recurrence_ends_by, revision, source,
                   buffer_after_ms, buffer_before_ms, notify
@@ -8949,6 +8961,7 @@ function buildSlotlockStore(
                   ${params.resourceId},
                   ${event.start}, ${event.end}, ${event.timezone}, ${event.summary},
                   ${event.description ?? null}, ${event.location ?? null},
+                  ${event.conference?.requested ?? null}, ${event.conference?.url ?? null},
                   ${event.status ?? 'confirmed'}, ${event.transparency ?? 'opaque'},
                   ${event.organizer ? tx.json(organizerForJson(event.organizer)) : null},
                   ${tx.json(attendeesForJson(event.attendees))},
@@ -9049,7 +9062,8 @@ function buildSlotlockStore(
       }
       const rows = await sql<CalendarEventRow[]>`
         SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-               summary, description, location, status, transparency, organizer, attendees,
+               summary, description, location, conference, conference_url, status, transparency,
+               organizer, attendees,
                reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
                materialized_ends_at, revision, source, created_at, updated_at
           FROM slotlock.calendar_events
@@ -9071,7 +9085,8 @@ function buildSlotlockStore(
       }
       const rows = await sql<CalendarEventRow[]>`
         SELECT id, tenant_ref, owner_ref, external_ref, resource_id, starts_at, ends_at, timezone,
-               summary, description, location, status, transparency, organizer, attendees,
+               summary, description, location, conference, conference_url, status, transparency,
+               organizer, attendees,
                reminders, recurrence_rule, recurrence_exceptions, materialized_starts_at,
                materialized_ends_at, revision, source, created_at, updated_at
           FROM slotlock.calendar_events
@@ -9120,7 +9135,8 @@ function buildSlotlockStore(
       const rows = await sql<CalendarEventRow[]>`
         SELECT event.id, event.tenant_ref, event.owner_ref, event.external_ref, event.resource_id,
                event.starts_at, event.ends_at, event.timezone, event.summary, event.description,
-               event.location, event.status, event.transparency, event.organizer, event.attendees,
+               event.location, event.conference, event.conference_url, event.status,
+               event.transparency, event.organizer, event.attendees,
                event.reminders, event.recurrence_rule, event.recurrence_exceptions,
                event.materialized_starts_at, event.materialized_ends_at, event.revision,
                event.source, event.created_at, event.updated_at

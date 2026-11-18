@@ -60,6 +60,19 @@ const RECURRENCE_EXCEPTION = z
   })
   .strict();
 
+// The meeting link (RFC 0007 3.1). Each set of values may grow (VERSIONING.md, listed values).
+const CONFERENCE = z
+  .object({
+    /** What was asked for. */
+    requested: z.enum(['user_supplied']),
+    /** Who made the link. */
+    provider: z.enum(['user_supplied']),
+    status: z.enum(['ready']),
+    /** The link every participant joins by; never one that lets its holder host. */
+    join_url: z.string().max(2_048),
+  })
+  .strict();
+
 export const SLOTLOCK_EVENT_OUTPUT = z
   .object({
     id: EVENT_ID,
@@ -82,6 +95,8 @@ export const SLOTLOCK_EVENT_OUTPUT = z
       .array(RECURRENCE_EXCEPTION)
       .max(TRUSTED_RECURRENCE_EXCEPTION_OUTPUT_MAX),
     recurrence_id: DATE_TIME.nullable(),
+    /** Null when it has none. Optional, so a backend written before links still answers. */
+    conference: CONFERENCE.nullable().optional(),
   })
   .strict();
 

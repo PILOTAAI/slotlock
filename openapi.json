@@ -2594,6 +2594,18 @@
                     "minLength": 1,
                     "maxLength": 200
                   },
+                  "conference": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "user_supplied"
+                    ]
+                  },
+                  "conference_url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "pattern": "^https:\\/\\/"
+                  },
                   "dry_run": {
                     "type": "boolean",
                     "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
@@ -2895,6 +2907,47 @@
                               {
                                 "type": "string",
                                 "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "conference": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "requested": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "provider": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "status": {
+                                    "type": "string",
+                                    "enum": [
+                                      "ready"
+                                    ]
+                                  },
+                                  "join_url": {
+                                    "type": "string",
+                                    "maxLength": 2048
+                                  }
+                                },
+                                "required": [
+                                  "requested",
+                                  "provider",
+                                  "status",
+                                  "join_url"
+                                ],
+                                "additionalProperties": false
                               },
                               {
                                 "type": "null"
@@ -3318,6 +3371,47 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -3664,6 +3758,18 @@
                     "minLength": 1,
                     "maxLength": 200
                   },
+                  "conference": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "user_supplied"
+                    ]
+                  },
+                  "conference_url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "pattern": "^https:\\/\\/"
+                  },
                   "dry_run": {
                     "type": "boolean",
                     "description": "Check the write without making it: it runs with every check, the database's included, and is then undone, so nothing is stored, recorded or sent. The answer is what it would have been, with dry_run: true (ids in it are never stored), or the refusal it would have met, alternatives included. Charged as a read."
@@ -3964,6 +4070,47 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -4380,6 +4527,47 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "conference": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "requested": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "provider": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "status": {
+                                    "type": "string",
+                                    "enum": [
+                                      "ready"
+                                    ]
+                                  },
+                                  "join_url": {
+                                    "type": "string",
+                                    "maxLength": 2048
+                                  }
+                                },
+                                "required": [
+                                  "requested",
+                                  "provider",
+                                  "status",
+                                  "join_url"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -4449,7 +4637,7 @@
       "post": {
         "operationId": "slotlock_create_event",
         "summary": "Create resource event",
-        "description": "Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long rental). The database refuses a time already taken: 409 overlap, with alternatives (the earliest free times of the same length) and, when the booking in the way is yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same idempotency_key answers the same event.",
+        "description": "Book a resource for a time, as an event of up to 3,660 days (a booking, lease or long rental). The database refuses a time already taken: 409 overlap, with alternatives (the earliest free times of the same length) and, when the booking in the way is yours, its id. A booking rule that refuses the time answers booking_rule_… with alternatives too. To book a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url gives it a meeting link the person supplied (https), which Slotlock keeps and exports but never makes or checks. A retry with the same idempotency_key answers the same event.",
         "tags": [
           "Agent tools"
         ],
@@ -4644,6 +4832,18 @@
                   },
                   "notify": {
                     "type": "boolean"
+                  },
+                  "conference": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "user_supplied"
+                    ]
+                  },
+                  "conference_url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "pattern": "^https:\\/\\/"
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -4942,6 +5142,47 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -5312,6 +5553,47 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -5599,6 +5881,18 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200
+                  },
+                  "conference": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "user_supplied"
+                    ]
+                  },
+                  "conference_url": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "pattern": "^https:\\/\\/"
                   },
                   "dry_run": {
                     "type": "boolean",
@@ -5904,6 +6198,47 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -6456,6 +6791,47 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -23096,6 +23472,47 @@
                               }
                             ]
                           },
+                          "conference": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "requested": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "provider": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "status": {
+                                    "type": "string",
+                                    "enum": [
+                                      "ready"
+                                    ]
+                                  },
+                                  "join_url": {
+                                    "type": "string",
+                                    "maxLength": 2048
+                                  }
+                                },
+                                "required": [
+                                  "requested",
+                                  "provider",
+                                  "status",
+                                  "join_url"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "event_ref": {
                             "type": "string",
                             "maxLength": 500
@@ -23460,6 +23877,47 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
@@ -24185,6 +24643,47 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "conference": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "requested": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "provider": {
+                                    "type": "string",
+                                    "enum": [
+                                      "user_supplied"
+                                    ]
+                                  },
+                                  "status": {
+                                    "type": "string",
+                                    "enum": [
+                                      "ready"
+                                    ]
+                                  },
+                                  "join_url": {
+                                    "type": "string",
+                                    "maxLength": 2048
+                                  }
+                                },
+                                "required": [
+                                  "requested",
+                                  "provider",
+                                  "status",
+                                  "join_url"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -24596,6 +25095,47 @@
                             {
                               "type": "string",
                               "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "conference": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "requested": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "provider": {
+                                  "type": "string",
+                                  "enum": [
+                                    "user_supplied"
+                                  ]
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "ready"
+                                  ]
+                                },
+                                "join_url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                }
+                              },
+                              "required": [
+                                "requested",
+                                "provider",
+                                "status",
+                                "join_url"
+                              ],
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"

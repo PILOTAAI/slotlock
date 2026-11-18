@@ -125,6 +125,13 @@ export const INPUT_NOTES = {
   'RECURRENCE_EXCEPTION_INPUT.ends_at': 'New end, unless `cancelled`.',
   'REMINDER_INPUT.minutes_before': 'Minutes before the start.',
   'ATTENDEE_INPUT.rsvp': 'Whether a reply is requested.',
+  conference:
+    'A meeting link: `none`, or `user_supplied` with `conference_url`. More values may come in any release.',
+  conference_url:
+    'A link the person gave you, https; on its own it means `user_supplied`. Slotlock keeps it and writes it into the event\u2019s iCalendar, but never makes, fetches or checks it. `invalid_event` when it has a user name or password, a space, or more than 2,048 bytes.',
+  'slotlock_update_event.conference': '`none` removes the link; left out, it stays.',
+  'slotlock_book_together.conference_url':
+    'A link the person gave you, https, for every event booked; on its own it means `user_supplied`. Slotlock never makes, fetches or checks it.',
 };
 
 export const OUTPUT_NOTES = {
@@ -158,6 +165,12 @@ export const OUTPUT_NOTES = {
   'EVENT.revision': 'Pass it as `expected_revision` to update or delete.',
   'EVENT.sequence': 'The iCalendar `SEQUENCE`.',
   'EVENT.title': 'Busy when the event was created without one.',
+  'EVENT.conference': '`null` when it has none; absent from a backend written before meeting links.',
+  'CONFERENCE.requested': 'What the booking asked for.',
+  'CONFERENCE.provider': 'Who made the link: `user_supplied` is the person.',
+  'CONFERENCE.status':
+    '`ready`: the link can be used. Each of these sets may gain values in any release: read a value you do not know as no link yet.',
+  'CONFERENCE.join_url': 'The link every participant joins by, as the URL parser writes it.',
   'COVERAGE.start': 'Start of the window assessed.',
   'COVERAGE.end': 'End of the window assessed.',
   'COVERAGE.certainty':
@@ -179,6 +192,7 @@ export const OBJECTS = {
   ATTENDEE: { name: 'Attendee', role: 'output' },
   REMINDER: { name: 'Reminder', role: 'output' },
   RECURRENCE_EXCEPTION: { name: 'Recurrence exception', role: 'output' },
+  CONFERENCE: { name: 'Meeting link', role: 'output' },
   ORGANIZER_INPUT: { name: 'Organizer input', role: 'input' },
   ATTENDEE_INPUT: { name: 'Attendee input', role: 'input' },
   REMINDER_INPUT: { name: 'Reminder input', role: 'input' },
@@ -208,6 +222,7 @@ export const TOOL_ERRORS = {
     'overlap',
     'resource_not_found',
     'idempotency_conflict',
+    'invalid_event',
     'booking_rule_min_notice',
     'booking_rule_max_advance',
     'booking_rule_slot_step',
@@ -280,6 +295,7 @@ export const TOOL_ERRORS = {
     'payment_required',
     'holds_unavailable',
     'idempotency_conflict',
+    'invalid_event',
     'resource_not_found',
     'owner_event_quota_exceeded',
     'owner_command_quota_exceeded',
@@ -358,6 +374,11 @@ export const CONFIRMATION_ERRORS = [
  * no entry matches fails the build, so a new rule gets a sentence before it ships.
  */
 export const REFINEMENTS = [
+  {
+    matches: (text) => text === 'conferencePaired',
+    note: () =>
+      '`conference: "user_supplied"` needs `conference_url`, and `conference_url` goes with `user_supplied` or alone.',
+  },
   {
     matches: (text) => text.includes('value.payment === undefined || value.payment_required === true'),
     note: () => '`payment` is given only with `payment_required: true`.',

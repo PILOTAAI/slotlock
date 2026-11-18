@@ -442,6 +442,13 @@ describe.skipIf(!url)('approval policies (real Postgres)', () => {
       idempotency_key: `t-${randomUUID()}`,
     });
     expect(renamed.status).toBe(200);
+    // Nor does a meeting link.
+    const linked = await call('agent', 'PATCH', `/v1/events/${event.id}`, {
+      expected_revision: (renamed.body.event as { revision: number }).revision,
+      conference_url: 'https://meet.example.com/abc-defg-hij',
+      idempotency_key: `l-${randomUUID()}`,
+    });
+    expect(linked.status).toBe(200);
     await call('admin', 'DELETE', '/v1/approval-policies/vip');
 
     // A one-off a person granted cannot become a series without one.

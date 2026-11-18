@@ -83,14 +83,17 @@ scope. Over MCP and A2A, agents create events, and you can make each write
 
 ## Events
 
-Events carry what people see: title, organizer, attendees, reminders and recurrence. Each opaque
-occurrence is a reservation under the same constraint; a transparent event occupies nothing.
+Events carry what people see: title, organizer, attendees, reminders, recurrence and a meeting
+link. Each opaque occurrence is a reservation under the same constraint; a transparent event
+occupies nothing.
 
 - Writes take an expected revision (`0` creates) and an idempotency key, so retries are safe.
 - Cancelling leaves a tombstone, so a late create cannot bring the event back.
 - Recurrence is stored for at most {{horizonDays}} days ahead; one event may last
   {{maxEventDaysText}} days.
 - Over MCP and A2A, a caller sees only its own events, but everyone's count as busy time.
+- A meeting link is one the person gave (`conference_url`): Slotlock keeps it with the event and
+  writes it into the event's iCalendar as `CONFERENCE`, but never makes, fetches or checks it.
 
 ## Free/busy certainty
 

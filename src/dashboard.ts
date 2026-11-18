@@ -4591,6 +4591,8 @@ ${
     description: 'Note',
     metadata: 'Details',
     slots: 'Times',
+    // Shown among the facts, as text the member reads before approving, never as a link to follow.
+    conference_url: 'Meeting link',
   });
 
   /**

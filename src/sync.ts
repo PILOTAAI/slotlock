@@ -19,6 +19,7 @@ import {
 import type {
   CalendarAttendee,
   CalendarAttendeeRole,
+  CalendarConference,
   CalendarEventContent,
   CalendarEventOccurrence,
   CalendarOrganizer,
@@ -292,6 +293,7 @@ interface ExpansionState {
 const MAX_EXCEPTION_BACKWARD_SHIFT_MS = MAX_ICAL_WINDOW_MS;
 const MAX_TRUSTED_TEXT_BYTES = 16_384;
 const MAX_TRUSTED_SUMMARY_BYTES = 4_096;
+const MAX_CONFERENCE_URL_BYTES = 2_048;
 const MAX_TRUSTED_ATTENDEES = 100;
 const MAX_TRUSTED_REMINDERS = 20;
 const MAX_REMINDER_MINUTES = 366 * 24 * 60;
@@ -794,7 +796,49 @@ export function normalizeCalendarEventContent(input: CalendarEventContent): Cale
   if (reminders.length > 0) normalized.reminders = reminders;
   const recurrence = normalizeRecurrence(input.recurrence, start, normalized.timezone);
   if (recurrence) normalized.recurrence = recurrence;
+  // Last and only when asked for, so content without a link hashes as it did before links.
+  const conference = normalizeConference(input.conference);
+  if (conference) normalized.conference = conference;
   return normalized;
+}
+
+/**
+ * A meeting link as Slotlock keeps it: https, with no user name or password and no space or control
+ * character, at most 2,048 bytes as the WHATWG URL parser writes it. That form is ASCII: a host in
+ * another script is written as `xn--`, so a look-alike host shows as one. Slotlock never fetches
+ * it. Throws `invalid_icalendar`.
+ */
+function normalizeConferenceUrl(value: string): string {
+  if (typeof value !== 'string' || /[\s\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || !url.hostname) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  const href = url.href;
+  if (Buffer.byteLength(href, 'utf8') > MAX_CONFERENCE_URL_BYTES) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  return href;
+}
+
+function normalizeConference(input: CalendarConference | undefined): CalendarConference | undefined {
+  if (input === undefined) return undefined;
+  if (
+    typeof input !== 'object' ||
+    input === null ||
+    input.requested !== 'user_supplied' ||
+    typeof input.url !== 'string'
+  ) {
+    throw new CalendarContractError('invalid_icalendar');
+  }
+  return { requested: 'user_supplied', url: normalizeConferenceUrl(input.url) };
 }
 
 export function normalizeExternalCalendarChange(
@@ -3113,6 +3157,27 @@ function addReminders(
   }
 }
 
+/**
+ * RFC 7986 CONFERENCE, as a URI: ical.js knows no such property and would write the link as TEXT,
+ * escaping its commas and semicolons. One FEATURE value, since ical.js quotes a list ("AUDIO,VIDEO"
+ * would read as one value).
+ */
+function addConference(component: ICAL.Component, url: string): void {
+  const property = new ICAL.Property('conference', component);
+  property.resetType('uri');
+  property.setParameter('feature', 'VIDEO');
+  property.setValue(url);
+  component.addProperty(property);
+}
+
+/** The description with the join link as its last line, unless that would pass its bound. */
+function withJoinLine(description: string | undefined, url: string | undefined): string | undefined {
+  if (!url) return description;
+  const line = `Join: ${url}`;
+  const joined = description ? `${description}\n\n${line}` : line;
+  return Buffer.byteLength(joined, 'utf8') <= MAX_TRUSTED_TEXT_BYTES ? joined : description;
+}
+
 function eventComponent(params: {
   event: CalendarEventContent;
   uid: string;
@@ -3150,10 +3215,13 @@ function eventComponent(params: {
     addDateTimeProperty(component, 'recurrence-id', params.recurrenceId, 'UTC');
   }
   component.updatePropertyWithValue('summary', params.event.summary);
-  if (params.event.description) {
-    component.updatePropertyWithValue('description', params.event.description);
-  }
-  if (params.event.location) component.updatePropertyWithValue('location', params.event.location);
+  const joinUrl = params.event.conference?.url;
+  const description = withJoinLine(params.event.description, joinUrl);
+  if (description) component.updatePropertyWithValue('description', description);
+  // Calendars that do not read CONFERENCE show the link as the place.
+  const location = params.event.location ?? joinUrl;
+  if (location) component.updatePropertyWithValue('location', location);
+  if (joinUrl) addConference(component, joinUrl);
   component.updatePropertyWithValue('sequence', params.sequence);
   component.updatePropertyWithValue(
     'status',
@@ -3306,6 +3374,7 @@ export function emitITipCalendar(input: ICalendarEvent, method: ITipMethod): str
     if (input.attendees !== undefined) contentInput.attendees = input.attendees;
     if (input.reminders !== undefined) contentInput.reminders = input.reminders;
     if (input.recurrence !== undefined) contentInput.recurrence = input.recurrence;
+    if (input.conference !== undefined) contentInput.conference = input.conference;
     const event = normalizeCalendarEventContent(contentInput);
     if (method === 'REQUEST' && (!event.organizer || !event.attendees?.length)) {
       throw new CalendarContractError('invalid_icalendar');

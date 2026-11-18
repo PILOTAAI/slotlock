@@ -76,6 +76,7 @@ import {
 import { slotlockResourceSearchWords, slotlockSearchResources } from './resource-search.js';
 import type {
   CalendarAttendee,
+  CalendarConference,
   CalendarEventContent,
   CalendarRecurrence,
   CalendarRecurrenceException,
@@ -183,7 +184,12 @@ interface AgentEventInput {
   notify?: boolean;
   recurrence_exceptions?: AgentRecurrenceExceptionInput[];
   idempotency_key: string;
+  conference?: AgentConferenceRequest;
+  conference_url?: string;
 }
+
+/** `none` asks for no link; `user_supplied` keeps `conference_url` (RFC 0007 3.1). */
+type AgentConferenceRequest = 'none' | 'user_supplied';
 
 /**
  * Writes run under READ COMMITTED whatever the role's default: tenant limits are counted under a
@@ -577,7 +583,36 @@ export function projectSlotlockCalendarEvent(event: SlotlockCalendarEvent): Reco
       ends_at: exception.end?.toISOString() ?? null,
     })),
     recurrence_id: null,
+    conference: conferenceProjection(event.conference),
   };
+}
+
+function conferenceProjection(conference: CalendarConference | undefined): Record<string, unknown> | null {
+  if (conference?.requested !== 'user_supplied' || conference.url === undefined) return null;
+  return {
+    requested: 'user_supplied',
+    provider: 'user_supplied',
+    status: 'ready',
+    join_url: conference.url,
+  };
+}
+
+/**
+ * The meeting link a write asks for: undefined when it names none (an update keeps the event's),
+ * null for `none`. A link alone is `user_supplied`. The tool schemas refuse a link with `none` and
+ * `user_supplied` without a link; a direct caller that sends either is refused as an invalid event.
+ */
+function requestedConference(input: {
+  conference?: unknown;
+  conference_url?: unknown;
+}): CalendarConference | null | undefined {
+  const url = input.conference_url;
+  if (input.conference === undefined && url === undefined) return undefined;
+  if (input.conference === 'none' && url === undefined) return null;
+  if ((input.conference === undefined || input.conference === 'user_supplied') && typeof url === 'string') {
+    return { requested: 'user_supplied', url };
+  }
+  throw new SlotlockAgentOperationError('invalid_event', 400);
 }
 
 /**
@@ -1213,10 +1248,14 @@ export function createSlotlockStoreAgentBackend(
         title?: string;
         idempotency_key: string;
         hold_group_id?: string;
+        conference?: AgentConferenceRequest;
+        conference_url?: string;
       };
       // Sorted, so bundles over the same resources lock in one order and never deadlock.
       const resourceIds = [...new Set(input.resource_ids)].sort();
       if (resourceIds.length < 2) throw new SlotlockAgentOperationError('invalid_arguments', 400);
+      // One link for the whole set: everyone booked together meets in the same place.
+      const conference = requestedConference(input);
       const content: CalendarEventContent = {
         start: new Date(input.starts_at),
         end: new Date(input.ends_at),
@@ -1226,6 +1265,7 @@ export function createSlotlockStoreAgentBackend(
         transparency: 'opaque',
         attendees: [],
         reminders: [],
+        ...(conference ? { conference } : {}),
       };
       return withTenant(store, context, async (tenantStore) => {
         for (const resourceId of resourceIds) {
@@ -1294,6 +1334,12 @@ export function createSlotlockStoreAgentBackend(
         location?: string;
         timezone?: string;
         idempotency_key: string;
+        conference?: AgentConferenceRequest;
+        conference_url?: string;
+      };
+      const conference = {
+        ...(input.conference !== undefined ? { conference: input.conference } : {}),
+        ...(input.conference_url !== undefined ? { conference_url: input.conference_url } : {}),
       };
       // The holder's own hold, lapsed or live, and its resource's zone; then the booking exactly
       // as create_event with its hold_id makes it, which judges the hold again under its lock.
@@ -1332,6 +1378,7 @@ export function createSlotlockStoreAgentBackend(
             status: 'confirmed',
             hold_id: input.hold_id,
             idempotency_key: input.idempotency_key,
+            ...conference,
           },
         );
       }
@@ -1350,6 +1397,7 @@ export function createSlotlockStoreAgentBackend(
           status: 'confirmed',
           hold_id: input.hold_id,
           idempotency_key: input.idempotency_key,
+          ...conference,
         },
       );
     },
@@ -1766,6 +1814,7 @@ export function createSlotlockStoreAgentBackend(
 
     async createEvent(context, rawInput) {
       const input = rawInput as unknown as AgentEventInput;
+      const conference = requestedConference(input);
       return withTenant(store, context, async (tenantStore) => {
         await requireAgentResource(tenantStore, context.principal.tenantRef, input.resource_id);
         const recurrence = recurrenceFromInput(input.recurrence_rule, input.recurrence_exceptions);
@@ -1789,6 +1838,7 @@ export function createSlotlockStoreAgentBackend(
           attendees: attendeesFromInput(input.attendees),
           reminders: remindersFromInput(input.reminders),
           ...(recurrence ? { recurrence } : {}),
+          ...(conference ? { conference } : {}),
         };
         const result = await tenantStore.putCalendarEvent({
           tenantRef: context.principal.tenantRef,
@@ -1877,6 +1927,7 @@ export function createSlotlockStoreAgentBackend(
       ) {
         throw new SlotlockAgentOperationError('event_not_found', 404);
       }
+      const conference = requestedConference(input);
       const moved = await withTenant(store, context, async (tenantStore) => {
         const current = await tenantStore.getCalendarEvent({
           tenantRef: context.principal.tenantRef,
@@ -1943,6 +1994,14 @@ export function createSlotlockStoreAgentBackend(
           status: input.status ?? current.status ?? 'confirmed',
           transparency: input.transparency ?? current.transparency ?? 'opaque',
           ...(recurrence ? { recurrence } : {}),
+          // `none` removes the link; a request that names none keeps it.
+          ...(conference === null
+            ? {}
+            : conference !== undefined
+              ? { conference }
+              : current.conference !== undefined
+                ? { conference: current.conference }
+                : {}),
         };
         const result = await tenantStore.putCalendarEvent({
           tenantRef: context.principal.tenantRef,
@@ -2405,6 +2464,8 @@ function withApprovalPolicies(
     'organizer',
     'attendees',
     'reminders',
+    'conference',
+    'conference_url',
   ]);
 
   /** The write's ask and the policies that may cover it, or null when none can. */

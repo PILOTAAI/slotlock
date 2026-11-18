@@ -484,6 +484,20 @@ export interface CalendarEventContent {
   attendees?: CalendarAttendee[];
   reminders?: CalendarReminder[];
   recurrence?: CalendarRecurrence;
+  /** The meeting link asked for (RFC 0007 3.1). Absent: none. */
+  conference?: CalendarConference;
+}
+
+/**
+ * Who provides an event's meeting link. `user_supplied`: a link the person gave, kept as given
+ * (https only). More providers may be added in any release (VERSIONING.md, listed values).
+ */
+export type CalendarConferenceRequest = 'user_supplied';
+
+export interface CalendarConference {
+  requested: CalendarConferenceRequest;
+  /** The join link, for `user_supplied`. Never a link that lets its holder host the meeting. */
+  url?: string;
 }
 
 export interface CalendarEventOccurrence {

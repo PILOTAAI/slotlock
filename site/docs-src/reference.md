@@ -301,7 +301,7 @@ curl -X PUT "http://localhost:8080/v1/reservations/BK-42" \
 Every committed change to a tenant's holds, bookings, calendar events and configuration is recorded
 in the same transaction (by a database trigger, so no write path skips it), and nothing is recorded
 that did not commit. A change carries ids, times and states, never titles, descriptions, attendees,
-webhook URLs or secrets.
+meeting links, webhook URLs or secrets.
 
 - The types: `hold.created`, `.updated`, `.confirmed`, `.released`, `.expired`;
   `reservation.created`, `.updated`, `.rescheduled` (a move, besides `.updated`), `.cancelled`,

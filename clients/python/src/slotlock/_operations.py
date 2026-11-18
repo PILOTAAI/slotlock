@@ -1263,6 +1263,8 @@ class Operations(Transport):
         idempotency_key: str,
         title: str | None = None,
         hold_group_id: str | None = None,
+        conference: str | None = None,
+        conference_url: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Book resources together.
@@ -1290,6 +1292,10 @@ class Operations(Transport):
             values["title"] = title
         if hold_group_id is not None:
             values["hold_group_id"] = hold_group_id
+        if conference is not None:
+            values["conference"] = conference
+        if conference_url is not None:
+            values["conference_url"] = conference_url
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_book_together", values)
@@ -1370,6 +1376,8 @@ class Operations(Transport):
         location: str | None = None,
         timezone: str | None = None,
         idempotency_key: str | None = None,
+        conference: str | None = None,
+        conference_url: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Confirm a held slot.
@@ -1396,6 +1404,10 @@ class Operations(Transport):
             values["timezone"] = timezone
         if idempotency_key is not None:
             values["idempotency_key"] = idempotency_key
+        if conference is not None:
+            values["conference"] = conference
+        if conference_url is not None:
+            values["conference_url"] = conference_url
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_confirm_slot", values)
@@ -1440,6 +1452,8 @@ class Operations(Transport):
         recurrence_exceptions: list[dict[str, Any]] | None = None,
         hold_id: str | None = None,
         notify: bool | None = None,
+        conference: str | None = None,
+        conference_url: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Create resource event.
@@ -1448,8 +1462,9 @@ class Operations(Transport):
         rental). The database refuses a time already taken: 409 overlap, with alternatives (the
         earliest free times of the same length) and, when the booking in the way is yours, its id.
         A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
-        a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
-        idempotency_key answers the same event.
+        a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url gives it a
+        meeting link the person supplied (https), which Slotlock keeps and exports but never makes
+        or checks. A retry with the same idempotency_key answers the same event.
 
         Args:
             dry_run: Check the write without making it: it runs with every check, the database's
@@ -1488,6 +1503,10 @@ class Operations(Transport):
             values["hold_id"] = hold_id
         if notify is not None:
             values["notify"] = notify
+        if conference is not None:
+            values["conference"] = conference
+        if conference_url is not None:
+            values["conference_url"] = conference_url
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_create_event", values)
@@ -1522,6 +1541,8 @@ class Operations(Transport):
         recurrence_rule: str | None | Unset = UNSET,
         recurrence_exceptions: list[dict[str, Any]] | None = None,
         expected_resource_id: str | None = None,
+        conference: str | None = None,
+        conference_url: str | None = None,
         dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """Update resource event.
@@ -1573,6 +1594,10 @@ class Operations(Transport):
             values["recurrence_exceptions"] = recurrence_exceptions
         if expected_resource_id is not None:
             values["expected_resource_id"] = expected_resource_id
+        if conference is not None:
+            values["conference"] = conference
+        if conference_url is not None:
+            values["conference_url"] = conference_url
         if dry_run is not None:
             values["dry_run"] = dry_run
         return self.call("slotlock_update_event", values)

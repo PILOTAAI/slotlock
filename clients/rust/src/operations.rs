@@ -1102,6 +1102,10 @@ pub struct BookTogetherInput {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference_url: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1162,6 +1166,10 @@ pub struct ConfirmSlotInput {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference_url: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1214,6 +1222,10 @@ pub struct CreateEventInput {
     pub hold_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference_url: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -1269,6 +1281,10 @@ pub struct UpdateEventInput {
     pub recurrence_exceptions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference_url: Option<String>,
     /// Check the write without making it: it runs with every check, the database's included, and
     /// is then undone, so nothing is stored, recorded or sent. The answer is what it would have
     /// been, with dry_run: true (ids in it are never stored), or the refusal it would have met,
@@ -2789,8 +2805,9 @@ impl Client {
     /// rental). The database refuses a time already taken: 409 overlap, with alternatives (the
     /// earliest free times of the same length) and, when the booking in the way is yours, its id.
     /// A booking rule that refuses the time answers booking_rule_… with alternatives too. To book
-    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. A retry with the same
-    /// idempotency_key answers the same event.
+    /// a time you hold, pass its hold_id, or use slotlock_confirm_slot. conference_url gives it a
+    /// meeting link the person supplied (https), which Slotlock keeps and exports but never makes
+    /// or checks. A retry with the same idempotency_key answers the same event.
     pub fn create_event(&self, input: &CreateEventInput) -> Result<Value, Error> {
         self.call("slotlock_create_event", serde_json::to_value(input)?)
     }

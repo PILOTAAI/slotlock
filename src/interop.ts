@@ -343,6 +343,11 @@ export interface JSCalendarEvent {
   status: 'confirmed' | 'tentative';
   freeBusyStatus: 'free' | 'busy';
   locations?: Record<string, { '@type': 'Location'; name: string }>;
+  /** The meeting link (RFC 8984 §4.2.6). */
+  virtualLocations?: Record<
+    string,
+    { '@type': 'VirtualLocation'; uri: string; features: { video: true } }
+  >;
   participants?: Record<string, JSCalendarParticipant>;
   alerts?: Record<string, JSCalendarAlert>;
   recurrenceRules?: JSCalendarRecurrenceRule[];
@@ -510,6 +515,11 @@ export function toJSCalendarEvent(event: SlotlockCalendarEvent): JSCalendarEvent
   if (event.description !== undefined) output.description = event.description;
   if (event.location !== undefined) {
     output.locations = { l1: { '@type': 'Location', name: event.location } };
+  }
+  if (event.conference?.url !== undefined) {
+    output.virtualLocations = {
+      v1: { '@type': 'VirtualLocation', uri: event.conference.url, features: { video: true } },
+    };
   }
   const participants: Record<string, JSCalendarParticipant> = {};
   if (event.organizer) {
