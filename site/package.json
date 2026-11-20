@@ -23,13 +23,13 @@
     "preview:worker": "wrangler dev --port 8787"
   },
   "dependencies": {
-    "@astrojs/sitemap": "3.7.4",
-    "@astrojs/starlight": "0.42.7",
-    "astro": "7.4.2",
+    "@astrojs/sitemap": "3.7.5",
+    "@astrojs/starlight": "0.43.0",
+    "astro": "7.4.12",
     "starlight-llms-txt": "0.12.0"
   },
   "devDependencies": {
-    "wrangler": "4.152.0"
+    "wrangler": "4.162.0"
   },
   "overrides": {
     "undici@7.29.1": "7.30.1",
