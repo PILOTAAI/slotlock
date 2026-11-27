@@ -75,16 +75,16 @@
     "@fontsource-variable/inter": "5.3.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@seriousme/openapi-schema-validator": "2.11.0",
+    "@seriousme/openapi-schema-validator": "2.12.0",
     "@types/node": "26.6.6",
     "ajv": "8.20.0",
-    "axe-core": "4.14.0",
-    "fast-check": "4.10.2",
+    "axe-core": "4.14.1",
+    "fast-check": "4.10.3",
     "jsdom": "30.1.3",
-    "playwright": "1.63.0",
-    "standardwebhooks": "1.1.1",
+    "playwright": "1.65.1",
+    "standardwebhooks": "1.3.0",
     "typescript": "7.0.2",
-    "vitest": "5.1.0"
+    "vitest": "5.1.1"
   },
   "overrides": {
     "tldts-core": "7.4.19"
